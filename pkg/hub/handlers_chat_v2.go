@@ -47,9 +47,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"regexp"
 	"slices"
@@ -133,6 +135,16 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, t := range topics {
 				rs, ok := readMap[t.ID]
+				// A muted thread is silent all the way up: it contributes
+				// nothing to the space badge, so muting every unread thread in
+				// a space clears the badge instead of leaving the space
+				// shouting about threads the user asked to be quiet (#1029).
+				// Mentions are covered by the same rule — the rail already
+				// hides the mention dot on a muted thread, and a rollup that
+				// disagreed with it would put two numbers on screen.
+				if ok && rs.Muted {
+					continue
+				}
 				if !ok || rs.LastReadMessageID == "" || (t.LastMessageID != "" && t.LastMessageID != rs.LastReadMessageID) {
 					if t.LastMessageID != "" {
 						unreadCount++
@@ -229,6 +241,10 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationTyping(w, r, key)
 	case "interagent":
 		s.handleConversationInteragent(w, r, key)
+	case "mute":
+		s.handleConversationMute(w, r, key)
+	case "pin":
+		s.handleConversationPin(w, r, key)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1493,31 +1509,9 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
-	if isDM {
-		if !validDMKey(key) {
-			BadRequest(w, "invalid DM key format")
-			return
-		}
-		if !isDMParticipant(key, user.ID()) {
-			Forbidden(w)
-			return
-		}
-	} else {
-		topic, err := wcs.GetTopic(ctx, key)
-		if err != nil || topic == nil {
-			NotFound(w, "Thread")
-			return
-		}
-		project, err := s.store.GetProject(ctx, topic.ProjectID)
-		if err != nil {
-			NotFound(w, "Project")
-			return
-		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
-			return
-		}
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
 	}
 
 	if r.Method == http.MethodGet {
@@ -1582,6 +1576,141 @@ func (s *Server) writeConversationReadState(
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// authorizeConversationAccess authorizes the caller for a conversation key: a
+// DM is reachable by its participants, a topic by anyone with read access to
+// its project. It writes the error response itself and returns false when
+// access is refused.
+//
+// The read, mute and pin handlers all call this rather than each carrying a
+// copy. They have to agree — you should not be able to mute a conversation you
+// cannot read — and three copies of the same twenty lines agree only until
+// someone edits one of them.
+func (s *Server) authorizeConversationAccess(
+	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string,
+) bool {
+	if strings.HasPrefix(key, "dm:") {
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return false
+		}
+		if !isDMParticipant(key, userID) {
+			Forbidden(w)
+			return false
+		}
+		return true
+	}
+
+	ctx := r.Context()
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return false
+	}
+	return s.authorize(w, r, projectResource(project), ActionRead)
+}
+
+// handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
+// Body: {"muted": bool}. A muted conversation raises no notifications
+// (ChatNotifier already honours the flag) and shows no unread badge.
+func (s *Server) handleConversationMute(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	var body struct {
+		Muted *bool `json:"muted"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+	if body.Muted == nil {
+		ValidationError(w, "muted is required", nil)
+		return
+	}
+
+	if err := wcs.SetMuted(r.Context(), user.ID(), key, *body.Muted); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update mute state", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"muted": *body.Muted})
+}
+
+// handleConversationPin handles PUT /api/v1/chat/conversations/{key}/pin.
+// Body: {"pinned": bool}. Pinned threads sort above the rest of their space.
+func (s *Server) handleConversationPin(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	var body struct {
+		Pinned *bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+	if body.Pinned == nil {
+		ValidationError(w, "pinned is required", nil)
+		return
+	}
+
+	if err := wcs.SetPinned(r.Context(), user.ID(), key, *body.Pinned); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update pin state", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"pinned": *body.Pinned})
 }
 
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.
@@ -1695,6 +1824,7 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		rs, _ := wcs.GetReadState(ctx, user.ID(), dm.ConversationKey)
 		if rs != nil {
 			entry.LastReadMessageID = rs.LastReadMessageID
+			entry.Muted = rs.Muted
 			entry.HasUnread = dm.LastMessageID != "" && dm.LastMessageID != rs.LastReadMessageID
 		} else {
 			entry.HasUnread = dm.LastMessageID != ""
@@ -2605,6 +2735,7 @@ type chatDMEntry struct {
 	LastActivityAt     time.Time `json:"lastActivityAt"`
 	LastReadMessageID  string    `json:"lastReadMessageId,omitempty"`
 	HasUnread          bool      `json:"hasUnread"`
+	Muted              bool      `json:"muted"`
 	LastMessagePreview string    `json:"lastMessagePreview,omitempty"`
 	LastMessageSender  string    `json:"lastMessageSender,omitempty"`
 }
@@ -2740,68 +2871,142 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var results []attachmentUploadResult
+	// One bad file in a selection of ten used to lose the other nine. Each file
+	// now succeeds or fails on its own and the response reports both, so the
+	// composer can keep what worked and name what did not.
+	results := make([]attachmentUploadResult, 0, len(files))
+	failures := make([]attachmentUploadFailure, 0)
+	internalError := false
 	for _, fh := range files {
-		// Validate size.
-		if fh.Size > MaxAttachmentSize {
-			ValidationError(w, fmt.Sprintf("file %q exceeds maximum size of %d bytes", fh.Filename, MaxAttachmentSize), nil)
-			return
-		}
-
-		// Sanitize filename.
-		safeName, err := SanitizeFilename(fh.Filename)
+		result, err := s.storeUploadedFile(ctx, as, wcs, projectID, user.ID(), fh)
 		if err != nil {
-			ValidationError(w, fmt.Sprintf("invalid filename %q: %v", fh.Filename, err), nil)
-			return
+			var rejection attachmentRejection
+			if !errors.As(err, &rejection) {
+				internalError = true
+				s.messageLog.Error("Attachment upload failed", "file", fh.Filename, "error", err)
+			}
+			failures = append(failures, attachmentUploadFailure{
+				Name:  fh.Filename,
+				Error: uploadFailureMessage(err),
+			})
+			continue
 		}
-
-		// Validate MIME type.
-		mime := fh.Header.Get("Content-Type")
-		// Normalize: strip parameters (e.g. "text/plain; charset=utf-8" -> "text/plain").
-		if idx := strings.Index(mime, ";"); idx >= 0 {
-			mime = strings.TrimSpace(mime[:idx])
-		}
-		if !AllowedMimeTypes[mime] {
-			ValidationError(w, fmt.Sprintf("file type %q not allowed", mime), nil)
-			return
-		}
-
-		// Open the file.
-		file, err := fh.Open()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to read uploaded file", nil)
-			return
-		}
-
-		// Save to storage.
-		meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mime)
-		_ = file.Close()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", fmt.Sprintf("failed to save file: %v", err), nil)
-			return
-		}
-
-		// Set the uploader.
-		meta.UploadedBy = user.ID()
-
-		// Persist metadata in DB.
-		if err := wcs.CreateAttachment(ctx, meta); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save attachment metadata", nil)
-			return
-		}
-
-		results = append(results, attachmentUploadResult{
-			ID:       meta.ID,
-			Name:     meta.Filename,
-			MimeType: meta.MimeType,
-			Size:     meta.Size,
-			URL:      "/api/v1/chat/attachments/" + meta.ID,
-		})
+		results = append(results, result)
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
+	// 201 whenever something was created, even alongside failures: the
+	// response body is where per-file outcomes live, and a client that got
+	// attachments back has to treat the request as having created them.
+	// Nothing created means nothing to report as created — 400 for a batch the
+	// caller can fix, 500 if the batch died on our side. 207 Multi-Status was
+	// the other candidate and was passed over: it is a WebDAV code that
+	// browsers and fetch wrappers treat as an oddity, for no gain over reading
+	// the body that has to be read anyway.
+	status := http.StatusCreated
+	if len(results) == 0 {
+		status = http.StatusBadRequest
+		if internalError {
+			status = http.StatusInternalServerError
+		}
+	}
+
+	writeJSON(w, status, map[string]interface{}{
 		"attachments": results,
+		"failures":    failures,
 	})
+}
+
+// attachmentRejection is a refusal the uploader caused and could fix — a
+// blocked extension, an unreadable type, an oversized file. Anything else is
+// ours and is reported as an internal error instead.
+type attachmentRejection struct{ msg string }
+
+func (e attachmentRejection) Error() string { return e.msg }
+
+func rejectAttachment(format string, args ...interface{}) error {
+	return attachmentRejection{msg: fmt.Sprintf(format, args...)}
+}
+
+// uploadFailureMessage renders a per-file failure for the composer. Rejections
+// speak for themselves; internal failures are logged in full and summarised
+// here, since their detail is about our storage, not the user's file.
+func uploadFailureMessage(err error) string {
+	var rejection attachmentRejection
+	if errors.As(err, &rejection) {
+		return rejection.msg
+	}
+	return "upload failed"
+}
+
+// storeUploadedFile validates, classifies, and stores one uploaded file.
+func (s *Server) storeUploadedFile(
+	ctx context.Context, as AttachmentStore, wcs WebChatStore,
+	projectID, userID string, fh *multipart.FileHeader,
+) (attachmentUploadResult, error) {
+	if fh.Size > MaxAttachmentSize {
+		return attachmentUploadResult{}, rejectAttachment(
+			"file exceeds the maximum size of %d bytes", MaxAttachmentSize)
+	}
+
+	safeName, err := SanitizeFilename(fh.Filename)
+	if err != nil {
+		// Passed through without a prefix. Every error this can return already
+		// names the problem — "invalid filename", or the refused extension —
+		// and the failure entry carries the filename beside it, so a wrapper
+		// only stacks two subjects on one line ("invalid filename: invalid
+		// filename"). Nothing here echoes the uploader's text: the two
+		// extension errors interpolate a key of our own blocklists (#1045).
+		return attachmentUploadResult{}, attachmentRejection{msg: err.Error()}
+	}
+
+	file, err := fh.Open()
+	if err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("open uploaded file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	// Classify from the content, not from the Content-Type the client put on
+	// the part: that header is a claim the uploader controls.
+	head := make([]byte, contentSniffLen)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return attachmentUploadResult{}, fmt.Errorf("read uploaded file: %w", err)
+	}
+	mimeType, err := ClassifyAttachment(safeName, head[:n])
+	if err != nil {
+		return attachmentUploadResult{}, attachmentRejection{msg: err.Error()}
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("rewind uploaded file: %w", err)
+	}
+
+	meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mimeType)
+	if err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("save file: %w", err)
+	}
+	meta.UploadedBy = userID
+
+	if err := wcs.CreateAttachment(ctx, meta); err != nil {
+		// The blob is already on disk and nothing will ever reach it again: the
+		// download path finds an attachment through the row that just failed to
+		// be written, so what is left is storage no one can list or delete.
+		// Aborting the batch on the first failure used to cap that at one blob
+		// per request; the per-file loop makes it ten (#1089).
+		if delErr := as.Delete(ctx, projectID, meta.ID); delErr != nil {
+			// The blob is orphaned after all. Say so: nothing else will.
+			s.messageLog.Error("Failed to delete orphaned attachment blob",
+				"project_id", projectID, "attachment", meta.ID, "error", delErr)
+		}
+		return attachmentUploadResult{}, fmt.Errorf("save attachment metadata: %w", err)
+	}
+
+	return attachmentUploadResult{
+		ID:       meta.ID,
+		Name:     meta.Filename,
+		MimeType: meta.MimeType,
+		Size:     meta.Size,
+		URL:      "/api/v1/chat/attachments/" + meta.ID,
+	}, nil
 }
 
 // handleAttachmentDownload handles GET /api/v1/chat/attachments/{id}.
@@ -2878,6 +3083,13 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, reader)
+}
+
+// attachmentUploadFailure is one file the batch could not take, named so the
+// composer can say which of the dropped files did not make it and why.
+type attachmentUploadFailure struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
 }
 
 type attachmentUploadResult struct {

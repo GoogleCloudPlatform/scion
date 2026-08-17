@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -91,11 +92,70 @@ var AllowedMimeTypes = map[string]bool{
 }
 
 // DangerousExtensions lists extensions that should be rejected even if
-// the MIME type is spoofed.
+// the MIME type is spoofed. The subject is execution: a file that a recipient,
+// or something running on the recipient's machine, will run by opening it.
+//
+// Entries are grouped with their peers on purpose. A blocklist whose holes sit
+// immediately beside its entries is the worst kind: .js was blocked while .mjs
+// — the same source, run by the same engines — was not, and the gap read as a
+// judgement rather than as an omission.
 var DangerousExtensions = map[string]bool{
+	// Windows executables and installers.
 	".exe": true, ".bat": true, ".cmd": true, ".com": true,
-	".msi": true, ".scr": true, ".pif": true, ".vbs": true,
-	".js": true, ".jar": true, ".sh": true, ".ps1": true,
+	".msi": true, ".scr": true, ".pif": true,
+	// HTML Application: markup, but mshta runs it with full local trust, so it
+	// belongs with the executables rather than with the markup extensions the
+	// classifier refuses.
+	".hta": true,
+	// Script engines. .vbs and .js, their encoded forms, the ES module and
+	// CommonJS spellings of the same JavaScript, and the Windows Script Host
+	// files that exist to run them.
+	".vbs": true, ".vbe": true, ".js": true, ".jse": true,
+	".mjs": true, ".cjs": true, ".wsf": true, ".wsh": true,
+	".jar": true,
+	// PowerShell: the script and the module the same host loads and executes.
+	".ps1": true, ".psm1": true,
+	// Shell scripts under the names shells and desktops actually run, plus the
+	// two launcher formats whose whole purpose is to run a command on
+	// double-click.
+	".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".csh": true,
+	".command": true, ".desktop": true,
+}
+
+// attachmentExt returns the lower-cased extension that the blocklist above and
+// the classifier's text-like list both judge. It is deliberately the only such
+// parse: two copies of "lower-case filepath.Ext" is how two answers to the same
+// question begin to disagree.
+//
+// The name is normalised first, because the blocklist is a claim about the file
+// a recipient ends up with rather than about the exact bytes of the upload's
+// filename. Windows drops trailing dots and spaces when it creates a file, so
+// "payload.sh " arrives on disk as "payload.sh"; a zero-width space or a NUL
+// inside the extension is invisible in every UI that will ever show the name.
+// Both spellings reached the disk as an accepted text file before this. Trailing
+// noise is trimmed and invisible runes are dropped so that every spelling of an
+// extension is judged as the extension it will behave as.
+func attachmentExt(name string) string {
+	name = strings.TrimRightFunc(name, func(r rune) bool {
+		return r == '.' || isIgnorableFilenameRune(r)
+	})
+	return strings.Map(func(r rune) rune {
+		if isIgnorableFilenameRune(r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, filepath.Ext(name))
+}
+
+// isIgnorableFilenameRune reports whether a rune carries no visible weight in a
+// filename: spaces and other whitespace, control characters including NUL, and
+// the format characters — zero-width spaces, joiners, bidi overrides.
+//
+// Homoglyphs are a different problem and are not addressed here: "a.ѕh" with a
+// Cyrillic es is a visually confusable name, not an invisible character, and
+// nothing on the receiving end treats it as ".sh".
+func isIgnorableFilenameRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 }
 
 // IsImageMime returns true if the MIME type is an image type that should
@@ -110,7 +170,7 @@ func IsImageMime(mime string) bool {
 }
 
 // SanitizeFilename strips path components, limits length, and rejects
-// dangerous extensions.
+// dangerous and markup extensions.
 func SanitizeFilename(name string) (string, error) {
 	// Strip any directory components.
 	name = filepath.Base(name)
@@ -121,13 +181,22 @@ func SanitizeFilename(name string) (string, error) {
 	// Replace any remaining path separators.
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
-	// Check for dangerous extensions.
-	ext := strings.ToLower(filepath.Ext(name))
-	if DangerousExtensions[ext] {
+	// Check for refused extensions. This is the one gate both entry points
+	// share — the browser upload handler and the agent --attach path — so both
+	// classes of refusal are judged here, off the same canonical extension.
+	// Markup is refused because it would be served back as its own document
+	// type; #1098 tracks re-admitting it safely.
+	switch ext := attachmentExt(name); {
+	case DangerousExtensions[ext]:
 		return "", fmt.Errorf("dangerous file extension: %s", ext)
+	case refusedMarkupExtensions[ext]:
+		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
-	// Truncate if too long (preserve extension).
+	// Truncate if too long (preserve extension). This parse is about keeping a
+	// recognisable suffix on a shortened name, not about judging it, so it uses
+	// the extension as written.
 	if len(name) > MaxFilenameLength {
+		ext := strings.ToLower(filepath.Ext(name))
 		base := strings.TrimSuffix(name, ext)
 		maxBase := MaxFilenameLength - len(ext)
 		if maxBase < 1 {

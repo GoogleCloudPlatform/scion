@@ -64,13 +64,16 @@ var agentAttachmentMimes = map[string]string{
 	".yaml": "application/x-yaml",
 	".yml":  "application/x-yaml",
 
-	".go":   "text/plain",
-	".py":   "text/plain",
-	".rs":   "text/plain",
-	".ts":   "text/plain",
-	".tsx":  "text/plain",
-	".jsx":  "text/plain",
-	".sql":  "text/plain",
+	".go":  "text/plain",
+	".py":  "text/plain",
+	".rs":  "text/plain",
+	".ts":  "text/plain",
+	".tsx": "text/plain",
+	".jsx": "text/plain",
+	".sql": "text/plain",
+	// Unreachable while SanitizeFilename refuses markup extensions: an .html
+	// attachment never gets this far. Kept so the mapping is already right if
+	// #1098 re-admits the type.
 	".html": "text/html",
 	".css":  "text/css",
 	".xml":  "text/xml",
@@ -218,7 +221,11 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 
 	if err := wcs.CreateAttachment(ctx, meta); err != nil {
 		// Leave no orphaned bytes behind when the metadata row fails.
-		_ = as.Delete(ctx, projectID, meta.ID)
+		if delErr := as.Delete(ctx, projectID, meta.ID); delErr != nil {
+			// The blob is orphaned after all. Say so: nothing else will.
+			s.messageLog.Error("Failed to delete orphaned attachment blob",
+				"project_id", projectID, "attachment", meta.ID, "error", delErr)
+		}
 		return AttachmentRef{}, err
 	}
 

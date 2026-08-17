@@ -363,3 +363,126 @@ describe('chat page — mobile swipe navigation', () => {
     expect(el.mobilePanel).toBe('center');
   });
 });
+
+describe('chat page — DM mute toggle', () => {
+  /** A page with an open DM conversation in the given muted state. */
+  function pageOnDM(muted: boolean): any {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey: 'dm:user-me:user-1',
+      projectId: 'proj-1',
+      threadName: '',
+      peerName: 'Ada Lovelace',
+      peerId: 'user-1',
+      peerKind: 'user',
+      isDM: true,
+      muted,
+    };
+    return el;
+  }
+
+  it('PUTs the mute endpoint for the open DM and flips the local state', async () => {
+    const el = pageOnDM(false);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ muted: true }), { status: 200 })
+    );
+
+    await el.toggleDMMute();
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/chat/conversations/dm%3Auser-me%3Auser-1/mute',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ muted: true }) })
+    );
+    expect(el.v2Conversation.muted).toBe(true);
+  });
+
+  it('unmutes a muted DM', async () => {
+    const el = pageOnDM(true);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ muted: false }), { status: 200 })
+    );
+
+    await el.toggleDMMute();
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/mute'),
+      expect.objectContaining({ body: JSON.stringify({ muted: false }) })
+    );
+    expect(el.v2Conversation.muted).toBe(false);
+  });
+
+  it('rolls back when the server refuses', async () => {
+    const el = pageOnDM(false);
+    vi.mocked(apiFetch).mockResolvedValue(new Response('{}', { status: 403 }));
+
+    await el.toggleDMMute();
+
+    expect(el.v2Conversation.muted).toBe(false);
+  });
+
+  it('does not reconcile onto a DM the user switched to mid-request', async () => {
+    const el = pageOnDM(false);
+    // The server disagrees with the optimistic value, so the success path wants
+    // to write back — but by the time it resolves the user is reading another DM.
+    vi.mocked(apiFetch).mockImplementation(async () => {
+      el.v2Conversation = { ...el.v2Conversation, conversationKey: 'dm:user-me:user-2' };
+      return new Response(JSON.stringify({ muted: false }), { status: 200 });
+    });
+
+    await el.toggleDMMute();
+
+    expect(el.v2Conversation.conversationKey).toBe('dm:user-me:user-2');
+    expect(el.v2Conversation.muted).toBe(true);
+  });
+
+  it('renders the bell as filled-through only while muted', () => {
+    const quiet = renderToFragment(pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation));
+    expect(quiet.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell-slash');
+
+    const loud = renderToFragment(pageOnDM(false).renderDMMuteButton(pageOnDM(false).v2Conversation));
+    expect(loud.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell');
+  });
+});
+
+describe('chat page — muted DMs raise no unread dot', () => {
+  /** Answer GET /api/v1/chat/dms with the given entries. */
+  function serveDMs(dms: Array<Record<string, unknown>>): void {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url.startsWith('/api/v1/chat/dms')) {
+        return Promise.resolve(new Response(JSON.stringify({ dms }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+  }
+
+  it('leaves a muted DM out of the unread peers', async () => {
+    const el = createPage();
+    serveDMs([
+      { peerId: 'user-1', hasUnread: true, muted: true },
+      { peerId: 'user-2', hasUnread: true, muted: false },
+    ]);
+
+    await el.loadUnreadDMPeers();
+
+    expect(el.v2UnreadFromIds).toEqual(['user-2']);
+  });
+
+  it('keeps unmuted unread DMs when muted is absent from the payload', async () => {
+    const el = createPage();
+    serveDMs([{ peerId: 'user-1', hasUnread: true }]);
+
+    await el.loadUnreadDMPeers();
+
+    expect(el.v2UnreadFromIds).toEqual(['user-1']);
+  });
+
+  it('drops every dot when the only unread DMs are muted', async () => {
+    const el = createPage();
+    el.v2UnreadFromIds = ['user-1'];
+    serveDMs([{ peerId: 'user-1', hasUnread: true, muted: true }]);
+
+    await el.loadUnreadDMPeers();
+
+    expect(el.v2UnreadFromIds).toEqual([]);
+  });
+});

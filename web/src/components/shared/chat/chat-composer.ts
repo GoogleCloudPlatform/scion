@@ -29,6 +29,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
@@ -45,6 +46,35 @@ export interface UploadedAttachment {
   size: number;
   url: string;
 }
+
+/**
+ * A file the server refused. Uploads are per-file, so a batch can come back
+ * part stored and part rejected and the composer has to say which is which.
+ */
+export interface UploadFailure {
+  name: string;
+  error: string;
+}
+
+/**
+ * What the file picker offers. The MIME types cover what browsers recognise;
+ * the extensions cover the developer formats they do not, which browsers
+ * report as application/octet-stream and the server classifies by content
+ * (see ClassifyAttachment). Keep in step with textLikeExtensions in
+ * pkg/hub/attachment_classify.go.
+ */
+export const ATTACHMENT_ACCEPT = [
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'application/pdf',
+  'application/zip',
+  '.txt,.md,.rst,.adoc,.log,.csv',
+  '.json,.yaml,.yml,.toml,.ini,.cfg,.env,.xml',
+  '.diff,.patch,.sql,.graphql,.proto',
+  '.ts,.tsx,.jsx,.py,.go,.rs,.rb,.java,.kt,.swift,.c,.cpp,.h,.hpp,.cs',
+].join(',');
 
 /** Event detail for the chat-send custom event. */
 export interface ChatSendDetail {
@@ -128,6 +158,9 @@ export class ScionChatComposer extends LitElement {
 
   /** W7: Upload in progress. */
   @state() private uploading = false;
+
+  /** Files the last upload refused, shown until dismissed or superseded. */
+  @state() private uploadFailures: UploadFailure[] = [];
 
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
@@ -369,6 +402,36 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
+    .upload-failures {
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+      padding: 0.25rem;
+    }
+
+    .upload-failure {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.6875rem;
+      color: var(--scion-danger-600, #dc2626);
+    }
+
+    .upload-failure .failure-name {
+      font-weight: 600;
+    }
+
+    .upload-failure .dismiss-btn {
+      margin-left: auto;
+      cursor: pointer;
+      color: var(--scion-text-muted, #94a3b8);
+      padding: 0;
+      line-height: 1;
+      background: none;
+      border: none;
+      font-size: 0.875rem;
+    }
+
     .upload-progress {
       font-size: 0.6875rem;
       color: var(--scion-text-muted, #64748b);
@@ -388,6 +451,7 @@ export class ScionChatComposer extends LitElement {
       ${this.conversationMode ? this.renderDestinationChip() : nothing}
       <div class="composer">
         ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
+        ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
         ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
         <div class="input-row">
           ${this.conversationMode
@@ -402,7 +466,7 @@ export class ScionChatComposer extends LitElement {
                 <input
                   type="file"
                   multiple
-                  accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain,text/markdown,application/zip"
+                  accept=${ATTACHMENT_ACCEPT}
                   style="display:none"
                   @change=${this.handleFileSelected}
                 />
@@ -676,6 +740,43 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
+  /**
+   * Render the files the server would not take. A rejected file is not an
+   * error about the message — the rest of the batch is still attached — so it
+   * belongs next to the attachments rather than in a toast that replaces them.
+   */
+  private renderUploadFailures(): TemplateResult {
+    return html`
+      <div class="upload-failures">
+        ${this.uploadFailures.map(
+          (failure, index) => html`
+            <div class="upload-failure">
+              <sl-icon name="exclamation-triangle" style="font-size:0.75rem"></sl-icon>
+              <span class="failure-name">${failure.name}</span>
+              <span class="failure-reason">${failure.error}</span>
+              <button
+                class="dismiss-btn"
+                aria-label="Dismiss ${failure.name}"
+                @click=${(): void => this.dismissUploadFailure(index)}
+              >
+                &times;
+              </button>
+            </div>
+          `
+        )}
+      </div>
+    `;
+  }
+
+  /**
+   * Dismiss one row. The × sits on the row, so it has to clear that row —
+   * clearing the list would silently throw away the failures the user has not
+   * read yet, which is the thing this surface exists to prevent.
+   */
+  private dismissUploadFailure(index: number): void {
+    this.uploadFailures = this.uploadFailures.filter((_, i) => i !== index);
+  }
+
   /** Open the hidden file input. */
   private handleAttachClick(): void {
     const input = this.shadowRoot?.querySelector('input[type="file"]') as HTMLInputElement | null;
@@ -717,22 +818,34 @@ export class ScionChatComposer extends LitElement {
         body: formData,
       });
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({ message: 'Upload failed' }));
+      const data = (await res.json().catch(() => ({}))) as {
+        attachments?: UploadedAttachment[];
+        failures?: UploadFailure[];
+        // The hub's error helper nests the reason under `error`; a plain
+        // `message` is read too so a handler that answers flat is not silently
+        // reduced to "Upload failed".
+        error?: { message?: string };
+        message?: string;
+      };
+
+      // The server reports per file: some may be stored while others are
+      // refused. Anything it did take is attached, and the refusals are named
+      // rather than collapsed into one "upload failed".
+      this.uploadFailures = data.failures ?? [];
+      if (data.attachments?.length) {
+        this.pendingFiles = [...this.pendingFiles, ...data.attachments];
+      }
+
+      // A failure with no per-file detail is about the request itself.
+      if (!res.ok && this.uploadFailures.length === 0) {
         this.dispatchEvent(
           new CustomEvent('composer-error', {
-            detail: { message: (errData as Record<string, string>).message || 'Upload failed' },
+            detail: { message: data.error?.message || data.message || 'Upload failed' },
             bubbles: true,
             composed: true,
           })
         );
-        return;
       }
-
-      const data = (await res.json()) as {
-        attachments: UploadedAttachment[];
-      };
-      this.pendingFiles = [...this.pendingFiles, ...data.attachments];
     } catch (err) {
       this.dispatchEvent(
         new CustomEvent('composer-error', {

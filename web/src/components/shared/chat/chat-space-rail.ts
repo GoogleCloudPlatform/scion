@@ -25,7 +25,7 @@
  * Data sources:
  *   - GET /api/v1/chat/spaces — visible spaces with unread rollup
  *   - GET /api/v1/chat/spaces/{projectId}/threads — threads per space
- *   - GET /api/v1/chat/prefs — user preferences (sort mode, custom order)
+ *   - GET /api/v1/chat/user-prefs — user preferences (sort mode, custom order)
  *
  * DMs are accessed via member-click in the members sidebar (chat-members).
  *
@@ -53,6 +53,8 @@ export interface ChatSpaceThread {
   name: string;
   isGeneral: boolean;
   pinned: boolean;
+  /** Muted threads raise no notifications and show no unread marker. */
+  muted?: boolean;
   defaultAgent?: string;
   lastActivityAt?: string;
   lastMessagePreview?: string;
@@ -67,6 +69,41 @@ interface RailPrefs {
   spaceSortMode: 'activity' | 'alpha' | 'custom';
   threadSortMode: 'activity' | 'alpha';
   spaceOrder: string[] | undefined;
+}
+
+/**
+ * Read a prefs payload from the server. `spaceOrder` arrives either as a real
+ * array or as a JSON array string, so both are accepted; a hand-edited or
+ * truncated value has to degrade to "no custom order" rather than throwing the
+ * rail's whole load away. Non-string entries are dropped either way.
+ */
+function parseRailPrefs(payload: unknown): RailPrefs {
+  const data = (payload ?? {}) as {
+    spaceSortMode?: string;
+    threadSortMode?: string;
+    spaceOrder?: unknown;
+  };
+  let spaceOrder: string[] | undefined;
+  if (Array.isArray(data.spaceOrder)) {
+    spaceOrder = data.spaceOrder.filter((id): id is string => typeof id === 'string');
+  } else if (typeof data.spaceOrder === 'string' && data.spaceOrder !== '') {
+    try {
+      const parsed: unknown = JSON.parse(data.spaceOrder);
+      if (Array.isArray(parsed)) {
+        spaceOrder = parsed.filter((id): id is string => typeof id === 'string');
+      }
+    } catch {
+      spaceOrder = undefined;
+    }
+  }
+  const spaceSortMode = data.spaceSortMode;
+  const threadSortMode = data.threadSortMode;
+  return {
+    spaceSortMode:
+      spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity',
+    threadSortMode: threadSortMode === 'alpha' ? 'alpha' : 'activity',
+    spaceOrder,
+  };
 }
 
 /** Viewport width at or below which the chat panels are separate screens. */
@@ -108,6 +145,10 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
   @state() private spaceFilter: 'all' | 'unread' = 'all';
+  /** Project id of the space header currently being dragged, if any. */
+  @state() private draggingSpaceId: string | null = null;
+  /** Project id of the space header the drag is hovering over. */
+  @state() private dragOverSpaceId: string | null = null;
 
   static override styles = css`
     :host {
@@ -160,6 +201,16 @@ export class ScionChatSpaceRail extends LitElement {
 
     .space-header:hover {
       color: var(--scion-text, #1e293b);
+    }
+
+    /* Reorder affordances: the dragged header fades, the hovered one grows a
+       line marking where the drop lands. */
+    .space-header.dragging {
+      opacity: 0.4;
+    }
+
+    .space-header.drag-over {
+      box-shadow: inset 0 2px 0 0 var(--scion-primary, #3b82f6);
     }
 
     .space-header .chevron {
@@ -289,6 +340,12 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .thread-item .pin-icon {
+      font-size: 0.625rem;
+      color: var(--scion-text-muted, #64748b);
+      flex-shrink: 0;
+    }
+
+    .thread-item .mute-icon {
       font-size: 0.625rem;
       color: var(--scion-text-muted, #64748b);
       flex-shrink: 0;
@@ -594,40 +651,41 @@ export class ScionChatSpaceRail extends LitElement {
 
   private async loadPrefs(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/chat/prefs');
+      const res = await apiFetch('/api/v1/chat/user-prefs');
       if (res.ok) {
-        const data = (await res.json()) as {
-          space_sort_mode?: string;
-          thread_sort_mode?: string;
-          space_order?: string[];
-        };
-        this.prefs = {
-          spaceSortMode: (data.space_sort_mode as RailPrefs['spaceSortMode']) || 'activity',
-          threadSortMode: (data.thread_sort_mode as RailPrefs['threadSortMode']) || 'activity',
-          spaceOrder: data.space_order,
-        };
+        this.prefs = parseRailPrefs(await res.json());
       }
     } catch {
       // Use defaults
     }
   }
 
-  /** Save user preferences. Exposed for sort mode changes. */
+  /**
+   * Save user preferences. Applied locally first so the rail responds to the
+   * click, then reconciled with what the server actually stored — the server
+   * defaults blank modes, so its answer can differ from the request.
+   */
   async savePrefs(update: Partial<RailPrefs>): Promise<void> {
+    const previous = this.prefs;
     const newPrefs = { ...this.prefs, ...update };
     this.prefs = newPrefs;
     try {
-      await apiFetch('/api/v1/chat/prefs', {
+      const res = await apiFetch('/api/v1/chat/user-prefs', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          space_sort_mode: newPrefs.spaceSortMode,
-          thread_sort_mode: newPrefs.threadSortMode,
-          space_order: newPrefs.spaceOrder,
+          spaceSortMode: newPrefs.spaceSortMode,
+          threadSortMode: newPrefs.threadSortMode,
+          spaceOrder: JSON.stringify(newPrefs.spaceOrder ?? []),
         }),
       });
+      if (!res.ok) {
+        this.prefs = previous;
+        return;
+      }
+      this.prefs = parseRailPrefs(await res.json());
     } catch {
-      // Non-critical
+      this.prefs = previous;
     }
   }
 
@@ -666,6 +724,108 @@ export class ScionChatSpaceRail extends LitElement {
         break;
     }
     return spaces;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Custom ordering
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Persist a new space order. Dragging or nudging a space is an unambiguous
+   * statement about where it belongs, so it switches the rail to custom sort
+   * rather than being refused in activity or alpha mode — the check moving to
+   * "Custom" in the sort menu is what tells the user the mode changed. The
+   * alternative (disabling the drag outside custom mode) would make the
+   * feature undiscoverable: you would have to know to pick Custom first, in a
+   * menu that gives no hint of what a custom order even is.
+   */
+  private async applySpaceOrder(order: string[]): Promise<void> {
+    await this.savePrefs({ spaceSortMode: 'custom', spaceOrder: order });
+  }
+
+  /** The order the user is currently looking at, as project ids. */
+  private currentSpaceOrder(): string[] {
+    return this.getSortedSpaces().map((s) => s.projectId);
+  }
+
+  /**
+   * Move a space one slot up (-1) or down (+1) in the displayed order. This is
+   * the keyboard-reachable half of reordering: drag-and-drop cannot be done
+   * without a pointer, and a rail only reorderable by mouse is not reorderable
+   * for everyone.
+   */
+  private async moveSpace(projectId: string, delta: -1 | 1): Promise<void> {
+    if (!this.canReorderSpaces()) return;
+    const order = this.currentSpaceOrder();
+    const from = order.indexOf(projectId);
+    const to = from + delta;
+    if (from === -1 || to < 0 || to >= order.length) return;
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    await this.applySpaceOrder(next);
+  }
+
+  /**
+   * Reordering is only offered on the unfiltered list. The order that gets
+   * persisted is the global one, so "Move up" against a filtered view would
+   * swap the space with a neighbour the user cannot see — either appearing to
+   * do nothing, or quietly writing an arrangement they never chose. Reordering
+   * against the visible list instead would be worse: the same click would mean
+   * different things depending on a filter elsewhere in the rail.
+   */
+  private canReorderSpaces(): boolean {
+    return this.spaceFilter === 'all';
+  }
+
+  /**
+   * True when the reorder item should be disabled: the space is already at the
+   * given end of the displayed order, or reordering is off altogether.
+   */
+  private isSpaceAtEdge(projectId: string, edge: 'first' | 'last'): boolean {
+    if (!this.canReorderSpaces()) return true;
+    const order = this.currentSpaceOrder();
+    const index = order.indexOf(projectId);
+    if (index === -1) return true;
+    return edge === 'first' ? index === 0 : index === order.length - 1;
+  }
+
+  private handleSpaceDragStart(e: DragEvent, projectId: string): void {
+    this.draggingSpaceId = projectId;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      // Firefox ignores a drag that carries no data.
+      e.dataTransfer.setData('text/plain', projectId);
+    }
+  }
+
+  private handleSpaceDragOver(e: DragEvent, projectId: string): void {
+    if (!this.draggingSpaceId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    if (this.dragOverSpaceId !== projectId) this.dragOverSpaceId = projectId;
+  }
+
+  private async handleSpaceDrop(e: DragEvent, targetProjectId: string): Promise<void> {
+    e.preventDefault();
+    const sourceId = this.draggingSpaceId;
+    this.draggingSpaceId = null;
+    this.dragOverSpaceId = null;
+    if (!sourceId || sourceId === targetProjectId) return;
+
+    const order = this.currentSpaceOrder();
+    const from = order.indexOf(sourceId);
+    const to = order.indexOf(targetProjectId);
+    if (from === -1 || to === -1) return;
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    await this.applySpaceOrder(next);
+  }
+
+  private handleSpaceDragEnd(): void {
+    this.draggingSpaceId = null;
+    this.dragOverSpaceId = null;
   }
 
   private getSpaceLastActivity(projectId: string): number {
@@ -777,7 +937,9 @@ export class ScionChatSpaceRail extends LitElement {
     this.contextMenuPos = { x: e.clientX, y: e.clientY };
   }
 
-  private async handleMarkRead(thread: ChatSpaceThread, projectId: string): Promise<void> {
+  // _projectId is kept for the call site's symmetry with the other context-menu
+  // actions; markThreadRead finds the thread's space itself.
+  private async handleMarkRead(thread: ChatSpaceThread, _projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     // The server requires the watermark to move to a specific message. Without
     // an ID it rejects the request, and the dot comes back on the next reload.
@@ -795,9 +957,11 @@ export class ScionChatSpaceRail extends LitElement {
         }
       );
       if (!res.ok) return;
-      // Update locally
-      this.updateThread(projectId, thread.id, { hasUnread: false, hasUnreadMention: false });
-      this.decrementSpaceUnread(projectId);
+      // Update locally through the same helper the no-watermark path above
+      // uses. The badge arithmetic lives there and nowhere else: doing it
+      // inline here is how "Mark as read" on an already-read thread came to
+      // decrement the badge on every click (#1029).
+      this.markThreadRead(thread.id);
     } catch {
       // Non-critical
     }
@@ -806,31 +970,52 @@ export class ScionChatSpaceRail extends LitElement {
   /**
    * Clear a thread's unread markers without talking to the server. Called when
    * the thread view itself advanced the watermark — the rail has no other way
-   * to learn that happened.
+   * to learn that happened — and by "Mark as read" once the server has moved
+   * the watermark for it.
+   *
+   * The space badge is a server-side rollup of unread, unmuted threads, so a
+   * thread only leaves it if it was in it: an already-read thread and a muted
+   * one both take nothing off, or they would eat another thread's unread.
    */
   markThreadRead(threadId: string): void {
     for (const [projectId, threads] of this.threadsBySpace) {
       const target = threads.find((t) => t.id === threadId);
       if (!target || (!target.hasUnread && !target.hasUnreadMention)) continue;
       this.updateThread(projectId, threadId, { hasUnread: false, hasUnreadMention: false });
-      this.decrementSpaceUnread(projectId);
+      if (!target.muted) this.adjustSpaceUnread(projectId, -1);
       return;
     }
   }
 
-  /** Drop one from a space's unread badge, floored at zero. */
-  private decrementSpaceUnread(projectId: string): void {
+  /** Nudge a space's unread badge, floored at zero. */
+  private adjustSpaceUnread(projectId: string, delta: number): void {
     this.spaces = this.spaces.map((s) =>
-      s.projectId === projectId ? { ...s, unreadCount: Math.max(0, s.unreadCount - 1) } : s
+      s.projectId === projectId ? { ...s, unreadCount: Math.max(0, s.unreadCount + delta) } : s
     );
+  }
+
+  /**
+   * Apply a mute decision locally, keeping the space badge in step with it.
+   * The server's rollup does not count muted threads, so an unread thread
+   * leaves the badge when it is muted and rejoins it when it is unmuted —
+   * without this the badge only tells the truth again after a reload.
+   */
+  private setThreadMuted(projectId: string, threadId: string, muted: boolean): void {
+    const target = (this.threadsBySpace.get(projectId) || []).find((t) => t.id === threadId);
+    if (!target || (target.muted === true) === muted) return;
+    this.updateThread(projectId, threadId, { muted });
+    if (target.hasUnread) this.adjustSpaceUnread(projectId, muted ? -1 : 1);
   }
 
   private async handleMarkSpaceRead(projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     try {
-      await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/read`, {
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/read`, {
         method: 'POST',
       });
+      // A refused request leaves every watermark where it was, so clearing the
+      // dots here would show the space as read until the next reload (#1029).
+      if (!res.ok) return;
       // Update all threads in this space locally
       const threads = this.threadsBySpace.get(projectId) || [];
       const newMap = new Map(this.threadsBySpace);
@@ -844,6 +1029,64 @@ export class ScionChatSpaceRail extends LitElement {
       );
     } catch {
       // Non-critical
+    }
+  }
+
+  /**
+   * Toggle a thread's pinned state. Applied locally first so the rail reorders
+   * on the click, and rolled back if the server refuses — a pin the server
+   * does not have would silently survive until the next reload otherwise.
+   */
+  private async handleTogglePin(thread: ChatSpaceThread, projectId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const next = !thread.pinned;
+    this.updateThread(projectId, thread.id, { pinned: next });
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/pin`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned: next }),
+        }
+      );
+      if (!res.ok) {
+        this.updateThread(projectId, thread.id, { pinned: thread.pinned });
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { pinned?: boolean };
+      if (typeof data.pinned === 'boolean' && data.pinned !== next) {
+        this.updateThread(projectId, thread.id, { pinned: data.pinned });
+      }
+    } catch {
+      this.updateThread(projectId, thread.id, { pinned: thread.pinned });
+    }
+  }
+
+  /** Toggle a thread's muted state, with the same optimistic-then-reconcile shape as pin. */
+  private async handleToggleMute(thread: ChatSpaceThread, projectId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const next = !thread.muted;
+    this.setThreadMuted(projectId, thread.id, next);
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/mute`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ muted: next }),
+        }
+      );
+      if (!res.ok) {
+        this.setThreadMuted(projectId, thread.id, thread.muted === true);
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
+      if (typeof data.muted === 'boolean' && data.muted !== next) {
+        this.setThreadMuted(projectId, thread.id, data.muted);
+      }
+    } catch {
+      this.setThreadMuted(projectId, thread.id, thread.muted === true);
     }
   }
 
@@ -987,11 +1230,26 @@ export class ScionChatSpaceRail extends LitElement {
           ></sl-icon-button>
           <sl-menu @sl-select=${this.handleSortSelect}>
             <sl-menu-label>Sort spaces</sl-menu-label>
-            <sl-menu-item value="activity" ?checked=${this.prefs.spaceSortMode === 'activity'}>
+            <sl-menu-item
+              type="checkbox"
+              value="activity"
+              ?checked=${this.prefs.spaceSortMode === 'activity'}
+            >
               Recent activity
             </sl-menu-item>
-            <sl-menu-item value="alpha" ?checked=${this.prefs.spaceSortMode === 'alpha'}>
+            <sl-menu-item
+              type="checkbox"
+              value="alpha"
+              ?checked=${this.prefs.spaceSortMode === 'alpha'}
+            >
               Alphabetical
+            </sl-menu-item>
+            <sl-menu-item
+              type="checkbox"
+              value="custom"
+              ?checked=${this.prefs.spaceSortMode === 'custom'}
+            >
+              Custom
             </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
@@ -1017,6 +1275,19 @@ export class ScionChatSpaceRail extends LitElement {
     const value = item?.getAttribute('value');
     if (value === 'activity' || value === 'alpha') {
       void this.savePrefs({ spaceSortMode: value });
+      return;
+    }
+    if (value === 'custom') {
+      // Switching to custom with no order saved yet freezes the order the user
+      // is currently looking at, so the list does not jump on the click.
+      void this.savePrefs({
+        spaceSortMode: 'custom',
+        // An empty saved order counts as "no order saved yet", so test length
+        // rather than nullishness — `[]` would otherwise freeze nothing.
+        spaceOrder: this.prefs.spaceOrder?.length
+          ? this.prefs.spaceOrder
+          : this.getSortedSpaces().map((s) => s.projectId),
+      });
     }
   }
 
@@ -1049,7 +1320,15 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="space-section">
         <div
-          class="space-header"
+          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${this
+            .dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
+            ? 'drag-over'
+            : ''}"
+          draggable="true"
+          @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
+          @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
+          @drop=${(e: DragEvent): void => void this.handleSpaceDrop(e, space.projectId)}
+          @dragend=${(): void => this.handleSpaceDragEnd()}
           @click=${() =>
             isCollapsed
               ? this.handleCollapsedSpaceClick(space)
@@ -1075,12 +1354,33 @@ export class ScionChatSpaceRail extends LitElement {
                   const value = detail?.item?.getAttribute('value');
                   if (value === 'new-thread') {
                     this.startCreateThread(space.projectId);
+                  } else if (value === 'move-up') {
+                    void this.moveSpace(space.projectId, -1);
+                  } else if (value === 'move-down') {
+                    void this.moveSpace(space.projectId, 1);
                   }
                 }}
               >
                 <sl-menu-item value="new-thread">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New thread
+                </sl-menu-item>
+                <sl-divider></sl-divider>
+                <sl-menu-item
+                  class="move-up"
+                  value="move-up"
+                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'first')}
+                >
+                  <sl-icon slot="prefix" name="arrow-up"></sl-icon>
+                  Move up
+                </sl-menu-item>
+                <sl-menu-item
+                  class="move-down"
+                  value="move-down"
+                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'last')}
+                >
+                  <sl-icon slot="prefix" name="arrow-down"></sl-icon>
+                  Move down
                 </sl-menu-item>
               </sl-menu>
             </sl-dropdown>
@@ -1100,6 +1400,11 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
+  /**
+   * Render one thread row. The trailing badge is a single choice, not two: a
+   * muted thread shows the bell and deliberately does not advertise its unread
+   * state with a dot, so mute is the first branch of one chain.
+   */
   private renderThread(thread: ChatSpaceThread, projectId: string) {
     const isSelected = thread.id === this.selectedKey;
 
@@ -1136,13 +1441,17 @@ export class ScionChatSpaceRail extends LitElement {
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, thread, projectId)}
       >
         <span class="hash">#</span>
-        <span class="thread-name ${thread.hasUnread ? 'unread' : ''}">${thread.name}</span>
+        <span class="thread-name ${!thread.muted && thread.hasUnread ? 'unread' : ''}"
+          >${thread.name}</span
+        >
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
-        ${thread.hasUnreadMention
-          ? html`<span class="mention-dot"></span>`
-          : thread.hasUnread
-            ? html`<span class="unread-dot"></span>`
-            : nothing}
+        ${thread.muted
+          ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
+          : thread.hasUnreadMention
+            ? html`<span class="mention-dot"></span>`
+            : thread.hasUnread
+              ? html`<span class="unread-dot"></span>`
+              : nothing}
       </div>
     `;
   }
@@ -1193,6 +1502,24 @@ export class ScionChatSpaceRail extends LitElement {
         <div class="context-menu-item" @click=${() => this.handleMarkSpaceRead(projectId)}>
           <sl-icon name="check-lg"></sl-icon>
           Mark space read
+        </div>
+        <div
+          class="context-menu-item pin-toggle"
+          @click=${(): void => void this.handleTogglePin(thread, projectId)}
+        >
+          <!-- The glyph reports the current state, the label offers the
+               action — the filled star means pinned everywhere else in this
+               rail, and a menu that used it for "will be pinned" would make
+               the row indicator ambiguous. -->
+          <sl-icon name=${thread.pinned ? 'star-fill' : 'star'}></sl-icon>
+          ${thread.pinned ? 'Unpin' : 'Pin to top'}
+        </div>
+        <div
+          class="context-menu-item mute-toggle"
+          @click=${(): void => void this.handleToggleMute(thread, projectId)}
+        >
+          <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
+          ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
         ${!thread.isGeneral
           ? html`

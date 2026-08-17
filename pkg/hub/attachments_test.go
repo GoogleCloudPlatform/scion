@@ -89,6 +89,100 @@ func TestSanitizeFilename_TruncateLong(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// attachmentExt / blocklist normalisation tests
+// ---------------------------------------------------------------------------
+
+// The blocklist judges the file the recipient ends up with. Windows drops
+// trailing dots and spaces when it creates a file, and a zero-width space or a
+// NUL is invisible wherever the name is shown, so every spelling below is the
+// same file to whoever receives it and must be the same extension here.
+func TestAttachmentExt_NormalisesTrailingAndInvisibleCharacters(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"a.sh", ".sh"},
+		{"a.SH", ".sh"},
+		{"a.sh ", ".sh"},
+		{"a.sh  ", ".sh"},
+		{"a.sh.", ".sh"},
+		{"a.sh...", ".sh"},
+		{"a.sh. . ", ".sh"},
+		{"a.sh\t", ".sh"},
+		{"a.sh\n", ".sh"},
+		{"a.sh\x00", ".sh"},
+		{"a.sh\u200b", ".sh"}, // zero-width space
+		{"a.sh ", ".sh"},      // no-break space
+		{"a.s\u200bh", ".sh"}, // zero-width space inside the extension
+		{"a.s\x00h", ".sh"},   // NUL inside the extension
+		{"a.\u202esh", ".sh"}, // right-to-left override
+		{"notes.txt", ".txt"}, // the ordinary case is unchanged
+		{"archive.tar.gz", ".gz"},
+		{"noext", ""},
+		{"...", ""},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, attachmentExt(tt.input), "attachmentExt(%q)", tt.input)
+	}
+}
+
+// Every spelling the security audit landed on disk. A control a trailing space
+// defeats is not a control, and the decision to keep executables out of a
+// scratchpad rests on this one.
+func TestSanitizeFilename_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T) {
+	variants := []string{
+		"a.sh ", "a.sh.", "a.sh\t", "a.sh\n", "a.sh\x00",
+		"a.sh\u200b", "a.sh ", "a.SH ", "a.s\x00h", "payload.sh...",
+	}
+	for _, v := range variants {
+		_, err := SanitizeFilename(v)
+		require.Error(t, err, "SanitizeFilename(%q) was accepted", v)
+		assert.Contains(t, err.Error(), "dangerous file extension", "for %q", v)
+	}
+}
+
+// The blocklist should have no hole immediately beside an entry it already
+// carries: the same code, the same interpreter, a different suffix.
+func TestSanitizeFilename_RejectsPeersOfBlockedExtensions(t *testing.T) {
+	peers := []string{
+		"mod.mjs", "mod.cjs", "enc.jse", // .js
+		"enc.vbe", "run.wsf", "run.wsh", // .vbs / Windows Script Host
+		"module.psm1",                                            // .ps1
+		"run.bash", "run.zsh", "run.ksh", "run.csh", "x.command", // .sh
+		"launch.desktop", // double-click launcher
+		"app.hta",        // markup that mshta runs with full trust
+	}
+	for _, f := range peers {
+		_, err := SanitizeFilename(f)
+		require.Error(t, err, "SanitizeFilename(%q) was accepted", f)
+	}
+}
+
+// SanitizeFilename is the gate both entry points share, so the markup refusal
+// has to be enforced here and not only in ClassifyAttachment — otherwise the
+// agent --attach path, which never classifies, still accepts .html.
+func TestSanitizeFilename_RefusesMarkupExtensions(t *testing.T) {
+	for _, f := range []string{
+		"evil.html", "evil.htm", "evil.xhtml", "evil.shtml", "evil.mhtml", "evil.mht",
+		"diagram.svg", "EVIL.HTML", "evil.html ", "evil.html.",
+	} {
+		_, err := SanitizeFilename(f)
+		require.Error(t, err, "SanitizeFilename(%q) was accepted", f)
+		assert.Contains(t, err.Error(), "not accepted", "for %q", f)
+	}
+}
+
+// Widening the blocklist must not swallow the developer formats #1045 exists to
+// let through. These are the near neighbours of the new entries.
+func TestSanitizeFilename_KeepsAcceptedDeveloperFormats(t *testing.T) {
+	for _, f := range []string{"app.jsx", "app.ts", "app.tsx", "main.go", "script.py", "notes.md", "data.json"} {
+		name, err := SanitizeFilename(f)
+		require.NoError(t, err, "SanitizeFilename(%q)", f)
+		assert.Equal(t, f, name)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // IsImageMime tests
 // ---------------------------------------------------------------------------
 

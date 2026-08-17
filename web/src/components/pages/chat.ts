@@ -50,6 +50,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Capabilities, Agent } from '../../shared/types.js';
@@ -174,6 +175,11 @@ interface V2ConversationState {
   peerName: string;
   peerId: string;
   peerKind: 'user' | 'agent';
+  /**
+   * Muted state of this conversation for the current user. Resolved from the
+   * DM list; a DM that does not exist yet is unmuted.
+   */
+  muted?: boolean;
 }
 
 /** The parts of a thread that a URL does not carry and have to be resolved. */
@@ -1576,6 +1582,7 @@ export class ScionPageChat extends LitElement {
           peerId: string;
           peerKind: 'user' | 'agent';
           peerSlug?: string;
+          muted?: boolean;
         }>;
       };
       const dm = data.dms?.find((d) => d.conversationKey === key);
@@ -1586,6 +1593,7 @@ export class ScionPageChat extends LitElement {
           peerName,
           peerId: dm.peerId,
           peerKind: dm.peerKind,
+          muted: dm.muted === true,
         };
         dispatchPageTitle(this, peerName, 'Chat');
       }
@@ -1617,6 +1625,7 @@ export class ScionPageChat extends LitElement {
             peerId: string;
             peerKind: 'user' | 'agent';
             peerSlug?: string;
+            muted?: boolean;
           }>;
         };
         const dm = data.dms?.find((d) => d.peerId === peerId);
@@ -1632,6 +1641,7 @@ export class ScionPageChat extends LitElement {
             peerName,
             peerId: dm.peerId,
             peerKind: dm.peerKind,
+            muted: dm.muted === true,
           };
           this.classList.add('thread-open');
           this.mobilePanel = 'center';
@@ -1838,10 +1848,13 @@ export class ScionPageChat extends LitElement {
         dms?: Array<{
           peerId: string;
           hasUnread: boolean;
+          muted?: boolean;
         }>;
       };
+      // A muted DM raises no dot: muting is the user saying "stop telling me
+      // about this", and the avatar dot is the telling (#1029).
       const unreadIds = (data.dms || [])
-        .filter((dm) => dm.hasUnread)
+        .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
       // Only update if changed to avoid unnecessary re-renders
       if (
@@ -2452,6 +2465,61 @@ export class ScionPageChat extends LitElement {
     `;
   }
 
+  /**
+   * Mute toggle for a DM. Threads carry theirs in the rail's context menu;
+   * a DM has no rail row, so the conversation header is the only place a
+   * user can silence one.
+   */
+  private renderDMMuteButton(conv: V2ConversationState): TemplateResult {
+    const muted = conv.muted === true;
+    return html`
+      <sl-tooltip content=${muted ? 'Unmute conversation' : 'Mute conversation'}>
+        <sl-icon-button
+          class="dm-mute"
+          name=${muted ? 'bell-slash' : 'bell'}
+          label=${muted ? 'Unmute conversation' : 'Mute conversation'}
+          @click=${(): void => void this.toggleDMMute()}
+        ></sl-icon-button>
+      </sl-tooltip>
+    `;
+  }
+
+  /**
+   * Flip the open DM's muted state. Applied locally first and rolled back if
+   * the server refuses, so the bell never claims a state the server does not
+   * have.
+   */
+  private async toggleDMMute(): Promise<void> {
+    const conv = this.v2Conversation;
+    if (!conv) return;
+    const previous = conv.muted === true;
+    const next = !previous;
+    this.v2Conversation = { ...conv, muted: next };
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(conv.conversationKey)}/mute`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ muted: next }),
+        }
+      );
+      if (!res.ok) throw new Error('mute failed');
+      const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
+      if (typeof data.muted === 'boolean' && data.muted !== next) {
+        // The user may have switched conversations while the request was in
+        // flight; only reconcile if this DM is still the one on screen.
+        if (this.v2Conversation?.conversationKey === conv.conversationKey) {
+          this.v2Conversation = { ...this.v2Conversation, muted: data.muted };
+        }
+      }
+    } catch {
+      if (this.v2Conversation?.conversationKey === conv.conversationKey) {
+        this.v2Conversation = { ...this.v2Conversation, muted: previous };
+      }
+    }
+  }
+
   private renderV2Conversation() {
     if (!this.v2Conversation) return nothing;
     const conv = this.v2Conversation;
@@ -2495,6 +2563,7 @@ export class ScionPageChat extends LitElement {
                 : nothing}
             `}
         <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+          ${conv.isDM ? this.renderDMMuteButton(conv) : nothing}
           <sl-tooltip content="Search messages">
             <sl-icon-button
               name="search"

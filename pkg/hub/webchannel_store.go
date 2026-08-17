@@ -237,11 +237,14 @@ type WebChatReadState struct {
 }
 
 // WebChatUserPrefs holds per-user rail preferences.
+// The json tags mirror the field names PUT /api/v1/chat/user-prefs accepts, so
+// a client can read back what it wrote instead of translating between a
+// camelCase request and a PascalCase response.
 type WebChatUserPrefs struct {
-	UserID         string
-	SpaceSortMode  string // "activity", "alpha", "custom"
-	SpaceOrder     string // JSON array of project UUIDs
-	ThreadSortMode string // "activity", "alpha"
+	UserID         string `json:"userId"`
+	SpaceSortMode  string `json:"spaceSortMode"`  // "activity", "alpha", "custom"
+	SpaceOrder     string `json:"spaceOrder"`     // JSON array of project UUIDs
+	ThreadSortMode string `json:"threadSortMode"` // "activity", "alpha"
 }
 
 // WebChatDM represents one side of a DM conversation.
