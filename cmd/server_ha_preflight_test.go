@@ -178,6 +178,54 @@ func TestValidateHostedHAPreflightSkippedForNonHA(t *testing.T) {
 	require.NoError(t, validateHostedHAPreflight(&cfg))
 }
 
+// TestValidateHostedHAPreflightAcceptsOAuthMode covers the core of #1087: IAP
+// is not required for HA. A hub that authenticates users itself (OAuth/OIDC)
+// starts in HA as long as the universal consistency checks are satisfied.
+func TestValidateHostedHAPreflightAcceptsOAuthMode(t *testing.T) {
+	withHostedHAGuards(t)
+
+	cfg := config.DefaultGlobalConfig()
+	cfg.Mode = "hosted"
+	cfg.Hub.HubID = "scion-hub"
+	cfg.Database.Driver = "postgres"
+	cfg.Database.URL = "postgres://scion:secret@localhost/scionhub"
+	cfg.Storage.Provider = "gcs"
+	cfg.Storage.Bucket = "scion-prod-artifacts"
+	cfg.Auth.Mode = "oauth"
+
+	require.NoError(t, validateHostedHAPreflight(&cfg), "oauth mode should pass HA preflight when universal checks are satisfied")
+}
+
+// TestValidateHostedHAPreflightStillRequiresIAPForProxy pins the other half of
+// the split: proxy mode keeps every IAP requirement it has today.
+func TestValidateHostedHAPreflightStillRequiresIAPForProxy(t *testing.T) {
+	withHostedHAGuards(t)
+
+	cfg := validHostedHAConfig()
+	cfg.Auth.Proxy = nil
+	cfg.Auth.Transport = nil
+
+	err := validateHostedHAPreflight(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "iap")
+}
+
+// TestValidateHostedHAPreflightEnforcesUniversalForOAuth checks that skipping
+// the IAP block does not skip the universal checks.  Postgres makes this an HA
+// deployment; hub_id is missing, so preflight must still reject it.
+func TestValidateHostedHAPreflightEnforcesUniversalForOAuth(t *testing.T) {
+	withHostedHAGuards(t)
+
+	cfg := config.DefaultGlobalConfig()
+	cfg.Mode = "hosted"
+	cfg.Database.Driver = "postgres"
+	cfg.Auth.Mode = "oauth"
+
+	err := validateHostedHAPreflight(&cfg)
+	require.Error(t, err, "universal checks should still enforce for oauth mode")
+	require.Contains(t, err.Error(), "requires an explicit server.hub.hub_id")
+}
+
 func TestIsHADeployment(t *testing.T) {
 	tests := []struct {
 		name     string
