@@ -411,6 +411,7 @@ fi
 # name no ClusterRole has is a binding that grants nothing - which fails
 # silently, in the safe direction, and would not be noticed.
 _all="$(names "$R41" team-alpha-production)"
+# shellcheck disable=SC2086  # intentional: splits $_all into $1 $2 $3 $4 by design
 set -- $_all
 if [ "$1" = "$2" ] && [ "$2" = "$3" ] && [ "$1" != "-" ]; then
   pass "(i) the ClusterRole, the ClusterRoleBinding and its roleRef all carry the same name ($1)"
@@ -640,7 +641,9 @@ sa_subject() { # sa_subject <release> <namespace>
 }
 _o_sa_a="$(sa_subject prod platform)"
 _o_sa_b="$(sa_subject prod-scion-hub platform)"
-[ -n "$_o_sa_a" ] && [ -n "$_o_sa_b" ] || meta_failure "(o) could not read the ClusterRoleBinding subject for one or both releases (got '$_o_sa_a' and '$_o_sa_b'); an empty-vs-empty comparison would report 'identical' having measured nothing"
+if ! { [ -n "$_o_sa_a" ] && [ -n "$_o_sa_b" ]; }; then
+  meta_failure "(o) could not read the ClusterRoleBinding subject for one or both releases (got '$_o_sa_a' and '$_o_sa_b'); an empty-vs-empty comparison would report 'identical' having measured nothing"
+fi
 if [ "$_o_sa_a" = prod-scion-hub ] && [ "$_o_sa_b" = prod-scion-hub ]; then
   pass "(o) both releases bind the SAME ServiceAccount subject (prod-scion-hub), so renaming only the cluster-scoped objects would leave the grant shared"
 else
@@ -753,7 +756,9 @@ pin "(q) NEGATIVE CONTROL: release 'zz' into the same absorbed namespace text st
 # C5 is fixable here: the two installs are genuinely different identities.
 _q_sa_a="$(sa_subject a team-alpha-x-b)"
 _q_sa_b="$(sa_subject a-scion-hub-team-alpha-x b)"
-[ -n "$_q_sa_a" ] && [ -n "$_q_sa_b" ] || meta_failure "(q) could not read the ClusterRoleBinding subject for one or both releases (got '$_q_sa_a' and '$_q_sa_b'); two empty strings compare equal and would report 'identical subjects', which is C4's signature and the opposite of this arm's finding"
+if ! { [ -n "$_q_sa_a" ] && [ -n "$_q_sa_b" ]; }; then
+  meta_failure "(q) could not read the ClusterRoleBinding subject for one or both releases (got '$_q_sa_a' and '$_q_sa_b'); two empty strings compare equal and would report 'identical subjects', which is C4's signature and the opposite of this arm's finding"
+fi
 if [ "$_q_sa_a" != "$_q_sa_b" ]; then
   pass "(q) the two colliding installs bind DIFFERENT ServiceAccounts ('$_q_sa_a' and '$_q_sa_b') in different namespaces - unlike arm (o), so a disambiguating rename at this site WOULD be a real fix. That makes C5 FIXABLE HERE; it does NOT make it fixed here, and gd-em ruled it a SEPARATE Critical because this change is gated on truncation and C5 does not truncate"
 else
@@ -809,7 +814,9 @@ for _rl in 1 4 10 20 30 40 41 42 50 53; do
   for _ns in a core core-agents team team-alpha team-alpha-staging \
              team-alpha-production agents x-agents platform prod; do
     _n="$(crb_name "$_r" "$_ns")"
-    [ -n "$_n" ] && [ "$_n" != "-" ] || meta_failure "(p) release length ${_rl} in namespace ${_ns} rendered no cluster-scoped name; a sweep that renders nothing classifies nothing and would report every shape as absent"
+    if ! { [ -n "$_n" ] && [ "$_n" != "-" ]; }; then
+      meta_failure "(p) release length ${_rl} in namespace ${_ns} rendered no cluster-scoped name; a sweep that renders nothing classifies nothing and would report every shape as absent"
+    fi
     _shapes_all=$((_shapes_all+1)); _shapes_names="${_shapes_names}${_n}
 "
     _is_r=no; _is_d=no
