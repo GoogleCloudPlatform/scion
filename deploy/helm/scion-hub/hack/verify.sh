@@ -3913,11 +3913,34 @@ _ck_url() { awk '$1=="url:"{print $2}' "$1"; }
 # happens to read, because a list goes stale the moment an arm is added and a
 # glob cannot - and the expected number is ABSOLUTE, so a file set that grew or
 # shrank is a meta-failure naming the number rather than a silently wider sweep.
+#
+# 🔴 AND IT MUST NOT ABORT, WHICH IS A DIFFERENT FAILURE FROM THE ONE ABOVE AND
+# WORSE. This file is line 46 `set -euo pipefail`, so an assignment whose command
+# substitution exits non-zero KILLS THE SCRIPT ON THAT LINE - no diagnostic, no
+# meta_failure, and the assertion counter never reaches its pin. gd-p1-dev found
+# they had cleared a site on the reasoning "empty cannot match, so it fails
+# safe", when under `set -e` control never reaches the comparison at all and the
+# ${x:-<absent>} they cited was unreachable code.
+#
+# MEASURED HERE THE WAY THEY PRESCRIBED - delete the input and run it, rather
+# than read the code and predict. With the renders removed and no -f guard:
+#   rc 2, stdout truncated at the step banner, 0 occurrences of META-FAILURE,
+#   0 occurrences of any diagnostic of mine, and on stderr:
+#     awk: cannot open .../ck-*.yaml (No such file or directory)
+# It "fails closed" only because awk's exit status is 2 and 2 is this harness's
+# meta-failure code. THAT IS A COINCIDENCE OF TWO UNRELATED NUMBERS, not a
+# guard, and it reports the run as unmeasured while saying nothing about why.
+# An unmatched glob is also how it arrives: bash passes the pattern through
+# literally, so the file that "cannot open" is a filename nobody wrote.
 _ck_require_live() { # <expected count of well-formed digests> <file>...
   local _want="$1"; shift
   local _f _v _n=0 _bad=0 _empty=0
   for _f in "$@"; do
-    _v="$(_ck_digest "$_f")"
+    [[ -f "$_f" ]] || meta_failure "the settings-checksum step was asked to read ${_f} and there is no such file. If that name still contains a * the glob matched nothing, which means the renders this step is about were never written - so nothing below was measured, and without this line the run would have died on awk's exit status with no diagnostic at all."
+    # `|| true` INSIDE the substitution, deliberately: any other awk failure must
+    # arrive at the shape and count checks below as an empty value with a message
+    # attached, not as a bare abort three lines from the thing it was measuring.
+    _v="$(_ck_digest "$_f" || true)"
     if [[ "$_v" =~ ^[0-9a-f]{64}$ ]]; then _n=$((_n+1))
     elif [[ -n "$_v" ]]; then _bad=$((_bad+1))
     else _empty=$((_empty+1)); fi
@@ -4181,7 +4204,14 @@ _sweep() {
 # on. A scanner that can go blind and still report PASS is worse than no
 # scanner, so the needle is checked against a digest committed independently of
 # the expression that builds it.
-_needle_digest="$(printf '%s' "$_banned_path" | sha256sum | cut -c1-16)"
+# `|| true` because this file is `set -euo pipefail` and pipefail hands back
+# sha256sum's status, not cut's: a sha256sum that exists but fails would abort
+# the script here instead of reaching the comparison below. There IS an upstream
+# `command -v sha256sum` guard at :864, but that answers callability and not
+# whether it works, and a site whose safety depends on a guard 500 lines away is
+# a site that changes meaning when either end moves. Empty is the outcome the
+# comparison below was written for, and it fails with a message.
+_needle_digest="$( (printf '%s' "$_banned_path" | sha256sum | cut -c1-16) || true )"
 if [[ "$_needle_digest" == "15a99506b4e1757d" ]]; then
   pass "the banned-path needle is the string this gate was written for (sha256[0:16] 15a99506b4e1757d)"
 else
