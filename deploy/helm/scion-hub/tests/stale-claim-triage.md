@@ -75,7 +75,7 @@ All are **true at `60b2912`** and false at `11a78701`. None reopens Phase 0.
 | 14 | `_helpers.tpl:637-638` | "This chart delivers no ConfigMap and no Secret" | both land |
 | 15 | `_helpers.tpl:827` | "the chart renders no ConfigMap, no Secret, no env, no envFrom and no volumes" | all five land |
 | — | `_helpers.tpl:899-901` | "argv value silently outranks the Secret-backed environment variable a later phase mounts" | the Secret lands |
-| **16** | **`_helpers.tpl:310-314`** | **three clauses spanning two sentences of one bullet: "this chart mounts no volumes" (ends sentence 2); "the driver is not postgres" and "the gcs-plus-proxy branch is unset" (sentence 3) — and the conclusion they support, "isHADeployment ... is FALSE at every replica count"** | **P1 mounts the settings volume (verified). Per `gd-p1-dev`, P1 also falsifies the driver clause (corroborated in-tree at `:321-322`) and the gcs-plus-proxy clause (attributed, no in-tree corroboration), so the conclusion is false by two further independent routes** |
+| **16** | **`_helpers.tpl:310-314`** | **three clauses spanning two sentences of one bullet: "this chart mounts no volumes" (in sentence 2, which ends at "renders no `--db`"); "the driver is not postgres" and "the gcs-plus-proxy branch is unset" (sentence 3) — and the conclusion they support, "isHADeployment ... is FALSE at every replica count"** | **P1 mounts the settings volume (verified). Per `gd-p1-dev`, P1 also falsifies the driver clause (corroborated in-tree at `:321-322`) and the gcs-plus-proxy clause (attributed, no in-tree corroboration), so the conclusion is false by two further independent routes** |
 | **17** | **`NOTES.txt:72-79`** | **"It renders no server configuration"** | **P1 renders exactly that** |
 | **17b** | **`NOTES.txt:75-76`** | **"It does write a settings.yaml for itself on first boot... that file carries no server section"** | **P1's mounted file has one** |
 
@@ -113,13 +113,44 @@ The paragraph below shipped in the first draft of this file. **It is struck, not
 deleted, because it is the record of what the sweep could not see.** Read it,
 then read why it is wrong.
 
-> ~~Severity is *lower* than instances eleven to fifteen, and this matters for~~
-> ~~sequencing: the inference the paragraph draws — "replicas share NO mutable~~
-> ~~state, so `isHADeployment` is false" — **survives**, because a read-only~~
-> ~~projected ConfigMap volume is not shared mutable state. Only the literal clause~~
-> ~~goes false. A reviewer skimming for consequences would correctly conclude~~
-> ~~nothing breaks, and would leave a false sentence in place under a heading that~~
-> ~~says later phases falsify it on purpose.~~
+**Why every line below starts with the word `WRONG`.** I asked `gd-p0-rev-4`
+whether `~~`-strikethrough survives a plain-text or grep-based read. It measured
+instead of reasoning, and the answer inverts what I assumed: **the unit of
+accidental extraction is the LINE**, so a marker must be per-line and must be a
+*word*, not a glyph. The demonstration, on this file:
+
+```
+# over this file at 5ebe3dab, before this section existed. GNU grep 3.8.
+$ /usr/bin/grep -n 'survives' stale-claim-triage.md
+  118:  ... "isHADeployment is false" — **survives**, because a read-only     <- WRONG
+  252:  **survives** P1. Per gd-p1-dev, it does not — ...                     <- LIVE
+```
+
+Exactly two hits, opposite truth values, distinguished by nothing but tilde pairs — which
+vanish in any tool that strips markdown or does not render it. (Grepping the same
+token at *this* head returns **6**, not 2, because this section quotes it four
+more times. Same rule as §6: the corpus and the SHA are pinned above precisely so
+that number is a confirmation rather than a contradiction.) The block-level
+`SUPERSEDED` heading above is right for a human reading top to bottom and does no
+work at all for a line lifted out of the middle. Seven lines, one word each, and
+`grep` now returns a line that says `WRONG` on it in every renderer and in none.
+
+> **A RETRACTION MUST BE LEGIBLE AT THE GRANULARITY AT WHICH TEXT IS ACTUALLY
+> STOLEN, AND THAT IS THE LINE.** A marker that requires its own delimiters to be
+> present, or its own heading to be in view, is a marker that fails exactly when
+> the text has travelled — which is the only time it was needed.
+
+This is the cheapest thing that extends an unstructured "keep it visible"
+convention. Past this the file wants a machine-readable marker, which is a
+`gd-doc` standards decision and not a thing to invent here.
+
+> WRONG ~~Severity is *lower* than instances eleven to fifteen, and this matters for~~
+> WRONG ~~sequencing: the inference the paragraph draws — "replicas share NO mutable~~
+> WRONG ~~state, so `isHADeployment` is false" — **survives**, because a read-only~~
+> WRONG ~~projected ConfigMap volume is not shared mutable state. Only the literal clause~~
+> WRONG ~~goes false. A reviewer skimming for consequences would correctly conclude~~
+> WRONG ~~nothing breaks, and would leave a false sentence in place under a heading that~~
+> WRONG ~~says later phases falsify it on purpose.~~
 
 **Two things are wrong with it, and `gd-p1-dev` found both by extracting the
 tree instead of trusting the quotation.**
@@ -342,9 +373,24 @@ number to one would be attaching a tripwire to a policy.
   triage never looked at either file.** `gd-p0-rev-4` found it:
   `values.yaml:46` and `values.schema.json:31` both carry *"renders no `--db`
   and mounts no volumes, so replicas share no mutable state"* plus the
-  HA-preflight consequence. `grep -c 'values.yaml'` and
-  `grep -c 'values.schema.json'` over this file are **both 0** — neither file is
-  named anywhere in the triage. This is consistent with the stated method (§3:
+  HA-preflight consequence. Over **this file at `38a41b6e`, before this bullet
+  existed**, `/usr/bin/grep -cF` (GNU grep 3.8; the bare `grep` here is a zsh
+  function wrapping ugrep and is a different program) counted **0** for
+  `values.yaml` and **0** for `values.schema.json` — neither file was named
+  anywhere in the triage. At this head both are **3**, and every one of the six
+  hits is inside this bullet: lines 341, 343, 345 and 346. Controls: a token
+  known present counts 8, a token known absent counts 0.
+
+  🔴 **This paragraph is the second worked example of its own rule, and it was
+  caught by a reviewer rather than by me.** As first written it published a bare
+  `both 0` with no corpus and no SHA, in the same commit that codifies *a
+  negative count published in prose enters its own corpus* — 174 lines earlier.
+  `gd-p0-rev-4` measured 3. The rule was stated, the O1 count was fixed to obey
+  it, and the very next count in the same file was written as though the rule
+  did not exist. **A RULE OBEYED AT THE SITE THAT PROMPTED IT IS NOT YET A RULE;
+  IT IS A PATCH WEARING A RULE'S VOCABULARY.** The wrong version is left visible
+  in this file's history rather than silently replaced. This is consistent with
+  the stated method (§3:
   all four reviewers swept `templates/`, and these are not under `templates/`)
   and §6 already disclaims coverage, so it is not a contradiction. **It is
   worse: it is the same defect in the two files an operator is most likely to
