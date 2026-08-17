@@ -1369,19 +1369,19 @@ printf '%s\n' "${CANON_GATES[@]}" "${ALLOWED_NON_GATES[@]}" | sort -u >"$WORK/ga
 for _src in doc fail notes; do
   _f="$WORK/gates-$_src.txt"
   gate_tokens "$_f" >"$WORK/gates-$_src.tok"
-  _missing="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
-  _missing="${_missing% }"
-  if [[ -z "$_missing" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
+  _gap="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
+  _gap="${_gap% }"
+  if [[ -z "$_gap" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
     pass "the $_src copy names every gate the walk found"
   else
-    fail "the $_src copy does not name every gate the walk found: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
+    fail "the $_src copy does not name every gate the walk found: missing [${_gap:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
   fi
-  _extra="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
-  _extra="${_extra% }"
-  if [[ -z "$_extra" ]]; then
+  _surplus="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
+  _surplus="${_surplus% }"
+  if [[ -z "$_surplus" ]]; then
     pass "the $_src copy names no preflight key the walk did not find"
   else
-    fail "the $_src copy names [$_extra], which is neither a gate the walk found nor a listed non-gate. If the hub added a gate, re-derive hack/ha-gates.txt and add it to all three copies; if it is not a gate, say why in ALLOWED_NON_GATES."
+    fail "the $_src copy names [$_surplus], which is neither a gate the walk found nor a listed non-gate. If the hub added a gate, re-derive hack/ha-gates.txt and add it to all three copies; if it is not a gate, say why in ALLOWED_NON_GATES."
   fi
 done
 
@@ -1679,7 +1679,7 @@ else
   # invitation to assume something is checked.
   probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
   : >"$WORK/probe-observed.txt"
-  probe_quiet_names="" probe_err_names="" probe_unaccounted=""
+  probe_quiet_names="" probe_err_names=""
   probe_skipped=0
 
   while IFS='|' read -r leaf kind value; do
@@ -2902,17 +2902,19 @@ step "nothing points the hub at a second configuration file"
 config_flag_re='^\s*-\s*"?(--config(=|"?$)|-c(=|"?$|[^-]))'
 
 for fixture in '            - "--config"' '            - --config' '            - "--config=/etc/x.yaml"' '            - "-c"' '            - -c' '            - "-c=/etc/x.yaml"' '            - "-c/etc/x.yaml"' '            - -cetc/x.yaml'; do
+  _label="${fixture#*- }"
   if grep -Eq "$config_flag_re" <<<"$fixture"; then
-    pass "the config-flag pattern matches $(sed 's/^ *- *//' <<<"$fixture")"
+    pass "the config-flag pattern matches $_label"
   else
-    fail "the config-flag pattern does NOT match $(sed 's/^ *- *//' <<<"$fixture") - the checks below cannot detect what they exist to detect"
+    fail "the config-flag pattern does NOT match $_label - the checks below cannot detect what they exist to detect"
   fi
 done
 for fixture in '            - "--hosted"' '            - "--enable-web"' '            - "--configure-something"' '            - "--concurrency"' '            - "--config-dir-hint"'; do
+  _label="${fixture#*- }"
   if grep -Eq "$config_flag_re" <<<"$fixture"; then
-    fail "the config-flag pattern matches $(sed 's/^ *- *//' <<<"$fixture"), which is not a config-path flag - the checks below would reject legitimate arguments"
+    fail "the config-flag pattern matches $_label, which is not a config-path flag - the checks below would reject legitimate arguments"
   else
-    pass "the config-flag pattern does not match $(sed 's/^ *- *//' <<<"$fixture")"
+    pass "the config-flag pattern does not match $_label"
   fi
 done
 

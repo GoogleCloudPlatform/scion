@@ -90,6 +90,7 @@ path_farm_without() { # path_farm_without <toolname> <destdir>
   local drop="$1" dest="$2" dir f base
   mkdir -p "$dest" || return 1
   local oldifs="$IFS"; IFS=:
+  # shellcheck disable=SC2086  # intentional word splitting on IFS=: to iterate PATH components
   set -- $PATH
   IFS="$oldifs"
   for dir in "$@"; do
@@ -209,6 +210,7 @@ row() { # row <label> <mutation function name>
     # TWO CONTROLS, because either one alone passes for the wrong arm.
     # Negative: the tool under test must really be gone, or the row measures a
     # clean run wearing MM7's label.
+    # shellcheck disable=SC2030  # intentional: testing helm absence requires PATH modification scoped to subshell
     if ( PATH="$farm"; hash -r 2>/dev/null; command -v helm >/dev/null 2>&1 ); then
       echo "HARNESS ERROR: the $label arm still resolves helm, so it is not the arm it claims to be. NOTHING WAS MEASURED."; exit 2
     fi
@@ -231,13 +233,14 @@ row() { # row <label> <mutation function name>
     # real PATH by exactly {helm}". That is complete by construction and cannot
     # go out of date when the suite starts using a new tool.
     _want="$d/.farm-want"; _have="$d/.farm-have"
+    # shellcheck disable=SC2031,SC2086  # SC2031: PATH here is the real PATH, not the subshell copy; SC2086: intentional word splitting on IFS=:
     { oldifs="$IFS"; IFS=:; set -- $PATH; IFS="$oldifs"
       for _dir in "$@"; do
         case "$_dir" in /*) ;; *) continue ;; esac
         [ -d "$_dir" ] || continue
         for _f in "$_dir"/*; do [ -x "$_f" ] && printf '%s\n' "${_f##*/}"; done
       done; } | sort -u | grep -vx helm > "$_want"
-    ls -1 "$farm" 2>/dev/null | sort -u > "$_have"
+    find "$farm" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | sort -u > "$_have"
     # Extent before the difference, so an empty diff cannot come from an empty scan.
     if [ ! -s "$_want" ]; then
       echo "HARNESS ERROR: the expected-tool set for the $label arm is EMPTY, so the comparison below would pass on anything. NOTHING WAS MEASURED."; exit 2
@@ -309,6 +312,7 @@ mm6() { sed -i 's/runAsUser may not be 0/runAsUser must not be 0/' "$1/templates
 # and that is asserted rather than assumed. The PATH perturbation has its own two
 # controls below (helm gone; every other tool still reachable).
 mm7() { strip_helm=1; expect_change=0; }
+# shellcheck disable=SC2016  # single quotes are intentional: matching the literal string ${executed}, not expanding it
 mm8() { sed -i '/^echo "ASSERTIONS_EXECUTED=\${executed}"$/d' "$1/tests/update-strategy.sh"; }
 mm9() { rm -f "$1/tests/verify-failopen.sh"; }
 
