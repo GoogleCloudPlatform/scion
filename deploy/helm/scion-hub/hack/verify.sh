@@ -2288,22 +2288,52 @@ for name in "${PERMUTATIONS[@]}"; do
   # all, so the extractor's grep finds nothing and exits 1, which set -e would
   # take as a reason to abandon the run. An empty string is the answer here, and
   # the branch below asserts which permutation is allowed to produce one.
+  #
+  # THIS SITE USED TO CARRY `2>/dev/null` AND IT WAS A DEMONSTRATED FAIL-OPEN
+  # (gd-p2-dev's criterion: does an ERROR render as a clean absence in a
+  # published result). The existing-secret arm passes on `-z $s`, so an EMPTY
+  # extractor result is its success condition - and a BROKEN extractor also
+  # produces empty. Measured rather than reasoned: pointing this one line at a
+  # file that does not exist, a total instrument failure,
+  #
+  #   minimal         FAIL      settings   FAIL      settings-oauth  FAIL
+  #   varied          FAIL      existing-secret  ok   <- GREEN ON AN ERROR
+  #   stderr captured by the harness: 0 lines, because 2>/dev/null ate sed's
+  #   complaint about the missing file
+  #
+  # Four arms went red and the fifth reported success, on the same broken
+  # instrument. The old comment justified the `|| true` at length and said
+  # nothing about the `2>/dev/null`, which is the half that did the damage.
+  #
+  # TWO CHANGES, because the empty needs to become meaningful rather than merely
+  # tolerated. First, stderr is captured and a single byte on it is a
+  # META-FAILURE: the extractor has no legitimate reason to complain, so if it
+  # does, this run is not evidence either way. Second, the emptiness gets a
+  # POSITIVE TWIN - the arm now asserts the structural fact that MAKES it empty,
+  # that the rendered ConfigMap carries no settings.yaml key at all. A broken
+  # extractor cannot satisfy that, because it is answered by grepping the
+  # manifest directly and not by the extractor under suspicion.
   a="$(grep -oE 'scion\.io/hub-id: .*' "$WORK/$name.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u || true)"
-  s="$(settings_block "$WORK/$name.yaml" 2>/dev/null | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u || true)"
+  _sberr="$WORK/hubid-$name.err"
+  s="$(settings_block "$WORK/$name.yaml" 2>"$_sberr" | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u || true)"
+  if [[ -s $_sberr ]]; then
+    meta_failure "the hub_id extractor wrote to stderr for the $name permutation, so an empty hub_id below cannot be read as 'the chart rendered none'. Stderr: $(tr '\n' ' ' <"$_sberr")"
+  fi
+  if grep -qE '^  settings\.yaml: \|' "$WORK/$name.yaml"; then _has_block=yes; else _has_block=no; fi
   if [[ $name == existing-secret ]]; then
     # The documented exception, asserted rather than skipped. Here the settings
     # file is the operator's and the chart renders none, so there is genuinely
     # nothing to agree with - and the annotation must still be there, because an
     # absent annotation would also satisfy an equality check against nothing.
-    if [[ -n $a && -z $s ]]; then
-      pass "$name: the annotation is rendered and no chart settings file exists to agree with it"
+    if [[ -n $a && -z $s && $_has_block == no ]]; then
+      pass "$name: the annotation is rendered, the ConfigMap carries no settings.yaml key, and so there is no chart hub_id to agree with it"
     else
-      fail "$name: expected an annotation and no rendered hub_id, got annotation ${a@Q} and hub_id ${s@Q}"
+      fail "$name: expected an annotation, no rendered hub_id, and no settings.yaml key in the ConfigMap; got annotation ${a@Q}, hub_id ${s@Q}, settings.yaml key present: ${_has_block}"
     fi
-  elif [[ -n $a && $a == "$s" ]]; then
+  elif [[ -n $a && $a == "$s" && $_has_block == yes ]]; then
     pass "$name: the annotation and server.hub.hub_id agree (${a@Q})"
   else
-    fail "$name: the annotation (${a@Q}) and server.hub.hub_id (${s@Q}) disagree or are missing"
+    fail "$name: the annotation (${a@Q}) and server.hub.hub_id (${s@Q}) disagree or are missing (settings.yaml key present: ${_has_block})"
   fi
 done
 
