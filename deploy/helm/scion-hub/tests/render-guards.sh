@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=77   # 63 + 14 from the oauth credential section (Phase 3).
+EXPECTED_TOTAL=110   # 77 (upstream: 63 + 14 Phase 3 oauth) + 33 (F2 name-axis separators, multi-line-leaf, anchor-class rows).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -161,10 +161,49 @@ reject "--private-key"            "names credential material" --set hub.args[0]=
 reject "--upstream-password"      "names credential material" --set hub.args[0]=--upstream-password=abc
 reject "--x-credential"           "names credential material" --set hub.args[0]=--x-credential=abc
 
+echo "== NAME axis: the separator must not decide whether the guard runs =="
+# F2. Every one of these was ACCEPTED, and the word list already contained the
+# word that should have caught each. The match was anchored to the hyphen alone,
+# so a dotted or camelCase convention walked straight through - and dotted flag
+# names are exactly where "password" turns up in the wild. The fix normalises the
+# separator; the list is still nine words long. Lengthening it would have been
+# the same defect with more entries.
+reject "--admin.token"            "names credential material" --set hub.args[0]=--admin.token=hunter2
+reject "--admin:token"            "names credential material" --set hub.args[0]=--admin:token=hunter2
+reject "--adminToken (camelCase)" "names credential material" --set hub.args[0]=--adminToken=hunter2
+reject "--adminAPIKey (acronym)"  "names credential material" --set hub.args[0]=--adminAPIKey=hunter2
+reject "--spring.datasource.password" "names credential material" --set hub.args[0]=--spring.datasource.password=hunter2
+reject "--auth/token"             "names credential material" --set hub.args[0]=--auth/token=hunter2
+reject "--db.credential"          "names credential material" --set hub.args[0]=--db.credential=x
+# The camelCase split happens before lowering, so it is destroyed by any caller
+# that pre-lowers. It WAS: the flag path passed an already-lowered name while the
+# positional path passed a raw one, so --adminToken was rejected as a positional
+# and accepted as a flag. Both paths are pinned here; a fix to one is not a fix.
+reject "adminToken as a positional" "names credential material" --set hub.args[0]=adminToken=hunter2
+# POSITIVE TWINS FOR THE NEW SEPARATORS. The trailing-segment anchor is what makes
+# the list usable at all: a flag NAMED for a credential carries one, a flag named
+# ABOUT one does not. Matching every segment instead of the last would reject all
+# of these, and they are the reason the fix is a better tokeniser and not a
+# broader match.
+accept "--tokenTtl"               --set hub.args[0]=--tokenTtl=5m
+accept "--maxTokens"              --set hub.args[0]=--maxTokens=10
+accept "--secret.manager.project" --set hub.args[0]=--secret.manager.project=p
+accept "--passwordMinLength"      --set hub.args[0]=--passwordMinLength=8
+
 echo "== credential guard, VALUE axis =="
 reject "DSN with userinfo"  "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion'
 reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAA'
-reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-AAAAAAAAAAAA'
+# LENGTHENED DELIBERATELY, AND DO NOT SHORTEN IT BACK. "sk-" carries a length
+# floor because three characters of prefix plus one alphanumeric is a substring
+# of ordinary English; the old witness "sk-AAAAAAAAAAAA" sat under the floor and
+# went red when the floor landed. A red row there meant the FIXTURE was a toy,
+# not that the pattern was wrong. This is the shape a real key has.
+reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-proj-A1b2C3d4E5f6G7h8I9j0'
+# The floor's cost, asserted rather than left implicit: a short sk- string is NOT
+# treated as a credential, and that is a deliberate trade against the prose class
+# below. If someone lowers the floor to catch this, the prose rows go red and the
+# chart starts refusing credential-free charts.
+accept "short sk- string is under the floor" --set 'hub.args[0]=--x=sk-9A'
 reject "AKIA prefix"        "shape of a credential"       --set 'hub.args[0]=--x=AKIAABCDEFGH1234'
 # ORDERING PIN. Both messages are rejections, and asserting WHICH one fires is
 # what keeps a guard from taking credit for a catch it did not make. This row
@@ -188,6 +227,95 @@ reject "PEM header (value axis wins)"       "shape of a credential" --set 'hub.a
 # they still differ in shape, and the helper is shared: Phase 1 and Phase 3 call
 # it on environment values where a multi-line PEM is legal and this is the catch.
 reject "PEM in a positional"                "shape of a credential" --set 'hub.args[0]=x=-----BEGIN RSA PRIVATE KEY-----'
+
+echo "== VALUE axis: ONE SCALAR LEAF CAN BE MULTI-LINE =="
+# Every other row on this axis plants a BARE scalar, which sits at the start of
+# the string and so satisfies "^" for free. That made the whole axis look anchored
+# when it was not: a YAML block scalar - which is what annotations carrying an
+# embedded config blob look like - hid any prefixed token behind a leading line.
+# Worst on "-----BEGIN ", since PEM is multi-line BY DEFINITION.
+#
+# These use a values FILE, not --set: --set cannot express a newline in a scalar,
+# and a fixture that silently plants one line is a row that measures nothing.
+MLTMP="$(mktemp -d)"; trap 'rm -rf "$MLTMP"' EXIT
+ml() { # ml <file> <block scalar body>
+  { printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n    example.com/blob: |\n'
+    printf '%b\n' "$2"; } > "$MLTMP/$1.yaml"
+  # PERTURBATION ASSERT: prove the leaf really is multi-line before reading a result.
+  local n; n=$(awk '/^      /{c++} END{print c+0}' "$MLTMP/$1.yaml")
+  [ "$n" -ge 2 ] || { echo "FAIL  fixture $1 is not multi-line (${n} line(s)) - row measures nothing"; failed=$((failed + 1)); return 1; }
+}
+ml pem   "      owner: platform-eng\n      -----BEGIN RSA PRIVATE KEY-----\n      MIIEowIBAAKCAQEA\n      -----END RSA PRIVATE KEY-----" \
+  && reject "PEM block on a non-first line"  "shape of a credential" -f "$MLTMP/pem.yaml"
+ml tokln "      owner: platform-eng\n      ghp_A1b2C3d4E5f6G7h8\n      tier: gold" \
+  && reject "token at a non-first line start" "shape of a credential" -f "$MLTMP/tokln.yaml"
+# These two are why (?m) alone was not enough: the credential is MID-line, after
+# "token: ", so a line-start anchor never reaches it. They need the widened class.
+ml tokkv "      owner: platform-eng\n      token: ghp_A1b2C3d4E5f6G7h8\n      tier: gold" \
+  && reject "token after 'token: ' in a leaf" "shape of a credential" -f "$MLTMP/tokkv.yaml"
+ml pemkv "      owner: platform-eng\n      key: -----BEGIN RSA PRIVATE KEY-----" \
+  && reject "PEM after 'key: ' in a leaf"     "shape of a credential" -f "$MLTMP/pemkv.yaml"
+# R-b: PEM INDENTED, which is how a PEM actually appears when someone pastes one
+# under a key in a block scalar. The extra two spaces survive the block's own
+# indent stripping, so the header is preceded by whitespace rather than sitting
+# at column 0 - a configuration no other row here plants.
+ml pemind "      cert:\n        -----BEGIN RSA PRIVATE KEY-----\n        MIIEowIBAAKCAQEA" \
+  && reject "PEM indented under a key"        "shape of a credential" -f "$MLTMP/pemind.yaml"
+
+echo "== ANCHOR CLASS: the credential is not at offset 0, and the leaf is ONE LINE =="
+# THE DEFECT WAS NEVER MULTI-LINE. "(^|=)" required the credential at offset 0 or
+# immediately after "="; ANY other preceding byte silenced the check. Every row
+# above plants a bare scalar or a "--flag=" form, so the whole axis sat on the one
+# side of the defect where the anchor happens to hold, and reported green.
+#
+# These rows are SINGLE-LINE on purpose. A multi-line witness makes this look like
+# a narrower bug than it is and invites a line-start fix, which closes one of the
+# seven known arms and leaves the likeliest one - a plain "token: <secret>" pair -
+# still silent.
+sl() { # sl <file> <single-line leaf value>, planted as a QUOTED scalar
+  { printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n'
+    printf "    example.com/blob: %s\n" "$2"; } > "$MLTMP/$1.yaml"
+  # PERTURBATION ASSERT: one line, and the value really reached the file.
+  local n; n=$(awk '/example.com\/blob:/{c++} END{print c+0}' "$MLTMP/$1.yaml")
+  [ "$n" -eq 1 ] || { echo "FAIL  fixture $1 did not plant a single leaf (${n})"; failed=$((failed + 1)); return 1; }
+}
+sl a3   "'token: ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
+  && reject "single-line 'token: <tok>'"      "shape of a credential" -f "$MLTMP/a3.yaml"
+sl a4   "'Authorization: Bearer ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
+  && reject "single-line 'Bearer <tok>'"      "shape of a credential" -f "$MLTMP/a4.yaml"
+sl a5   "' ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
+  && reject "ONE leading space before a token" "shape of a credential" -f "$MLTMP/a5.yaml"
+# A quoted credential inside a JSON blob. The preceding byte is a double quote,
+# which is neither "=" nor whitespace nor a colon - the configuration that a
+# hand-listed set of separators misses and a negated token class catches.
+sl aq   "'{\"tok\":\"ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\"}'" \
+  && reject "token after a double quote"      "shape of a credential" -f "$MLTMP/aq.yaml"
+
+echo "== NEGATIVE CONTROLS: ordinary prose must still render =="
+# THE ANCHOR AND THE ALTERNATION ARE ONE FIX AND THESE ROWS ARE THE HALF THAT
+# PROVES IT. Repairing the anchor while leaving "sk-[A-Za-z0-9]" and a bare
+# "xox[abprs]-" in the alternation makes every one of these red: three characters
+# of prefix plus one alphanumeric is a substring of ordinary English, and
+# hub.podAnnotations has no value constraint in the schema. A suite of positive
+# rows cannot see that - both the correct fix and the anchor-only one fire on
+# every credential arm - so these are the only rows here that discriminate.
+#
+# TWO OF THEM WERE LIVE FAILURES, NOT HYPOTHETICALS. Measured against the tree
+# before the floors landed, "sk-learn pipeline" and "xoxb-team" were REFUSED: an
+# annotation whose value is prose puts that prose at offset 0, which is exactly
+# where the old anchor looked. The concealment only ever covered values that did
+# not BEGIN with the unsafe prefix.
+sl p1 "'sk-learn pipeline'"       && accept "prose 'sk-learn pipeline'"    -f "$MLTMP/p1.yaml"
+sl p2 "'xoxb-team'"               && accept "prose 'xoxb-team'"            -f "$MLTMP/p2.yaml"
+sl p3 "'my sk-8 skateboard deck'" && accept "prose 'sk-8 skateboard'"      -f "$MLTMP/p3.yaml"
+sl p4 "'avoid xoxb-style naming'" && accept "prose 'xoxb-style naming'"    -f "$MLTMP/p4.yaml"
+sl p5 "'/opt/sk-tools/bin'"       && accept "path '/opt/sk-tools/bin'"     -f "$MLTMP/p5.yaml"
+ml prose "      note: the sk-8 connector is documented\n      tier: gold" \
+  && accept "prose mentioning sk-8 in a leaf"  -f "$MLTMP/prose.yaml"
+ml task  "      note: owned by a task-force team\n      tier: gold" \
+  && accept "prose 'task-force' (sk- mid-word)" -f "$MLTMP/task.yaml"
+ml clean "      owner: platform-eng\n      tier: gold" \
+  && accept "credential-free multi-line leaf"   -f "$MLTMP/clean.yaml"
 
 echo "== the failure message must not print what it caught =="
 # TWO CONDITIONS, AND THE FIRST ONE IS THE POINT. This was a bare negative -
@@ -222,6 +350,30 @@ reject "--pod_namespace"  "contains an underscore" --set hub.args[0]=--pod_names
 echo "== whitespace on argv =="
 reject "leading space"  "leading or trailing whitespace" --set 'hub.args[0]= --verbose'
 reject "embedded space" "contains whitespace"            --set 'hub.args[0]=--log-level debug'
+# THE EMBEDDED-WHITESPACE GUARD IS GATED ON hasPrefix "-" (_helpers.tpl, the
+# "contains whitespace" refusal). A POSITIONAL carrying whitespace is not covered
+# by it at all. This row pins that boundary so nobody reads the row above as
+# "argv rejects whitespace" - it rejects whitespace in FLAGS.
+accept "positional with spaces (whitespace guard is flag-only)" \
+  --set 'hub.args[0]=plain positional with spaces'
+
+echo "== argv, ANCHOR CLASS, attributed BY MESSAGE TEXT =="
+# WHY ATTRIBUTION AND NOT PASS/FAIL. Several prefixed argv forms are refused today
+# by the WHITESPACE guard rather than the credential guard - a different guard,
+# with a different purpose, that the operator satisfies by not typing a space. A
+# harness recording only "did it fail" books those as credential coverage and
+# concludes argv is guarded. These rows name the message, so the whitespace axis
+# cannot take credit for a catch the value axis did not make.
+#
+# THE CLEANEST DISCRIMINATOR IS A POSITIONAL, AND THE REASON IS NOT WHAT IT LOOKS
+# LIKE. "cert:-----BEGIN RSA PRIVATE KEY-----" was reported as escaping because it
+# contains no whitespace. It contains four spaces. It escapes because it does not
+# begin with "-", so the whitespace guard above never examines it, which leaves
+# the value axis as the only thing standing between a PEM and the manifest.
+reject "positional 'cert:<PEM>' (value axis, not whitespace)" \
+  "shape of a credential" --set 'hub.args[0]=cert:-----BEGIN RSA PRIVATE KEY-----'
+reject "positional 'Authorization: Bearer <tok>'" \
+  "shape of a credential" --set 'hub.args[0]=Authorization: Bearer ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
 
 echo "== POSITIVE TWINS: the false-positive baseline =="
 # Without these the suite passes by refusing everything. Each is a near-miss

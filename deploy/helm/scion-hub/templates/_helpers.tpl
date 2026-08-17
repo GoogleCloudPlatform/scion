@@ -767,12 +767,46 @@ An underscore in a flag name is also a real error on the argv path: no flag on
 Failing here says so at render time.
 */}}
 {{- define "scion-hub.assertNoCredentialName" -}}
-{{- $n := lower (toString .name) }}
+{{- $raw := toString .name }}
+{{- $n := lower $raw }}
 {{- if contains "_" $n }}
 {{- fail (printf "%s %q contains an underscore, and this check separates segments on the hyphen. Translate \"_\" to \"-\" before calling (environment variable names need this; flag names do not, and no flag on `server start` has an underscore). Called with the name as-is, the check matches nothing and silently protects nothing." .source $n) }}
 {{- end }}
-{{- if regexMatch "(^|-)(secret|password|passwd|token|credential|key|apikey|pat)$" $n }}
-{{- fail (printf "%s %q names credential material. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret. (The match is on a trailing word: --token-ttl and --max-tokens are fine, --admin-token is not.)" .source $n) }}
+{{- /*
+   NORMALISE THE SEPARATOR BEFORE MATCHING. The word list below is NOT the part
+   that was wrong, and lengthening it would have been the same defect with more
+   entries. What was wrong is that the match was anchored to ONE separator
+   convention, the hyphen, so every one of these walked straight through while
+   the list already contained the exact word that should have caught it:
+
+       --admin.token=                 --adminToken=
+       --spring.datasource.password=  --admin:token=
+
+   THE PROTECTION WAS ANTI-CORRELATED WITH THE CONVENTION. A Java or Spring
+   operator, whose flags are dotted by habit, got no guard at all -- and dotted
+   flag names are where `password` most often appears in the wild.
+
+   So: split camelCase, then collapse any run of non-alphanumerics to a hyphen,
+   then match. Two passes for the camel, because ([a-z0-9])([A-Z]) alone leaves
+   APIKey intact and it must become api-key.
+
+   THE UNDERSCORE IS DELIBERATELY NOT NORMALISED HERE, and the line is
+   principled rather than historical: normalise the separators that are LEGAL on
+   argv, hard-fail the one that is not. pflag rejects an underscore in a flag
+   name, so --pod_namespace is a crash-loop at render time whether or not it
+   names a credential, and turning it into a hyphen would convert a certain
+   failure into a silent pass. That check stays above, and stays first.
+
+   The trailing-word anchor is load-bearing and survives untouched. A flag named
+   for a credential CARRIES one; a flag named ABOUT one does not. --token-ttl,
+   --max-tokens, --password-min-length and --secret-manager-project are all
+   accepted, and they are pinned as positive twins in render-guards.sh. Matching
+   every segment instead of the last would reject all four.
+*/}}
+{{- $camel := regexReplaceAll "([A-Z]+)([A-Z][a-z])" (regexReplaceAll "([a-z0-9])([A-Z])" $raw "${1}-${2}") "${1}-${2}" }}
+{{- $seg := lower (regexReplaceAll "[^A-Za-z0-9]+" $camel "-") }}
+{{- if regexMatch "(^|-)(secret|password|passwd|token|credential|key|apikey|pat)$" $seg }}
+{{- fail (printf "%s %q names credential material. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret. (The match is on the FINAL segment, and the segment separator can be a hyphen, a dot, a colon or a camelCase hump: --admin-token, --admin.token and --adminToken are all rejected, while --token-ttl and --max-tokens are fine.)" .source $n) }}
 {{- end }}
 {{- end }}
 
@@ -849,7 +883,62 @@ into CI logs.
 {{- if regexMatch "(?i)[?&](access_token|refresh_token|id_token|auth_token|api_?key|client_secret|password|passwd|signature)=[^&[:space:]]" $s }}
 {{- fail (printf "%s carries a credential in a URL query string (%s=...). A query string is not a hiding place: it reaches argv, process listings, proxy logs and Referer headers alike. Deliver it through a Secret and let the hub read it from the environment." $source (regexFind "(?i)[?&](access_token|refresh_token|id_token|auth_token|api_?key|client_secret|password|passwd|signature)=" $s | trimAll "?&=")) }}
 {{- end }}
-{{- if regexMatch "(?i)(^|=)(sk-[A-Za-z0-9]|ghp_|gho_|ghs_|github_pat_|xox[abprs]-|AKIA[A-Z0-9]{8}|-----BEGIN )" $s }}
+{{- /*
+   THE ANCHOR AND THE ALTERNATION ARE ONE CHANGE. DO NOT SPLIT THEM IN A LATER
+   EDIT. Repairing the anchor alone makes this guard refuse ordinary English;
+   tightening the alternation alone gives up catches. The two halves are only
+   correct together, and the history of this line is a record of what each half
+   costs when it travels without the other.
+
+   THE ANCHOR DEFECT. "(^|=)" required the credential at offset 0 of the value or
+   immediately after an "=". Any other preceding byte silenced this check -- a
+   space, a colon, an indent. The plainest form of the mistake, a single-line
+   annotation leaf reading
+
+       token: ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8
+
+   was SILENT, because the token sits after "token: " rather than at the start.
+   So was "cert:" followed by a PEM header on argv, with no whitespace anywhere
+   for the argv whitespace guard to catch instead.
+
+   (?m) WAS PROPOSED FOR THIS AND IS NEITHER NECESSARY NOR SUFFICIENT. Not
+   sufficient: "(?m)^" matches at a LINE start, so it closes a pasted PEM block
+   and a token alone on its own line, and leaves the single-line case above --
+   the likeliest one -- still silent. Measured, it closed one of the seven known
+   arms. Not necessary: a newline is not a token character, so the current class
+   admits a line start for free. THE DEFECT WAS NEVER ABOUT MULTIPLE LINES; it
+   was about the byte in front of the credential, and a multi-line witness makes
+   it look like a narrower bug than it is.
+
+   WHY THE ALTERNATION HAD TO BE TIGHTENED IN THE SAME COMMIT. "sk-[A-Za-z0-9]"
+   and a bare "xox[abprs]-" are three or four characters of prefix plus one
+   alphanumeric, which is a substring of ordinary English. The old narrow anchor
+   was concealing that, so widening the anchor without adding the length floors
+   would have traded a false negative on every credential for a false positive
+   on every annotation -- and hub.podAnnotations has no value constraint in the
+   schema, so that is a chart refusing to render because someone wrote a
+   description. Hence "{16,}" and "{8,}" on those two alternatives ONLY. The
+   specific prefixes -- ghp_ gho_ ghs_ github_pat_ AKIA+8 "-----BEGIN " -- carry
+   enough signal to stand without a floor and are deliberately untouched.
+
+   THE CONCEALMENT WAS PARTIAL, WHICH IS WORTH KNOWING BEFORE YOU TRUST A "no
+   false positives today" READING OF THE OLD PATTERN. Measured through sprig's
+   own regexMatch, the old pattern already refused two ordinary prose leaves --
+   "sk-learn pipeline" and "xoxb-team" -- because when the operator writes a
+   description, the prose IS at offset 0, which is exactly where the old anchor
+   looked. Those were live refusals of credential-free charts, not hypotheticals
+   un-masked by this commit; the floors are what fix them. Both are committed as
+   negative controls, along with "the sk-8 connector is documented" and "owned by
+   a task-force team", because this is a guard whose failure in the other
+   direction is rejecting a chart that contains no credential at all.
+
+   KNOWN RESIDUAL, DISCLOSED RATHER THAN CHASED: an attached shorthand argument,
+   "-sghp_A1b2...", stays SILENT, because "s" is a token character and admitting
+   it would re-admit "alphghp_notatoken" and the whole prose class with it. That
+   is an argument-parsing bypass and belongs to the arg layer, not here. It is a
+   known hole with an owner, not an oversight.
+*/}}
+{{- if regexMatch "(?i)(^|[^A-Za-z0-9_-])(sk-[A-Za-z0-9_-]{16,}|ghp_|gho_|ghs_|github_pat_|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{8}|-----BEGIN )" $s }}
 {{- fail (printf "%s (starting %q) has the shape of a credential. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (trunc 10 $s)) }}
 {{- end }}
 {{- end }}
@@ -921,16 +1010,41 @@ guard switched off by a condition, which is the defect class this chart has
 spent the most effort on. It also gets the threat model wrong: a values file
 carrying a DSN is committed to a repository whether or not the chart renders it.
 
-WHAT IS EXCLUDED, AND IT IS EXCLUDED BY A GRAMMAR RATHER THAN BY OPINION.
-Leaves that values.schema.json types as integer or boolean, and the two closed
-enums (image.pullPolicy, updateStrategy.type), cannot express a credential at
-all - the schema rejects any string before this check runs. That exclusion is
-falsifiable and was tested. The two scalars that DO carry a string pattern were
-tested the same way and both FAILED the test, so neither is excluded:
+NOTHING IS EXCLUDED. NOT EVEN BY TYPE. Read the walk below: there is no
+kindIs "string" filter in it, so every non-empty scalar leaf reaches the
+detector whatever its type.
+
+It was argued - correctly - that the 19 leaves typed integer or boolean in
+values.schema.json, plus the two closed enums (image.pullPolicy,
+updateStrategy.type), cannot express a credential, because the schema rejects
+any string before this check runs. That argument is sound and it is deliberately
+not used. Acting on it would remove no work, since a leaf that cannot hold a
+credential could never have been a finding, while adding a second thing that has
+to stay true: the day someone widens one of those types, the exclusion silently
+becomes wrong. Checking them costs a regex against a short integer.
+
+An earlier version of THIS COMMENT claimed the exclusion was implemented. It was
+not, and it never had been. The paragraph was written from the design that was
+discussed rather than the code that was committed - which is finding 1's exact
+defect class, a comment describing a policy the code does not implement,
+reproduced in the comment on the fix for it.
+
+The two scalars that DO carry a string pattern were tested as grammars and both
+FAILED, so no pattern-based exclusion was available either:
 serviceAccount.gcpServiceAccount's pattern accepts "AKIAIOSFODNN7EXAMPLE" as a
 local part because an AWS access key ID is [A-Z0-9]+, and hub.hubId's pattern
 "^\S(.*\S)?$" accepts a DSN. A grammar is only a guard if it excludes EVERY
 credential, not if one credential happens to fail it.
+
+KNOWN COST, AND IT IS DELIBERATE: THE PATH IN THE MESSAGE IS AUTHORITATIVE, THE
+FILE IN THE CITATION IS NOT. Because this is called from every template, helm
+attributes the failure to whichever template it was rendering when the walk
+tripped - usually serviceaccount.yaml - even for a defect in hub.args, which
+belongs to the Deployment. The message always names the values path, and the
+values path is what the operator edits. The alternative is one call site, and
+one call site is precisely the gating hazard that produced finding 1: a guard
+that stops running the moment anything stops rendering the file it lives in.
+A wrong filename is cheaper than a re-openable hole, so this is not traded.
 */}}
 {{- define "scion-hub.assertNoCredentialsInValues" -}}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values "source" "values") }}
@@ -1605,7 +1719,8 @@ that stays correct: --config reaches a sole-source substitution on one path and 
 overlay on the other, and no single verb covers both.
 */}}
 {{- if hasPrefix "-" $arg }}
-{{- $flag := lower (trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg)))) }}
+{{- $flagRaw := trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg))) }}
+{{- $flag := lower $flagRaw }}
 {{- if has $flag $setByChart }}
 {{- fail (printf "hub.args may not contain -%s: the chart renders it, and pflag is last-wins, so this would silently replace the chart's value rather than conflict with it - disabling hosted mode, unbinding the listener, taking the daemon fork so PID 1 exits, leaving /readyz unregistered, or leaving the runtime broker off in a pod that still reports Ready and can never launch an agent." $flag) }}
 {{- end }}
@@ -1621,7 +1736,16 @@ overlay on the other, and no single verb covers both.
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
 {{- end }}
-{{- include "scion-hub.assertNoCredentialName" (dict "name" $flag "source" "hub.args flag") }}
+{{- /*
+   $flagRaw, NOT $flag. The reserved-name lists above are matched case-insensitively
+   and need the lowered form; this check needs the ORIGINAL case, because it splits
+   camelCase humps to find the final segment and $flag has already flattened
+   adminToken to admintoken. Passing $flag here left --adminToken accepted while the
+   positional path one branch below rejected it -- the guard was switched off by its
+   caller, which is the defect class this file exists to prevent, reached by handing
+   a helper a pre-normalised argument. Measured before and after.
+*/}}
+{{- include "scion-hub.assertNoCredentialName" (dict "name" $flagRaw "source" "hub.args flag") }}
 {{- else if contains "=" $arg }}
 {{- /*
 A POSITIONAL IS IGNORED BY pflag, BUT ITS TEXT IS STILL ON argv.
@@ -1675,7 +1799,14 @@ before calling, which is advice addressed to this line, not to them: a false
 positive of exactly the kind the hasPrefix fix was written to remove. Translated,
 `some_var=value` renders and `session_secret=hunter2` fails for its real reason.
 */}}
-{{- include "scion-hub.assertNoCredentialName" (dict "name" (lower (replace "_" "-" (trim (first (splitList "=" $arg))))) "source" "hub.args positional") }}
+{{- /*
+   NOT lowered here, deliberately. The helper lowers for itself, and it now
+   splits camelCase humps BEFORE lowering -- pre-lowering would flatten
+   adminToken to admintoken and hand the helper a name with no boundary left to
+   find. The "_" to "-" translation stays: this is the env-var-shaped path, and
+   the helper treats a raw underscore as a caller error rather than a separator.
+*/}}
+{{- include "scion-hub.assertNoCredentialName" (dict "name" (replace "_" "-" (trim (first (splitList "=" $arg)))) "source" "hub.args positional") }}
 {{- end }}
 {{- $args = append $args $arg }}
 {{- end }}
