@@ -413,13 +413,105 @@ for name in settings existing-secret; do
     pass "$name sets no fsGroup"
   fi
 done
-# No init container for settings. The mount replaced it; a copy step reintroduces
-# a writable per-pod file, which is the divergence the mount exists to prevent.
+# No RUN-ONCE init container. The settings mount replaced one; a copy step
+# reintroduces a writable per-pod file, which is the divergence the mount exists
+# to prevent.
+#
+# WRITTEN IN ITS NARROWED FORM ALREADY, AT PHASE 1, WHERE IT IS VACUOUS. The
+# obvious assertion here is that the string initContainers: never appears, and
+# that is true today and WILL BE WRONG AT PHASE 2. The Cloud SQL proxy is a
+# native sidecar, and a native sidecar is an initContainers entry carrying
+# restartPolicy: Always - so the obvious assertion goes red on a change that is
+# entirely correct, and the obvious fix is to delete it, which puts the copy
+# shape back within reach of a green suite.
+#
+# So the rule is on the ENTRY, not on the section: every initContainers entry
+# must carry restartPolicy: Always. A native sidecar passes; a run-once init
+# container does not. Zero entries pass trivially, which is Phase 1's state and
+# is exactly why the fixtures below exist - with nothing to scan, the scan proves
+# nothing and only the fixtures show the detector still works. Narrow this
+# further if a phase needs it. Do not delete it.
+init_entries_without_always() {
+  awk '
+    !inblock {
+      if ($0 ~ /^[[:space:]]*initContainers:[[:space:]]*$/) {
+        indent = match($0, /[^ ]/) - 1
+        inblock = 1; entry = 0; ok = 0; name = "(unnamed)"
+      }
+      next
+    }
+    {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if (match($0, /[^ ]/) - 1 <= indent) {
+        if (entry && !ok) print name
+        inblock = 0; entry = 0
+        next
+      }
+      if ($0 ~ /^[[:space:]]*-[[:space:]]/) {
+        if (entry && !ok) print name
+        entry = 1; ok = 0; name = "(unnamed)"
+      }
+      if (name == "(unnamed)" && $0 ~ /name:[[:space:]]/) {
+        n = $0; sub(/^.*name:[[:space:]]*/, "", n); name = n
+      }
+      if ($0 ~ /restartPolicy:[[:space:]]*Always[[:space:]]*$/) ok = 1
+    }
+    END { if (inblock && entry && !ok) print name }
+  ' "$1"
+}
+
+# The fixtures. These are what keep the scan honest while the chart renders no
+# init containers at all: they prove the detector still distinguishes the two
+# shapes, so a Phase 2 developer adding the proxy sidecar sees this pass, and one
+# adding a run-once container sees it fail.
+cat >"$WORK/fx-plain.yaml" <<'FXPLAIN'
+    spec:
+      initContainers:
+        - name: settings-init
+          image: busybox
+FXPLAIN
+cat >"$WORK/fx-sidecar.yaml" <<'FXSIDE'
+    spec:
+      initContainers:
+        - name: cloudsql-proxy
+          image: proxy
+          restartPolicy: Always
+      containers:
+        - name: hub
+FXSIDE
+cat >"$WORK/fx-both.yaml" <<'FXBOTH'
+    spec:
+      initContainers:
+        - name: cloudsql-proxy
+          image: proxy
+          restartPolicy: Always
+        - name: settings-init
+          image: busybox
+      containers:
+        - name: hub
+FXBOTH
+if [[ "$(init_entries_without_always "$WORK/fx-plain.yaml")" == "settings-init" ]]; then
+  pass "the init-container rule flags a run-once init container"
+else
+  fail "the init-container rule did NOT flag a run-once init container - the scan below cannot detect what it exists to detect"
+fi
+if [[ -z "$(init_entries_without_always "$WORK/fx-sidecar.yaml")" ]]; then
+  pass "the init-container rule accepts a native sidecar"
+else
+  fail "the init-container rule flags a native sidecar - it would go red on Phase 2's Cloud SQL proxy, which is correct code"
+fi
+if [[ "$(init_entries_without_always "$WORK/fx-both.yaml")" == "settings-init" ]]; then
+  pass "the init-container rule flags a run-once container alongside a sidecar"
+else
+  fail "the init-container rule missed a run-once container sharing the list with a native sidecar"
+fi
+
 for name in "${PERMUTATIONS[@]}"; do
-  if grep -q 'initContainers:' "$WORK/$name.yaml"; then
-    fail "$name has an init container - settings are delivered by mount, not by copy"
+  offenders="$(init_entries_without_always "$WORK/$name.yaml")"
+  if [[ -n "$offenders" ]]; then
+    fail "$name has a run-once init container ($(tr '\n' ' ' <<<"$offenders")) - settings are delivered by mount, not by copy. A native sidecar carries restartPolicy: Always and is allowed."
   else
-    pass "$name has no init container"
+    pass "$name has no run-once init container"
   fi
 done
 
