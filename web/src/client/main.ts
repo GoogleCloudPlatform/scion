@@ -30,6 +30,7 @@ import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
+import { chatUnread } from './chat-unread.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 
 /**
@@ -636,6 +637,16 @@ async function init(): Promise<void> {
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
   await featureFlagsReady;
+
+  // The tab-title unread badge is unread state, not notification state: it
+  // runs for every signed-in user regardless of the push preference, and on
+  // every page, because an unread mention is worth seeing from the dashboard.
+  // After the flags settle — with chat disabled the endpoints it reads are
+  // not even registered.
+  if (currentUser && isFeatureEnabled('web.native_chat')) {
+    chatUnread.start();
+  }
+
   await renderRoute(stripBasePath(window.location.pathname));
 
   // Setup client-side router for navigation

@@ -59,6 +59,7 @@ import { apiFetch } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
+import { chatUnread } from '../../client/chat-unread.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
@@ -910,8 +911,19 @@ export class ScionPageChat extends LitElement {
   private handleRailLoaded(e: Event): void {
     const detail = (e as CustomEvent).detail as {
       spaceIds: string[];
-      spaces?: Array<{ projectId: string; projectSlug: string; projectName: string }>;
+      spaces?: Array<{
+        projectId: string;
+        projectSlug: string;
+        projectName: string;
+        unreadCount?: number;
+      }>;
     };
+
+    // The rail just loaded the space rollup the tab-title badge needs; hand it
+    // over rather than fetching /chat/spaces again alongside it.
+    if (detail.spaces) {
+      chatUnread.setSpaceUnread(detail.spaces);
+    }
 
     // Populate slug ↔ projectId maps for deep-link resolution
     if (detail.spaces) {
@@ -1865,6 +1877,8 @@ export class ScionPageChat extends LitElement {
       const unreadIds = (data.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
+      // Same list the tab-title badge counts — reuse the response.
+      chatUnread.setDMUnread(data.dms || []);
       // Only update if changed to avoid unnecessary re-renders
       if (
         unreadIds.length !== this.v2UnreadFromIds.length ||
