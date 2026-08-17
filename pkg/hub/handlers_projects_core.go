@@ -798,6 +798,11 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 			}
 			// Fallback: check legacy local path
 			if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
+				// Worth saying out loud: on GKE the local path is always pod
+				// ephemeral storage, so this content disappears on the next
+				// reschedule and the project silently moves to the volume.
+				s.projectsLogger().Warn("hub-managed project served from ephemeral local path; gke-shared-volume mount has no content yet",
+					"slug", slug, "local_path", localPath, "volume_path", gkePath)
 				return localPath, nil
 			}
 			return gkePath, nil
