@@ -4,7 +4,7 @@
   "description": "Values understood by the scion-hub chart. Unknown keys are rejected rather than ignored, so a misspelled key is an error and not a silent no-op.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "storage", "auth", "acknowledgeHAUnlanded"],
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "auth", "acknowledgeHAUnlanded"],
   "properties": {
     "global": {
       "type": "object",
@@ -343,11 +343,80 @@
       "additionalProperties": false,
       "required": ["driver"],
       "description": "Rendered into settings.yaml in full. Setting these through the environment instead is refused: driver and url do bind as SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL, are applied after the rendered file and win, and would leave the chart's HA guards reasoning about a driver the hub is not using; maxOpenConns does not bind at all, because its koanf tag contains an underscore.",
+      "allOf": [
+        {
+          "if": {
+            "properties": { "driver": { "const": "postgres" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "required": ["auth", "name"],
+            "properties": {
+              "name": {
+                "minLength": 1,
+                "description": "MINLENGTH, NOT MERELY REQUIRED. values.yaml ships name as the empty string, so the key is always present and \"required\" alone is satisfied by it - the check would pass on exactly the input it exists to reject. The same applies to user and password below."
+              }
+            },
+            "description": "REQUIRED WITH NO DEFAULT, and only where it is consequential. database.auth selects between IAM and password authentication, and neither is the default: the design made the default contingent on a live IAM verification against Cloud SQL, that verification has not been run (no cluster; 403 on the service account, recorded in VALIDATION.md), and an unverified default renders identically to a verified one. Requiring it only under postgres is deliberate - sqlite has no authentication mode, so forcing a choice there would be a meaningless choice, and a meaningless required key trains operators to set required keys without reading them."
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "driver": { "const": "postgres" },
+              "auth": { "const": "password" }
+            },
+            "required": ["driver", "auth"]
+          },
+          "then": {
+            "required": ["user", "password"],
+            "properties": {
+              "user": { "minLength": 1 },
+              "password": { "minLength": 1 }
+            },
+            "description": "Under password auth both the role and the password must be supplied. Under iam they must not be needed: the role is derived from the Google service account and there is no password at all, which is the entire point of that mode."
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "driver": { "const": "postgres" },
+              "auth": { "const": "iam" }
+            },
+            "required": ["driver", "auth"]
+          },
+          "then": {
+            "properties": {
+              "password": {
+                "maxLength": 0,
+                "description": "REFUSED under iam rather than ignored. A password set alongside iam means the operator believes one of the two is in effect and cannot tell which; silently dropping it would leave them believing the database is password-protected when the DSN carries no password at all."
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "driver": {
           "type": "string",
           "enum": ["sqlite", "postgres"],
           "description": "sqlite is single-pod only: it is a file in the hub's home directory. postgres turns on the hub's HA preflight, which additionally requires the hub ID, a database URL, GCS storage with a bucket and a durable session secret."
+        },
+        "auth": {
+          "type": "string",
+          "enum": ["iam", "password"],
+          "description": "REQUIRED under driver postgres, with NO DEFAULT. iam authenticates as the pod's Google service account and the DSN carries no password; password renders a Postgres role and password into the settings Secret. The absence of a default is the decision, not an oversight: the IAM path is unverified rather than known-good, defaulting to password when IAM would have worked is a silent security regression nothing would surface, and a withheld default can be added later without breaking any install while a wrong default cannot be removed without breaking every install."
+        },
+        "name": {
+          "type": "string",
+          "description": "The Postgres database name. Required under driver postgres."
+        },
+        "user": {
+          "type": "string",
+          "description": "The Postgres role. Under auth iam, leave empty to derive it from serviceAccount.gcpServiceAccount by stripping the trailing .gserviceaccount.com, which is the truncated form Cloud SQL registers IAM principals under. Setting it explicitly under iam is allowed and is checked against that derivation."
+        },
+        "password": {
+          "type": "string",
+          "description": "Only under auth password, and only ever inside the settings Secret - it is interpolated into server.database.url in the rendered settings.yaml and reaches no ConfigMap, annotation or argv. Use config.existingSecret to keep it out of Helm values entirely."
         },
         "maxOpenConns": {
           "type": "integer",
@@ -367,6 +436,72 @@
           "type": "string",
           "pattern": "^[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*$"
         }
+      }
+    },
+    "cloudsql": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "nativeSidecar", "port", "healthCheckPort", "image"],
+      "description": "The Cloud SQL Auth Proxy. cloudsqlconn is not in the hub's go.mod, so the in-process connector is unavailable and the proxy is the only route to Cloud SQL.",
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["instanceConnectionName"],
+            "properties": {
+              "instanceConnectionName": { "minLength": 1 }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "instanceConnectionName": {
+          "type": "string",
+          "pattern": "^(|[a-z][a-z0-9-]{4,28}[a-z0-9]:[a-z0-9-]+:[a-z][a-z0-9-]*[a-z0-9])$",
+          "description": "project:region:instance. Required when enabled. The pattern checks the three-part shape rather than merely that the string is non-empty: the proxy's own failure on a malformed value is a connection timeout, which reads as a network problem and sends the operator to the VPC rather than to this value."
+        },
+        "nativeSidecar": {
+          "type": "boolean",
+          "description": "An initContainers entry with restartPolicy: Always, started before the main container and torn down after it (GKE 1.29+). Set false only below 1.29, where the proxy becomes a plain sidecar with no ordering guarantee and the hub crash-loops until it wins the race - NOTES.txt prints that warning."
+        },
+        "privateIp": {
+          "type": "boolean",
+          "description": "Connect to the instance's private IP. Requires a VPC-native cluster peered to the instance."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The loopback port the proxy listens on. It is interpolated into the derived DSN, so the two cannot drift."
+        },
+        "healthCheckPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The proxy's own health-check server, serving /startup, /readiness and /liveness. Distinct from the hub's /readyz. Every container in the pod shares one network namespace, so this must not collide with hub.webPort - the chart refuses the collision rather than letting one process fail to bind at runtime."
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "digest"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "description": "REQUIRED. The proxy is pinned by digest and there is no tag-only path: a tag can be repointed underneath a running cluster, and this container holds the credentials to the database."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "resources": { "type": "object" }
       }
     },
     "storage": {
@@ -408,6 +543,34 @@
     }
   },
   "allOf": [
+    {
+      "description": "postgres requires the Cloud SQL proxy. The derived DSN points at 127.0.0.1, because that is where the proxy listens; with cloudsql.enabled false there is nothing on that port and the hub dials a closed loopback socket, which surfaces as a connection refused that names no cause. Connecting to a Postgres somewhere other than through the proxy is deliberately NOT offered rather than offered untested - this chart has never been run against one, and a database.host value nobody has exercised is a claim the chart cannot support. Adding it later is additive and breaks no existing install; shipping it wrong is not removable.",
+      "if": {
+        "properties": {
+          "database": {
+            "properties": {
+              "driver": {"const": "postgres"}
+            }
+          },
+          "config": {
+            "properties": {
+              "existingSecret": {"const": ""}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cloudsql": {
+            "properties": {
+              "enabled": {"const": true}
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["cloudsql"]
+      }
+    },
     {
       "description": "postgres implies the HA preflight, which requires a GCS bucket. Without this the install succeeds and the hub then refuses to start, so the failure is moved forward to helm template. Skipped when the settings file is supplied wholesale, since the chart is not rendering storage in that case.",
       "if": {

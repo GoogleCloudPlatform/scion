@@ -434,9 +434,58 @@ database:
   # the thirteen, and the chart already satisfies two of them. Naming a subset
   # of a guard's conditions reads as naming all of them.
   #
-  # The connection URL itself is not a value here yet; it arrives with Cloud
-  # SQL support.
+  # The connection URL is not set here and cannot be. It is DERIVED, from
+  # database.auth, database.user, database.name and the proxy's listen port -
+  # see the cloudsql block below and scion-hub.databaseUrl. Under password auth
+  # it carries the password, so it exists only inside the settings Secret and
+  # never as a value you could accidentally echo.
   driver: sqlite
+
+  # REQUIRED when driver is postgres, and deliberately not given a value here.
+  #
+  # iam       the proxy authenticates as the pod's Google service account and
+  #           the DSN carries NO password at all.
+  # password  a Postgres role and password, rendered into the settings Secret.
+  #
+  # THERE IS NO DEFAULT, AND THE ABSENCE IS THE DECISION. The design (§7.2)
+  # says Phase 2 verifies IAM against a live instance first and that the result
+  # picks the default. That verification HAS NOT HAPPENED - there is no cluster
+  # and no Cloud SQL instance reachable by the principal this chart was built
+  # with, measured as a 403 and recorded in VALIDATION.md. So there is no
+  # verified default to ship, and three reasons not to invent one:
+  #
+  #   - A default nobody verified is a parameter nobody chose. "Untested"
+  #     renders identically to "verified" and no reader can tell them apart.
+  #   - The risk is asymmetric. Defaulting to password when IAM would have
+  #     worked is a silent security regression that nothing would ever surface.
+  #   - Only one option is reversible. A withheld default can be added later
+  #     without breaking any existing install; a wrong default cannot be
+  #     removed later without breaking every existing install.
+  #
+  # When the IAM verification is finally run, this is where its result lands.
+  # Until then the operator chooses explicitly, which is the honest state.
+  #
+  #   auth: iam
+  #
+
+  # The Postgres database and role. Both REQUIRED when driver is postgres.
+  #
+  # Under auth: iam the user is the Google service account with the trailing
+  # ".gserviceaccount.com" REMOVED - Cloud SQL registers the IAM principal
+  # under the truncated form, so "scion-hub@my-project.iam.gserviceaccount.com"
+  # is the role "scion-hub@my-project.iam". Leave user empty and the chart
+  # derives exactly that from serviceAccount.gcpServiceAccount rather than
+  # making you restate it, which is one fewer place for the two to disagree.
+  name: ""
+  user: ""
+
+  # Only under auth: password, and only ever inside the settings Secret.
+  #
+  # It is interpolated into server.database.url in the rendered settings.yaml,
+  # which is a Secret; it reaches no ConfigMap, no pod annotation and no argv.
+  # If you would rather it never passed through Helm values at all, supply the
+  # whole settings file yourself with config.existingSecret.
+  password: ""
 
   # Connection pool. Rendered into settings.yaml, and not settable by
   # environment variable here: SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded
@@ -446,11 +495,85 @@ database:
   # configuration-intake section of templates/_helpers.tpl.
   #
   # Keep maxOpenConns comfortably above the number of background workers, and
-  # the total across replicas below the Cloud SQL tier's connection limit.
+  # the total across replicas below the Cloud SQL tier's connection limit. The
+  # budget formula, including the part of it this chart cannot know, is printed
+  # by NOTES.txt.
   maxOpenConns: 25
   maxIdleConns: 5
   connMaxLifetime: 30m
   connMaxIdleTime: 5m
+
+# The Cloud SQL Auth Proxy.
+#
+# The hub talks to 127.0.0.1 and the proxy holds a mutually authenticated TLS
+# tunnel to Cloud SQL. cloudsqlconn is not in the hub's go.mod, so the connector
+# cannot be used in-process and the proxy is the only route.
+cloudsql:
+  enabled: false
+
+  # project:region:instance. REQUIRED when enabled - the chart cannot guess it
+  # and there is nothing sensible to default to.
+  instanceConnectionName: ""
+
+  # A NATIVE SIDECAR: an initContainers entry carrying restartPolicy: Always,
+  # which GKE 1.29+ starts before the main container and tears down after it.
+  #
+  # This is not a style preference. The hub opens the database and runs
+  # AutoMigrate immediately at startup. As a plain sidecar the proxy has no
+  # ordering guarantee, so the hub races it and CrashLoopBackOffs until it wins
+  # - self-healing but ugly, and it spends the startup-probe budget on a
+  # sequencing problem rather than on migration.
+  #
+  # Set false only for clusters below 1.29. NOTES.txt then prints the crash-loop
+  # warning, because on that path the first minute of every rollout looks like a
+  # broken install and is not.
+  nativeSidecar: true
+
+  # Connect over the instance's private IP rather than its public IP. Requires
+  # the cluster to be VPC-native and peered to the instance.
+  privateIp: false
+
+  # The loopback port the proxy listens on and the hub connects to. It appears
+  # in the derived DSN, so the two cannot drift apart.
+  port: 5432
+
+  # The proxy's own health-check server. Distinct from the hub's /readyz, and
+  # deliberately not on the hub's port - both processes share one network
+  # namespace, so a collision here is a port conflict inside the pod.
+  #
+  # /startup and /readiness are the proxy's endpoints, not the hub's. Do not
+  # point them at the hub's paths and do not point the hub's probes here.
+  healthCheckPort: 9801
+
+  image:
+    repository: gcr.io/cloud-sql-connectors/cloud-sql-proxy
+
+    # PINNED BY DIGEST, AND THERE IS NO TAG VALUE TO SET.
+    #
+    # image.repository / image.digest for the hub refuse a tag and a digest
+    # together, because two sources for one identity can disagree and the digest
+    # silently wins. The same reasoning applies here, and the proxy has no case
+    # at all for running unpinned - so rather than offer a tag and refuse the
+    # combination, this block simply has no tag. The version below is a comment
+    # precisely so that nothing can mistake it for the authority.
+    #
+    # This is v2.25.2, and the digest was resolved FROM THE REGISTRY rather than
+    # copied from documentation:
+    #
+    #   curl -sSI -H "Accept: application/vnd.oci.image.index.v1+json" \
+    #     https://gcr.io/v2/cloud-sql-connectors/cloud-sql-proxy/manifests/2.25.2
+    #   docker-content-digest: sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f
+    #
+    # It is the multi-arch index digest, so it resolves on amd64 and arm64
+    # alike. The image runs as uid 65532 with no shell, which is what lets it
+    # satisfy this pod's runAsNonRoot without a per-container exemption.
+    digest: sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f
+    pullPolicy: IfNotPresent
+
+  # The proxy is small but it is on the hot path for every query. Left empty by
+  # default because Autopilot assigns its own defaults and a guess here would
+  # override them with a worse one.
+  resources: {}
 
 storage:
   # The hub's blob store: task artifacts, uploads, agent output. This is NOT the

@@ -1076,6 +1076,17 @@ for _p in "${HA_GATE_PATTERNS[@]}"; do
   fi
 done
 
+# THE LANDED GATE, replacing the presence arm that server.database.url used to
+# hold in the loop above. Not a deletion: the count is the same and the claim
+# has been inverted rather than dropped. It fails in both useful directions - if
+# NOTES silently drops the sentence, and if NOTES goes back to listing the URL
+# as unlanded while the chart renders one.
+if grep -qF 'server.database.url was the first of these until the Cloud SQL phase' "$WORK/notes-ack.txt"; then
+  pass "the acknowledged release's NOTES records server.database.url as landed, not as a gate"
+else
+  fail "the acknowledged release's NOTES does not say server.database.url was landed. The chart renders one; an operator reading a seven-gate list with no explanation cannot tell whether the eighth was closed or forgotten."
+fi
+
 # --------------------------------------------------------------------------
 # EXCLUSIVITY, WHICH IS THE HALF THAT WAS MISSING, AND THE DEFECT IT LET THROUGH.
 #
@@ -1539,7 +1550,27 @@ declare -A PROBE_MUTATION=(
   [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
-  [database.driver]='--set-string|database.driver=postgres|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
+  # every one of them is inert unless the driver is postgres AND the proxy is on,
+  # so a mutation without it moves nothing and the leaf is reported as a value
+  # that does nothing. That report would be true of the mutation and false of the
+  # chart. Each entry below therefore turns the feature ON and then changes the
+  # one leaf it is named for.
+  [database.driver]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  [database.name]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.name=probe-other-db'
+  [database.user]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.user=probe-user'
+  # The one leaf that cannot use the iam preamble: under iam the schema and the
+  # template both refuse a password, and the DSN has nowhere to put one.
+  [database.password]='--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  [cloudsql.instanceConnectionName]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.instanceConnectionName=other-project:us-west1:db-2'
+  [cloudsql.nativeSidecar]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.nativeSidecar=false'
+  [cloudsql.privateIp]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.privateIp=true'
+  [cloudsql.port]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.port=5433'
+  [cloudsql.healthCheckPort]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.healthCheckPort=9802'
+  [cloudsql.image.repository]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.repository=other.test/probe-proxy'
+  [cloudsql.image.digest]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.digest=sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'
+  [cloudsql.image.pullPolicy]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.pullPolicy=Never'
+  [cloudsql.resources]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.resources.limits.memory=64Mi'
   [hub.args]='--set-string|hub.args[0]=--probe-flag'
   [hub.baseUrl]='--set-string|hub.baseUrl=https://other.example.com'
   [hub.extraEnv]='--set-string|hub.extraEnv[0].name=PROBE_ONE|--set-string|hub.extraEnv[0].value=x'
@@ -2307,7 +2338,7 @@ step "the \$ownedByConfig split, measured against the render"
 declare -A DELIVERED=(
   [base-url]=1        # SCION_SERVER_BASE_URL, configmap-env.yaml
   [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
-  [db]=0              # server.database.url - Cloud SQL
+  [db]=1              # server.database.url - LANDED by the Cloud SQL phase; was 0 until then
   [storage-dir]=0     # server.storage.local_path - the workspace share
   [admin-emails]=0    # server.hub.admin_emails - no phase claims it
 )
@@ -3224,12 +3255,19 @@ expect_render_failure \
 # it is what a values file assembled by another tool can effectively produce, and
 # per the reviewer's F1 it removes EVERY schema-enforced rule at once. The
 # template guards are what is left, so they are worth testing on their own.
+# THE PROXY KEYS KEEP THIS CASE AIMED AT THE GUARD IT NAMES. Since the Cloud SQL
+# phase, postgres without cloudsql.enabled is refused by a DIFFERENT template
+# guard that fires first, and this case then reported "failed, but not for the
+# expected reason" - correctly. Supplying the proxy is what isolates the bucket
+# guard again; it is not padding.
 expect_render_failure \
   "the TEMPLATE rejects postgres without a GCS bucket" \
   "storage.bucket is required when storage.provider is gcs" \
   --skip-schema-validation \
   "${BASE[@]}" \
   --set database.driver=postgres \
+  --set database.auth=iam --set database.name=scion --set database.user=u \
+  --set cloudsql.enabled=true --set cloudsql.instanceConnectionName=my-project:us-central1:db-1 \
   --set storage.provider=gcs
 
 expect_render_failure \

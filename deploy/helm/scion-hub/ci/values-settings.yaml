@@ -45,6 +45,19 @@ image:
 
 database:
   driver: postgres
+  # THE CLOUD SQL PHASE MADE THESE REQUIRED. driver: postgres alone no longer
+  # renders: auth has no default by design, name has no safe one, and this
+  # chart reaches Postgres only through the Auth Proxy. user is stated
+  # explicitly rather than derived from serviceAccount.gcpServiceAccount so
+  # that a bug in the derivation surfaces in ci/values-cloudsql.yaml, which
+  # exists to exercise it, and not here in a fixture about something else.
+  auth: iam
+  name: scion
+  user: scion-hub@my-project.iam
+
+cloudsql:
+  enabled: true
+  instanceConnectionName: my-project:us-central1:scion-hub
 
 storage:
   provider: gcs

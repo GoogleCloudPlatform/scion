@@ -35,6 +35,11 @@ limitations under the License.
 {{- include "scion-hub.assertExtraEnv" . }}
 {{- include "scion-hub.assertHAUnlanded" . }}
 {{- /*
+Called here for the same reason assertConfigSource is: the Deployment is the one
+template that always renders, so this is where a guard becomes unconditional.
+*/}}
+{{- include "scion-hub.assertCloudsqlPorts" . }}
+{{- /*
 Called from here, and not only from the settings template, because the settings
 template is skipped entirely when config.existingSecret is set - which is the
 only case this assertion has anything to say about. The Deployment always
@@ -155,6 +160,24 @@ spec:
         {{- include "scion-hub.nonRootSecurityContext" . | nindent 8 }}
         seccompProfile:
           type: RuntimeDefault
+      {{- /*
+      THE NATIVE SIDECAR. An initContainers entry with restartPolicy: Always is
+      a sidecar, not an init container: the kubelet starts it before the main
+      containers, does NOT wait for it to exit, and tears it down after they
+      finish. That ordering is the entire reason for it here - the hub opens the
+      database and runs AutoMigrate immediately, so as an ordinary sidecar it
+      races the tunnel and CrashLoopBackOffs until it wins.
+
+      Requires GKE 1.29+. Below that the field is ignored and the entry becomes
+      a genuine init container that never exits, which hangs the pod at startup
+      forever - so cloudsql.nativeSidecar: false exists, and NOTES.txt prints
+      what to expect on that path.
+      */}}
+      {{- if and .Values.cloudsql.enabled .Values.cloudsql.nativeSidecar }}
+      initContainers:
+        {{- include "scion-hub.cloudsqlProxyContainer" . | nindent 8 }}
+          restartPolicy: Always
+      {{- end }}
       containers:
         - name: hub
           image: {{ include "scion-hub.image" . | quote }}
@@ -271,6 +294,22 @@ spec:
               mountPath: {{ printf "%s/settings.yaml" (include "scion-hub.scionDir" .) | quote }}
               subPath: settings.yaml
               readOnly: true
+        {{- /*
+        THE FALLBACK PLACEMENT, for clusters below 1.29 where restartPolicy on
+        an initContainers entry is ignored. Here the proxy is an ordinary
+        container and there is NO ordering guarantee, so the hub will lose the
+        race to the tunnel some number of times before it wins. That is the
+        crash-loop NOTES.txt warns about, and it is self-healing rather than
+        broken.
+
+        Appended AFTER the hub container, deliberately. Container order does not
+        affect startup on this path - nothing here is ordered - but the hub is
+        this pod's subject and a reader running kubectl describe should meet it
+        first.
+        */}}
+        {{- if and .Values.cloudsql.enabled (not .Values.cloudsql.nativeSidecar) }}
+        {{- include "scion-hub.cloudsqlProxyContainer" . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: scion-home
           emptyDir: {}

@@ -69,6 +69,7 @@ stringData:
         driver: postgres
         max_idle_conns: 5
         max_open_conns: 25
+        url: postgres://scion-hub%40my-project.iam@127.0.0.1:5432/scion?sslmode=disable
       hub:
         hub_id: ci-settings
         hub_name: CI Settings Hub
@@ -256,7 +257,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-settings"
         checksum/env-config: 89a57c8a161eca4df95ce9fb7d6296f0b0c94dc463dc2e4b75d1baf4c24d624b
-        checksum/settings: c61e274464dbc604293f7cc17f5e4627f37ba9674ebb9228af8b9bd4761734d9
+        checksum/settings: 248808599f9df9bab8a92eb9b09bad793d116db754d3566dfe01ad01726f2e1d
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:
@@ -265,6 +266,42 @@ spec:
         runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: cloud-sql-proxy
+          image: "gcr.io/cloud-sql-connectors/cloud-sql-proxy@sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "--health-check"
+            - "--http-address=0.0.0.0"
+            - "--http-port=9801"
+            - "--auto-iam-authn"
+            - "my-project:us-central1:scion-hub"
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9801
+            periodSeconds: 1
+            failureThreshold: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 9801
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          restartPolicy: Always
       containers:
         - name: hub
           image: "us-docker.pkg.dev/scion-ci/scion/scion-hub:ci"
