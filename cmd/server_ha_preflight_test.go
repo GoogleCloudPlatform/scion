@@ -252,9 +252,8 @@ func TestIsHADeployment(t *testing.T) {
 // config cannot boot. Remove or swap a route without touching the chart and it
 // over-triggers, demanding an acknowledgement for a deployment that is not HA.
 // So: change isHADeployment -> update the chart condition in lockstep -> add or
-// update the matching subtest below. The chart condition lives in the chart's
-// HA helper (at the time of writing, charts/scion/templates/_helpers.tpl); if
-// that file has moved, grep the chart for acknowledgeHAUnlanded.
+// update the matching subtest below. To locate the chart condition, grep the
+// deploy/helm tree for acknowledgeHAUnlanded.
 //
 // Routes as of this writing:
 //  1. K_SERVICE env var set (Cloud Run)
