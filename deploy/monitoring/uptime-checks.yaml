@@ -40,9 +40,16 @@ uptimeChecks:
       useSsl: true
       validateSsl: true
       requestMethod: GET
+    # Match the top-level "status" field exactly. A substring match on
+    # "healthy" would also succeed against "unhealthy" (which appears in the
+    # per-check detail fields) and against a "degraded" response that still
+    # reports some checks as "healthy".
     contentMatchers:
       - content: "healthy"
-        matcher: CONTAINS_STRING
+        matcher: MATCHES_JSON_PATH
+        jsonPathMatcher:
+          jsonPath: "$.status"
+          jsonMatcher: EXACT_MATCH
     period: "60s"              # Check every 1 minute
     timeout: "10s"
     notificationChannels:
@@ -97,9 +104,15 @@ uptimeChecks:
       port: 8080
       useSsl: false
       requestMethod: GET
+    # Match the top-level "status" field exactly. See the Hub /healthz note
+    # above: a substring match on "healthy" also succeeds against "unhealthy"
+    # and against a "degraded" response carrying healthy sub-checks.
     contentMatchers:
       - content: "healthy"
-        matcher: CONTAINS_STRING
+        matcher: MATCHES_JSON_PATH
+        jsonPathMatcher:
+          jsonPath: "$.status"
+          jsonMatcher: EXACT_MATCH
     # Internal checks use a longer period since the Broker is not user-facing.
     period: "300s"             # Check every 5 minutes
     timeout: "10s"
