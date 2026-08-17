@@ -25,7 +25,7 @@
  * Data sources:
  *   - GET /api/v1/chat/spaces — visible spaces with unread rollup
  *   - GET /api/v1/chat/spaces/{projectId}/threads — threads per space
- *   - GET /api/v1/chat/prefs — user preferences (sort mode, custom order)
+ *   - GET /api/v1/chat/user-prefs — user preferences (sort mode, custom order)
  *
  * DMs are accessed via member-click in the members sidebar (chat-members).
  *
@@ -71,6 +71,38 @@ interface RailPrefs {
   spaceOrder: string[] | undefined;
 }
 
+/**
+ * Read a prefs payload from the server. `spaceOrder` is stored as a JSON array
+ * string, so a hand-edited or truncated value has to degrade to "no custom
+ * order" rather than throwing the rail's whole load away.
+ */
+function parseRailPrefs(payload: unknown): RailPrefs {
+  const data = (payload ?? {}) as {
+    spaceSortMode?: string;
+    threadSortMode?: string;
+    spaceOrder?: string;
+  };
+  let spaceOrder: string[] | undefined;
+  if (typeof data.spaceOrder === 'string' && data.spaceOrder !== '') {
+    try {
+      const parsed: unknown = JSON.parse(data.spaceOrder);
+      if (Array.isArray(parsed)) {
+        spaceOrder = parsed.filter((id): id is string => typeof id === 'string');
+      }
+    } catch {
+      spaceOrder = undefined;
+    }
+  }
+  const spaceSortMode = data.spaceSortMode;
+  const threadSortMode = data.threadSortMode;
+  return {
+    spaceSortMode:
+      spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity',
+    threadSortMode: threadSortMode === 'alpha' ? 'alpha' : 'activity',
+    spaceOrder,
+  };
+}
+
 /** Viewport width at or below which the chat panels are separate screens. */
 const MOBILE_BREAKPOINT_PX = 768;
 
@@ -110,6 +142,10 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
   @state() private spaceFilter: 'all' | 'unread' = 'all';
+  /** Project id of the space header currently being dragged, if any. */
+  @state() private draggingSpaceId: string | null = null;
+  /** Project id of the space header the drag is hovering over. */
+  @state() private dragOverSpaceId: string | null = null;
 
   static override styles = css`
     :host {
@@ -162,6 +198,16 @@ export class ScionChatSpaceRail extends LitElement {
 
     .space-header:hover {
       color: var(--scion-text, #1e293b);
+    }
+
+    /* Reorder affordances: the dragged header fades, the hovered one grows a
+       line marking where the drop lands. */
+    .space-header.dragging {
+      opacity: 0.4;
+    }
+
+    .space-header.drag-over {
+      box-shadow: inset 0 2px 0 0 var(--scion-primary, #3b82f6);
     }
 
     .space-header .chevron {
@@ -602,40 +648,41 @@ export class ScionChatSpaceRail extends LitElement {
 
   private async loadPrefs(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/chat/prefs');
+      const res = await apiFetch('/api/v1/chat/user-prefs');
       if (res.ok) {
-        const data = (await res.json()) as {
-          space_sort_mode?: string;
-          thread_sort_mode?: string;
-          space_order?: string[];
-        };
-        this.prefs = {
-          spaceSortMode: (data.space_sort_mode as RailPrefs['spaceSortMode']) || 'activity',
-          threadSortMode: (data.thread_sort_mode as RailPrefs['threadSortMode']) || 'activity',
-          spaceOrder: data.space_order,
-        };
+        this.prefs = parseRailPrefs(await res.json());
       }
     } catch {
       // Use defaults
     }
   }
 
-  /** Save user preferences. Exposed for sort mode changes. */
+  /**
+   * Save user preferences. Applied locally first so the rail responds to the
+   * click, then reconciled with what the server actually stored — the server
+   * defaults blank modes, so its answer can differ from the request.
+   */
   async savePrefs(update: Partial<RailPrefs>): Promise<void> {
+    const previous = this.prefs;
     const newPrefs = { ...this.prefs, ...update };
     this.prefs = newPrefs;
     try {
-      await apiFetch('/api/v1/chat/prefs', {
+      const res = await apiFetch('/api/v1/chat/user-prefs', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          space_sort_mode: newPrefs.spaceSortMode,
-          thread_sort_mode: newPrefs.threadSortMode,
-          space_order: newPrefs.spaceOrder,
+          spaceSortMode: newPrefs.spaceSortMode,
+          threadSortMode: newPrefs.threadSortMode,
+          spaceOrder: JSON.stringify(newPrefs.spaceOrder ?? []),
         }),
       });
+      if (!res.ok) {
+        this.prefs = previous;
+        return;
+      }
+      this.prefs = parseRailPrefs(await res.json());
     } catch {
-      // Non-critical
+      this.prefs = previous;
     }
   }
 
@@ -674,6 +721,91 @@ export class ScionChatSpaceRail extends LitElement {
         break;
     }
     return spaces;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Custom ordering
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Persist a new space order. Dragging or nudging a space is an unambiguous
+   * statement about where it belongs, so it switches the rail to custom sort
+   * rather than being refused in activity or alpha mode — the check moving to
+   * "Custom" in the sort menu is what tells the user the mode changed. The
+   * alternative (disabling the drag outside custom mode) would make the
+   * feature undiscoverable: you would have to know to pick Custom first, in a
+   * menu that gives no hint of what a custom order even is.
+   */
+  private async applySpaceOrder(order: string[]): Promise<void> {
+    await this.savePrefs({ spaceSortMode: 'custom', spaceOrder: order });
+  }
+
+  /** The order the user is currently looking at, as project ids. */
+  private currentSpaceOrder(): string[] {
+    return this.getSortedSpaces().map((s) => s.projectId);
+  }
+
+  /**
+   * Move a space one slot up (-1) or down (+1) in the displayed order. This is
+   * the keyboard-reachable half of reordering: drag-and-drop cannot be done
+   * without a pointer, and a rail only reorderable by mouse is not reorderable
+   * for everyone.
+   */
+  private async moveSpace(projectId: string, delta: -1 | 1): Promise<void> {
+    const order = this.currentSpaceOrder();
+    const from = order.indexOf(projectId);
+    const to = from + delta;
+    if (from === -1 || to < 0 || to >= order.length) return;
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    await this.applySpaceOrder(next);
+  }
+
+  /** True when the space is already at the given end of the displayed order. */
+  private isSpaceAtEdge(projectId: string, edge: 'first' | 'last'): boolean {
+    const order = this.currentSpaceOrder();
+    const index = order.indexOf(projectId);
+    if (index === -1) return true;
+    return edge === 'first' ? index === 0 : index === order.length - 1;
+  }
+
+  private handleSpaceDragStart(e: DragEvent, projectId: string): void {
+    this.draggingSpaceId = projectId;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      // Firefox ignores a drag that carries no data.
+      e.dataTransfer.setData('text/plain', projectId);
+    }
+  }
+
+  private handleSpaceDragOver(e: DragEvent, projectId: string): void {
+    if (!this.draggingSpaceId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    if (this.dragOverSpaceId !== projectId) this.dragOverSpaceId = projectId;
+  }
+
+  private async handleSpaceDrop(e: DragEvent, targetProjectId: string): Promise<void> {
+    e.preventDefault();
+    const sourceId = this.draggingSpaceId;
+    this.draggingSpaceId = null;
+    this.dragOverSpaceId = null;
+    if (!sourceId || sourceId === targetProjectId) return;
+
+    const order = this.currentSpaceOrder();
+    const from = order.indexOf(sourceId);
+    const to = order.indexOf(targetProjectId);
+    if (from === -1 || to === -1) return;
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    await this.applySpaceOrder(next);
+  }
+
+  private handleSpaceDragEnd(): void {
+    this.draggingSpaceId = null;
+    this.dragOverSpaceId = null;
   }
 
   private getSpaceLastActivity(projectId: string): number {
@@ -1053,11 +1185,26 @@ export class ScionChatSpaceRail extends LitElement {
           ></sl-icon-button>
           <sl-menu @sl-select=${this.handleSortSelect}>
             <sl-menu-label>Sort spaces</sl-menu-label>
-            <sl-menu-item value="activity" ?checked=${this.prefs.spaceSortMode === 'activity'}>
+            <sl-menu-item
+              type="checkbox"
+              value="activity"
+              ?checked=${this.prefs.spaceSortMode === 'activity'}
+            >
               Recent activity
             </sl-menu-item>
-            <sl-menu-item value="alpha" ?checked=${this.prefs.spaceSortMode === 'alpha'}>
+            <sl-menu-item
+              type="checkbox"
+              value="alpha"
+              ?checked=${this.prefs.spaceSortMode === 'alpha'}
+            >
               Alphabetical
+            </sl-menu-item>
+            <sl-menu-item
+              type="checkbox"
+              value="custom"
+              ?checked=${this.prefs.spaceSortMode === 'custom'}
+            >
+              Custom
             </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
@@ -1083,6 +1230,15 @@ export class ScionChatSpaceRail extends LitElement {
     const value = item?.getAttribute('value');
     if (value === 'activity' || value === 'alpha') {
       void this.savePrefs({ spaceSortMode: value });
+      return;
+    }
+    if (value === 'custom') {
+      // Switching to custom with no order saved yet freezes the order the user
+      // is currently looking at, so the list does not jump on the click.
+      void this.savePrefs({
+        spaceSortMode: 'custom',
+        spaceOrder: this.prefs.spaceOrder ?? this.getSortedSpaces().map((s) => s.projectId),
+      });
     }
   }
 
@@ -1115,7 +1271,15 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="space-section">
         <div
-          class="space-header"
+          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${this
+            .dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
+            ? 'drag-over'
+            : ''}"
+          draggable="true"
+          @dragstart=${(e: DragEvent) => this.handleSpaceDragStart(e, space.projectId)}
+          @dragover=${(e: DragEvent) => this.handleSpaceDragOver(e, space.projectId)}
+          @drop=${(e: DragEvent) => void this.handleSpaceDrop(e, space.projectId)}
+          @dragend=${() => this.handleSpaceDragEnd()}
           @click=${() =>
             isCollapsed
               ? this.handleCollapsedSpaceClick(space)
@@ -1141,12 +1305,33 @@ export class ScionChatSpaceRail extends LitElement {
                   const value = detail?.item?.getAttribute('value');
                   if (value === 'new-thread') {
                     this.startCreateThread(space.projectId);
+                  } else if (value === 'move-up') {
+                    void this.moveSpace(space.projectId, -1);
+                  } else if (value === 'move-down') {
+                    void this.moveSpace(space.projectId, 1);
                   }
                 }}
               >
                 <sl-menu-item value="new-thread">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New thread
+                </sl-menu-item>
+                <sl-divider></sl-divider>
+                <sl-menu-item
+                  class="move-up"
+                  value="move-up"
+                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'first')}
+                >
+                  <sl-icon slot="prefix" name="arrow-up"></sl-icon>
+                  Move up
+                </sl-menu-item>
+                <sl-menu-item
+                  class="move-down"
+                  value="move-down"
+                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'last')}
+                >
+                  <sl-icon slot="prefix" name="arrow-down"></sl-icon>
+                  Move down
                 </sl-menu-item>
               </sl-menu>
             </sl-dropdown>
