@@ -74,6 +74,13 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		if ticket != "" {
 			// Validate ticket (single-use token)
 			identity = s.validatePTYTicket(ctx, ticket)
+			if identity != nil {
+				// Carry the ticket identity on the request so the authorization
+				// helper below gates the principal this handler authenticated
+				// rather than finding no identity and rejecting the connection.
+				ctx = contextWithIdentity(ctx, identity)
+				r = r.WithContext(ctx)
+			}
 		}
 	}
 
@@ -89,17 +96,12 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce policy-based authorization: only the agent's creator (owner) or admins can access PTY
-	if user := GetUserIdentityFromContext(ctx); user != nil {
-		decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionAttach)
-		if !decision.Allowed {
-			slog.Warn("PTY access denied: policy check failed",
-				"agent_id", agentID,
-				"userID", user.ID(),
-				"reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	// Enforce authorization for every caller kind. A user passes on ActionAttach
+	// against the agent; an agent passes on ScopeAgentLifecycle within its own
+	// project. Attaching a PTY is not read-class, so the agent project read
+	// baseline deliberately does not reach it.
+	if !s.authorizeAgentLifecycle(w, r, agent) {
+		return
 	}
 
 	// Check if agent has a runtime broker
