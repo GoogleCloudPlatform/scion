@@ -72,6 +72,7 @@ export class ChatUnreadCounter {
   private dmUnread = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listening = false;
+  private stopped = false;
   private readonly boundSchedule = (): void => this.scheduleRefresh();
   private readonly boundNotification = (e: Event): void => this.onNotification(e);
 
@@ -83,6 +84,7 @@ export class ChatUnreadCounter {
     stateManager.addEventListener('chat-message-received', this.boundSchedule);
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
+    this.stopped = false;
     void this.refresh();
   }
 
@@ -92,6 +94,7 @@ export class ChatUnreadCounter {
     stateManager.removeEventListener('chat-message-received', this.boundSchedule);
     stateManager.removeEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = false;
+    this.stopped = true;
     this.cancelPending();
   }
 
@@ -146,7 +149,7 @@ export class ChatUnreadCounter {
   /** Recomputes both halves from the server. */
   async refresh(): Promise<void> {
     const [spaces, dms] = await Promise.all([this.fetchSpaces(), this.fetchDMs()]);
-    if (!this.listening) return;
+    if (this.stopped) return;
     if (spaces) this.spaceUnread = countUnreadSpaces(spaces);
     if (dms) this.dmUnread = countUnreadDMs(dms);
     this.publish();
