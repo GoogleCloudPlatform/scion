@@ -38,21 +38,42 @@
 # MEASURED, NOT ASSUMED: before the preflight below existed, running this file
 # with no helm on PATH printed FIVE PASSING ASSERTIONS - among them "emits no
 # SCION_SERVER_DATABASE_/OIDC_ variable", the single check this phase most
-# EVERY grep CALL SITE IN THIS FILE NAMES ITS DIALECT, -E OR -F, AND THAT IS A
-# CORRECTNESS PROPERTY RATHER THAN A STYLE ONE. gd-em's ruling (e), as amended by
-# gd-trig and the lead: the check is "names its dialect explicitly", NOT "adds
-# -E". Adding -E to a pattern written for BRE is a second way to manufacture a
-# confident zero - GNU BRE's \| \? \+ \( are operators under -G and LITERALS
-# under -E - so the conversion was audited for backslash operators (none present)
-# and both suites were compared byte for byte before and after. One site did not
-# survive the conversion and is documented where it lives:
-# tests/chart-integrity.sh's schema-path arm, where '(root)' is a capture group
-# under -E and a literal under -F.
-#
 # needs to be true - because each of them greps a rendered manifest for a string
 # that must be ABSENT, and every one of those manifests was an empty file. A
 # negative assertion against a file that does not exist is the cheapest false
 # pass there is, and no amount of care inside the check prevents it.
+#
+# EVERY grep CALL SITE IN THIS FILE NAMES ITS DIALECT, -E OR -F, AND THAT IS A
+# CORRECTNESS PROPERTY RATHER THAN A STYLE ONE. gd-em's ruling (e), as amended by
+# gd-trig and the lead: the check is "names its dialect explicitly", NOT "adds
+# -E". Adding -E to a pattern written for BRE is a second way to manufacture a
+# confident zero - under GNU grep's BRE, \| \? \+ \( are operators and the bare
+# forms are literals, and -E swaps both - so the conversion was audited for
+# backslash operators (none present). One site did not survive the conversion and
+# is documented where it lives: tests/chart-integrity.sh's schema-path arm, where
+# '(root)' is a capture group under -E and a literal under -F.
+#
+# THAT AUDIT IS NOT THE EVIDENCE. The evidence is a differential run of both
+# suites, at 36a3fead^ and at 36a3fead, with every grep invocation executed twice
+# on byte-identical input - shipped flags, and dialect letter stripped:
+#
+#   893 invocations each tree · 0 NODIALECT · 0 UNPARSED
+#   DIFFERING on (position, exit status, stdout sha256):  0 of 893
+#   apparatus control, -F -> -E planted at the leaf filter below:  2 of 893
+#
+# so the zero is a measurement with a firing instrument behind it rather than an
+# absence claim. 58 invocations at 34 distinct sites DO depend on their -E, and
+# all 58 are identical between the two trees: every -E that is load-bearing was
+# already there, and every -E added was inert on this data.
+#
+# SCOPE, because the sentence above is about GNU grep and this shell is not the
+# only one on the machine: these scripts are #!/usr/bin/env bash and run-all.sh
+# invokes them as `bash <script>`. `bash -c 'type grep'` reports /usr/bin/grep;
+# the interactive zsh reports a shell function from a Claude Code snapshot which
+# injects -G, --ignore-files, --hidden, -I and six --exclude-dir flags into a
+# non-GNU engine. None of that reaches this file, and it was measured rather than
+# assumed - but do not paste a grep from here into an interactive shell and
+# expect the same answer.
 
 set -euo pipefail
 
@@ -1053,8 +1074,29 @@ CANON_GATES=("${CANON_KEYS[@]}")
 # as a marker rather than pretended into a dotted token. The marker itself is
 # derived: prose_marker() maps the hub's refusal to the chart's phrasing, and
 # fails loudly for a prose gate it has never seen.
-SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session' | head -1)")"
-[[ -n "$SESSION_MARKER" ]] || meta_failure "the walk's canonical arm records no durable-session gate, so SESSION_MARKER is empty and every 'names all the gates' assertion below would pass on the strength of an empty string."
+# THE `head -1` THAT WAS HERE IS GONE, AND NOT FOR THE REASON IT LOOKS LIKE.
+# gd-em's third re-check question: did any single value come off the front of a
+# list. This one did. It is NOT a wrapper hazard - the input is a printf over an
+# in-script array, not a traversal, so there is no completion-order instability
+# to eat - but `head -1` answers "which one" with silence when the answer is
+# "two", and a second durable-session line entering CANON_PROSE would have
+# picked one and never said which. Count first, then take the one.
+# `|| true` IS LOAD-BEARING AND IT IS NOT DEFENSIVE CLUTTER. This file runs under
+# `set -euo pipefail`. `grep -c` exits 1 when the count is 0, so without it the
+# assignment fails, the shell aborts mid-run, and the suite exits 1 - "the chart
+# is wrong" - with no summary line and no META-FAILURE, which is the one
+# confusion this file's exit-code contract exists to prevent. That is not
+# hypothetical: the guard below was written before this line existed, in the same
+# pipeline shape, and CONTROL A (needle mutated so nothing matches) exited 1
+# after 'the gate list is the same list everywhere it is written' with no further
+# output. THE META-FAILURE IT ADVERTISES WAS UNREACHABLE FOR AS LONG AS IT HAS
+# EXISTED, and the only reason nobody saw it is that the count has never been 0.
+_session_hits="$(printf '%s\n' "${CANON_PROSE[@]}" | grep -cF 'durable session' || true)"
+if [[ "$_session_hits" -ne 1 ]]; then
+  meta_failure "the walk's canonical arm records $_session_hits prose gates matching 'durable session', not exactly 1. At 0 the SESSION_MARKER below is empty and every 'names all the gates' assertion passes on the strength of an empty string; above 1 the marker is whichever line sorted first, which is a coin toss this suite would not report. Prose gates found: $(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session' | tr '\n' '|')"
+fi
+SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session')")"
+[[ -n "$SESSION_MARKER" ]] || meta_failure "the walk's canonical arm records a durable-session gate that prose_marker() maps to the empty string, so every 'names all the gates' assertion below would pass on the strength of an empty string."
 # Preflight keys that legitimately appear beside the gates. Each is here for a
 # stated reason, because an exclusion list with no reasons becomes a place to
 # put anything that turns a check green.
@@ -2145,7 +2187,20 @@ for present in \
   'server.hub.hub_id in the mounted' \
   'DELIVERED HERE' \
   ; do
-  if grep -rqF -- "$present" "$CHART_DIR/templates/"; then
+  # NOT `grep -rqF ... "$CHART_DIR/templates/"`, which is what this was. It was
+  # the only recursive grep in the chart's gates, and a recursive grep is the one
+  # shape where the search tool decides the corpus. Under the Claude Code shell
+  # snapshot's grep wrapper that decision includes -I (binaries dropped), six
+  # --exclude-dir flags, --hidden (dotfiles ADDED) and --ignore-files (an ignore
+  # file at or below the root honoured with full gitignore semantics). None of
+  # that reaches a bash script - measured, `bash -c 'type grep'` is
+  # /usr/bin/grep - and templates/ happens to hold no binaries and no
+  # dot-directories, but both of those are facts about today's tree rather than
+  # properties of this check. $prose_raw is the same corpus enumerated by the
+  # find above and concatenated, so the corpus is decided here and grep only
+  # answers about bytes. Concatenation order varies between find implementations
+  # and does not matter: this is a presence test over the join.
+  if grep -qF -- "$present" <<<"$prose_raw"; then
     pass "the replacement wording ${present@Q} is present"
   else
     fail "templates/ does not contain ${present@Q} - either the re-tensed prose was reverted, or this check is reading the wrong directory and the three checks above found nothing for that reason"
