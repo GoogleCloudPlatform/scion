@@ -111,7 +111,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=249
+EXPECTED_TOTAL=254
 
 failures=0
 assertions=0
@@ -1424,6 +1424,26 @@ for name in "${PERMUTATIONS[@]}"; do
     pass "$name refers to the scion-home volume exactly twice, as a mount and as a volume"
   else
     fail "$name has ${#home_items[@]} scion-home list items, expected 2 (one volumeMount, one volume) - the read-only check below selects items by that name and passes vacuously against a rename"
+  fi
+  # THE STATE DIRECTORY IS AN emptyDir, ASSERTED BECAUSE A COMMENT DEPENDS ON IT.
+  # values.yaml's updateStrategy paragraph used to say this chart "mounts no
+  # volumes, so replicas share no mutable state at all" and concluded that the
+  # strategy choice carries no data consequence. It mounts this one, and with no
+  # server.database.url the hub puts its SQLite file inside it
+  # (pkg/config/hub_config.go:691), so RollingUpdate's two-pod window has two
+  # divergent hub.db files. The corrected paragraph rests on this volume being an
+  # emptyDir; if Phase 4 makes it a PVC the paragraph changes again, and this is
+  # what will say so.
+  #
+  # CONTROL, 2026-08-17: the obvious mutation - edit emptyDir out of one golden -
+  # is caught by the golden-diff step first and never reaches here, so it proves
+  # nothing about THIS assertion. Mutating templates/deployment.yaml to render a
+  # persistentVolumeClaim and regenerating the goldens does reach it: 5 failures,
+  # one per permutation, 254/254 executed.
+  if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -q 'emptyDir'; then
+    pass "$name backs the hub's state directory with an emptyDir"
+  else
+    fail "$name does not back the hub's state directory with an emptyDir. If that is deliberate, the updateStrategy paragraph in values.yaml and the same sentence in values.schema.json both reason from it and must be rewritten in this diff."
   fi
   if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -q 'readOnly: *true'; then
     fail "$name mounts the hub's state directory read-only; only settings.yaml may be read-only"

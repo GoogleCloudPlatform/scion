@@ -63,11 +63,35 @@ updateStrategy:
   # exec, log tailing and port forwarding hit the wrong pod about half the time
   # (see replicaCount above).
   #
-  # Neither is a data-safety question at this point in the chart: it renders no
-  # --db and mounts no volumes, so replicas share no mutable state at all. That
-  # changes when the Cloud SQL and Filestore values arrive - a shared database
-  # and a shared volume are exactly what they add - and the hub coordinates
-  # concurrent instances through Postgres advisory locks when they do.
+  # IT IS A DATA-SAFETY QUESTION, AND THIS PARAGRAPH USED TO DENY IT. The denial
+  # read "it renders no --db and mounts no volumes, so replicas share no mutable
+  # state at all". Both halves are false, and the conclusion drawn from them was
+  # false in the unsafe direction, which is why it is corrected here rather than
+  # quietly deleted.
+  #
+  # MEASURED on the rendered deployment: two volumes are mounted, scion-home (an
+  # emptyDir, at /home/scion/.scion) and settings (the read-only Secret). And the
+  # hub does not need a --db to have a database - pkg/config/hub_config.go:691
+  # defaults an empty server.database.url to filepath.Join(globalDir, "hub.db"),
+  # which for this chart's home directory is /home/scion/.scion/hub.db. The
+  # default install therefore keeps a SQLite file inside an emptyDir.
+  #
+  # WHAT FOLLOWS FROM THAT. An emptyDir is per-pod and dies with the pod, so the
+  # hub's state does not survive a restart under either strategy - that is a
+  # property of this release, stated at replicaCount and at database.driver, not
+  # of this field. What this field decides is whether a SECOND pod exists at the
+  # same time. Under RollingUpdate the old and new pods each hold their own
+  # hub.db and serve writes concurrently for the length of the window, so the two
+  # diverge and whichever pod loses the race is discarded along with everything
+  # written to it. Recreate cannot produce that overlap. THIS IS NOT AN ARGUMENT
+  # FOR CHANGING THE DEFAULT: with no shared volume there is nothing to corrupt,
+  # only writes to lose, and the loss is bounded by the rollout window. It is an
+  # argument for not telling an operator that the choice is free of data
+  # consequences, because it is not.
+  #
+  # It changes again when the Cloud SQL and Filestore values arrive - a shared
+  # database and a shared volume are exactly what they add - and the hub
+  # coordinates concurrent instances through Postgres advisory locks when they do.
   #
   # THE HOSTED HA PREFLIGHT IS A SEPARATE QUESTION AND IT DOES RUN. This
   # paragraph used to end "and the hub's hosted HA preflight does not run at any
