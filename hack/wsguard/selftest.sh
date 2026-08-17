@@ -1115,6 +1115,74 @@ done
   assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read (${#watched_set[@]} verbs)" 0 ||
   assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read — UNDOCUMENTED:$undocumented" 1
 
+# N36. THE DOCUMENTATION AS A DELETION TRIPWIRE — the other direction of N33.
+#
+# N34 raised the bar from one file and two sites to two files and three sites,
+# and gd-wsg-rev-3 measured that the bar is still finite: deleting `switch` from
+# is_watched_verb, armed_for AND SHADOW_ARGV is a live silent bypass — measured
+# here before writing this, `git switch -f other` at rc=0 with the uncommitted
+# work destroyed — while the suite prints `PASS — 50 arms, 78 post-conditions`
+# and exits 0. The floors cannot see it, because N31 sweeps inside a single
+# assertion and N31–N34 each contribute exactly one check regardless of how big
+# their sets are. A count is not a denominator.
+#
+# SHADOW_ARGV was the right first move and it is not enough, for a reason worth
+# stating plainly: IT LIVES IN THIS FILE. Two sources in one file are two sites
+# in one edit. The remaining independent source is AGENTS.md — a different file,
+# written for a different audience, and the one artefact that a person removing
+# a verb from the shim has no reason to touch.
+#
+# So N33's containment gets its converse. N33 catches a verb ADDED to the guard
+# and not documented; N36 catches a verb DELETED from the guard while the
+# documentation still promises it. Together they are set equality, which is the
+# only shape that is blind in neither direction.
+#
+# THE ALLOWLIST IS THE ESCAPE HATCH AND IS TREATED AS ONE. Set equality holds if
+# a deleted verb is moved into the allowlist instead, so the allowlist is pinned
+# at its exact size and every entry must actually occur in the paragraph. Hiding
+# a deletion now costs a third file, a fifth site, and an edit to a constant
+# whose comment says what raising it does. That is no longer an accident, and
+# accidents are this guard's threat model.
+#
+# WHAT THIS STILL DOES NOT CLOSE, stated because the last four rounds were each
+# a bound that someone had declared sufficient. Deleting the verb from AGENTS.md
+# as well — three files, four sites — makes N33 and N36 agree on a smaller set
+# and both go green. This arm RAISES A COST; it does not prove a negative. The
+# reason to believe the cost is enough is not that the number is large, it is
+# that AGENTS.md is prose maintained for other agents to read and nothing about
+# removing a case arm from a shell script prompts anyone to edit it. If that
+# stops being true — if the paragraph ever becomes generated from the shim —
+# THIS ARM SILENTLY BECOMES N31 AGAIN, and whoever generates it owes this file a
+# replacement source that is independent for a reason, not by coincidence.
+DOC_NON_VERBS=(git .git FETCH_HEAD)
+EXPECT_DOC_NON_VERBS=3
+if (( ${#DOC_NON_VERBS[@]} != EXPECT_DOC_NON_VERBS )); then
+  die_cannot_evaluate "N36's allowlist has ${#DOC_NON_VERBS[@]} entries, not $EXPECT_DOC_NON_VERBS — growing it is how a deleted verb gets hidden from this arm, so it is pinned, not bounded"
+fi
+for nv in "${DOC_NON_VERBS[@]}"; do
+  nv_found=0
+  for dt in "${doc_tokens[@]}"; do [[ "$nv" == "$dt" ]] && { nv_found=1; break; }; done
+  (( nv_found == 0 )) &&
+    die_cannot_evaluate "N36 allowlists '$nv' but the AGENTS.md paragraph no longer contains it; a dead allowlist entry is a slot waiting for a real verb"
+done
+undeleted=""
+doc_verb_n=0
+for dt in "${doc_tokens[@]}"; do
+  skip=0
+  for nv in "${DOC_NON_VERBS[@]}"; do [[ "$dt" == "$nv" ]] && { skip=1; break; }; done
+  (( skip == 1 )) && continue
+  doc_verb_n=$(( doc_verb_n + 1 ))
+  found=0
+  for wv in "${watched_set[@]}"; do [[ "$dt" == "$wv" ]] && { found=1; break; }; done
+  (( found == 0 )) && undeleted="$undeleted $dt"
+done
+if (( doc_verb_n < 5 )); then
+  die_cannot_evaluate "N36 found only $doc_verb_n documented verbs after the allowlist; the containment would be vacuous"
+fi
+[[ -z "$undeleted" ]] &&
+  assert "N36-documented-verbs-are-still-watched" "every verb AGENTS.md promises is guarded is still in is_watched_verb, so a verb cannot leave the shim while the documentation still promises it ($doc_verb_n documented verbs, from a file the shim is not generated from)" 0 ||
+  assert "N36-documented-verbs-are-still-watched" "every verb AGENTS.md promises is guarded is still in is_watched_verb — DOCUMENTED BUT NO LONGER WATCHED:$undeleted" 1
+
 # Rule (c) is armed in EVERY workspace mode, because the remote is shared in
 # every workspace mode. It used to ride on refs_shared, which left force-push
 # unguarded in clone-per-agent and with the mode unset — inside the guarded
@@ -1364,7 +1432,7 @@ echo "==========================================================================
 # constant in two places — that is a chore, and chores get done by lowering the
 # number. Removing one must.
 EXPECT_ARMS=50
-EXPECT_CHECKS=78
+EXPECT_CHECKS=79
 EXPECT_CONTROLS=7
 if (( arms_run < EXPECT_ARMS || checks_run < EXPECT_CHECKS || controls_run < EXPECT_CONTROLS )); then
   {

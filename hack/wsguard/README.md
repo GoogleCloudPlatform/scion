@@ -177,7 +177,7 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 50 arms, 78 post-conditions
+hack/wsguard/selftest.sh            # 50 arms, 79 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
 hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
 make wsguard                        # both, from CI
@@ -214,10 +214,12 @@ vacuously:
   all of them: every global option classifies the same separated as attached
   (`N25`); an alias cannot demote any watched builtin (`N31`); every verb
   `armed_for` can arm is also in `is_watched_verb` (`N32`); every watched verb
-  is named in the `AGENTS.md` paragraph agents actually read (`N33`); every verb
-  in a hand-written argv table is still watched (`N34`, and see below for why
-  that direction is the one that was missing); repeating an unknown-arity option
-  does not exhaust the candidate union at any depth from one to four (`N35`).
+  is named in the `AGENTS.md` paragraph agents actually read (`N33`), and every
+  verb that paragraph promises is still watched by the shim (`N36`, the deletion
+  direction of the same pair); every verb in a hand-written argv table is still
+  watched (`N34`, and see below for why that direction is the one that was
+  missing); repeating an unknown-arity option does not exhaust the candidate
+  union at any depth from one to four (`N35`).
 
 Every arm runs under `timeout`, and a timeout kill is scored as its own status
 rather than folded into "failed". A suite that can hang cannot report.
@@ -237,6 +239,33 @@ twelve-entry table that exists for an unrelated purpose and is **not** derived
 from the guard, and asserts every verb in it is still watched. An independent
 denominator is the only thing that can see a deletion; a generated one moves
 with the thing it is measuring.
+
+**And `SHADOW_ARGV` alone was not enough, because it lives in this file.** Two
+sources in one file are two sites in one edit: deleting `switch` from
+`is_watched_verb`, `armed_for` *and* `SHADOW_ARGV` is still a live silent bypass
+— measured, `rc=0`, work destroyed — while the suite prints `PASS — 50 arms, 78
+post-conditions` and exits `0`. The floors cannot see it either, because `N31`
+sweeps inside a single assertion and `N31`–`N34` each contribute exactly one
+check no matter how large their sets are. **A count is not a denominator.**
+
+So `N33` gained its converse. `N33` catches a verb *added* to the guard and left
+undocumented; `N36` catches a verb *deleted* from the guard while `AGENTS.md`
+still promises it. Together they are set equality, which is blind in neither
+direction, and `AGENTS.md` qualifies as an independent source for a reason
+rather than by coincidence: it is prose maintained for other agents to read, in
+another file, and nothing about deleting a `case` arm from a shell script
+prompts anyone to edit it.
+
+The allowlist for the paragraph's three non-verb tokens (`` `git` ``, `` `.git` ``,
+`` `FETCH_HEAD` ``) is the obvious way back out — move the deleted verb into it
+and set equality holds again — so it is **pinned at exactly three entries**, and
+every entry must actually occur in the paragraph. Both falsifiers exit `2`.
+
+This raises a cost; it does not prove a negative. Deleting the verb from
+`AGENTS.md` as well (three files, four sites) makes both arms agree on a smaller
+set. That limit is written down in the arm itself, along with the condition
+under which it would silently get worse: if the paragraph ever becomes
+*generated* from the shim, `N36` quietly becomes `N31` again.
 
 ### The suite's own size is a post-condition
 
