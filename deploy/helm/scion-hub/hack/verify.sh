@@ -186,7 +186,11 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # is 340. A pin adjusted to fit and a pin re-derived look identical in a diff;
 # the point of writing both routes down is that here they were computed
 # separately and had to meet.
-EXPECTED_TOTAL=340
+# +1 for the backstop-probe shape pin, whose three mutations are recorded at the
+# arm itself: A and B are caught by every arm in that step because they stop the
+# chart rendering, and C - the rewrite from a literal to a pattern - renders
+# clean with a credential in the digest and was caught by nothing.
+EXPECTED_TOTAL=341
 
 failures=0
 assertions=0
@@ -4796,6 +4800,47 @@ if grep -qF -- "$_ck_rot_heading" "$WORK/notes-rot-place.txt"; then
   pass "the credential-placement paragraph points the reader at [$_ck_rot_heading], so the two statements about rotation are joined rather than left to disagree"
 else
   fail "the credential-placement paragraph does not name [$_ck_rot_heading]. A reader who stops at the placement paragraph - which reads like a complete account of where the credential lives and what changing it does - never reaches the step that keeps a retired password from staying live."
+fi
+
+# THE ONE ARM IN THIS STEP THAT READS SOURCE INSTEAD OF A RENDER, AND WHY IT HAS
+# TO. C1 made the redaction preserve the username, which gave the helper's own
+# output - ://user:[redacted...]@ - the exact shape the URL backstop below it
+# hunts for. The backstop would then fire on every render it had just correctly
+# redacted, so the known-redacted form is removed from the probe first. gd-em
+# asked whether that removal widens the door. It does not, and this is the
+# measurement rather than the argument (mutation rig, sub-floor 7-char password
+# so the 12-character value axis stays silent and the URL axis is the only thing
+# under test):
+#
+#   A  redaction disabled, raw credential URL in the digest input
+#      -> rc=1, the backstop fires and names itself. The door is not widened.
+#   B  the probe removal deleted entirely
+#      -> rc=1 on an ORDINARY render. The line is forced, not decorative.
+#   C  the probe removal rewritten from a literal to the pattern
+#      ":[^/@[:space:]]+@" -> "@", plus A's raw credential
+#      -> rc=0. THE CREDENTIAL REACHES THE DIGEST AND NOTHING SAYS SO.
+#
+# C is the whole risk in one line: a pattern that strips the marker also strips
+# real credentials that resemble it, and the failure is silent and green. A and
+# B are caught by any arm in this step, because they make the chart refuse to
+# render. C is caught by NOTHING that runs against a render, because everything
+# renders. It is not reachable from values either - assertNoCredential refuses a
+# credential URL at every values surface that feeds settings.yaml, which is what
+# makes the backstop a backstop - so there is no permutation to point at it.
+#
+# So this arm pins the SHAPE OF THE LINE, which is the weakest kind of assertion
+# in this file and is used here because the alternative is no assertion at all.
+# It is stated as a limit, not sold as a proof: it catches the rewrite that
+# mutation C performed, and it would not catch a literal that is merely wrong.
+_probe_src="$(grep -c 'probe := replace (printf ":%s@" \$redacted) "@" \$projection' "$CHART_DIR/templates/_helpers.tpl" || true)"
+_probe_any="$(grep -c 'probe :=' "$CHART_DIR/templates/_helpers.tpl" || true)"
+if [[ "$_probe_any" != "1" ]]; then
+  meta_failure "the settings-checksum backstop's probe assignment was expected exactly once in _helpers.tpl and grep found $_probe_any. The arm below cannot say which line it is reading, and an arm that cannot locate its subject reports on nothing."
+fi
+if [[ "$_probe_src" == "1" ]]; then
+  pass "the URL backstop's probe removes the redaction marker as a LITERAL, so it cannot also swallow a real credential that resembles it (mutation C, the rewrite to a pattern, renders clean with a credential in the digest)"
+else
+  fail "the URL backstop's probe is no longer the literal removal of the marker this helper writes. If it is now a pattern, it strips real credentials too and the backstop is disarmed silently - measured: the render succeeds and the credential reaches the digest input. Remove the exact literal, never a shape that resembles it."
 fi
 
 # --------------------------------------------------------------------------
