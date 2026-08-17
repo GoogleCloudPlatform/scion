@@ -177,7 +177,7 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 24 arms, 28 post-conditions
+hack/wsguard/selftest.sh            # 33 arms, 37 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
 hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
 make wsguard                        # both, from CI
@@ -195,7 +195,7 @@ vacuously:
   with one expectation deliberately falsified and requires it to exit `1`. A
   falsified run that still passes means the harness measures nothing, and the
   honest answer is `2`, not `0`.
-- **Both directions.** Eleven refusal arms, four cannot-evaluate arms, nine
+- **Both directions.** Seventeen refusal arms, four cannot-evaluate arms, twelve
   permit arms — including the same `git checkout --` that is refused in the
   shared repository being permitted in a private one.
 
@@ -213,6 +213,58 @@ a root that does not exist matches nothing. Both are now `78`
 (cannot-evaluate) or a refusal, asserted by arms `U2-unresolvable-root` and
 `N11-root-with-trailing-slash`. A guard must not answer *"not shared, go ahead"*
 on the strength of a comparison it could not make.
+
+### Where the guard's parse disagrees with git's parse, git wins
+
+Three bypasses, all found by `gd-wsg-rev`, all the same shape — the guard
+decided what a command *was* by reading argv differently from the way git reads
+it, and the gap between the two readings was a hole:
+
+| form | shipped | now | why |
+|---|---|---|---|
+| `git co -- f` (`alias.co = checkout`) | `0`, work destroyed, silent | `77` | git expands the alias **internally**; the shim never sees `checkout` and never re-enters |
+| `git checkout -- -h` | `0`, work destroyed, silent | `77` | the help scan did not stop at `--`, so a **pathspec** named `-h` read as a help flag |
+| `git rm -f f` | `0`, file gone | `77` | `rm` deletes from the **working tree**, and was simply missing from the watched set |
+
+Aliases are resolved **one level**, because that is what git does — measured, not
+assumed: with `alias.a = co` and `alias.co = checkout`, `git a -- tracked.txt`
+left the modification in place. A `!`-prefixed shell alias is deliberately *not*
+expanded: any git it runs is a new process that finds the shim on `PATH` and is
+judged on its own merits, so re-entry already covers it.
+
+`git rm --cached` and `git clean -n` are permitted for the same reason — in both
+cases the discriminating flag was measured, not inferred, by running the real
+git and looking at the disk.
+
+**`-h` is the one worth remembering.** It was filed as cosmetic: `rc=1` instead
+of `77`. In a fixture containing a file literally named `-h` it is `rc=0` and
+the uncommitted content is gone. The reviewer's fixture had no such file, so
+git's own pathspec error stood in for a refusal.
+
+### The justification must be true of the operation it guards
+
+`branch -D` was refused on the grounds that it touches *"a ref namespace that
+every agent in this project shares."* `gd-pkg-rep` measured that claim: local
+`refs/heads` held **2 names, none belonging to another agent**, while the shared
+namespace — **one origin URL, 510 branches** under `refs/heads/scion/*` — is
+reached by `push`, which was not guarded at all.
+
+> The guard protected a live namespace against an operation that cannot reach
+> it, while the operation that can was unguarded.
+
+The refusal is **kept** and re-pointed: `branch -D` now cites the narrower
+ground that is actually true of it (an unpushed commit reachable only from that
+name has nothing else pointing at it — rule `a/local-refs`), and the shared-
+namespace reasoning moved to new rule `c/shared-remote` on `push --delete`,
+`push --force` and `push --mirror`. `--force-with-lease` is permitted and is
+what the refusal offers instead, so arm `P12` pushes with it for real rather
+than merely not refusing it.
+
+**Bound, kept in the code and not only here:** at the time of measurement **0 of
+4** sampled agent branches existed on the remote, so this risk is *unrealized*,
+not disproven. **Known gap:** rule (c) is scoped to the guarded root like every
+other rule, so a force-push from a private clone elsewhere on disk is not
+covered.
 
 ### A shim must recognise its own kind, not just itself
 

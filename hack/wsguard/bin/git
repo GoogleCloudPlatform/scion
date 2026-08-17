@@ -295,7 +295,23 @@ done
 # `git <anything> -h` and `--help` never touch the tree. Let them through
 # before classification so that the guard never stands between an operator and
 # the documentation for the command it just refused.
+#
+# The scan MUST stop at `--`. After the terminator every token is a PATHSPEC,
+# and this loop used to keep scanning: `git checkout -- -h` was read by the
+# guard as a help request and by git as "check out the file named -h", so the
+# guard waved through the exact command that overwrites it.
+#
+# gd-wsg-rev filed this as O4, cosmetic — rc=1 instead of 77. It is not
+# cosmetic. Measured in a fixture holding a file literally named `-h`:
+#
+#     git checkout -- -h    rc=0, uncommitted content GONE, guard silent
+#
+# The reviewer's fixture had no such file, so git's own pathspec error stood in
+# for a refusal and the miss looked like a difference of opinion about an exit
+# code. The general rule is the one that matters: WHEREVER THE GUARD'S PARSE
+# DISAGREES WITH GIT'S PARSE, GIT WINS, AND THE GAP IS A BYPASS.
 for tok in ${rest[@]+"${rest[@]}"}; do
+  [[ "$tok" == "--" ]] && break
   case "$tok" in
     -h|--help) passthrough "$@" ;;
   esac
@@ -313,10 +329,65 @@ for tok in "${argv[@]}"; do
   esac
 done
 
-watched=0
+# The subcommand the guard classifies must be the subcommand GIT will run, and
+# for an alias those are different strings. `git co -- file` with
+# `alias.co = checkout` expands INSIDE git and never re-enters this shim, so the
+# guard classified "co", found it unwatched, and passed through. Measured by
+# gd-wsg-rev as R2 and reproduced here: rc=0, uncommitted work destroyed, not
+# one line of output. That is the silent-bypass shape this whole guard exists
+# to prevent, arriving through the guard's own front door.
+#
+# Two things make one level of expansion the right amount, both measured rather
+# than assumed:
+#
+#   - Alias chains are NOT followed by git. With alias.a=co and alias.co=checkout,
+#     `git a -- tracked.txt` left the modification in place: git expands once.
+#     Resolving once therefore matches git exactly; resolving twice would make
+#     the guard refuse commands git would not run.
+#   - A `!`-prefixed SHELL alias needs no handling here. Whatever git command it
+#     runs is spawned as a new process, finds this shim on PATH first, and is
+#     classified on its own merits. Re-entry already covers it, and the hop
+#     counter above bounds the re-entry.
+#
+# Cost: one `git config --get` on subcommands that are not already watched, and
+# only while the guard is armed. An unarmed guard has already passed through.
+classify_as="$subcmd"
+alias_of=""
 case "$subcmd" in
+  checkout|switch|restore|reset|clean|stash|branch|rm|fetch) ;;
+  *)
+    alias_expansion="$("$REAL_GIT" ${pre[@]+"${pre[@]}"} config --get "alias.$subcmd" 2>/dev/null)" || alias_expansion=""
+    case "$alias_expansion" in
+      ''|'!'*) ;;
+      *)
+        # First whitespace-delimited word of the expansion is the subcommand
+        # git will actually dispatch on.
+        alias_first="${alias_expansion%%[$' \t']*}"
+        if [[ -n "$alias_first" && "$alias_first" != "$subcmd" ]]; then
+          classify_as="$alias_first"
+          alias_of="$subcmd"
+        fi
+        ;;
+    esac
+    ;;
+esac
+
+watched=0
+case "$classify_as" in
   checkout|switch|restore|reset|clean|stash|branch) (( tree_shared == 1 )) && watched=1 ;;
   fetch)                                            (( refs_shared == 1 )) && watched=1 ;;
+  rm)                                               (( tree_shared == 1 )) && watched=1 ;;
+  # Rule (c). ARMED ON THE SAME TERMS AS THE OTHERS, AND THAT IS A KNOWN LIMIT,
+  # not an oversight. The remote is shared in every workspace mode — privacy of
+  # a clone says nothing about the namespace it pushes to — but this shim exits
+  # early when neither the tree nor the local refs are shared, and it scopes
+  # every rule to $guard_root. So a force-push issued from a private clone
+  # somewhere else on disk is NOT covered by this rule.
+  #
+  # Widening it would mean either resolving and comparing remote URLs on every
+  # invocation, or refusing in repositories that have nothing to do with this
+  # project. Both are worse than a stated gap. Recorded in the notes as open.
+  push)                                             (( refs_shared == 1 )) && watched=1 ;;
 esac
 if (( mentions_fetch_head == 1 && refs_shared == 1 )); then
   watched=1
@@ -430,12 +501,14 @@ if (( mentions_fetch_head == 1 && refs_shared == 1 )); then
 fi
 
 if [[ "$verdict" == "allow" ]]; then
-  case "$subcmd" in
+  # NOTE: this switches on $classify_as, not $subcmd, so that an alias is judged
+  # as the command git will actually dispatch. See the alias block above.
+  case "$classify_as" in
 
     # --- rule (a): commands that overwrite the shared working tree ---------
     checkout|switch)
       refuse "a/working-tree" \
-        "\`git $subcmd\` in a shared working tree replaces files and moves HEAD for every agent in this project at once, including agents with uncommitted work who are given no warning and no way to recover it." \
+        "\`git $classify_as\` replaces files in this working tree and moves HEAD. The tree is shared (SCION_WORKSPACE_MODE=$mode), so this discards UNCOMMITTED WORK — yours for certain, and anyone else's who is holding some here. A working-tree modification that was never committed is not in the object database and has no reflog entry, so there is nothing to recover it from." \
         "git show <ref>:<path>            # read a file at another ref" \
         "git archive <sha> <path> | tar -x -C /tmp/inspect   # read a whole tree" \
         "git clone --no-hardlinks $guard_root /tmp/mine      # then do as you like there"
@@ -451,7 +524,7 @@ if [[ "$verdict" == "allow" ]]; then
 
     reset)
       refuse "a/working-tree" \
-        "\`git reset\` moves the shared HEAD and rewrites the shared index. --hard additionally discards every agent's uncommitted work in one step." \
+        "\`git reset\` moves HEAD and rewrites the index in a shared tree (SCION_WORKSPACE_MODE=$mode). --hard additionally discards every uncommitted change present in the tree in one step, whoever made them." \
         "git revert <sha>                 # undo a commit without moving HEAD backwards" \
         "git clone --no-hardlinks $guard_root /tmp/mine      # then reset there"
       ;;
@@ -526,11 +599,95 @@ if [[ "$verdict" == "allow" ]]; then
         esac
       done
       if [[ -n "$branch_destructive" ]]; then
-        refuse "a/shared-refs" \
-          "\`git branch $branch_destructive\` deletes, renames or force-moves a branch in a ref namespace that every agent in this project shares. Another agent's work may be reachable only from that name." \
+        # The justification here was WRONG, and wrong in a specific way worth
+        # recording: it read "a ref namespace that every agent in this project
+        # shares". gd-pkg-rep measured it. refs/heads in a container holds ~2
+        # names, all local, none belonging to another agent, while the shared
+        # namespace — one origin URL, 510 branches under refs/heads/scion/* —
+        # is reached by `push`, which this rule does not touch. THE STATED
+        # REASON WAS TRUE OF A DIFFERENT OPERATION THAN THE ONE BEING GUARDED.
+        #
+        # The refusal is kept, because the narrower ground is real and is the
+        # one that bit this project: an unpushed commit reachable only from the
+        # name you are deleting has nothing else pointing at it. The shared-
+        # namespace reasoning moved to rule (c) below, where it bites.
+        refuse "a/local-refs" \
+          "\`git branch $branch_destructive\` deletes, renames or force-moves a branch, and a commit reachable only from that name has nothing else pointing at it. If it was never pushed, the branch name IS the backup. (Narrower than this guard used to claim: refs/heads was measured and holds only local branches, so this is about losing YOUR OWN work, not another agent's. The shared namespace is the remote, and it is guarded separately on push.)" \
           "git branch                       # permitted: listing" \
           "git branch <new-name> <sha>      # permitted: creating" \
           "ask the branch's owner before removing or moving it"
+      fi
+      ;;
+
+    # `git rm` deletes files from the working tree, not merely from the index.
+    # Filed as R3 by gd-wsg-rev and reproduced: `git rm -f tracked.txt` returned
+    # 0 and the file was gone, uncommitted content and all. It belongs with
+    # `clean` — an outright deletion — and it was simply missing from the
+    # watched set.
+    #
+    # --cached is the discriminating flag, measured rather than assumed: with
+    # --cached the file survived in the working tree, so that form is permitted
+    # exactly as `clean -n` is.
+    rm)
+      rm_cached=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --cached) rm_cached=1 ;;
+        esac
+      done
+      if (( rm_cached == 0 )); then
+        refuse "a/working-tree" \
+          "\`git rm\` DELETES THE FILE FROM THE WORKING TREE, not just from the index, and it does so without asking. Anything uncommitted in that file goes with it and is in no object database. In a shared tree (SCION_WORKSPACE_MODE=$mode) the file may not be yours at all." \
+          "git rm --cached <path>           # permitted: unstages, leaves the file" \
+          "git status --porcelain -- <path> # permitted: see whether it is dirty first"
+      fi
+      ;;
+
+    # --- rule (c): the operations that reach the SHARED remote namespace ----
+    #
+    # This rule exists because of a measurement, not a theory. The shared-
+    # namespace justification was originally attached to `branch -D`, which
+    # cannot reach the remote at all. Measured by gd-pkg-rep: one origin URL,
+    # 510 branches under refs/heads/scion/*, against a local refs/heads holding
+    # 2 private names.
+    #
+    # Bound, kept deliberately in the code and not only in the notes: at the
+    # time of measurement 0 of 4 sampled agent branches existed on the remote,
+    # so this risk is UNREALIZED, not disproven. That is a fact about push
+    # history at 12:04 on 2026-08-17, not a clearance for the future.
+    #
+    # Only the forms that can destroy someone else's ref are refused. A plain
+    # push, and a --force-with-lease, are permitted: the lease is precisely the
+    # mechanism that refuses to overwrite a ref you have not seen, so it is the
+    # alternative offered rather than another thing to block.
+    push)
+      push_destructive=""
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --force-with-lease|--force-with-lease=*|--force-if-includes) ;;
+          --delete) push_destructive="--delete" ;;
+          --force)  push_destructive="--force" ;;
+          --mirror) push_destructive="--mirror" ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              case "${chars:k:1}" in
+                d) push_destructive="-d" ;;
+                f) push_destructive="-f" ;;
+              esac
+            done
+            ;;
+        esac
+      done
+      if [[ -n "$push_destructive" ]]; then
+        refuse "c/shared-remote" \
+          "\`git push $push_destructive\` acts on the ONE namespace that is shared no matter how your workspace is provisioned. A private clone does not make the remote private: measured, this project has a single origin and 510 branches under refs/heads/scion/*. A deleted or force-overwritten remote branch may be the only copy of another agent's work, and unlike a local ref there is no reflog of yours to recover it from." \
+          "git push --force-with-lease      # permitted: refuses to clobber a ref you have not seen" \
+          "git push origin <your-branch>    # permitted: fast-forward to your own name" \
+          "ask the branch's owner before deleting or force-overwriting their name"
       fi
       ;;
 

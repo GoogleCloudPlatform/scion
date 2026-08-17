@@ -483,6 +483,38 @@ fi
 
 echo
 echo "==========================================================================="
+echo "ARM Z — THE TRAILING CONTROL. Is the apparatus still alive, NOW?"
+echo "==========================================================================="
+echo
+echo "Every control above runs BEFORE the negative arms. That answers 'was the"
+echo "hook set alive when we started'. It does not answer 'was it alive when the"
+echo "silences were recorded', and those are different questions with the SAME"
+echo "OBSERVATION: an apparatus that died mid-run and an aperture that was"
+echo "correctly silent both emit nothing. Deriving the aperture from git fixed"
+echo "the WIDTH of the listening; it cannot detect listening that stopped, and a"
+echo "dead apparatus is not a narrow aperture, it is a zero-width one."
+echo
+echo "Reproduced by gd-wsg-rev, and by me before writing this: delete the hooks"
+echo "immediately after the leading controls pass and the probe still reported"
+echo "CONFIRMED by measurement. With this arm it reports 2, nothing measured."
+echo
+
+arms_control=$(( arms_control + 1 ))
+run_arm "armZ-trailing-control (checkout -b)" checkout -q -b probe-trailing
+if ! expect_fired "armZ" "reference-transaction"; then
+  echo >&2
+  echo "hook-probe: the TRAILING control did not fire. The hook set was alive at" >&2
+  echo "hook-probe: the start of this run and is not alive now, so every silence" >&2
+  echo "hook-probe: recorded between the two controls is uninterpretable: it is" >&2
+  echo "hook-probe: indistinguishable from a probe that was listening to nothing." >&2
+  echo "hook-probe: The negative arms above are VOID, not confirmatory." >&2
+  die_cannot_measure "trailing liveness control did not fire — the arms above are void"
+fi
+echo "    + the hook set was alive at the START and is still alive at the END,"
+echo "      so the silences in between were recorded by a live instrument."
+
+echo
+echo "==========================================================================="
 printf 'arms run           : %d (%d positive control, %d negative, %d contrast)\n' \
   "$arms" "$arms_control" "$arms_negative" "$arms_contrast"
 printf 'harness controls   : %d/%d reproduced, and they are not all the same kind:\n' \
@@ -494,6 +526,10 @@ printf '                                   names git ships — an independent so
 printf '                                   not zero\n'
 printf '                     [apparatus]   arm 1 fires the hook set\n'
 printf '                     [plumbing]    arm 1 payload names the ref it created\n'
+printf '                     [liveness]    arm Z fires it AGAIN, after every\n'
+printf '                                   negative arm, so the silences are\n'
+printf '                                   bracketed by two live readings and not\n'
+printf '                                   merely preceded by one\n'
 printf 'claim assertions   : %d — each could have come back CONTRADICTED\n' "$assertions"
 printf 'contradictions     : %d\n' "$contradictions"
 printf 'note: the contrast arm asserts nothing. It is reported, not counted.\n'

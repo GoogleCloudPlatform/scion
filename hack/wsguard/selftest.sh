@@ -192,6 +192,44 @@ if [[ "$control_fetch_head" != *"$DONOR_SHA"* ]]; then
 fi
 control "fetch-head-is-a-slot" "reproduced: fetch left $DONOR_SHA in the single .git/FETCH_HEAD slot"
 
+# The three hazards below were all reported by gd-wsg-rev against a shipped
+# version of the shim that permitted them. Each is reproduced with the REAL git
+# before the corresponding arm runs, because "the guard refused it" is not a
+# result unless the thing refused would otherwise have done damage.
+"$REAL_GIT" -C "$CONTROL" config alias.co checkout
+"$REAL_GIT" -C "$CONTROL" config alias.sh '!echo SHELL-ALIAS'
+dirty "$CONTROL"
+control_status=0
+"$REAL_GIT" -C "$CONTROL" co -- tracked.txt || control_status=$?
+control_content="$(cat "$CONTROL/tracked.txt")"
+if (( control_status != 0 )) || [[ "$control_content" == *UNCOMMITTED-WORK* ]]; then
+  die_cannot_evaluate "control 'an alias reaches checkout' did not reproduce (status=$control_status, content='$control_content')"
+fi
+control "alias-reaches-checkout" "reproduced: \`git co\` erased the modification, so the alias is a real path to the hazard"
+
+dirty "$CONTROL"
+control_status=0
+"$REAL_GIT" -C "$CONTROL" rm -f -q tracked.txt >/dev/null 2>&1 || control_status=$?
+if (( control_status != 0 )) || [[ -e "$CONTROL/tracked.txt" ]]; then
+  die_cannot_evaluate "control 'git rm -f deletes from the working tree' did not reproduce (status=$control_status)"
+fi
+control "rm-deletes-worktree" "reproduced: git rm -f removed the file from the working tree, not just the index"
+"$REAL_GIT" -C "$CONTROL" checkout -q -- tracked.txt 2>/dev/null || "$REAL_GIT" -C "$CONTROL" reset -q --hard >/dev/null
+
+# A file named exactly `-h`. This is what turns O4 from a disagreement about an
+# exit code into a bypass: after `--` git reads `-h` as a pathspec.
+printf 'committed\n' >"$CONTROL/-h"
+"$REAL_GIT" -C "$CONTROL" add -- ./-h >/dev/null 2>&1
+"$REAL_GIT" -C "$CONTROL" -c user.email=w@g -c user.name=w commit -qm "a file named -h" >/dev/null 2>&1
+printf 'UNCOMMITTED-WORK\n' >"$CONTROL/-h"
+control_status=0
+"$REAL_GIT" -C "$CONTROL" checkout -- -h >/dev/null 2>&1 || control_status=$?
+control_dash_h="$(cat "$CONTROL/-h")"
+if (( control_status != 0 )) || [[ "$control_dash_h" == *UNCOMMITTED-WORK* ]]; then
+  die_cannot_evaluate "control 'checkout -- -h overwrites a file named -h' did not reproduce (status=$control_status, content='$control_dash_h')"
+fi
+control "dash-h-is-a-pathspec" "reproduced: after -- git treated -h as a PATH and overwrote it"
+
 # ---------------------------------------------------------------------------
 # Arm runner. The status is captured into a variable and branched on by value.
 # It is never used as the condition of an `if`: an `if` sees a boolean, and a
@@ -410,6 +448,13 @@ echo "==========================================================================
 echo "REFUSAL, CONTINUED — the root must be normalised before it is compared"
 echo "==========================================================================="
 
+# Fixtures for the alias and dash-pathspec arms, on the SHARED repo.
+"$REAL_GIT" -C "$SHARED" config alias.co checkout
+"$REAL_GIT" -C "$SHARED" config alias.sh '!echo SHELL-ALIAS'
+printf 'committed\n' >"$SHARED/-h"
+"$REAL_GIT" -C "$SHARED" add -- ./-h >/dev/null 2>&1
+"$REAL_GIT" -C "$SHARED" -c user.email=w@g -c user.name=w commit -qm "a file named -h" >/dev/null 2>&1
+
 dirty "$SHARED"
 ROOT_OVERRIDE="$SHARED/"
 arm "N11-root-with-trailing-slash" 77 "$SHARED" -- checkout -- tracked.txt
@@ -418,8 +463,85 @@ still_dirty && assert "N11-root-with-trailing-slash" "a trailing slash on the ro
 
 echo
 echo "==========================================================================="
+echo "REFUSAL, CONTINUED — where the guard's parse must agree with git's parse"
+echo "==========================================================================="
+
+# R2. The guard classified the literal token; git expands the alias internally
+# and never re-enters the shim. Shipped behaviour was rc=0 and silence.
+dirty "$SHARED"
+arm "N12-alias-reaches-checkout" 77 "$SHARED" -- co -- tracked.txt
+still_dirty && assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 0 ||
+  assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 1
+
+# R3. git rm deletes from the WORKING TREE, and was simply missing.
+dirty "$SHARED"
+arm "N13-rm-deletes-worktree" 77 "$SHARED" -- rm -f tracked.txt
+[[ -e "$SHARED/tracked.txt" ]] && assert "N13-rm-deletes-worktree" "the file is still on disk after the refusal" 0 ||
+  assert "N13-rm-deletes-worktree" "the file is still on disk after the refusal" 1
+
+# O4. After `--` every token is a pathspec, including one that looks like a flag.
+dirty "$SHARED"
+printf 'UNCOMMITTED-WORK\n' >"$SHARED/-h"
+arm "N14-dash-h-after-terminator" 77 "$SHARED" -- checkout -- -h
+[[ "$(cat "$SHARED/-h")" == *UNCOMMITTED-WORK* ]] &&
+  assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 0 ||
+  assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 1
+
+echo
+echo "==========================================================================="
 echo "POSITIVE — the guard must permit; a gate that refuses everything is not one"
 echo "==========================================================================="
+
+# --- rule (c): the shared REMOTE namespace -------------------------------
+# A bare repo stands in for origin. The refusal arms never reach it (the guard
+# refuses before running), but the permit arms must actually push, or "permitted"
+# would only mean "not refused" and would not show the command works.
+BARE="$WORK/origin.git"
+"$REAL_GIT" init -q --bare "$BARE"
+"$REAL_GIT" -C "$SHARED" remote add origin "$BARE" 2>/dev/null || \
+  "$REAL_GIT" -C "$SHARED" remote set-url origin "$BARE"
+"$REAL_GIT" -C "$SHARED" push -q origin main 2>/dev/null ||
+  die_cannot_evaluate "could not seed the stand-in remote; the push arms would be vacuous"
+bare_before="$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main)" ||
+  die_cannot_evaluate "stand-in remote has no main after seeding"
+
+arm "N15-push-delete" 77 "$SHARED" -- push origin --delete main
+[[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
+  assert "N15-push-delete" "the remote branch still exists after the refusal" 0 ||
+  assert "N15-push-delete" "the remote branch still exists after the refusal" 1
+
+arm "N16-push-force" 77 "$SHARED" -- push --force origin main
+[[ "$LAST_OUT" == *"c/shared-remote"* ]] &&
+  assert "N16-push-force" "the refusal cites the remote namespace, not the local ref store" 0 ||
+  assert "N16-push-force" "the refusal cites the remote namespace, not the local ref store" 1
+
+# The lease is the alternative the refusal offers, so it had better work.
+arm "P12-push-force-with-lease" 0 "$SHARED" -- push --force-with-lease origin main
+[[ "$LAST_STATUS" == 0 ]] &&
+  assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 0 ||
+  assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 1
+
+# And the justification moved: branch -D is still refused, on the narrower
+# ground, and must no longer claim the shared namespace.
+arm "N17-branch-D-cites-local-ground" 77 "$SHARED" -- branch -D nonexistent-branch
+[[ "$LAST_OUT" == *"a/local-refs"* && "$LAST_OUT" != *"every agent in this project shares"* ]] &&
+  assert "N17-branch-D-cites-local-ground" "branch -D no longer claims a shared ref namespace it cannot reach" 0 ||
+  assert "N17-branch-D-cites-local-ground" "branch -D no longer claims a shared ref namespace it cannot reach" 1
+
+# --cached is the discriminating flag for rm, exactly as -n is for clean.
+dirty "$SHARED"
+arm "P10-rm-cached-is-permitted" 0 "$SHARED" -- rm --cached -q tracked.txt
+[[ -e "$SHARED/tracked.txt" ]] && assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 0 ||
+  assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 1
+"$REAL_GIT" -C "$SHARED" reset -q >/dev/null 2>&1
+
+# A `!`-alias needs no expansion here: any git it runs re-enters this shim on
+# PATH and is judged on its own merits. Passing it through is the correct
+# answer, not a gap.
+arm "P11-shell-alias-passes-through" 0 "$SHARED" -- sh
+[[ "$LAST_OUT" == *"SHELL-ALIAS"* ]] &&
+  assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 0 ||
+  assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 1
 
 arm "P1-status" 0 "$SHARED" -- status --porcelain
 [[ "$LAST_OUT" == *"tracked.txt"* ]] &&
@@ -544,7 +666,12 @@ printf 'arms run              : %d  (%d refusal, %d cannot-evaluate, %d permit)\
   "$arms_run" "$arms_refuse" "$arms_cannot" "$arms_permit"
 printf 'exit-status mismatches: %d/%d\n' "$arms_mismatched" "$arms_run"
 printf 'post-condition checks : %d  failed: %d\n' "$checks_run" "$checks_failed"
-printf 'harness controls      : %d/3 reproduced with the real git\n' "$controls_run"
+# Not printed as a ratio. Every control calls die_cannot_evaluate on failure, so
+# the denominator can only ever equal the numerator and "6/6" would be a
+# tautology dressed as a measurement. The load-bearing statement is the second
+# line: a control that does not reproduce ends the run at 2.
+printf 'harness controls      : %d reproduced with the real git\n' "$controls_run"
+printf '                        (any that had not would have exited 2, not 0)\n'
 echo "==========================================================================="
 
 total_failed=$(( arms_mismatched + checks_failed ))
