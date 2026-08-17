@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**66 mechanical assertions over this file's self-claims. 66 run. 12 corrected**,
+**68 mechanical assertions over this file's self-claims. 68 run. 13 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -483,7 +483,7 @@ appears without a SHA on the same line.
 |---|---|---|---|
 | **A** | line numbers or ranges into this same file | 1 | 1 (four coordinates, deleted) |
 | **B** | counts of a token in this same file | 18 | 5 |
-| **C** | positional claims about this same file | 12 | 1 |
+| **C** | positional claims about this same file | 14 | 2 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
 | **E** | claims about the instrument that measured it | 13 | 2 |
 | **F** | this section's own description of the harness | 7 | — (never checked before) |
@@ -639,8 +639,8 @@ that the BRE extension is live in the dialect actually in use and dead under
 > pattern as passed, byte for byte** — `?` and `\?` are different patterns and a
 > disclosure naming only the dialect cannot tell them apart.
 
-**Control: all 66 assertions were re-run under the shadowed engine and every one
-of the 66 outcomes is byte-identical.** Not asserted from the patterns being
+**Control: all 68 assertions were re-run under the shadowed engine and every one
+of the 68 outcomes is byte-identical.** Not asserted from the patterns being
 `-F` or BRE-safe — measured, by pointing the harness at
 `ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
 output. **The numbers in this section do not depend on which engine you use; the
@@ -649,7 +649,7 @@ because the same file one paragraph up shows what it costs when it is not true.
 The second axis, `--ignore-files`, cannot bite here either: this path is not
 git-ignored (`git check-ignore` returns nothing).
 
-### The twelve corrections, and N3
+### The thirteen corrections, and N3
 
 | # | claim as it stood | measured | disposition |
 |---|---|---|---|
@@ -665,6 +665,7 @@ git-ignored (`git check-ignore` returns nothing).
 | 10 | *"a zsh function wrapping ugrep 7.5.0"*, ×3 | no such binary exists | corrected; the wrapper and flags are real |
 | 11 | §7 *"the injected `-G` forces BRE"* | `-G` is inert vs GNU default | corrected; POSIX, so it reaches CI |
 | 12 | §7's own harness, row B11 | counted FILES for a claim about HITS; blind at both SHAs | split into B11/B11b–f, site-level |
+| 13 | §7's harness, C10's bullet boundaries | a single value off a match set, cardinality never asserted | C10c/C10d added |
 | — | §3 row-16 *"the same sentence"* | two sentences | corrected (N3; **out of the denominator**) |
 
 Four of those are worth more than the corrections.
@@ -738,16 +739,21 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`b0a6d4ccdd7a61c8`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 66/66 under **both** engines and **exits 1 under a four-arm
+`46e7b71ed3d0149f`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 68/68 under **both** engines and **exits 1 under a four-arm
 mutation battery**, each arm naming the row it broke:
 
 ```
-MM1  revert the §3 heading to "the two new findings"   rc=1  65/66   D8
-MM2  category B in the table above: 18 -> 17           rc=1  64/66   F-B, F7
-MM3  headline total: 66 -> 67                          rc=1  65/66   F7
-MM4  delete the F row entirely                         rc=1  64/66   F-F, F7
+MM1  revert the §3 heading to "the two new findings"   rc=1  67/68   D8
+MM2  category B in the table above: 18 -> 17           rc=1  66/68   F-B, F7
+MM3  headline total: 68 -> 69                          rc=1  67/68   F7
+MM4  delete the F row entirely                         rc=1  66/68   F-F, F7
 ```
+
+🔴 **Category F earned itself within the hour: adding C10c/C10d took C from 12 to
+14 and F-C went red on the next run, before the table above had been touched.** The
+table cannot now go stale without the harness saying so, which is the property the
+rest of this file exists to complain about the absence of.
 
 **MM4 is the one worth the space.** Deleting a row from the table is the mutation
 a table-checker most naturally misses, because there is then nothing there to
