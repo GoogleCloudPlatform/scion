@@ -733,7 +733,11 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// After authorization so an unauthorized caller cannot consume a
 	// legitimate sender's allowance, and before the body is read so a flood
 	// costs the hub as little as possible.
-	if !s.allowChatSend(w, user.ID(), chatSenderClassFor(user)) {
+	//
+	// Always the human class: this handler rejects anything that is not a
+	// UserIdentity above, which is exactly why agent senders need their own
+	// limit on the outbound-message path.
+	if !s.allowChatSend(w, user.ID(), chatSenderHuman) {
 		return
 	}
 

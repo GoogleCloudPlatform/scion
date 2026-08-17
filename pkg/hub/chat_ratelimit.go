@@ -22,12 +22,20 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // Per-sender send limits for chat messages (#1054). Without them a single
 // looping agent can fill a thread faster than any reader can scroll, and the
 // cost lands on every consumer of that thread: the store, the SSE fan-out and
 // the notification pipeline.
+//
+// THE ENFORCED CEILING IS THE AGGREGATE PER SENDER: 30/min for a human,
+// 60/min for an agent, whatever the caller puts in the request body. Class
+// sub-limits below are reservations carved out of that aggregate, never extra
+// budget — a send is charged to its class bucket *and* to the sender's
+// aggregate bucket, and is refused if either is empty.
 //
 // The limits are per sender, not global: a busy fleet of many agents is normal
 // traffic, a single sender emitting more than one message per second is not.
@@ -39,22 +47,27 @@ import (
 // deliberately scoped to the chat send paths and should stay consistent with
 // whatever that work lands.
 const (
-	// chatSendHumanRatePerMinute is the sustained send rate allowed for a
-	// single human sender.
+	// chatSendHumanRatePerMinute is the total send rate allowed for a single
+	// human sender.
 	chatSendHumanRatePerMinute = 30
 
-	// chatSendAgentRatePerMinute is the sustained send rate allowed for a
-	// single agent's own messages to humans. Agents legitimately send more
-	// than humans (status reports, replies to several recipients), so they
-	// get a higher ceiling.
+	// chatSendAgentRatePerMinute is the total send rate allowed for a single
+	// agent, across every kind of traffic it produces. Agents legitimately
+	// send more than humans (status reports, replies to several recipients),
+	// so they get a higher ceiling.
 	chatSendAgentRatePerMinute = 60
 
-	// chatSendAgentMirrorRatePerMinute is the sustained rate allowed for an
-	// agent's automatic assistant-reply transcript mirror. Same ceiling as
-	// the agent's own messages, but a separate bucket: the mirror is machine
-	// generated and must not be able to spend the allowance an agent needs
-	// for a completion report or a blocker escalation.
-	chatSendAgentMirrorRatePerMinute = 60
+	// chatSendAgentMirrorRatePerMinute is the share of an agent's aggregate
+	// allowance that the automatic assistant-reply transcript mirror may
+	// consume. It is a sub-cap inside chatSendAgentRatePerMinute, not an
+	// addition to it: the mirror is machine generated and must not be able to
+	// spend the whole allowance an agent needs for a completion report or a
+	// blocker escalation, but it cannot raise the agent's total either.
+	//
+	// Sized so a flooding mirror always leaves at least
+	// chatSendAgentRatePerMinute - chatSendAgentMirrorRatePerMinute of
+	// headroom for the agent's own messages.
+	chatSendAgentMirrorRatePerMinute = 30
 
 	// chatSendLimiterIdleTTL is how long an untouched bucket is kept before
 	// being evicted. It also bounds how often the sweep runs.
@@ -70,6 +83,9 @@ const (
 // that share an ID cannot drain each other's allowance and — more
 // importantly — an agent's automatic transcript mirror cannot starve the
 // messages that agent writes itself.
+//
+// A class that is not its own aggregate (see aggregate) is a reservation
+// inside another class's ceiling rather than a ceiling of its own.
 type chatSenderClass int
 
 const (
@@ -90,13 +106,43 @@ func (c chatSenderClass) keyPrefix() string {
 	}
 }
 
-// chatSenderClassFor maps an authenticated identity to its rate class.
-// Anything that is not an agent is rated as a human.
-func chatSenderClassFor(ident Identity) chatSenderClass {
-	if ident != nil && ident.Type() == "agent" {
+// aggregate returns the class holding the sender's real ceiling. The mirror
+// spends an agent's allowance, so its aggregate is the agent class; every
+// other class is its own aggregate.
+//
+// This is what makes the traffic class safe to derive from a caller-supplied
+// field: whichever class a sender claims, the same aggregate bucket is
+// charged, so relabelling traffic cannot buy a second allowance. It can only
+// move the sender into a *smaller* reservation.
+func (c chatSenderClass) aggregate() chatSenderClass {
+	if c == chatSenderAgentMirror {
 		return chatSenderAgent
 	}
-	return chatSenderHuman
+	return c
+}
+
+// chatSenderClassForMessageType maps an outbound message type to its traffic
+// class. Only the transcript mirror's own type gets the mirror reservation;
+// every other type — including one this build does not recognise — is charged
+// as an agent-authored message, so an unfamiliar label can never be used to
+// claim a reservation it is not entitled to.
+//
+// The class is only ever a reservation *within* the sender's aggregate
+// allowance (see aggregate), so a sender cannot gain budget by choosing a
+// class either way.
+func chatSenderClassForMessageType(msgType string) chatSenderClass {
+	if msgType == messages.TypeAssistantReply {
+		return chatSenderAgentMirror
+	}
+	return chatSenderAgent
+}
+
+// noun describes a class in a rate-limit error message.
+func (c chatSenderClass) noun() string {
+	if c == chatSenderAgentMirror {
+		return "assistant-reply messages"
+	}
+	return "messages"
 }
 
 // chatSendBucket is one sender's token bucket.
@@ -157,22 +203,32 @@ func (l *chatSendLimiter) limitFor(class chatSenderClass) float64 {
 	return l.ratesPerMinute[class]
 }
 
-// Allow consumes one token for the sender and reports whether the send may
-// proceed. When it may not, the returned duration is how long the caller
-// should wait before retrying — suitable for a Retry-After header.
+// chatSendDecision is the outcome of a rate-limit check.
+type chatSendDecision struct {
+	// Allowed reports whether the send may proceed.
+	Allowed bool
+	// RetryAfter is how long to wait before retrying. When both the
+	// aggregate bucket and the class reservation are empty it is the longer
+	// of the two waits. Zero when Allowed.
+	RetryAfter time.Duration
+	// Limit is the per-minute allowance of the bucket that refused, and
+	// LimitClass is the class that bucket belongs to, so the error can name
+	// the limit the sender actually hit. Zero when Allowed.
+	Limit      float64
+	LimitClass chatSenderClass
+}
+
+// Allow consumes one token from the sender's aggregate bucket and one from
+// the class reservation (when the class is not its own aggregate), and
+// reports whether the send may proceed. It is refused if either bucket is
+// empty, and nothing is consumed from either when it is refused.
 //
 // A nil limiter allows everything: limiting is a protection, not a
 // correctness requirement, and a hand-constructed Server must still work.
-func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) (bool, time.Duration) {
+func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) chatSendDecision {
 	if l == nil {
-		return true, 0
+		return chatSendDecision{Allowed: true}
 	}
-
-	perMinute := l.limitFor(class)
-	if perMinute <= 0 {
-		return true, 0
-	}
-	perSecond := perMinute / 60
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -180,25 +236,62 @@ func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) (bool, t
 	now := l.now()
 	l.sweepLocked(now)
 
+	aggregate := l.refillLocked(senderID, class.aggregate(), now)
+	var reservation *chatSendBucket
+	if class != class.aggregate() {
+		reservation = l.refillLocked(senderID, class, now)
+	}
+
+	// Refuse if either bucket is empty, reporting whichever has the longer
+	// wait: that is the one the sender actually has to wait out.
+	decision := chatSendDecision{Allowed: true}
+	consider := func(b *chatSendBucket, c chatSenderClass) {
+		if b == nil || b.tokens >= 1 {
+			return
+		}
+		perMinute := l.limitFor(c)
+		wait := time.Duration((1 - b.tokens) / (perMinute / 60) * float64(time.Second))
+		if wait < time.Second {
+			wait = time.Second
+		}
+		if decision.Allowed || wait > decision.RetryAfter {
+			decision = chatSendDecision{RetryAfter: wait, Limit: perMinute, LimitClass: c}
+		}
+	}
+	consider(aggregate, class.aggregate())
+	consider(reservation, class)
+	if !decision.Allowed {
+		return decision
+	}
+
+	if aggregate != nil {
+		aggregate.tokens--
+	}
+	if reservation != nil {
+		reservation.tokens--
+	}
+	return decision
+}
+
+// refillLocked returns the sender's bucket for a class, creating it if needed
+// and crediting the tokens accrued since it was last touched. It returns nil
+// when the class is unlimited. The caller must hold l.mu.
+func (l *chatSendLimiter) refillLocked(senderID string, class chatSenderClass, now time.Time) *chatSendBucket {
+	perMinute := l.limitFor(class)
+	if perMinute <= 0 {
+		return nil
+	}
+
 	key := class.keyPrefix() + senderID
 	b, ok := l.buckets[key]
 	if !ok {
 		b = &chatSendBucket{tokens: perMinute, last: now}
 		l.buckets[key] = b
-	} else {
-		b.tokens = math.Min(perMinute, b.tokens+now.Sub(b.last).Seconds()*perSecond)
-		b.last = now
+		return b
 	}
-
-	if b.tokens < 1 {
-		wait := time.Duration((1 - b.tokens) / perSecond * float64(time.Second))
-		if wait < time.Second {
-			wait = time.Second
-		}
-		return false, wait
-	}
-	b.tokens--
-	return true, 0
+	b.tokens = math.Min(perMinute, b.tokens+now.Sub(b.last).Seconds()*perMinute/60)
+	b.last = now
+	return b
 }
 
 // sweepLocked evicts idle buckets. It runs at most once per idle TTL, or
@@ -239,15 +332,17 @@ func (l *chatSendLimiter) sweepLocked(now time.Time) {
 // caller must stop. The error is deliberately explicit rather than a silent
 // drop, so an agent that hits the limit can back off and resend (#1054).
 func (s *Server) allowChatSend(w http.ResponseWriter, senderID string, class chatSenderClass) bool {
-	allowed, retryAfter := s.chatSendLimiter.Allow(senderID, class)
-	if allowed {
+	decision := s.chatSendLimiter.Allow(senderID, class)
+	if decision.Allowed {
 		return true
 	}
 
-	seconds := int(math.Ceil(retryAfter.Seconds()))
+	seconds := int(math.Ceil(decision.RetryAfter.Seconds()))
 	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	// The delay goes in the body as well as the header: no current client
+	// reads Retry-After, so the message text is what a sending agent sees.
 	writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
-		fmt.Sprintf("send rate limit exceeded (%d messages per minute); retry in %ds",
-			int(s.chatSendLimiter.limitFor(class)), seconds), nil)
+		fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
+			int(decision.Limit), decision.LimitClass.noun(), seconds), nil)
 	return false
 }

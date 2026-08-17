@@ -123,6 +123,11 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), ErrCodeRateLimited) {
 		t.Errorf("expected a %q error code in the body, got %s", ErrCodeRateLimited, rr.Body.String())
 	}
+	// No current client reads Retry-After, so the delay in the message text is
+	// what a sending agent actually sees. Assert it as well as the header.
+	if want := "retry in " + retryAfter + "s"; !strings.Contains(rr.Body.String(), want) {
+		t.Errorf("expected the body to carry the retry delay %q, got %s", want, rr.Body.String())
+	}
 
 	if rr := postOutbound(t, srv, project.ID, bystander, "unrelated report"); rr.Code != http.StatusOK {
 		t.Errorf("a second agent must not be throttled by the flooder: got %d: %s", rr.Code, rr.Body.String())
@@ -135,10 +140,70 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 	}
 }
 
-// The automatic assistant-reply transcript mirror shares an agent with the
-// messages the agent writes itself, but not a bucket: a chatty agent whose
-// mirror is over its limit can still deliver a completion report or a blocker
-// escalation. Low-value traffic must not starve high-value traffic.
+// An unrecognised message type is charged as ordinary agent traffic and then
+// rejected: the class must be picked from the closed enum, not from whatever
+// the caller puts in the body, and a flood of malformed sends is still a flood
+// (#1054).
+func TestOutboundMessage_UnknownTypeIsChargedThenRejected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "type-project",
+		Slug:       "type-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human@example.com",
+		DisplayName: "Human",
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "mislabeller",
+		Slug:       "mislabeller",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	clock := newTestClock()
+	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
+
+	rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mislabelled", "not-a-real-type")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unknown message type, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// It cost a token from the agent's aggregate allowance, not from the
+	// cheaper mirror reservation.
+	if got := srv.chatSendLimiter.buckets["agent:"+agent.ID].tokens; got != chatSendAgentRatePerMinute-1 {
+		t.Errorf("agent bucket = %v tokens, want %v: the send must be charged to the agent aggregate",
+			got, chatSendAgentRatePerMinute-1)
+	}
+	if _, ok := srv.chatSendLimiter.buckets["agent-mirror:"+agent.ID]; ok {
+		t.Error("an unknown type must not be classified as transcript-mirror traffic")
+	}
+}
+
+// The automatic assistant-reply transcript mirror shares the agent's single
+// aggregate allowance with the messages the agent writes itself, but it may
+// only spend its own reservation of it: a chatty agent whose mirror is
+// flooding can still deliver a completion report or a blocker escalation. Low
+// value traffic must not starve high-value traffic.
+//
+// The mirror is driven well past the aggregate ceiling here, not merely up to
+// its reservation — otherwise the test would pass even with no reservation at
+// all and would prove nothing about starvation.
 func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -174,16 +239,22 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 	clock := newTestClock()
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
-	// Exhaust the mirror's allowance with hook-posted assistant replies.
-	for i := range chatSendAgentMirrorRatePerMinute {
+	// Flood with hook-posted assistant replies, twice the agent's whole
+	// aggregate allowance. Only the mirror's reservation may get through.
+	accepted := 0
+	for range 2 * chatSendAgentRatePerMinute {
 		rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("mirror send %d: expected 200, got %d: %s", i+1, rr.Code, rr.Body.String())
+		switch rr.Code {
+		case http.StatusOK:
+			accepted++
+		case http.StatusTooManyRequests:
+		default:
+			t.Fatalf("mirror send: expected 200 or 429, got %d: %s", rr.Code, rr.Body.String())
 		}
 	}
-	rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
-	if rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("the mirror is over its limit and should be refused, got %d: %s", rr.Code, rr.Body.String())
+	if accepted != chatSendAgentMirrorRatePerMinute {
+		t.Fatalf("the flooding mirror got %d sends through, want exactly its reservation of %d",
+			accepted, chatSendAgentMirrorRatePerMinute)
 	}
 
 	// The agent's own message to a human is unaffected.

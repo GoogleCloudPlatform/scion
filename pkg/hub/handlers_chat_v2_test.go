@@ -2333,6 +2333,11 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), ErrCodeRateLimited) {
 		t.Errorf("expected a %q error code in the body, got %s", ErrCodeRateLimited, rec.Body.String())
 	}
+	// The delay belongs in the body as well as the header: no current client
+	// reads Retry-After, so the message text is the signal that gets seen.
+	if want := "retry in " + retryAfter + "s"; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("expected the body to carry the retry delay %q, got %s", want, rec.Body.String())
+	}
 
 	// The refusal is transient: at 30/min a token accrues every 2 seconds.
 	clock.Advance(2 * time.Second)

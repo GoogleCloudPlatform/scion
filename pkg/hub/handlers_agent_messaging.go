@@ -70,20 +70,30 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if req.Type == "" {
+		req.Type = "input-needed"
+	}
+
 	// Per-sender send limit (#1054). This is the path a looping agent floods a
 	// thread through, so the limit has to live here and not only on the
 	// browser send path. The response is an explicit 429 with Retry-After
 	// rather than a silent drop, so a caller can back off and resend.
 	//
-	// The automatic assistant-reply transcript mirror (posted by the agent
-	// hook, not written by the agent) is limited in its own bucket: it is
-	// still part of the flood vector, but it must not be able to spend the
-	// allowance the agent needs for a completion report or an escalation.
-	sendClass := chatSenderAgent
-	if req.Type == messages.TypeAssistantReply {
-		sendClass = chatSenderAgentMirror
+	// The traffic class is derived from the (now defaulted) message type so the
+	// automatic assistant-reply transcript mirror — posted by the agent hook,
+	// not written by the agent — cannot spend the whole allowance the agent
+	// needs for a completion report or an escalation. The class only ever
+	// selects a reservation inside the agent's single aggregate ceiling, so a
+	// caller cannot buy extra allowance by relabelling its traffic.
+	//
+	// Charged before the payload is validated: a flood of malformed sends is
+	// still a flood.
+	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
+		return
 	}
-	if !s.allowChatSend(w, agentIdent.ID(), sendClass) {
+
+	if err := messages.ValidateType(req.Type); err != nil {
+		ValidationError(w, err.Error(), nil)
 		return
 	}
 
@@ -94,9 +104,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if msgLen := utf8.RuneCountInString(req.Msg); msgLen > messages.MaxMessageLength {
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
 		return
-	}
-	if req.Type == "" {
-		req.Type = "input-needed"
 	}
 
 	// Validate and default visibility.
