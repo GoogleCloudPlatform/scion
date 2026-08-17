@@ -82,6 +82,9 @@ jobs:
       - name: Check Compatibility Literals
         run: make compat-literals
 
+      - name: Check Authorization Guards
+        run: make check-authz-guards
+
       - name: Run Tests
         run: make test-fast
 
