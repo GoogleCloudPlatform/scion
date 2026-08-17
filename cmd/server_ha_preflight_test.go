@@ -239,8 +239,11 @@ func TestIsHADeployment(t *testing.T) {
 
 // TestIsHADeployment_RouteInventory is a tripwire on the source of truth for HA
 // detection. It enumerates every condition that makes isHADeployment return
-// true — one named subtest per route — so a route cannot be added, removed, or
-// swapped unnoticed.
+// true — one named subtest per route — so a route cannot be removed or swapped
+// without failing CI. Addition of a new route is NOT caught by CI (no subtest
+// exists for the unknown route, so nothing fails); the tripwire for addition is
+// this comment and the test structure: a developer adding route #4 must add a
+// matching subtest here and update the chart condition in lockstep.
 //
 // TRIPWIRE: the GKE Helm chart transcribes these same conditions into template
 // logic gating the operator acknowledgement flag (acknowledgeHAUnlanded). If
@@ -259,8 +262,10 @@ func TestIsHADeployment(t *testing.T) {
 //  3. storage.provider == "gcs" && auth.mode == "proxy"
 //
 // This asserts the route SET, not the route count: each subtest is named for
-// the identity of its route, so a swap fails the replaced route's subtest and
-// an addition shows up as a route with no subtest of its own.
+// the identity of its route, so a removal or a swap fails the replaced route's
+// subtest. An addition fails nothing — the new route simply has no subtest —
+// which is why adding one is a documented obligation rather than an enforced
+// one.
 func TestIsHADeployment_RouteInventory(t *testing.T) {
 	// baseConfig returns a config with none of the HA routes active — the
 	// package defaults are sqlite + local storage + unset auth mode. Each
