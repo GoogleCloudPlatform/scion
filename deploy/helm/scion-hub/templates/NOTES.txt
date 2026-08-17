@@ -74,7 +74,10 @@ CLOUD SQL
   Under password the credential lives in the settings Secret and reaches the
   hub inside the rendered settings.yaml. It is not on any container's argv, not
   in a ConfigMap and not in a pod annotation; the chart asserts all three.
-  Rotating it is a helm upgrade, which rewrites the Secret and rolls the pods.
+  Rotating it is a helm upgrade, which rewrites the Secret - and leaves every
+  running pod on the OLD credential until you restart them by hand. Read
+  ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP below before you rotate: it
+  is the command, and the reason the chart cannot do it for you.
 {{- end }}
 
   BEFORE THE POD CAN CONNECT. These are the exact commands for the values you

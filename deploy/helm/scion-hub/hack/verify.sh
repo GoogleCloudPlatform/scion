@@ -159,7 +159,12 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # remedy in both directions. Summed onto the previous committed value.
 # The step's arm 0 adds none of these on purpose: it is meta_failure, because
 # "nothing was analysed" is a third outcome and not a passing assertion.
-EXPECTED_TOTAL=312
+# +1 for arm U, gd-p2-rev's C1: rotating database.user must move the checksum.
+# +2 for HALF C, gd-p2-rev's C2: the credential-placement paragraph must make no
+# pod-roll claim, and must name the manual-step heading it used to contradict.
+# The _ck_planted() guard that landed alongside arm U adds none: it is
+# meta_failure, for the same reason arm 0 is.
+EXPECTED_TOTAL=314
 
 failures=0
 assertions=0
@@ -4499,6 +4504,40 @@ if grep -qF -- 'CLOUD SQL' "$WORK/notes-cloudsql.txt"; then
   fi
 else
   fail "the iam permutation's NOTES has no CLOUD SQL section, so the absence of the rotation step there is the absence of everything."
+fi
+
+# HALF C. THE TWO PLACES ONE RENDER TALKS ABOUT ROTATION MUST NOT DISAGREE.
+#
+# gd-p2-rev's C2. The credential-placement paragraph in the CLOUD SQL section
+# used to end "Rotating it is a helm upgrade, which rewrites the Secret and
+# rolls the pods", and ninety lines further down the SAME render said ROTATING
+# THE PASSWORD REQUIRES ONE MANUAL STEP. Both printed, to the same operator, on
+# the same install. The first one is the one a reader hits first and the one
+# that sounds like reassurance, so it is the one that gets believed - and it is
+# the false one, because the whole point of the redacted projection is that a
+# credential-only change does NOT move the annotation.
+#
+# WHAT THIS CAN AND CANNOT CHECK. A contradiction between two English sentences
+# is not something grep decides. What is checkable is narrower and still worth
+# pinning: the earlier paragraph must not make the claim in the wording that
+# was wrong, and it must send the reader to the section that states the truth.
+# The second arm is the one that generalises - a paragraph that names the
+# heading cannot be rewritten into a contradiction without someone reading the
+# heading it points at.
+sed -n '/Under password the credential lives/,/BEFORE THE POD CAN CONNECT/p' \
+  "$WORK/notes-rot-pw.txt" >"$WORK/notes-rot-place.txt"
+# The arm below is an ABSENCE and an empty file is the perfect absence, so the
+# region has to be proven to exist before it is allowed to be clean.
+[[ -s "$WORK/notes-rot-place.txt" ]] || meta_failure "the credential-placement paragraph could not be located in the password render (no text between 'Under password the credential lives' and 'BEFORE THE POD CAN CONNECT'). The contradiction arm below would report a clean paragraph because there is no paragraph."
+if grep -qEi 'rolls? the pods' "$WORK/notes-rot-place.txt"; then
+  fail "the credential-placement paragraph claims a pod roll: $(grep -Ei 'rolls? the pods' "$WORK/notes-rot-place.txt" | head -1 | sed 's/^ *//'). The same render says ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP. An operator who believes the first sentence rotates a leaked credential, sees a green upgrade and keeps serving on the retired one."
+else
+  pass "the credential-placement paragraph makes no pod-roll claim, so it does not contradict the manual-step section printed below it in the same render"
+fi
+if grep -qF -- "$_ck_rot_heading" "$WORK/notes-rot-place.txt"; then
+  pass "the credential-placement paragraph points the reader at [$_ck_rot_heading], so the two statements about rotation are joined rather than left to disagree"
+else
+  fail "the credential-placement paragraph does not name [$_ck_rot_heading]. A reader who stops at the placement paragraph - which reads like a complete account of where the credential lives and what changing it does - never reaches the step that keeps a retired password from staying live."
 fi
 
 # --------------------------------------------------------------------------
