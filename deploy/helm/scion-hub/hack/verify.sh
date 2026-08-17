@@ -143,7 +143,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=278
+EXPECTED_TOTAL=280
 
 failures=0
 assertions=0
@@ -1395,6 +1395,172 @@ for _src in doc fail notes; do
     fail "the $_src copy names [$_surplus], which is neither a gate the walk found nor a listed non-gate. If the hub added a gate, re-derive hack/ha-gates.txt and add it to all three copies; if it is not a gate, say why in ALLOWED_NON_GATES."
   fi
 done
+
+# --------------------------------------------------------------------------
+step "NOTES.txt prints the Cloud SQL commands substituted and the budget unmeasured"
+# --------------------------------------------------------------------------
+# PHASE 2. NOTES.txt is the only place an operator is told how to create the IAM
+# binding, the database role and the grants, and it is the only place the
+# connection budget appears. None of it has been run - the deploying principal
+# is refused by sqladmin.googleapis.com with 403 - so what CAN be checked here
+# is narrow and worth being precise about:
+#
+#   that the commands carry THIS RELEASE'S VALUES rather than placeholders, and
+#   that the budget presents S as the operator's input and says outright that
+#   we did not measure it.
+#
+# Neither of those is a claim that the commands work. That claim is unrun and
+# VALIDATION.md 7.2 records it as unrun.
+#
+# THE EXPECTED VALUES ARE DERIVED FROM ci/values-cloudsql.yaml, NOT TYPED HERE.
+# A hardcoded "example-project" would still pass if the template stopped
+# substituting and started printing a constant that happened to match. Reading
+# the input and the output and requiring them to agree is the only version of
+# this check that can fail for the right reason.
+_icn="$(awk '$1=="instanceConnectionName:"{print $2; exit}' "$CHART_DIR/ci/values-cloudsql.yaml")"
+_gsa="$(awk '$1=="gcpServiceAccount:"{print $2; exit}' "$CHART_DIR/ci/values-cloudsql.yaml")"
+_dbname="$(awk '$1=="name:"{print $2; exit}' <(sed -n '/^database:/,/^[a-z]/p' "$CHART_DIR/ci/values-cloudsql.yaml"))"
+_maxopen="$(awk '$1=="maxOpenConns:"{print $2; exit}' "$CHART_DIR/values.yaml")"
+for _pair in "instanceConnectionName:$_icn" "gcpServiceAccount:$_gsa" "database.name:$_dbname" "maxOpenConns:$_maxopen"; do
+  [[ -n "${_pair#*:}" ]] || meta_failure "could not read ${_pair%%:*} out of the chart's own inputs, so every arm below would compare the render against an empty string and pass. NOTHING WAS CHECKED."
+done
+_csProject="${_icn%%:*}"
+_csInstance="${_icn##*:}"
+_role="${_gsa%.gserviceaccount.com}"
+if [[ "$_role" == "$_gsa" ]]; then
+  meta_failure "trimming .gserviceaccount.com off $_gsa changed nothing, so the derived-role arm below is comparing the render against the untrimmed email and would pass on the wrong value."
+fi
+
+render_notes "$WORK/notes-cloudsql.txt" -f "$CHART_DIR/ci/values-cloudsql.yaml"
+render_notes "$WORK/notes-cloudsql-plain.txt" -f "$CHART_DIR/ci/values-cloudsql.yaml" --set cloudsql.nativeSidecar=false
+
+# THE SECTION, NOT THE FILE. Several arms below are absences, and an absence
+# holds hardest against text that is not there. Scoping them to the section and
+# then requiring the section to be non-empty is what stops "the Cloud SQL
+# section was deleted" from reading as "the Cloud SQL section is clean".
+sed -n '/^CLOUD SQL$/,/^THE IMAGE$/p' "$WORK/notes-cloudsql.txt" >"$WORK/notes-cs-section.txt"
+if [[ ! -s "$WORK/notes-cs-section.txt" ]]; then
+  meta_failure "the Cloud SQL NOTES render has no CLOUD SQL section, so every arm in this step is measuring an empty file."
+fi
+if grep -qF 'CLOUD SQL' "$WORK/notes-cs-section.txt"; then
+  pass "the Cloud SQL permutation's NOTES carries a CLOUD SQL section, so the absences below are absences"
+else
+  fail "the Cloud SQL permutation's NOTES has no CLOUD SQL section"
+fi
+
+# SUBSTITUTED, and each value traced back to the input that produced it.
+for _want in \
+  "--instance=$_csInstance" \
+  "--project=$_csProject" \
+  "gcloud sql users create $_role" \
+  "gcloud sql databases create $_dbname" \
+  "--member \"serviceAccount:$_gsa\"" \
+  "--role roles/cloudsql.client" \
+  "--role roles/cloudsql.instanceUser" \
+  ; do
+  if grep -qF -- "$_want" "$WORK/notes-cs-section.txt"; then
+    pass "the Cloud SQL NOTES prints [$_want], substituted from the values file"
+  else
+    fail "the Cloud SQL NOTES does not print [$_want]. An operator is handed a command they must edit before it runs, and the edit they must make is not stated."
+  fi
+done
+
+# THE OTHER DIRECTION. The template carries PROJECT/REGION/INSTANCE literals as
+# a fallback for a malformed instanceConnectionName. If one of them reaches a
+# render where the value WAS well-formed, the substitution silently stopped and
+# every presence arm above could still be green off a different line.
+if grep -Eq -- '--project=PROJECT|--instance=INSTANCE|:REGION:' "$WORK/notes-cs-section.txt"; then
+  fail "the Cloud SQL NOTES still prints an unsubstituted PROJECT/REGION/INSTANCE placeholder for a well-formed instanceConnectionName"
+else
+  pass "the Cloud SQL NOTES leaves no unsubstituted placeholder in the gcloud commands"
+fi
+
+# THE BUDGET. S is the operator's input and the chart does not supply it.
+for _want in \
+  'TOTAL = R * (M + S)' \
+  'R = replicaCount' \
+  'M = database.maxOpenConns' \
+  'YOU MUST SUPPLY THIS' \
+  'WE HAVE NOT MEASURED S' \
+  'pg_stat_activity' \
+  'S_max = 2 * max(4, NumCPU) + 2' \
+  'STRUCTURAL MAXIMUM' \
+  ; do
+  if grep -qF -- "$_want" "$WORK/notes-cs-section.txt"; then
+    pass "the connection budget states [$_want]"
+  else
+    fail "the connection budget does not state [$_want]"
+  fi
+done
+if grep -qF -- "= $_maxopen   (the ent pool" "$WORK/notes-cs-section.txt"; then
+  pass "the budget prints M as the release's own database.maxOpenConns ($_maxopen), not a worked example"
+else
+  fail "the budget does not print M as this release's database.maxOpenConns ($_maxopen), so the operator has to work out which number the formula means"
+fi
+# THE ARM THAT MATTERS MOST, and it is a negative. The structural maximum is a
+# ceiling read out of source and the whole point of §3 is that it must not be
+# handed over as though it were the measured overhead. If a later edit gets
+# helpful and writes "S = 10" or "S = S_max", this goes red.
+#
+# THE LEGEND LINE "S = every other connection a replica holds" IS NOT AN
+# ASSIGNMENT and must not trip this - the first version of this arm was a bare
+# /^ *S +=/ and it went red on correct text. Narrowing an arm to make it green
+# is the move that turns a check into decoration, so the narrowing was measured
+# rather than eyeballed. Mutations run against this pattern, all red:
+#   inserting "S = 12"     -> red   (a number nobody took)
+#   inserting "S = S_max"  -> red   (the ceiling passed off as the overhead)
+# and the legend line alone is green. See the mutation log at the end of this
+# step for the other five.
+if grep -Eq '^ *S +=[[:space:]]*([0-9]|S_max)' "$WORK/notes-cs-section.txt"; then
+  fail "the budget assigns a value to S. S is the operator's measurement; a number here is one nobody took, and it is indistinguishable from one that was. If this is the structural maximum, it is S_max and it is a ceiling."
+else
+  pass "the budget assigns no value to S, so the structural maximum is not being passed off as the measured overhead"
+fi
+
+# THE CRASH-LOOP WARNING, BOTH DIRECTIONS. Present when the proxy is a plain
+# sidecar; absent when it is a native one. Without the second arm a warning
+# printed unconditionally would satisfy the first and tell the operator nothing.
+if grep -qF 'CRASH-LOOP AT STARTUP' "$WORK/notes-cloudsql-plain.txt"; then
+  pass "cloudsql.nativeSidecar: false prints the crash-loop warning"
+else
+  fail "cloudsql.nativeSidecar: false prints no crash-loop warning, and the failure it causes reports itself as 'connection refused'"
+fi
+if grep -qF 'CRASH-LOOP AT STARTUP' "$WORK/notes-cloudsql.txt"; then
+  fail "the native-sidecar render prints the crash-loop warning too, so the warning does not distinguish the two shapes and carries no information"
+else
+  pass "the native-sidecar render does not print the crash-loop warning"
+fi
+
+# ABSENT ENTIRELY WITH THE PROXY OFF. notes-plain.txt was rendered above from
+# ci/values-minimal.yaml and its non-emptiness is already established there.
+if grep -qF 'CLOUD SQL' "$WORK/notes-plain.txt"; then
+  fail "a release with cloudsql.enabled false is still shown the Cloud SQL section, so the operator is given gcloud commands for an instance this release does not use"
+else
+  pass "a release with cloudsql.enabled false is shown no Cloud SQL section"
+fi
+
+# MUTATION LOG for this step. Every arm above was written and then attacked; an
+# arm nobody has seen go red is an arm nobody has evidence about. Each mutation
+# was applied to a throwaway copy of the chart, the suite run, and the failing
+# arm read off. Counts stayed at 271/271 throughout, so none of these is a
+# harness error masquerading as a finding.
+#
+#   S = 12 added to the budget              -> the S-assignment arm
+#   S = S_max added to the budget           -> the S-assignment arm
+#   $csProject replaced by the literal
+#     PROJECT in the client binding         -> the placeholder arm
+#   "WE HAVE NOT MEASURED S." reworded to
+#     "S depends on your workload."         -> the unmeasured-statement arm
+#   the crash-loop warning made
+#     unconditional ({{- if true }})        -> the native-sidecar negative arm
+#   ci/values-cloudsql.yaml's instance
+#     connection name changed alone         -> GREEN, correctly. The arms compare
+#     the render against the input, so moving both together is not a defect.
+#   the template hardcoded to today's
+#     instance name AND the ci file
+#     changed underneath it                 -> the --instance= arm. This is the
+#     fail-open the derivation exists for, and it is the one a hardcoded
+#     "ci-cloudsql" in this file would have missed.
 
 # --------------------------------------------------------------------------
 step "config.extra deep merge"
