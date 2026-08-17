@@ -18,7 +18,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -107,28 +106,7 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 		return // Local storage — no health check needed
 	}
 
-	var mountPath string
-	switch wsCfg.Backend {
-	case "nfs":
-		if wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
-			share := wsCfg.NFS.Shares[0]
-			mountPath = filepath.Join(wsCfg.NFS.MountRoot, share.ID)
-		}
-	case "cloudrun-volume":
-		if wsCfg.CloudRunVolume != nil && wsCfg.CloudRunVolume.VolumeName != "" {
-			mountPath = filepath.Join("/mnt", wsCfg.CloudRunVolume.VolumeName)
-		}
-	case "gke-shared-volume":
-		// The PVC is mounted into the pod at /mnt/<volume_name>, mirroring the
-		// Cloud Run volume convention. V1GKESharedVolumeConfig carries no mount
-		// path of its own — PVClaimName names the PVC and SubPathRoot is the
-		// prefix *within* the volume — so the volume name is what identifies
-		// the mount point.
-		if wsCfg.GKESharedVolume != nil && wsCfg.GKESharedVolume.VolumeName != "" {
-			mountPath = filepath.Join("/mnt", wsCfg.GKESharedVolume.VolumeName)
-		}
-	}
-
+	mountPath := workspaceMountRoot(wsCfg)
 	if mountPath == "" {
 		checks["workspace_storage"] = "unhealthy: mount path not configured"
 		return

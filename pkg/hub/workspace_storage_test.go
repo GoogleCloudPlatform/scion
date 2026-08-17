@@ -317,6 +317,19 @@ func TestServerHubManagedProjectPath_NFSPrefersNFSWhenBothExist(t *testing.T) {
 	assert.Equal(t, nfsDir, path)
 }
 
+// setVolumeMountBase points the platform volume mount base at dir for the
+// duration of the test, so a test can create the mount root that a real
+// deployment gets from Cloud Run or a Kubernetes pod spec. Tests in this
+// package do not run in parallel, so mutating the package-level seam is safe.
+func setVolumeMountBase(t *testing.T, dir string) {
+	t.Helper()
+	prev := volumeMountBase
+	volumeMountBase = dir
+	t.Cleanup(func() { volumeMountBase = prev })
+}
+
+// This test pins the literal default mount root: a deployment gets
+// /mnt/<volume_name> and the chart must mount the PVC there.
 func TestServerHubManagedProjectPath_GKESharedVolume(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -357,13 +370,75 @@ func TestServerHubManagedProjectPath_GKESharedVolumeCustomSubPath(t *testing.T) 
 	assert.Equal(t, expected, path)
 }
 
+// Content on the volume wins over content in the legacy local path. This is
+// the case that discriminates: without the gke branch the local path is
+// returned and the project is served from ephemeral disk.
+func TestServerHubManagedProjectPath_GKESharedVolumePrefersVolumeWhenBothExist(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+
+	slug := "gke-both-project"
+
+	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
+	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "local.txt"), []byte("local"), 0644))
+
+	volumeDir := filepath.Join(mountBase, "workspace-vol", "projects", "hub-projects", slug)
+	require.NoError(t, os.MkdirAll(volumeDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(volumeDir, "volume.txt"), []byte("volume"), 0644))
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  "workspace-vol",
+			PVClaimName: "scion-workspaces",
+		},
+	}
+
+	path, err := srv.hubManagedProjectPath(slug)
+	require.NoError(t, err)
+	assert.Equal(t, volumeDir, path)
+}
+
+// A project with no content on the volume yet resolves to the volume, not to
+// the local path — new projects are created on durable storage.
+func TestServerHubManagedProjectPath_GKESharedVolumeEmptyVolumeStillWins(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	path, err := srv.hubManagedProjectPath("new-project")
+	require.NoError(t, err)
+
+	expected := filepath.Join(mountBase, "workspace-vol", "projects", "hub-projects", "new-project")
+	assert.Equal(t, expected, path)
+}
+
 func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	// The volume is mounted and empty: a deployment that predates it still has
+	// its content on the local path.
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
 	slug := "gke-fallback-project"
 
-	// Content exists in the local path only (deployment predating the volume)
 	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
 	require.NoError(t, os.MkdirAll(localDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
@@ -372,7 +447,7 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
 		Backend: "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{
-			VolumeName: "absent-workspace-vol",
+			VolumeName: "workspace-vol",
 		},
 	}
 
@@ -388,6 +463,9 @@ func TestServerHubManagedProjectPath_GKESharedVolumeMissingVolumeName(t *testing
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+
 	srv, _ := testServer(t)
 	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
 		Backend:         "gke-shared-volume",
@@ -399,6 +477,77 @@ func TestServerHubManagedProjectPath_GKESharedVolumeMissingVolumeName(t *testing
 
 	expected := filepath.Join(tmpHome, ".scion", "projects", "my-project")
 	assert.Equal(t, expected, path)
+}
+
+// TestWorkspaceMountRoot covers the single resolver both the readiness check
+// and the hub-managed project path derive the mount location from.
+func TestWorkspaceMountRoot(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.V1WorkspaceStorageConfig
+		want string
+	}{
+		{name: "nil config", cfg: nil, want: ""},
+		{name: "local backend", cfg: &config.V1WorkspaceStorageConfig{Backend: "local"}, want: ""},
+		{
+			name: "nfs joins mount root and first share",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS: &config.V1NFSConfig{
+					MountRoot: "/mnt/nfs",
+					Shares:    []config.V1NFSShare{{ID: "share1"}, {ID: "share2"}},
+				},
+			},
+			want: "/mnt/nfs/share1",
+		},
+		{
+			name: "nfs without shares",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS:     &config.V1NFSConfig{MountRoot: "/mnt/nfs"},
+			},
+			want: "",
+		},
+		{
+			name: "cloudrun-volume mounts under /mnt",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:        "cloudrun-volume",
+				CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "scion-workspaces"},
+			},
+			want: "/mnt/scion-workspaces",
+		},
+		{
+			name: "gke-shared-volume mounts under /mnt",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "gke-shared-volume",
+				GKESharedVolume: &config.V1GKESharedVolumeConfig{
+					VolumeName:  "scion-workspaces",
+					PVClaimName: "scion-workspaces-pvc",
+					SubPathRoot: "projects",
+				},
+			},
+			want: "/mnt/scion-workspaces",
+		},
+		{
+			name: "gke-shared-volume without a volume name",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:         "gke-shared-volume",
+				GKESharedVolume: &config.V1GKESharedVolumeConfig{PVClaimName: "scion-workspaces-pvc"},
+			},
+			want: "",
+		},
+		{
+			name: "unknown backend",
+			cfg:  &config.V1WorkspaceStorageConfig{Backend: "some-future-backend"},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, workspaceMountRoot(tt.cfg))
+		})
+	}
 }
 
 func TestServerHubManagedProjectPath_EmptySlugError(t *testing.T) {

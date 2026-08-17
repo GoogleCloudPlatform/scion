@@ -747,9 +747,7 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 
 	// --- NFS backend ---
 	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
-		share := wsCfg.NFS.Shares[0]
-		mountBase := filepath.Join(wsCfg.NFS.MountRoot, share.ID)
-		nfsPath := filepath.Join(mountBase, "hub-projects", slug)
+		nfsPath := filepath.Join(workspaceMountRoot(wsCfg), "hub-projects", slug)
 		if hasWorkspaceContent(nfsPath) {
 			return nfsPath, nil
 		}
@@ -762,12 +760,15 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	}
 
 	// --- Cloud Run volume backend ---
+	// Unlike the GKE branch below, this one does not require a non-empty
+	// volume name: guarding it would change where existing Cloud Run
+	// deployments look for content, which needs its own migration (#1073).
 	if wsCfg != nil && wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil {
 		subPathRoot := wsCfg.CloudRunVolume.SubPathRoot
 		if subPathRoot == "" {
 			subPathRoot = "projects"
 		}
-		crPath := filepath.Join("/mnt", wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
+		crPath := filepath.Join(volumeMountBase, wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
 		if hasWorkspaceContent(crPath) {
 			return crPath, nil
 		}
@@ -779,25 +780,28 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	}
 
 	// --- GKE shared volume backend ---
-	// The PVC is mounted into the pod at /mnt/<volume_name>, the same
-	// convention checkWorkspaceStorageHealth probes for readiness. VolumeName
-	// is required: without it there is no mount point to build a path from, so
-	// the config is treated as unset and this falls through to the local path —
-	// a deployment in that state fails its readiness check anyway.
-	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil && wsCfg.GKESharedVolume.VolumeName != "" {
-		subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
-		if subPathRoot == "" {
-			subPathRoot = "projects"
-		}
-		gkePath := filepath.Join("/mnt", wsCfg.GKESharedVolume.VolumeName, subPathRoot, "hub-projects", slug)
-		if hasWorkspaceContent(gkePath) {
+	// The mount root comes from workspaceMountRoot, the same resolver
+	// checkWorkspaceStorageHealth probes for readiness, so the two cannot
+	// drift. An empty root means no volume name was configured: there is no
+	// mount point to build a path from, so the config is treated as unset and
+	// this falls through to the local path. A deployment in that state fails
+	// its readiness check and never serves.
+	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" {
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
+			if subPathRoot == "" {
+				subPathRoot = "projects"
+			}
+			gkePath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
+			if hasWorkspaceContent(gkePath) {
+				return gkePath, nil
+			}
+			// Fallback: check legacy local path
+			if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
+				return localPath, nil
+			}
 			return gkePath, nil
 		}
-		// Fallback: check legacy local path
-		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-			return localPath, nil
-		}
-		return gkePath, nil
 	}
 
 	// --- Default: local ephemeral path (existing behavior) ---
