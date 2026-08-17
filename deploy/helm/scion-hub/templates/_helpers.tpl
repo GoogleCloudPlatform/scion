@@ -536,6 +536,50 @@ credential by the name of the key holding it is also the defect filed as
 finding 2. The value axis is the one that catches a DSN whatever the key is
 called.
 */}}
+{{/*
+Assert that NO operator-supplied value anywhere in .Values is credential
+material. Called once at the top of every template that renders an object.
+
+Call as:
+  {{- include "scion-hub.assertNoCredentialsInValues" . }}
+
+IT TAKES THE WHOLE OF .Values AND NOT A LIST OF PATHS, AND THAT IS THE ENTIRE
+POINT OF IT. Three separate attempts to enumerate this surface came up short in
+one morning: a report of three unguarded values paths turned out to be fourteen;
+an enumeration of twenty-six refusal sites could not contain a surface that has
+no refusal site to enumerate; and a hand-picked subset chosen by "where a
+credential is a plausible mistake" would have excluded nameOverride and
+fullnameOverride, which are the two widest surfaces in the chart - they place
+the operator's string into all five objects it emits.
+
+A shorter list, a longer list and a cleverer list all share the same defect: a
+values path added next month is not on any of them. Walking .Values inverts the
+default. A new value is covered on the day it is added, and the only way to
+escape the check is to add something that is not in .Values at all.
+
+WHY IT DOES NOT CONDITION ON WHETHER THE VALUE REACHES A MANIFEST. Checking
+only values that this particular render happens to emit would make coverage
+depend on other values - serviceAccount.annotations would be checked when
+serviceAccount.create is true and silently skipped when it is false. That is a
+guard switched off by a condition, which is the defect class this chart has
+spent the most effort on. It also gets the threat model wrong: a values file
+carrying a DSN is committed to a repository whether or not the chart renders it.
+
+WHAT IS EXCLUDED, AND IT IS EXCLUDED BY A GRAMMAR RATHER THAN BY OPINION.
+Leaves that values.schema.json types as integer or boolean, and the two closed
+enums (image.pullPolicy, updateStrategy.type), cannot express a credential at
+all - the schema rejects any string before this check runs. That exclusion is
+falsifiable and was tested. The two scalars that DO carry a string pattern were
+tested the same way and both FAILED the test, so neither is excluded:
+serviceAccount.gcpServiceAccount's pattern accepts "AKIAIOSFODNN7EXAMPLE" as a
+local part because an AWS access key ID is [A-Z0-9]+, and hub.hubId's pattern
+"^\S(.*\S)?$" accepts a DSN. A grammar is only a guard if it excludes EVERY
+credential, not if one credential happens to fail it.
+*/}}
+{{- define "scion-hub.assertNoCredentialsInValues" -}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values "source" "values") }}
+{{- end }}
+
 {{- define "scion-hub.assertNoCredentialTree" -}}
 {{- $source := .source }}
 {{- $v := .value }}

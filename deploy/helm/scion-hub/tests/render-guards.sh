@@ -129,13 +129,27 @@ reject "DSN with userinfo"  "embeds credentials in a URL" --set 'hub.args[0]=--u
 reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAA'
 reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-AAAAAAAAAAAA'
 reject "AKIA prefix"        "shape of a credential"       --set 'hub.args[0]=--x=AKIAABCDEFGH1234'
-# A PEM header contains spaces, so the whitespace guard reaches it FIRST. Both
-# are rejections; asserting which message fires keeps the ordering honest rather
-# than letting the credential axis take credit for a catch it did not make.
-reject "PEM header (whitespace guard wins)" "contains whitespace" --set 'hub.args[0]=--x=-----BEGIN RSA PRIVATE KEY-----'
-# The PEM alternative is only reachable on argv through a non-flag-shaped entry.
-# Do not delete it as dead: the helper is shared, and Phase 1 and Phase 3 call it
-# on environment values where a multi-line PEM is legal and this is the catch.
+# ORDERING PIN. Both messages are rejections, and asserting WHICH one fires is
+# what keeps a guard from taking credit for a catch it did not make. This row
+# was "whitespace guard wins" until the credential check moved from a list of
+# named subtrees to a walk of the whole of .Values: the walk applies the VALUE
+# axis to hub.args before the argv guard runs at all, so the credential axis now
+# genuinely makes this catch rather than inheriting it.
+#
+# Nothing is given up by retargeting it. The walk shadows the VALUE axis ONLY -
+# measured, the whitespace and name axes still answer from the argv guard at
+# deployment.yaml, which is what the two whitespace rows and the underscore rows
+# above pin. Whitespace-on-argv reachability is therefore still asserted; it is
+# just no longer asserted through a PEM.
+#
+# One cost, recorded because it will confuse someone: helm cites the template it
+# was rendering when the walk failed, which is serviceaccount.yaml, not the
+# Deployment that owns argv. The message names values.hub.args[0] so the PATH is
+# right, but the FILE in the citation is not where the operator should look.
+reject "PEM header (value axis wins)"       "shape of a credential" --set 'hub.args[0]=--x=-----BEGIN RSA PRIVATE KEY-----'
+# Keep both PEM rows. They no longer differ in which guard catches them, but
+# they still differ in shape, and the helper is shared: Phase 1 and Phase 3 call
+# it on environment values where a multi-line PEM is legal and this is the catch.
 reject "PEM in a positional"                "shape of a credential" --set 'hub.args[0]=x=-----BEGIN RSA PRIVATE KEY-----'
 
 echo "== the failure message must not print what it caught =="

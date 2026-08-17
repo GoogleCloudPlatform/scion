@@ -25,17 +25,12 @@ limitations under the License.
 {{- end }}
 {{- end }}
 {{- /*
-   Every free-form operator-supplied subtree this template renders is checked for
-   credential material before it reaches the manifest. These land in pod-template
-   metadata and pod spec, which anyone with pod read access can read - a WIDER
-   audience than the RBAC on the Secret the credential should have come from.
+   Pod metadata and pod spec are readable by anyone with pod read access, which
+   is a WIDER audience than the RBAC on the Secret a credential should have come
+   from. The check covers the whole of .Values rather than the subtrees this
+   template happens to render - see its definition for why it is not a list.
 */}}
-{{- include "scion-hub.assertNoCredentialTree" (dict "value" $podAnnotations "source" "hub.podAnnotations") }}
-{{- include "scion-hub.assertNoCredentialTree" (dict "value" $podLabels "source" "hub.podLabels") }}
-{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.nodeSelector "source" "hub.nodeSelector") }}
-{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.tolerations "source" "hub.tolerations") }}
-{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.affinity "source" "hub.affinity") }}
-{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.resources "source" "hub.resources") }}
+{{- include "scion-hub.assertNoCredentialsInValues" . }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 apiVersion: apps/v1
 kind: Deployment
