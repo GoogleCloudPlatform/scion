@@ -1816,8 +1816,13 @@ Present is not enough; it has to be the value that stops migration, as a string.
 The top-level server: key, and it carries a load-bearing property that nothing
 else in this file would suggest.
 
-It is not only that the hub's configuration lives under it. It is that THE KEY'S
-PRESENCE IS WHAT MAKES --config INERT:
+It is not only that the hub's configuration lives under it. It is that EMITTING
+THIS KEY IS WHAT MAKES --config INERT. Not "--config is inert" - it is not, as a
+general fact, and writing it that way is how the property gets dropped. At Phase
+0 the flag is fully LIVE: that chart rendered no Secret and no ConfigMap, so no
+settings.yaml existed in the container at all, the global read below found
+nothing, and configPath was read. THIS PHASE IS THE ONE THAT MAKES IT INERT, by
+emitting this key, and drop the key and the flag returns to the Phase 0 state.
 
   LoadGlobalConfig            pkg/config/hub_config.go:628
   loadGlobalConfigFromSettings                        :640
@@ -1845,15 +1850,16 @@ overlay. A settings.yaml of only profiles and runtimes - a plausible
 minimisation, and one that would look like a simplification - is what opens
 them.
 
-A NO-OP WITH NO SIGNAL, WHICH IS WHY THIS ASSERTION IS THE ONLY WARNING THERE
-WILL EVER BE. --config is not marked deprecated - MarkDeprecated appears twice
-in cmd/server.go, :236 and :290, both for --production; the flag itself is a
-plain StringVarP at :237 - and the two warnings in the load path (:668, :678)
-are about a server.yaml beside settings.yaml, the second of them additionally
-requiring hasServerYAML(dir) (:1393), which this chart creates nowhere. So the
-flag is accepted and ignored in silence today, and tomorrow it takes effect in
-the same silence. The author of the refactor that flips this gets no runtime
-symptom to discover. They get this message, at render time, or they get nothing.
+IN THE INERT STATE IT IS A NO-OP WITH NO SIGNAL, WHICH IS WHY THIS ASSERTION IS
+THE ONLY WARNING THERE WILL EVER BE. --config is not marked deprecated -
+MarkDeprecated appears twice in cmd/server.go, :236 and :290, both for
+--production; the flag itself is a plain StringVarP at :237 - and the two
+warnings in the load path (:668, :678) are about a server.yaml beside
+settings.yaml, the second of them additionally requiring hasServerYAML(dir)
+(:1393), which this chart creates nowhere. So while this key is emitted the flag
+is accepted and ignored in silence, and without it it takes effect in the same
+silence. The author of the refactor that flips it gets no runtime symptom to
+discover. They get this message, at render time, or they get nothing.
 
 Non-nil is asserted, not merely present, because that is the condition the
 binary tests. `server:` with nothing under it satisfies hasKey and fails
@@ -1867,10 +1873,10 @@ The six keys below are nested under server: in V1ServerConfig. A file that
 places any of them at the top level parses, installs, and is silently not read.
 */}}
 {{- if not (hasKey $doc "server") }}
-{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes live, and it is Phase 0's reserved flag. The hub's global settings read succeeds today only because this key is here (:647); without it, loadGlobalConfigFromSettings consults the --config path instead (:648-659), where that path's own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). --config is silently accepted and ignored today - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
+{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0, which rendered no settings file at all, it was fully live. Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
 {{- end }}
 {{- if not (kindIs "map" (get $doc "server")) }}
-{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, silently accepted and ignored while this key is a map - becomes live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
+{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, live there, and silently accepted and ignored only while this chart emits this key as a map - returns to live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
 {{- end }}
 {{- range $key := list "notification_channels" "message_broker" "native_chat" "plugins" "scheduler" "github_app" }}
 {{- if hasKey $doc $key }}

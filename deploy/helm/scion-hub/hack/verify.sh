@@ -316,8 +316,12 @@ step "every rendered settings.yaml carries a top-level server: key"
 # what belongs under server:. This asserts that the key exists at all, in EVERY
 # permutation, and it is here because a Phase 0 guard is closed by it.
 #
-# --config / -c is reserved in hub.args. It does nothing today, and the reason
-# is ours: loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
+# --config / -c is reserved in hub.args, and at Phase 0 it was not merely
+# reserved, it was LIVE: that chart rendered no Secret and no ConfigMap, so the
+# container had no settings.yaml, the global read below found nothing and the
+# flag's path was read. THIS PHASE IS WHAT MAKES IT INERT, by emitting the
+# top-level server key, and the reason is ours end to end:
+# loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
 # GetGlobalDir() first and unconditionally, and consults the --config path only
 # `if !found` (:647-660). `found` is true exactly when
 # $HOME/.scion/settings.yaml parses AND has a non-nil top-level `server` key -
@@ -648,9 +652,12 @@ step "nothing points the hub at a second configuration file"
 # exactly when $HOME/.scion/settings.yaml parses AND carries a non-nil top-level
 # `server` key (loadServerFromSettingsFile, :1331, decided at :1344-1347).
 #
-# THE FLAG IS INERT TODAY BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT
-# BECAUSE OF ANYTHING IN THE BINARY. Every settings-bearing permutation renders a
-# top-level `server:` key, so `found` is true, so --config does nothing at all.
+# THE FLAG IS INERT BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT BECAUSE OF
+# ANYTHING IN THE BINARY, AND IT WAS LIVE AT PHASE 0. That chart rendered no
+# settings file, so `found` was false and configPath was read. Every
+# settings-bearing permutation here renders a top-level `server:` key, so `found`
+# is true and --config does nothing at all - a property this phase supplies and
+# no other phase can.
 #
 # NOTHING AT ALL, LITERALLY - NOT EVEN A WARNING, and it would be easy to write
 # "only warns" here and be wrong in the direction that matters. The flag is not
@@ -667,7 +674,8 @@ step "nothing points the hub at a second configuration file"
 #
 # Render a settings.yaml without the top-level key - a minimisation, a refactor
 # of the document's top-level shape, a phase that moves everything under a
-# profile - and `found` goes false and the flag takes effect. IN TWO FORMS, AND
+# profile - and `found` goes false, the deployment is back in the Phase 0 state,
+# and the flag takes effect. IN TWO FORMS, AND
 # NEITHER OF THEM IS A REDIRECT OF THE WHOLE LOAD. At :648-659 the --config
 # path's own directory is searched for a settings.yaml and, if it has a server
 # key, that file becomes the SOLE source of the server config. Failing that,
