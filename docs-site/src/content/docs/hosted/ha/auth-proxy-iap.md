@@ -94,7 +94,7 @@ During startup in Hosted HA mode, Scion performs strict preflight checks to vali
    - For **Cloud Run** audiences, Scion can automatically derive the Hub's public URL format from the audience.
    - For **GCLB/GKE** backend-service audiences, Scion *cannot* automatically derive the public endpoint URL because a backend service ID does not contain regional or routing information. You **must explicitly configure the public URL** using the `SCION_SERVER_BASE_URL` environment variable (or `server.hub.public_url` / `SCION_SERVER_HUB_PUBLIC_URL`). If missing, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents:
      ```
-     Warning: GKE/GCLB IAP audience detected but SCION_SERVER_BASE_URL not set; hub endpoint will fall back to localhost which is likely unreachable from dispatched agents
+     Warning: hosted HA deployment has no explicit hub base URL; falling back to http://localhost:8080, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.
      ```
 :::
 

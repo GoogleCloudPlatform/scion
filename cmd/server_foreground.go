@@ -949,10 +949,17 @@ func validateHostedBasic(cfg *config.GlobalConfig) {
 	}
 }
 
+// validateHostedHAPreflight fails startup closed when a hosted multi-instance
+// deployment is configured in a way that is not HA-safe.  It has two parts:
+// universal HA consistency checks that apply to every multi-instance
+// deployment regardless of auth mode, and IAP checks that apply only when IAP
+// is the auth frontend (auth.mode=proxy).
 func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	if !hostedHAGuardsRequired(cfg) {
 		return nil
 	}
+
+	// --- Universal HA consistency checks (all auth modes) ---
 
 	// Require an explicitly configured hub_id so all instances share the same
 	// GCS prefix, secret scopes, and DB lookups. Without this, each Cloud Run
@@ -977,59 +984,67 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 		return fmt.Errorf("hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET")
 	}
 
-	if cfg.Auth.Mode != "proxy" {
-		return fmt.Errorf("hosted HA deployment requires server.auth.mode=proxy for IAP authentication; got %q", cfg.Auth.Mode)
-	}
-	if cfg.Auth.Proxy == nil || cfg.Auth.Proxy.Provider != "iap" {
-		provider := ""
-		if cfg.Auth.Proxy != nil {
-			provider = cfg.Auth.Proxy.Provider
+	// --- IAP-specific validation (proxy mode only) ---
+	// When auth.mode is not "proxy", the hub handles authentication directly
+	// (OAuth/OIDC). Cross-replica session consistency is provided by the
+	// shared session secret (checked above) and stateless encrypted cookies.
+	// No IAP infrastructure config is needed, so IAP is not required for HA.
+	if cfg.Auth.Mode == "proxy" {
+		if cfg.Auth.Proxy == nil || cfg.Auth.Proxy.Provider != "iap" {
+			provider := ""
+			if cfg.Auth.Proxy != nil {
+				provider = cfg.Auth.Proxy.Provider
+			}
+			return fmt.Errorf("hosted HA deployment requires server.auth.proxy.provider=iap; got %q", provider)
 		}
-		return fmt.Errorf("hosted HA deployment requires server.auth.proxy.provider=iap; got %q", provider)
-	}
-	if cfg.Auth.Proxy.IAP == nil || strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience) == "" {
-		return fmt.Errorf("hosted HA deployment requires server.auth.proxy.iap.audience")
-	}
-	proxyAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")
-	if !isSupportedIAPAudience(proxyAudience) {
-		return fmt.Errorf("hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got %q", proxyAudience)
-	}
-	// Normalize the audience in-place so downstream consumers (IAP JWT
-	// validation, endpoint derivation) see the trimmed value.  Without this
-	// a trailing slash would pass preflight but cause a runtime audience
-	// mismatch in IAP token verification.
-	cfg.Auth.Proxy.IAP.Audience = proxyAudience
-	// The GKE + GCLB bootstrap flow deliberately allows a placeholder audience
-	// on the first deploy, because the backend-service ID only exists once the
-	// ingress has reconciled.  Preflight stays non-fatal for that case, but an
-	// operator who never completes the follow-up upgrade would otherwise get a
-	// hub that looks healthy and 401s every real request.
-	if isLikelyPlaceholderAudience(proxyAudience) {
-		log.Printf("WARNING: IAP audience %q looks like a bootstrap placeholder. "+
-			"IAP token validation will FAIL on real requests until a valid "+
-			"backend-service audience is configured. After your ingress "+
-			"reconciles, update auth.proxy.iap.audience with the real "+
-			"backend-service ID and restart.", proxyAudience)
-	}
+		if cfg.Auth.Proxy.IAP == nil || strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience) == "" {
+			return fmt.Errorf("hosted HA deployment requires server.auth.proxy.iap.audience")
+		}
+		proxyAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")
+		if !isSupportedIAPAudience(proxyAudience) {
+			return fmt.Errorf("hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got %q", proxyAudience)
+		}
+		// Normalize the audience in-place so downstream consumers (IAP JWT
+		// validation, endpoint derivation) see the trimmed value.  Without this
+		// a trailing slash would pass preflight but cause a runtime audience
+		// mismatch in IAP token verification.
+		cfg.Auth.Proxy.IAP.Audience = proxyAudience
+		// The GKE + GCLB bootstrap flow deliberately allows a placeholder audience
+		// on the first deploy, because the backend-service ID only exists once the
+		// ingress has reconciled.  Preflight stays non-fatal for that case, but an
+		// operator who never completes the follow-up upgrade would otherwise get a
+		// hub that looks healthy and 401s every real request.
+		if isLikelyPlaceholderAudience(proxyAudience) {
+			log.Printf("WARNING: IAP audience %q looks like a bootstrap placeholder. "+
+				"IAP token validation will FAIL on real requests until a valid "+
+				"backend-service audience is configured. After your ingress "+
+				"reconciles, update auth.proxy.iap.audience with the real "+
+				"backend-service ID and restart.", proxyAudience)
+		}
 
-	if cfg.Auth.Transport == nil {
-		return fmt.Errorf("hosted HA deployment requires server.auth.transport; do not use server.transport")
-	}
-	if cfg.Auth.Transport.Mode != "iap" {
-		return fmt.Errorf("hosted HA deployment requires server.auth.transport.mode=iap; got %q", cfg.Auth.Transport.Mode)
-	}
-	transportAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Transport.OIDCAudience), "/")
-	if transportAudience == "" {
-		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
-	}
-	// Note: transport.oidc_audience and proxy.iap.audience are intentionally
-	// allowed to differ. proxy.iap.audience is the IAP audience resource path
-	// (Cloud Run or GCLB) used for validating incoming IAP-signed JWTs, while
-	// transport.oidc_audience is the audience minted into OIDC tokens for
-	// dispatched agents (typically the IAP OAuth client ID). IAP requires
-	// the OAuth client ID format for token validation, not the resource path.
-	if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
-		return fmt.Errorf("hosted HA deployment requires server.auth.transport.platform_auth_sa")
+		if cfg.Auth.Transport == nil {
+			return fmt.Errorf("hosted HA deployment requires server.auth.transport; do not use server.transport")
+		}
+		if cfg.Auth.Transport.Mode != "iap" {
+			return fmt.Errorf("hosted HA deployment requires server.auth.transport.mode=iap; got %q", cfg.Auth.Transport.Mode)
+		}
+		transportAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Transport.OIDCAudience), "/")
+		if transportAudience == "" {
+			return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
+		}
+		// Normalize in-place so downstream consumers (token minting,
+		// validation) see the trimmed value — matching the proxy audience
+		// normalization above.
+		cfg.Auth.Transport.OIDCAudience = transportAudience
+		// Note: transport.oidc_audience and proxy.iap.audience are intentionally
+		// allowed to differ. proxy.iap.audience is the IAP audience resource path
+		// (Cloud Run or GCLB) used for validating incoming IAP-signed JWTs, while
+		// transport.oidc_audience is the audience minted into OIDC tokens for
+		// dispatched agents (typically the IAP OAuth client ID). IAP requires
+		// the OAuth client ID format for token validation, not the resource path.
+		if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
+			return fmt.Errorf("hosted HA deployment requires server.auth.transport.platform_auth_sa")
+		}
 	}
 
 	return nil
@@ -1391,17 +1406,13 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 
 	// In hosted mode with IAP authentication, derive the Cloud Run URL from
 	// the IAP audience. This prevents the localhost:8080 fallback which is
-	// unreachable from GKE-dispatched agents.
+	// unreachable from GKE-dispatched agents. GCLB/GKE audiences carry no
+	// routing information and cannot be converted to a URL, so they fall
+	// through to the HA warning below.
 	if hostedMode && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
 		if cloudRunURL := iapAudienceToCloudRunURL(cfg.Auth.Proxy.IAP.Audience); cloudRunURL != "" {
 			log.Printf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
 			return cloudRunURL
-		}
-		// GCLB/GKE audiences cannot be used to derive a URL; warn if no
-		// explicit base URL was provided (all earlier return paths above
-		// would have caught an explicit one).
-		if isSupportedIAPAudience(strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")) {
-			log.Println("Warning: GKE/GCLB IAP audience detected but SCION_SERVER_BASE_URL not set; hub endpoint will fall back to localhost which is likely unreachable from dispatched agents")
 		}
 	}
 
@@ -1410,6 +1421,14 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		port = webPort
 	}
 	hubEndpoint := fmt.Sprintf("http://localhost:%d", port)
+	// Any hosted multi-instance deployment reaching this fallback has no
+	// usable public URL: dispatched agents would resolve the loopback address
+	// inside their own container. This is not specific to IAP — a GCLB
+	// audience cannot be converted to a URL, and a hub doing its own
+	// OAuth/OIDC has no audience to derive one from at all.
+	if hostedHAGuardsRequired(cfg) {
+		log.Printf("Warning: hosted HA deployment has no explicit hub base URL; falling back to %s, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.", hubEndpoint)
+	}
 	if enableDebug {
 		log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
 	}
