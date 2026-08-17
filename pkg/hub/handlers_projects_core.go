@@ -2495,9 +2495,13 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	}
 
 	// The old slug is now unreachable, so its ephemeral-path warning
-	// suppression can never be consulted again — drop it. This has to run
-	// after the hubManagedProjectPath(oldSlug) call above, which can itself
-	// re-record oldSlug as warned.
+	// suppression can never be consulted again — drop it, or a later project
+	// reusing the slug inherits the suppression and never warns.
+	//
+	// As in deleteProject, this has to be the last read of oldSlug. The
+	// hubManagedProjectPath(oldSlug) call above re-records it on
+	// gke-shared-volume, where that resolution takes the warning path, so an
+	// eviction placed before it is undone by it.
 	s.warnedEphemeralProjects.Delete(oldSlug)
 }
 
@@ -2610,6 +2614,13 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// Same reason, keyed by slug rather than ID: drop the once-per-project
 	// ephemeral-path warning suppression so a slug that is deleted and later
 	// recreated warns again instead of inheriting the old suppression.
+	//
+	// Order matters, and not marginally. The hubManagedProjectPath call above
+	// can re-record this slug: on gke-shared-volume it takes the legacy-local
+	// fallback and warns, and a project served from that fallback is exactly
+	// the population that has an entry here — so evicting before that call
+	// would reliably reinstate the entry it just removed, not occasionally.
+	// The eviction has to be the last read of the slug, not the first.
 	s.warnedEphemeralProjects.Delete(project.Slug)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).

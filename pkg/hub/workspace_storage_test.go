@@ -1214,22 +1214,57 @@ func TestWebDAVSafetyGate_ReadMethodsAllowed(t *testing.T) {
 // Otherwise a slug that is deleted and recreated — or reused by a different
 // project — silently inherits the old suppression and never warns, on a
 // deployment that is still writing to ephemeral storage.
+//
+// Configured against gke-shared-volume on purpose, and asserted immediately
+// after the delete returns. deleteProject resolves the slug itself on its way
+// to removing the directory; under any other backend that resolution never
+// reaches the warning, and an eviction placed before it would pass. Totals at
+// the end of the test cannot tell the two placements apart, because a
+// misplaced eviction is followed by a warn that re-records the slug and
+// suppresses the later one — same count, opposite behavior.
 func TestWarnEphemeralProjectPath_SuppressionClearedOnProjectDelete(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
 	srv, _ := testServer(t)
 	logs := captureProjectsLog(t, srv)
 
-	project, _ := createTestHubManagedProject(t, srv, "Ephemeral Warn Delete")
+	// Created before the backend is configured, so its content is on the local
+	// path — the legacy deployment this fallback exists for.
+	project, localDir := createTestHubManagedProject(t, srv, "Ephemeral Warn Delete")
+	seedLocal := func() {
+		require.NoError(t, os.MkdirAll(localDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
+	}
+	seedLocal()
 
-	srv.warnEphemeralProjectPath(project.Slug, "/local", "/mnt/vol")
-	srv.warnEphemeralProjectPath(project.Slug, "/local", "/mnt/vol")
-	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"),
-		"the warning is suppressed after the first call")
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	path, err := srv.hubManagedProjectPath(project.Slug)
+	require.NoError(t, err)
+	require.Equal(t, localDir, path)
+	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	// The slug is recreated and hits the same fallback.
-	srv.warnEphemeralProjectPath(project.Slug, "/local", "/mnt/vol")
+	// The delete resolves the slug once more to find the directory to remove.
+	// That resolution must still be suppressed, which is only true if the
+	// eviction runs after it.
+	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"),
+		"the delete's own path resolution must not re-warn, and must not re-record the slug")
+
+	// The slug is now free and taken by a new project with local content.
+	seedLocal()
+	_, err = srv.hubManagedProjectPath(project.Slug)
+	require.NoError(t, err)
 	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"),
 		"deleting the project should clear its warning suppression")
 }
