@@ -60,16 +60,24 @@
 # field of a multi-field output has tested one field; the rest is decoration you
 # have trained yourself to skim.
 #
-#   MM0  clean                                 exit 0  4/4  107/107  meta 0
-#   MM1  unenumerated script on disk           exit 2  4/4  107/107  meta 2
-#   MM2  EXPECTED_SCRIPTS=5                    exit 2  4/5  107/107  meta 2
-#   MM3  EXPECTED_ASSERTIONS=108               exit 2  4/4  107/108  meta 1
-#   MM4  enumerated script missing             exit 2  3/4  103/107  meta 4
-#   MM5  assertion dropped + own total lowered exit 2  4/4  106/107  meta 1
-#   MM6  a real assertion failure              exit 1  4/4  107/107  meta 0
-#   MM7  helm absent from PATH                 exit 2  0/4    0/107  meta 1
-#   MM8  a script emits no count line          exit 2  4/4  103/107  meta 2
-#   MM9  named exception missing from disk     exit 2  4/4  107/107  meta 2
+# RE-DERIVE, DO NOT EDIT: bash hack/run-all-mutations.sh. The rows below were
+# printed by that script and pasted; it asserts it produced exactly ten of them.
+# The numbers here were 107 for a while after the total moved to 127, because
+# the original driver lived in a scratch directory and was thrown away - a
+# measurement whose apparatus is not shipped decays into a quotation, and this
+# table is where that was demonstrated rather than argued.
+#
+#   MEASURED 2026-08-17T08:53:04Z, helm v3.16.3+gcfd0749
+#   MM0    clean                                  exit 0  4/4   127/127   meta 0
+#   MM1    unenumerated script on disk            exit 2  4/4   127/127   meta 2
+#   MM2    EXPECTED_SCRIPTS=5                     exit 2  4/5   127/127   meta 2
+#   MM3    EXPECTED_ASSERTIONS=128                exit 2  4/4   127/128   meta 1
+#   MM4    enumerated script missing              exit 2  3/4   123/127   meta 4
+#   MM5    assertion dropped + own total lowered  exit 2  4/4   126/127   meta 1
+#   MM6    a real assertion failure               exit 1  4/4   127/127   meta 0
+#   MM7    helm absent from PATH                  exit 2  0/4   0/127     meta 1
+#   MM8    a script emits no count line           exit 2  4/4   123/127   meta 2
+#   MM9    named exception missing from disk      exit 2  4/4   127/127   meta 2
 #
 # MM5 is why EXPECTED_ASSERTIONS duplicates each script's own total: the mutated
 # script alone reports PASS 3/3 and exits 0. MM6 and MM7 are the pair that keeps
@@ -90,7 +98,9 @@
 #
 # The mutation driver is not in this directory: it copies the tree and edits the
 # copies, so it is not an assertion script and enumerating it here would be a
-# category error. It is mirrored to verification/ instead. Absence is deliberate.
+# category error. It is hack/run-all-mutations.sh - IN THE REPOSITORY, which it
+# was not, and its absence is reported by the hack/ gate near the bottom of this
+# file rather than left to be noticed.
 #
 # NO CI WIRING, deliberately, same as the scripts it runs. Phase 6 owns that.
 #
@@ -306,6 +316,16 @@ done
 # Phase 6 owns CI wiring and may move this; it must not delete it without
 # replacing the coverage.
 EXPECTED_VERIFY_ASSERTIONS=222
+# hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
+# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Two
+# files, both stated: verify.sh, gated below, and run-all-mutations.sh, which is
+# the driver that produces the MM table at the top of this file. That driver is
+# not run from here - it copies this tree ten times and each copy runs this
+# script, so it would recurse and it takes minutes - but its ABSENCE is reported,
+# because the MM table was already stale once and the reason was that its
+# apparatus lived in a scratch directory and was thrown away.
+_mm_driver="${HERE}/../hack/run-all-mutations.sh"
+[ -f "$_mm_driver" ] || note "hack/run-all-mutations.sh is missing: the MM table at the top of this file can no longer be re-derived, so its numbers are now quotations."
 _verify="${HERE}/../hack/verify.sh"
 if [ ! -f "$_verify" ]; then
   note "hack/verify.sh is missing, so the golden files and the settings-leaf probe were not checked at all."
