@@ -113,7 +113,13 @@ hub:
     runAsUser: 1000
     runAsGroup: 1000
 
+  # scion.io/hub-id is rendered by the chart and is rejected here.
   podAnnotations: {}
+  # Extra labels on the hub pod, for organisations that mandate cost-allocation
+  # or network-policy labels. Selector labels are rejected: a Deployment's
+  # selector is immutable, so overriding one breaks the Deployment rather than
+  # relabelling it.
+  podLabels: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}

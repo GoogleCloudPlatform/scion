@@ -6,6 +6,10 @@
   "additionalProperties": false,
   "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime"],
   "properties": {
+    "global": {
+      "type": "object",
+      "description": "Reserved by Helm for umbrella charts and unused by this chart. It must be declared: Helm merges an umbrella chart's .Values.global into every subchart and then validates the merged values against the subchart's own schema, so without this property any parent that sets any global key makes this chart impossible to depend on, with an error naming global rather than anything the operator wrote."
+    },
     "nameOverride": {
       "type": "string"
     },
@@ -54,7 +58,16 @@
         "pullSecrets": {
           "type": "array",
           "items": {
-            "type": "object"
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "description": "Each entry is {name: <secret>}. Typed strictly because a misspelling here validates as a bare object and then silently pulls nothing."
           }
         }
       }
@@ -102,7 +115,15 @@
           }
         },
         "podAnnotations": {
-          "type": "object"
+          "type": "object",
+          "description": "Free-form annotations on the hub pod. scion.io/hub-id is rejected: it is rendered from hub.hubId and a second source for the hub's identity is the divergence the explicit hub ID exists to prevent."
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Free-form labels on the hub pod, for organisations that mandate cost-allocation or network-policy labels. Selector labels are rejected: a Deployment's selector is immutable after creation, so overriding one produces a Deployment that either fails to update or adopts no pods. Values must be strings; a bare number here is not a valid label value to Kubernetes."
         },
         "nodeSelector": {
           "type": "object"

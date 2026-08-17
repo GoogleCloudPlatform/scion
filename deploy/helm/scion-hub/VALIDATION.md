@@ -26,7 +26,8 @@ Numbering follows the design document's whole-chart acceptance list (§18, items
 
 ### 14. Two-step install under `auth.mode: proxy` (IAP)
 
-Run the two-step install from `NOTES.txt`: `helm install` with
+Run the two-step install from `NOTES.txt` (that runbook arrives with the ingress
+change; it is not in `NOTES.txt` yet): `helm install` with
 `bootstrap.deferHub=true`, wait for the Ingress to get an address, read the
 backend-service ID, then `helm upgrade` with `iap.audience` set.
 
@@ -168,3 +169,31 @@ Then run the same install with a hub image built from the root `Dockerfile` with
 `--target hub-gke` and confirm the pod schedules and `/readyz` returns 200.
 Confirm the files it creates on the workspace share are owned by
 `hub.securityContext.runAsUser` and `runAsGroup`, not by uid 0.
+
+That positive direction is stated more precisely in the image and storage
+checks below, which were relocated separately. Run them as a pair with this one.
+This check establishes that the wrong image is **refused**; those establish that
+the right image is **admitted and serves**. An operator who runs only one of the
+two learns half of it — a cluster that refuses everything passes this check and
+is completely broken.
+
+### Image build and workspace storage
+
+Relocated with the same reasoning, and stated here in the words of the phase
+that owns them: there is no cluster in this environment; `runAsNonRoot`
+admission is kubelet behaviour and Docker locally is not a pod; and NFS
+ownership depends on the share, the mount options and `fsGroup`, none of which
+exist outside a cluster.
+
+- [ ] Deploy the chart and confirm the hub pod reaches Ready with
+      `securityContext.runAsNonRoot: true` set -- `kubectl get pod -l
+      app.kubernetes.io/name=scion-hub` shows Running, not
+      `CreateContainerConfigError`. Then from inside the cluster
+      `curl -s -o /dev/null -w '%{http_code}' http://<svc>:8080/readyz` returns 200.
+      (Exact path `/readyz`. Not a prefixed variant, and not the endpoint that
+      answers 200 unconditionally.)
+
+- [ ] With the Filestore share mounted, make the hub write to it (start it, or
+      `touch` a file under the mounted path as the hub's uid) and confirm
+      `ls -n` on the share shows the new files owned by the numeric `nfs.uid` /
+      `nfs.gid` configured in `values.yaml` -- not `0:0`, and not `root:root`.

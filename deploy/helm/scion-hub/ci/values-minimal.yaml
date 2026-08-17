@@ -19,6 +19,27 @@
 # Everything else in this file is deliberately absent. Keys for configuration
 # intake, Cloud SQL, Filestore and Ingress do not exist yet, and the schema
 # rejects keys the chart does not understand.
+#
+# CI: EVERY helm lint AND helm template INVOCATION MUST PASS -f ON THIS FILE.
+#
+# Bare `helm lint --strict .` fails, with:
+#
+#     scion-hub:
+#     - image: repository is required
+#     - hub: hubId is required
+#
+# That is the chart working correctly, not a defect. Both values are required
+# with no default on purpose - there is no correct default hub image and no
+# safe generated hub ID - and `helm lint` does not read this directory on its
+# own (only `ct lint` does, via its own configuration).
+#
+# So: if a lint or template step fails with either of those two messages, the
+# fix is to add `-f ci/values-minimal.yaml` to the command. THE FIX IS NOT TO
+# GIVE image.repository OR hub.hubId A DEFAULT IN values.yaml. Doing that would
+# silently undo the two decisions this chart most depends on: a default image
+# reference cannot be correct and would turn an install-time error into a
+# runtime mystery, and a defaulted hub ID re-scopes blob storage prefixes and
+# secrets on upgrade.
 
 # Explicit, stable, operator-supplied. The chart has no default for this and
 # never generates one.

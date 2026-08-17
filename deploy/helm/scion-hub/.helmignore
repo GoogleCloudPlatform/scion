@@ -1,0 +1,21 @@
+# Patterns to ignore when building packages.
+# Matched against the relative path, supports shell glob, one pattern per line.
+
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+
+# CI fixture values. These exist to be passed to helm lint and helm template
+# with -f; they are not defaults and must never be mistaken for them, least of
+# all inside a packaged chart where image.repository points at an example
+# registry path that does not exist.
+ci/
+
+# VALIDATION.md is deliberately NOT ignored. It is the record of which
+# acceptance criteria have never been run, and it is most useful to exactly the
+# person who has a packaged chart and a real cluster.

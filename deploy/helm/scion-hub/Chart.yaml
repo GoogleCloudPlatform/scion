@@ -17,6 +17,14 @@ name: scion-hub
 description: The Scion hub and its in-process runtime broker, for Google Kubernetes Engine.
 type: application
 
+# Declared now rather than when it first bites. The hub deployment needs native
+# sidecar containers (init containers with restartPolicy: Always), which are
+# only honoured from 1.29 - below that the API server accepts the field and the
+# container runs as a plain init container that never exits, so the pod hangs in
+# Init with no error. Failing the install with a version message is cheaper than
+# diagnosing that.
+kubeVersion: ">=1.29.0-0"
+
 # The chart's own version. Bumped independently of appVersion.
 version: 0.1.0
 

@@ -14,8 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 {{- $hubId := include "scion-hub.hubId" . }}
-{{- if hasKey .Values.hub.podAnnotations "scion.io/hub-id" }}
+{{- $podAnnotations := .Values.hub.podAnnotations | default dict }}
+{{- $podLabels := .Values.hub.podLabels | default dict }}
+{{- if hasKey $podAnnotations "scion.io/hub-id" }}
 {{- fail "hub.podAnnotations may not set scion.io/hub-id: it is rendered from hub.hubId and a second source for the hub's identity is exactly the divergence the explicit hub ID exists to prevent." }}
+{{- end }}
+{{- range $k := keys (include "scion-hub.selectorLabels" . | fromYaml) }}
+{{- if hasKey $podLabels $k }}
+{{- fail (printf "hub.podLabels may not set %s: it is a selector label, and a Deployment's selector is immutable after creation, so overriding it here produces a Deployment that either fails to update or adopts no pods." $k) }}
+{{- end }}
 {{- end }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 apiVersion: apps/v1
@@ -40,6 +47,9 @@ spec:
     metadata:
       labels:
         {{- include "scion-hub.labels" . | nindent 8 }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         {{- /*
         The hub ID the operator supplied, verbatim, from the same helper every
@@ -48,9 +58,26 @@ spec:
         label character set. Changing it rolls the pods, which is correct: the
         hub's identity, and with it its storage prefixes and secret scopes, has
         changed.
+
+        Two things about this annotation that are easy to get wrong later.
+
+        It records the operator's INTENT, not an observation of the hub. Nothing
+        in this chart yet feeds hub.hubId into the running process - the
+        settings file that does arrives with the configuration rendering - so
+        until then the hub's actual ID is still hostname-derived and this
+        annotation can legitimately disagree with it. Do not read it as a
+        control or as a status field.
+
+        The prefix is deliberate. This repository has two pod-annotation
+        conventions: agent pods use a bare "scion.<name>" form (see
+        pkg/runtime/k8s_runtime.go), and this is the domain-qualified
+        "scion.io/<name>" form that the rest of the project's Kubernetes
+        metadata uses. Domain-qualified is the correct one and is what later
+        additions here should follow; the bare form on agent pods is not a
+        precedent to copy.
         */}}
         scion.io/hub-id: {{ $hubId | quote }}
-        {{- with .Values.hub.podAnnotations }}
+        {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
