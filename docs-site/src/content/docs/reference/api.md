@@ -63,6 +63,8 @@ Uploads are accepted or refused **per file**, and the response reports both outc
 }
 ```
 
+`size` is the stored file's length in bytes — the example assumes a 34-byte `compose.yaml` — while `id` and `url` are elided here because both are assigned per upload.
+
 Status codes:
 - `201 Created` — **at least one** file was stored. `failures` may be non-empty. Previously a single bad file failed the whole batch with `400` and stored nothing; clients that treat `201` as "all files stored" must now read `failures`, or they will drop files silently.
 - `400 Bad Request` — nothing was stored and the caller can fix it (blocked extension, unaccepted type, oversized file).
