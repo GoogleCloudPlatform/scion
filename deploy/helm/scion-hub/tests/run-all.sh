@@ -119,8 +119,20 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=173   # 35 chart-integrity + 57 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
+EXPECTED_ASSERTIONS=179   # 35 chart-integrity + 63 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
+# 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
+# CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
+# tests/stale-claim-triage.md; NOT_EXECUTABLE was emptied to match, so the
+# set-difference check went on passing clean, and only the COUNT was left
+# stale at 7. The two constants above came out of the same conflict hunk and
+# answer to different facts - one was right and one was not, and taking a
+# hunk takes both without being asked which. Both are re-derived here:
+#   ls -1 deploy/helm/scion-hub/tests | wc -l                          -> 6
+#   for s in chart-integrity render-guards reserved-flags update-strategy; \
+#     do bash tests/$s.sh; done, reading each script's own total       -> 35 61 31 4
+# I told two agents that EXPECTED_ASSERTIONS was certain to move and it did
+# not; the pin that had silently moved was the other one on the same line.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
 # present and could never notice that something is absent.
@@ -176,10 +188,22 @@ note() { echo "META  $*"; meta_fail=$((meta_fail + 1)); }
 # it was aimed at has tested one field and skimmed the rest. Every exit from
 # this script prints scripts, assertions and meta-failures, so no outcome can be
 # reported by a subset of the numbers that describe it.
+#
+# 🔴 [HISTORY 2026-08-17] AND UNTIL TODAY IT DID NOT PRINT real_failure, WHICH IS
+# THE ONE FIELD THAT SEPARATES "NOTHING RAN" FROM "SOMETHING WENT RED". The
+# paragraph above is the standard this line was failing: a run with a stale
+# gate list and a wrong EXPECTED_FILES printed
+#
+#     scripts: 4/4   assertions: 127/127   meta-failures: 1
+#
+# and I read my own summary and reported ONE defect to two agents, because the
+# second one had no field to appear in. gd-p1-rev found it by planting
+# EXPECTED_FILES=6 and watching rc go 2 -> 1 with the gate walk still red. TWO
+# INDEPENDENT DEFECTS, TWO DIFFERENT EXIT CODES, ONE VISIBLE NUMBER.
 summary() {  # <ran> <assertions>
   echo
   echo "================================================================"
-  echo "scripts: ${1}/${EXPECTED_SCRIPTS}   assertions: ${2}/${EXPECTED_ASSERTIONS}   meta-failures: ${meta_fail}"
+  echo "scripts: ${1}/${EXPECTED_SCRIPTS}   assertions: ${2}/${EXPECTED_ASSERTIONS}   meta-failures: ${meta_fail}   scripts-red: ${real_failure:-0}"
 }
 
 # --- pre-flight: the toolchain ------------------------------------------------
@@ -319,7 +343,7 @@ done
 # gets its own committed number, failing in both directions like the others.
 # Phase 6 owns CI wiring and may move this; it must not delete it without
 # replacing the coverage.
-EXPECTED_VERIFY_ASSERTIONS=274
+EXPECTED_VERIFY_ASSERTIONS=278
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
 # NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Two
 # files, both stated: verify.sh, gated below, and run-all-mutations.sh, which is
@@ -401,11 +425,12 @@ else
     #
     # MEASURED, three arms, [HISTORY 2026-08-17] all three previously reported as "the chart is wrong":
     #   gate name drifted, a genuine test failure  -> --- FAIL, --- committed,
-    #                                                 --- derived now.  POSITIVE
-    #                                                 CONTROL: the filter works
-    #                                                 for the case it was written
-    #                                                 for, so this fix must not
-    #                                                 capture it.
+    #                                                 --- derived now. 🔴 [HISTORY
+    #                                                 2026-08-17] THIS ROW WAS
+    #                                                 LABELLED "POSITIVE CONTROL:
+    #                                                 the filter works for the
+    #                                                 case it was written for."
+    #                                                 IT WAS FALSE. See below.
     #   syntax error planted                       -> [setup failed]; the
     #                                                 compiler's own
     #                                                 `cmd/...go:564:16: expected
@@ -416,15 +441,41 @@ else
     # the test is on the FILTER'S OUTPUT rather than on a list of toolchain
     # phrases: a build failure this list does not enumerate still produces no
     # diagnostic, and a hand-listed set of compiler messages is the enumeration
-    # that quietly stops being complete. Both limbs print $_gout WHOLE, because
-    # the entire complaint here is that a filter ate the explanation.
+    # that quietly stops being complete.
+    #
+    # 🛑 [HISTORY 2026-08-17] AND THAT SENTENCE CONDEMNED THE FILTER ONE LINE
+    # BELOW IT, WHICH NOBODY NOTICED FOR A DAY. `^ *---|^(ok|FAIL)` IS a
+    # hand-listed enumeration that quietly stopped being complete - and it
+    # stopped being complete for the ASSERTION-FAILURE limb, the one limb that
+    # carries every real finding this test will ever produce. gd-p1-rev ran the
+    # case for real on 2026-08-17 and measured it: of 342 lines, SIX survived.
+    # What the operator saw was
+    #
+    #     --- FAIL: TestHelmChartHAGateWalk
+    #             --- committed
+    #             --- derived now
+    #
+    # two section headers with nothing between them, which reads as "the two
+    # sides agree" - the exact opposite of what happened. Eaten by name: the
+    # test's own sentence "ha-gates.txt is stale. The hub's preflight no longer
+    # produces the committed gate list", both TERMINATED lines carrying the gate
+    # counts, and all four "===== settings-oauth.yaml" arm headers.
+    #
+    # 🛑 THE CONTROL ABOVE ASSERTED THAT THE THREE MARKERS SURVIVED. IT NEVER
+    # ASSERTED THAT ANYTHING SURVIVED BETWEEN THEM. A control that checks the
+    # frame arrived has not checked that the contents did, and it passes loudest
+    # in exactly the case the filter destroys.
+    #
+    # So all three limbs now print $_gout WHOLE. An allow-list that stops being
+    # complete prints nothing; that is the failure mode that got us here, and
+    # there is no reason this limb should be the one that keeps it.
     _gfiltered="$(printf '%s\n' "$_gout" | grep -E 'HARNESS ERROR|VACUOUS|^ *---|^(ok|FAIL)')" || true
     if [ "$_grc" -ne 0 ] && { printf '%s\n' "$_gout" | grep -qE '\[setup failed\]|\[build failed\]|^go: ' || [ -z "$_gfiltered" ]; }; then
       note "go test ./cmd exited ${_grc} without running a test - the package did not build or the module was not found. This is a fault in the instrument, not a finding about the chart, so it is a meta-failure and NOT a chart failure. Full output follows."
       printf '%s\n' "$_gout" | sed 's/^/    /'
     elif [ "$_grc" -ne 0 ]; then
-      echo ">>> cmd/helm_chart_ha_contract_test.go: FAILED (exit ${_grc})"
-      printf '%s\n' "$_gfiltered" | sed 's/^/    /'
+      echo ">>> cmd/helm_chart_ha_contract_test.go: FAILED (exit ${_grc}). Full output follows; it is not filtered, because the filter that used to stand here reduced this case to two empty section headers."
+      printf '%s\n' "$_gout" | sed 's/^/    /'
       real_failure=1
     else
       echo ">>> cmd/helm_chart_ha_contract_test.go: ok (${_ct} tests; hack/ha-gates.txt re-derived and unchanged)"

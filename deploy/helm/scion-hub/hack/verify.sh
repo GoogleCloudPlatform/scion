@@ -143,7 +143,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=274
+EXPECTED_TOTAL=278
 
 failures=0
 assertions=0
@@ -1076,6 +1076,97 @@ for _p in "${HA_GATE_PATTERNS[@]}"; do
   fi
 done
 
+# --------------------------------------------------------------------------
+# EXCLUSIVITY, WHICH IS THE HALF THAT WAS MISSING, AND THE DEFECT IT LET THROUGH.
+#
+# The loop above asserts NOTES names every gate the walk FOUND. That is
+# completeness, and completeness is structurally blind to an EXTRA. A sentence
+# naming a gate the hub has DELETED is an extra, so it stayed green across
+# 1b3c9418 "fix: do not require IAP for hosted HA preflight": this chart went on
+# telling operators that auth.mode: oauth "refuses on one gate more,
+# server.auth.mode: proxy" after the hub had moved its IAP gates inside
+# `if cfg.Auth.Mode == "proxy"` and stopped checking any of them for oauth.
+# gd-p2-dev found it by rebasing onto this branch. This suite did not find it,
+# and this is the assertion whose absence is why.
+#
+# THIS IS NOT A NEW IDEA, IT IS AN IDEA REACHING ITS SECOND CALL SITE. The same
+# reasoning is already written into _helpers.tpl about the REFUSAL string - "the
+# previous guard only checked that nothing was missing, so this message could
+# name a gate the hub had deleted and stay green". I wrote that and did not
+# carry it here. A rule stated at one call site does not protect the others.
+#
+# BOTH ARMS, AND THE REASON IS NOT SYMMETRY. The proxy arm was never wrong.
+# Checking only the arm that was correct is exactly how this survived.
+#
+# WHY THIS TAKES AN OUT-FILE INSTEAD OF RETURNING ON STDOUT. meta_failure exits,
+# and `exit` inside $( ) leaves only the SUBSHELL: the meta-failure prose becomes
+# the return value and the caller carries on with it as data. I have hit that bug
+# in this branch already, twenty lines below a comment I had just written warning
+# about it. Writing to a path keeps the exit in the caller's shell.
+notes_gate_region() { # notes_gate_region <rendered notes> <out file>
+  local f="$1" out="$2" _a1 _a2
+  _a1="$(grep -cF 'from memory:' "$f" || true)"
+  _a2="$(grep -cF 'You would meet them one at a' "$f" || true)"
+  # A STRING ANCHOR IS A MEASUREMENT ONLY IF ITS UNIQUENESS WAS MEASURED
+  # (gd-p1-rev). Zero anchors yields an empty span, and an empty span names no
+  # extra gate, so every assertion below would pass without reading anything.
+  # Two yields a span neither anchor delimits.
+  if [[ "$_a1" -ne 1 || "$_a2" -ne 1 ]]; then
+    meta_failure "the NOTES gate-table anchors are not unique in $(basename "$f"): 'from memory:' x${_a1}, 'You would meet them one at a' x${_a2}; both must be exactly 1. The extraction would read the wrong span or none at all, and an empty span passes every exclusivity assertion below vacuously."
+  fi
+  awk '/from memory:/{f=1;next} /You would meet them one at a/{f=0} f' "$f" >"$out"
+  [[ -s "$out" ]] || meta_failure "the NOTES gate-table extraction for $(basename "$f") is empty even though both anchors are unique. Nothing below is a measurement."
+}
+
+notes_arm() { # notes_arm <label> <rendered notes> <golden name>
+  local label="$1" notes="$2" golden="$3"
+  local region="$WORK/notes-region-${label}.txt"
+  notes_gate_region "$notes" "$region"
+
+  local -a _canon=() _named=() _extra=() _missing=()
+  mapfile -t _canon < <(canon_block "$golden" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
+  if [[ ${#_canon[@]} -eq 0 ]]; then
+    meta_failure "the ${label} arm of the walk yielded no gate KEY rows from ${golden}, so both assertions below would compare against an empty set and agree with anything."
+  fi
+  mapfile -t _named < <(grep -oE 'server\.[a-z0-9_]+(\.[a-z0-9_]+)*' "$region" | sort -u || true)
+  if [[ ${#_named[@]} -eq 0 ]]; then
+    meta_failure "the ${label} arm's NOTES gate table names no server.* key at all. The table is the operator's only copy of this list; an empty extraction makes the exclusivity assertion below vacuous."
+  fi
+  mapfile -t _extra   < <(comm -23 <(printf '%s\n' "${_named[@]}") <(printf '%s\n' "${_canon[@]}"))
+  mapfile -t _missing < <(comm -13 <(printf '%s\n' "${_named[@]}") <(printf '%s\n' "${_canon[@]}"))
+
+  # THE POSITIVE TWIN. Region-scoped, so it is strictly narrower than the
+  # whole-file loop above: a gate named anywhere else in NOTES no longer
+  # satisfies the table.
+  if [[ ${#_missing[@]} -eq 0 ]]; then
+    pass "the ${label} arm's NOTES gate table names every gate the walk found (${#_canon[@]} keys)"
+  else
+    fail "the ${label} arm's NOTES gate table omits $(printf '%s ' "${_missing[@]}")- the walk found it and the operator's copy of the list does not have it"
+  fi
+
+  if [[ ${#_extra[@]} -eq 0 ]]; then
+    pass "the ${label} arm's NOTES gate table names no gate the walk did not find (${#_named[@]} named against ${#_canon[@]} walked)"
+  else
+    fail "the ${label} arm's NOTES gate table names $(printf '%s ' "${_extra[@]}")which the hub's preflight does not check under this auth.mode. The operator is being sent to configure something that is never read, and a refusal that is right about the outcome and wrong about the reason is worse than silence. This is the assertion that 1b3c9418 should have tripped."
+  fi
+
+  # THE PLANTED POSITIVE, WHOSE EXPECTATION IS A DELTA AND NOT A PIN.
+  # Pinning the planted result at 1 couples the control to the subject being
+  # clean: on a genuinely dirty subject the control would report an apparatus
+  # fault, which is the one outcome that tells a reader to disregard the
+  # finding. A delta is correct whatever the subject is doing.
+  local _n_before=${#_extra[@]} _n_after
+  _n_after="$(printf '%s\nserver.zzz.control.probe\n' "${_named[@]}" | grep -E . | sort -u \
+              | comm -23 - <(printf '%s\n' "${_canon[@]}") | grep -cE . || true)"
+  if [[ "$_n_after" -ne $(( _n_before + 1 )) ]]; then
+    meta_failure "the ${label} exclusivity differ found ${_n_before} extras on the real table and ${_n_after} with one known-absent key planted. Planting one key must move it by exactly one; it moved by $(( _n_after - _n_before )). The differ is not reading one of its two inputs, so ${_n_before} is not a measurement."
+  fi
+}
+
+render_notes "$WORK/notes-oauth.txt" -f "$CHART_DIR/ci/values-settings-oauth.yaml"
+notes_arm proxy "$WORK/notes-ack.txt"   "settings.yaml"
+notes_arm oauth "$WORK/notes-oauth.txt" "settings-oauth.yaml"
+
 # BOTH DIRECTIONS. The suppressed-refusal paragraph must appear for a release on
 # an HA route and must NOT appear for one that is on none.
 if grep -qF 'THE REFUSAL WAS SUPPRESSED' "$WORK/notes-ack.txt"; then
@@ -1180,20 +1271,46 @@ ALLOWED_NON_GATES=(
   server.database        # the assertExtraEnv refusal points the operator at this subtree
   server.mode            # hosted-mode prose
 )
-# THE OTHER LIMB'S EXTRA GATES, DERIVED AND NOT ASSUMED. The oauth arm refuses
-# on server.auth.mode as well; that is the operator's own auth.mode being
-# incompatible with HA detection, not an unlanded phase, so the chart's prose
-# names it outside the numbered list and it is permitted rather than canonical.
-# Deriving it means that if the hub ever adds a second oauth-only gate, it is
-# permitted automatically and the parity check does not go red for the wrong
-# reason - while a gate moving from the oauth limb into the proxy limb DOES turn
-# the forward half red, because CANON_KEYS would gain it.
+# THE OTHER LIMB'S EXTRA GATES, DERIVED AND NOT ASSUMED.
+#
+# 🛑 [HISTORY 2026-08-17] THE RELATION BETWEEN THE TWO LIMBS INVERTED, AND THIS
+# GUARD IS HOW WE FOUND OUT. It used to read: "the oauth arm refuses on
+# server.auth.mode as well; that is the operator's own auth.mode being
+# incompatible with HA detection, not an unlanded phase" - and it required
+# OAUTH_EXTRA_KEYS to be NON-EMPTY, on the reasoning that a gate moving from the
+# oauth limb into the proxy limb should turn the forward half red.
+#
+# 1b3c9418 ("fix: do not require IAP for hosted HA preflight", Preston Holmes,
+# 2026-08-17) deleted the server.auth.mode=proxy gate outright and moved the
+# seven IAP gates inside `if cfg.Auth.Mode == "proxy"` in
+# validateHostedHAPreflight. So oauth is now a STRICT SUBSET of proxy, not a
+# superset by one, and this guard went red on the very next run. ✅ It fired for
+# the right reason, named the right two possibilities, and it was the only
+# instrument in the suite pointed at the RELATION between the limbs rather than
+# at either limb alone. The direction is inverted below; the guard is kept.
+#
+# BOTH DIRECTIONS ARE NOW ASSERTED, because the containment is the claim:
+#   oauth \ proxy  MUST BE EMPTY   - an oauth-only gate would be new behaviour
+#                                    nobody has designed for, and it must stop
+#                                    the run rather than be quietly permitted.
+#   proxy \ oauth  MUST BE NON-EMPTY - and this is also the positive control on
+#                                    the comm itself. Two `comm` arms that both
+#                                    return nothing look exactly like a subset
+#                                    relation and exactly like a comm reading
+#                                    neither input. Only the second assertion
+#                                    tells them apart.
 mapfile -t OAUTH_EXTRA_KEYS < <(
   comm -13 <(printf '%s\n' "${CANON_KEYS[@]}" | sort -u) \
            <(canon_block "settings-oauth.yaml" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
 )
-[[ ${#OAUTH_EXTRA_KEYS[@]} -gt 0 ]] || meta_failure "the oauth arm of the walk adds no gate the proxy arm lacks. The chart's prose says it adds server.auth.mode; either that is now false, or the oauth arm was not read."
-ALLOWED_NON_GATES+=("${OAUTH_EXTRA_KEYS[@]}")
+mapfile -t PROXY_EXTRA_KEYS < <(
+  comm -23 <(printf '%s\n' "${CANON_KEYS[@]}" | sort -u) \
+           <(canon_block "settings-oauth.yaml" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
+)
+[[ ${#PROXY_EXTRA_KEYS[@]} -gt 0 ]] || meta_failure "the proxy arm of the walk holds no gate the oauth arm lacks, so the two limbs derived identical key sets. Since 1b3c9418 the hub's IAP gates run only under auth.mode=proxy and the proxy arm must be the longer list. Either canon_block read the same arm twice, or comm read neither input - both of which also make the emptiness assertion below pass, so nothing here would have been measured."
+if [[ ${#OAUTH_EXTRA_KEYS[@]} -gt 0 ]]; then
+  meta_failure "the oauth arm of the walk names $(printf '%s ' "${OAUTH_EXTRA_KEYS[@]}")which the proxy arm does not. Since 1b3c9418 oauth reaches a strict subset of the proxy preflight - the IAP gates sit inside \`if cfg.Auth.Mode == \"proxy\"\` - so an oauth-only gate means the hub grew a code path this chart's refusal, its prose and its schema all say does not exist."
+fi
 # THE FORMAT GATE IS RECORDED HERE RATHER THAN COUNTED, and this line is the
 # whole of gd-p1-rev's R1. The malformed-audience arm of the walk refuses a
 # NINTH time, on isSupportedIAPAudience. It is not a ninth position the chart
@@ -1216,11 +1333,34 @@ gate_tokens() { grep -oE 'server\.[a-z_]+(\.[a-z_]+)*' "$1" | sort -u; }
 # have passed on a truncated table.
 awk '/GATE TABLE BEGIN/{f=1;next} /GATE TABLE END/{f=0} f' \
   "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
-grep -F 'This release cannot start the deployment these values describe' \
+# 🔴 [HISTORY 2026-08-17] THIS USED TO BE `grep -F 'This release cannot start
+# the deployment these values describe'`, ONE LINE, AND THE SIZE GUARD BELOW
+# CHECKED THAT IT MATCHED EXACTLY ONE LINE - which it still did, correctly, on
+# the day the extraction stopped working. When the refusal grew a per-auth-mode
+# branch, the gate enumeration moved off the printf line into two `$gates`
+# assignments above it. The grep still matched its one line; that line just no
+# longer had any gates in it. A SIZE GUARD PINNED AT ONE CANNOT DISTINGUISH
+# "found the whole thing" FROM "found the frame and left the contents behind",
+# and it was the parity assertion downstream that caught this, not the guard
+# written to protect it.
+#
+# So the extraction is the whole refusal now: from the define header down to and
+# including the fail, which is where the $gates assignments live. Anchored on
+# content at both ends. Its size guard is a floor plus a uniqueness check rather
+# than a pin, because the block's line count is a thing that legitimately moves.
+awk '/\{\{- define "scion-hub.assertHAUnlanded"/{f=1} f{print} f && /\{\{- fail \(printf/{exit}' \
   "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-fail.txt" || true
+# BOTH LIMBS OF THE REFUSAL ARE IN THIS EXTRACT, and that is deliberate: the
+# proxy enumeration is a superset of the oauth one, so a static parity check
+# against the proxy canon is satisfied by the block as a whole and says nothing
+# about which branch renders which list. THAT QUESTION IS ANSWERED BY RENDERING,
+# NOT BY READING - tests/render-guards.sh renders both auth modes and asserts
+# each refusal names all of, and only, its own arm's derived gates. This check
+# owns "the source names the right set"; that one owns "each mode emits it".
+[[ "$(grep -cF 'This release cannot start the deployment these values describe' "$WORK/gates-fail.txt")" -eq 1 ]] || meta_failure "the extracted assertHAUnlanded block does not contain exactly one copy of the refusal's opening sentence. The awk anchors 'define \"scion-hub.assertHAUnlanded\"' and '{{- fail (printf' no longer bracket the refusal, so the parity check below is reading the wrong text or no text."
 grep -E '^    (server\.|a durable)' "$WORK/notes-ack.txt" >"$WORK/gates-notes.txt" || true
 [[ "$(wc -l <"$WORK/gates-doc.txt")" -eq "$HA_GATE_COUNT" ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines; the walk found $HA_GATE_COUNT gates. The parity check below has nothing to compare."
-[[ "$(wc -l <"$WORK/gates-fail.txt")" -eq 1 ]] || meta_failure "the assertHAUnlanded refusal string matched $(wc -l <"$WORK/gates-fail.txt") lines, not 1. The parity check below has nothing to compare."
+[[ "$(wc -l <"$WORK/gates-fail.txt")" -ge 4 ]] || meta_failure "the extracted assertHAUnlanded block is $(wc -l <"$WORK/gates-fail.txt") lines. The refusal has never been fewer than four - a define, a routes include, at least one gate enumeration and the fail - so the awk anchors are not bracketing it. The parity check below has nothing to compare."
 [[ "$(wc -l <"$WORK/gates-notes.txt")" -eq "$HA_GATE_COUNT" ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines; the walk found $HA_GATE_COUNT gates. The parity check below has nothing to compare."
 
 printf '%s\n' "${CANON_GATES[@]}" | sort -u >"$WORK/gates-canon.txt"
@@ -2478,7 +2618,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=33
+PIPE_SITES_EXPECTED=35
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else

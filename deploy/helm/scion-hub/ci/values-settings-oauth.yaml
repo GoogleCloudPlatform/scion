@@ -27,13 +27,21 @@
 # THE PREFLIGHT AS A WHOLE IS NOT MODE-BLIND, THOUGH, AND THIS FILE USED TO SAY
 # IT WAS. Measured by walking validateHostedHAPreflight gate by gate on the
 # settings.yaml each fixture renders (hack/ha-gates.txt records both arms): this
-# file is refused by one gate more than values-settings.yaml. The extra one is
-# server.auth.mode=proxy
-# (cmd/server_foreground.go:980), which sorts after the session secret and
-# before the proxy family. No phase lands it, because it is not missing
-# configuration - it is this fixture's own auth.mode being incompatible with HA
-# detection, which is a legitimate thing for an operator to choose and the
-# reason acknowledgeHAUnlanded is a flag rather than a refusal.
+# file is refused by a STRICT SUBSET of what values-settings.yaml is refused by.
+# The preflight's IAP gates sit inside `if cfg.Auth.Mode == "proxy"`, so an
+# oauth shape never reaches any of them and stops at the two gates that are
+# mode-independent: server.database.url and the durable session/signing secret.
+#
+# [HISTORY 2026-08-17] THIS SAID THE OPPOSITE: "this file is refused by one gate
+# more than values-settings.yaml. The extra one is server.auth.mode=proxy
+# (cmd/server_foreground.go:980)". It was true when written and 1b3c9418 "fix: do
+# not require IAP for hosted HA preflight" deleted that gate, so oauth went from
+# superset-by-one to subset. TWO THINGS ABOUT THAT CITE ARE WORTH KEEPING. The
+# line number did not rot in the way that announces itself - :980 still resolves,
+# and it is now the storage.provider gate, so a reader who checked it landed on a
+# real line about something else and came away reassured. And "one gate fewer" is
+# the plausible hand-fix and would be a SECOND false sentence: the difference is
+# the whole IAP family, not one gate.
 
 # SET BECAUSE THIS FIXTURE IS EXACTLY THE SHAPE THE FLAG EXISTS FOR. Postgres
 # alone makes the hub's isHADeployment test true, so without this the chart

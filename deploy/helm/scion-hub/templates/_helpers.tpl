@@ -1961,10 +1961,17 @@ it; keep that call.
 The HA acknowledgement gate.
 
 WHAT IT IS FOR. This chart can render a configuration that satisfies the hub's
-isHADeployment test (cmd/server_foreground.go:927), which turns on
-validateHostedHAPreflight (:951). That preflight has thirteen gates and this
-release cannot satisfy the ones listed below, so the hub aborts at
-cmd/server_foreground.go:151-153 before it serves anything. The postgres/gcs
+isHADeployment test (cmd/server_foreground.go, func isHADeployment), which turns
+on validateHostedHAPreflight. This release cannot satisfy the gates listed below,
+so the hub aborts where runServerForeground calls
+`if err := validateHostedHAPreflight(cfg); err != nil` before it serves anything.
+
+[HISTORY 2026-08-17] THIS PARAGRAPH SAID "that preflight has thirteen gates",
+eleven lines above the sentence below claiming there is no count anywhere in this
+file. Both were written the same day. 1b3c9418 then made the count wrong as well
+as forbidden, and the sentence that forbade it did not notice, because a prose
+claim about a file's contents is not a check on that file's contents. The count
+is gone; the prohibition below now has nothing to contradict it. The postgres/gcs
 shape is a choice an operator can coherently have made, so this is an opt-in
 acknowledgement rather than a refusal.
 
@@ -1990,10 +1997,20 @@ ci/values-settings.yaml, in hub order:
     server.auth.transport.platform_auth_sa     ingress/IAP phase
   GATE TABLE END
 
-ci/values-settings-oauth.yaml refuses on one gate more, server.auth.mode=proxy,
-which is not an unlanded phase - it is the operator's own auth.mode being
-incompatible with HA detection. It sorts after the session secret and before the
-proxy family.
+ci/values-settings-oauth.yaml refuses on a STRICT SUBSET of that table: the first
+two rows only. The hub's IAP gates sit inside `if cfg.Auth.Mode == "proxy"` in
+validateHostedHAPreflight, so an oauth deployment never reaches them and the
+ingress/IAP phase lands nothing that arm is waiting on.
+
+[HISTORY 2026-08-17] THIS SAID THE OPPOSITE - "refuses on one gate more,
+server.auth.mode=proxy, which is not an unlanded phase" - and it was true when
+written. 1b3c9418 "fix: do not require IAP for hosted HA preflight" deleted that
+gate and moved the IAP family inside the auth.mode test, inverting the direction:
+oauth went from superset-by-one to subset-by-six. The same claim was live in three
+places (here, templates/NOTES.txt, values.yaml at auth.mode). Correcting one of
+them by hand is what left the other two standing with MORE authority, not less,
+so the fix that matters is the exclusivity assertion in hack/verify.sh, not this
+paragraph.
 
 THE FIVE IN CIRCULATION WERE A PROBE'S EXTENT, NOT THE HUB'S. That walk stopped
 at server.auth.transport because the prober could not satisfy it, and its stop
@@ -2052,25 +2069,55 @@ with a parity check over the copies rather than a shared definition.
 {{- range .Values.hub.extraEnv }}
 {{- if eq .name "K_SERVICE" }}
 {{- if or .value .valueFrom }}
-{{- $routes = append $routes "hub.extraEnv sets K_SERVICE (cmd/server_foreground.go:928)" }}
+{{- $routes = append $routes "hub.extraEnv sets K_SERVICE (cmd/server_foreground.go, isHADeployment: os.Getenv(\"K_SERVICE\") != \"\")" }}
 {{- end }}
 {{- end }}
 {{- end }}
 {{- if not .Values.config.existingSecret }}
 {{- if eq (lower (toString .Values.database.driver)) "postgres" }}
-{{- $routes = append $routes "database.driver is postgres (cmd/server_foreground.go:931)" }}
+{{- $routes = append $routes "database.driver is postgres (cmd/server_foreground.go, isHADeployment: strings.EqualFold(cfg.Database.Driver, \"postgres\"))" }}
 {{- end }}
 {{- if and (eq (lower (toString .Values.storage.provider)) "gcs") (eq (toString .Values.auth.mode) "proxy") }}
-{{- $routes = append $routes "storage.provider is gcs and auth.mode is proxy (cmd/server_foreground.go:934)" }}
+{{- $routes = append $routes "storage.provider is gcs and auth.mode is proxy (cmd/server_foreground.go, isHADeployment: strings.EqualFold(cfg.Storage.Provider, \"gcs\") && cfg.Auth.Mode == \"proxy\")" }}
 {{- end }}
 {{- end }}
 {{- join " and " $routes }}
 {{- end }}
 
+{{/*
+THE GATE ENUMERATION IS PER-AUTH-MODE, AND IT IS THAT WAY BECAUSE THE HUB IS.
+
+Until 1b3c9418 ("fix: do not require IAP for hosted HA preflight", Preston
+Holmes, 2026-08-17) this list was the same in both modes and the chart printed
+one sentence. That commit deleted the gate "hosted HA deployment requires
+server.auth.mode=proxy for IAP authentication" and moved the seven IAP gates
+inside `if cfg.Auth.Mode == "proxy" {` in validateHostedHAPreflight. So under
+auth.mode oauth the hub now asks for NONE of the IAP configuration, and the
+single sentence became false about seven of the nine gates it named - while
+still refusing correctly, which is the dangerous combination: a refusal that
+is right about the outcome and wrong about the reason teaches the operator to
+go fix seven things that were never going to be checked.
+
+BOTH LISTS ARE DERIVED, NOT WRITTEN. hack/ha-gates.txt is produced by
+cmd/helm_chart_ha_contract_test.go driving the real validateHostedHAPreflight
+over this chart's own goldens, one gate at a time; the proxy arm walks eight
+and the oauth arm walks two. tests/render-guards.sh reads that artifact and
+asserts, per arm, that the message below names every gate in it AND NAMES NO
+OTHERS. The upper half of that assertion is new: the previous guard only
+checked that nothing was missing, so this message could name a gate the hub
+had deleted and stay green - which is exactly what it did for the forty
+minutes between 1b3c9418 landing and being noticed.
+*/}}
 {{- define "scion-hub.assertHAUnlanded" -}}
 {{- $routes := include "scion-hub.haRoutes" . }}
 {{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
-{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go:951), and it aborts at cmd/server_foreground.go:151-153 before serving. These preflight gates have no source in this chart, measured in hub order: server.database.url, from the Cloud SQL phase; a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase. With auth.mode oauth there is one more, server.auth.mode=proxy, which no phase lands because it is your own auth mode. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. That flag is removed when the Cloud SQL values and the ingress/IAP values have both landed - not Filestore, which lands none of them." $routes) }}
+{{- $gates := "server.database.url, from the Cloud SQL phase, and a durable session/signing secret, from the session-secret phase. That is the whole list for auth.mode oauth: the hub's IAP gates sit inside `if cfg.Auth.Mode == \"proxy\"` in validateHostedHAPreflight, so this shape never reaches them and the ingress/IAP phase lands nothing this release is waiting on" }}
+{{- $removal := "That flag stops being needed for auth.mode oauth when the Cloud SQL phase and the session-secret phase have both landed. The ingress/IAP phase is not on this shape's path and waiting for it would hold the flag one phase too long; Filestore lands none of them either" }}
+{{- if eq (toString .Values.auth.mode) "proxy" }}
+{{- $gates = "server.database.url, from the Cloud SQL phase; a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase" }}
+{{- $removal = "That flag stops being needed for auth.mode proxy when the Cloud SQL phase, the session-secret phase and the ingress/IAP phase have all landed. Filestore lands none of them" }}
+{{- end }}
+{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go, func validateHostedHAPreflight), and it aborts before serving where runServerForeground calls `if err := validateHostedHAPreflight(cfg); err != nil`. These preflight gates have no source in this chart, measured in hub order by walking the real preflight: %s. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. %s." $routes $gates $removal) }}
 {{- end }}
 {{- end }}
 

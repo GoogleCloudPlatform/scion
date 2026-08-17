@@ -187,12 +187,15 @@ WHAT THIS RELEASE DOES NOT YET DO
     database.driver: postgres                         (:931)
     storage.provider: gcs with auth.mode: proxy       (:934)
 
-  Any one of them runs validateHostedHAPreflight, whose error aborts startup at
-  :151 rather than degrading - log.Fatalf, not a warning. Several of its thirteen
-  gates have no source in this chart. Measured by walking the real preflight
-  gate by gate over the settings.yaml this chart renders, in the order the hub
-  checks them - the list below is checked against that walk, it is not typed
-  from memory:
+  Any one of them runs validateHostedHAPreflight, whose error aborts startup
+  rather than degrading: the caller is `if err := validateHostedHAPreflight(cfg)`
+  and it log.Fatalf's. WHICH of its gates have no source in this chart depends on
+  auth.mode, because the hub's IAP gates sit inside `if cfg.Auth.Mode == "proxy"`
+  and an oauth deployment never reaches them. Measured by walking the real
+  preflight gate by gate over the settings.yaml this chart renders, in the order
+  the hub checks them - the list below is checked against that walk, it is not
+  typed from memory:
+{{- if eq (toString .Values.auth.mode) "proxy" }}
 
     server.database.url                     Cloud SQL phase
     a durable session secret                session-secret phase
@@ -202,10 +205,15 @@ WHAT THIS RELEASE DOES NOT YET DO
     server.auth.transport.mode: iap         }
     server.auth.transport.oidc_audience     }
     server.auth.transport.platform_auth_sa  }
+{{- else }}
 
-  With auth.mode: oauth there is one more, server.auth.mode: proxy (:980), which
-  no phase lands - that one is the mode you chose being incompatible with HA
-  detection rather than configuration that is missing.
+    server.database.url                     Cloud SQL phase
+    a durable session secret                session-secret phase
+
+  That is the whole list for auth.mode: {{ .Values.auth.mode }}. The IAP gates
+  are not work you are waiting on - this shape never reaches them, so the
+  Ingress/IAP phase lands nothing this refusal is blocked on.
+{{- end }}
 
   You would meet them one at a time, each only after fixing the one before it,
   because the preflight returns on the first failure. Rather than let you find

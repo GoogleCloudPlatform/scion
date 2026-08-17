@@ -476,11 +476,26 @@ auth:
   # This value selects which configuration subtree is rendered, and the five
   # Block-1 keys the preflight requires render identically in both modes.
   #
-  # "AND NOTHING ELSE" WAS TOO STRONG AND THIS COMMENT USED TO SAY IT. auth.mode
-  # is itself a preflight gate: cmd/server_foreground.go:980 requires proxy, so
-  # the oauth permutation is refused by one gate more than the proxy one.
-  # Measured, by walking the preflight on each rendered settings.yaml; both arms
-  # are recorded in hack/ha-gates.txt. The claim that survives is the narrow one about the Block-1
+  # "AND NOTHING ELSE" WAS TOO STRONG AND THIS COMMENT USED TO SAY IT. The two
+  # modes reach DIFFERENT hosted-HA preflights, and since 1b3c9418 the gap is
+  # much wider than one gate: the hub's seven IAP gates sit inside
+  # `if cfg.Auth.Mode == "proxy"` in validateHostedHAPreflight, so oauth never
+  # reaches them. Measured by walking the real preflight on each rendered
+  # settings.yaml; both arms are recorded in hack/ha-gates.txt.
+  #
+  #     proxy   8 gates      oauth   2 gates
+  #
+  # 🛑 [HISTORY 2026-08-17] THIS COMMENT PREVIOUSLY READ "auth.mode is itself a
+  # preflight gate: cmd/server_foreground.go:980 requires proxy, so the oauth
+  # permutation is refused by one gate MORE than the proxy one." That was true
+  # when written and 1b3c9418 deleted the gate it named, inverting the
+  # direction. The line number did not go stale in the way that announces
+  # itself - :980 still resolves, to the storage.provider gate, so a reader
+  # checking it lands on a real line about something else and comes away
+  # reassured. That is why source references in this chart are cut as quoted
+  # strings now.
+  #
+  # The claim that survives unchanged is the narrow one about the Block-1
   # five, which is what the paired ci fixtures actually diff.
   mode: proxy
 

@@ -156,9 +156,28 @@ row() { # row <label> <mutation function name>
   # as "the mutation did nothing" for a mutating arm and, worse, as a clean pass
   # for MM0 and MM7. Pinned against an independently-derived expectation - the
   # source tree's own file count - and never against zero.
+  #
+  # 🔴 [HISTORY 2026-08-17] AND FOR A DAY THAT PARAGRAPH DESCRIBED A CHECK THAT
+  # WAS NOT THERE. The equality below compares the copy to the source, so it
+  # catches a copy that lost files - but if `_chart_manifest` itself returns
+  # nothing, BOTH sides are 0, 0 -ne 0 is false, and the arm sails through
+  # having measured an empty tree against an empty tree. "Never against zero"
+  # was the stated intent and zero was precisely what it permitted. gd-p1-rev
+  # carried this finding across three review rounds and reproduced it with a
+  # byte-identical control row. The floor is the missing half.
+  #
+  # THE FLOOR IS COARSE ON PURPOSE. It is not a second copy of the file count -
+  # a pin that tracks the exact number would need editing every time the chart
+  # gains a file, and would then be the hand-maintained constant this driver
+  # already refuses elsewhere. It only has to be too large for a broken
+  # manifest to reach. Derived 2026-08-17:
+  #   git ls-tree -r --name-only HEAD -- deploy/helm/scion-hub | wc -l   -> 35
   local _pre_n _src_n
   _pre_n="$(wc -l <"$_pre")"
   _src_n="$(_chart_manifest "$SRC" | wc -l)"
+  if [ "$_src_n" -lt 30 ]; then
+    echo "HARNESS ERROR: manifesting the source chart at $SRC produced $_src_n files, and this chart has not had fewer than 30 since it was written. _chart_manifest is not reading the tree, so the equality below would compare two broken manifests and agree. NOTHING WAS MEASURED."; exit 2
+  fi
   if [ "$_pre_n" -ne "$_src_n" ]; then
     echo "HARNESS ERROR: the $label arm's chart copy manifests $_pre_n files where the source chart has $_src_n. The copy is not the subject. NOTHING WAS MEASURED."; exit 2
   fi
@@ -267,7 +286,16 @@ MM_DESC=""
 mm0() { expect_change=0; }
 mm1() { printf '#!/usr/bin/env bash\nexit 0\n' >"$1/tests/zz-unenumerated.sh"; }
 mm2() { sed -i 's/^EXPECTED_SCRIPTS=4$/EXPECTED_SCRIPTS=5/' "$1/tests/run-all.sh"; }
-mm3() { sed -i 's/^EXPECTED_ASSERTIONS=127/EXPECTED_ASSERTIONS=128/' "$1/tests/run-all.sh"; }
+# 🔴 [HISTORY 2026-08-17] MM3 USED TO MATCH THE LITERAL `EXPECTED_ASSERTIONS=127`,
+# which made this mutation carry a fourth copy of a number the suite already
+# states twice. Re-deriving the pin to 131 turned the sed into a no-op, and the
+# row would have come out byte-identical to MM0 wearing MM3's label - the exact
+# defect the no-op guard in row() exists to catch. IT CAUGHT IT, on the first
+# run after the pin moved, which is the only reason this comment is being
+# written rather than a false green being reported. The match is on the SHAPE of
+# the line now, so it survives every future re-derivation; the replacement is a
+# value no honest count will ever be.
+mm3() { sed -i 's/^EXPECTED_ASSERTIONS=[0-9][0-9]*/EXPECTED_ASSERTIONS=9999/' "$1/tests/run-all.sh"; }
 mm4() { rm -f "$1/tests/update-strategy.sh"; }
 # MM5: drop assertions AND lower that script's own total, which is green
 # everywhere except against run-all.sh's duplicate of the number.
@@ -294,7 +322,7 @@ echo "# helm $(helm version --short 2>/dev/null || echo unknown)"
 MM_DESC="clean";                                 row MM0 mm0
 MM_DESC="unenumerated script on disk";           row MM1 mm1
 MM_DESC="EXPECTED_SCRIPTS=5";                    row MM2 mm2
-MM_DESC="EXPECTED_ASSERTIONS=128";               row MM3 mm3
+MM_DESC="EXPECTED_ASSERTIONS=9999";              row MM3 mm3
 MM_DESC="enumerated script missing";             row MM4 mm4
 MM_DESC="assertion dropped + own total lowered"; row MM5 mm5
 MM_DESC="a real assertion failure";              row MM6 mm6
