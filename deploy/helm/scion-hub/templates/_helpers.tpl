@@ -2999,7 +2999,26 @@ paragraph that justifies it, both marked PHASE 2 DELTA below.
 {{- $db := dig "server" "database" (dict) $doc }}
 {{- if hasKey $db "url" }}
 {{- $was := toString (get $db "url") }}
-{{- $now := regexReplaceAll "://[^/@[:space:]]*:[^/@[:space:]]+@" $was (printf "://%s@" $redacted) }}
+{{- /*
+PHASE 2 DELTA. THE USERNAME IS CAPTURED AND RE-EMITTED; only the password is
+replaced. gd-p2-rev found this as C1, measured: rotating database.user left
+checksum/settings byte-identical, so the pods did not roll, while NOTES.txt told
+the operator - in the section written to prevent exactly this - that rotating
+the user rolls them automatically. An operator rotating a LEAKED credential got
+a green upgrade and kept serving on the retired one.
+
+The old pattern consumed the username as part of the match and dropped it:
+
+  "://[^/@[:space:]]*:[^/@[:space:]]+@"  ->  "://[redacted-from-checksum]@"
+
+That is strictly more redaction than this projection was specified to do. The
+username is not a credential - it is in values.yaml, in NOTES.txt and in the
+plain settings document - and blanking it made a non-secret field invisible to
+the digest, which is how a real configuration change stopped rolling pods.
+Keeping it is what makes the annotation's promise true for every part of the DSN
+except the one part that must never be digested.
+*/}}
+{{- $now := regexReplaceAll "://([^:/@[:space:]]*):[^/@[:space:]]+@" $was (printf "://${1}:%s@" $redacted) }}
 {{- if ne $now $was }}
 {{- $_ := set $db "url" $now }}
 {{- $marks = add1 $marks }}
@@ -3048,7 +3067,21 @@ people trust past its edge. */ -}}
 {{- fail (printf "scion-hub.settingsChecksum redacted the credential paths it knows about and a rendered credential is STILL present in the digest input. The path list above is missing the path this value came from. Do not silence this by widening the value check - add the path, because the annotation is published to a wider audience than the Secret and a digest of a credential is a verification oracle for it. Value begins %q." (trunc 4 $s)) }}
 {{- end }}
 {{- end }}
-{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $projection }}
+{{- /*
+PHASE 2 DELTA, FORCED BY THE ONE ABOVE. The backstop below looks for a
+scheme://user:password@host URL surviving into the digest input. Now that the
+redaction preserves the username, its own output - ://user:[redacted...]@ - has
+the shape the backstop hunts for, and the backstop would fire on every render it
+had just correctly redacted. So the known-redacted form is removed first, by
+plain string replacement rather than by widening the pattern.
+
+The distinction matters: a WIDER pattern would also stop matching real
+credentials that happen to resemble the marker, which is how a backstop quietly
+stops backstopping. Removing the exact literal this helper just wrote leaves the
+pattern as strict as it was for everything the helper did not write.
+*/}}
+{{- $probe := replace (printf ":%s@" $redacted) "@" $projection }}
+{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $probe }}
 {{- fail "scion-hub.settingsChecksum found a scheme://user:password@host URL in the digest input AFTER redaction. This is a backstop and reaching it means an upstream guard was missed, so fix the upstream one rather than this: either some settings path now carries a credential-bearing URL and is not in the redaction list above (add the path), or a values surface that feeds settings.yaml is not running scion-hub.assertNoCredential (add the call, and prefer that - it names the value the operator actually set, which this message cannot)." }}
 {{- end }}
 {{- $_ := set $obj "stringData" (dict "settings.yaml" $projection) }}

@@ -159,7 +159,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # remedy in both directions. Summed onto the previous committed value.
 # The step's arm 0 adds none of these on purpose: it is meta_failure, because
 # "nothing was analysed" is a third outcome and not a passing assertion.
-EXPECTED_TOTAL=311
+EXPECTED_TOTAL=312
 
 failures=0
 assertions=0
@@ -4111,6 +4111,10 @@ step "the settings checksum is a redacted projection: the oracle is dead and the
 # satisfied by a digest that has stopped moving for ANY reason.
 _ck_A='RotPlainAlphaAAAA111'
 _ck_B='RotPlainBetaBBBB2222'
+# The rotated USERNAME for arm U. Not a credential and deliberately not
+# treated as one: it is the field gd-p2-rev's C1 showed was invisible to the
+# digest, and the fix makes it visible.
+_ck_U='rotated-user-uuuu'
 # @ : / and # are four of the nine characters scion-hub.pctEncodeUserinfo
 # encodes, so these two passwords do NOT appear in the rendered file as typed.
 # gd-secann-2 measured that a projection which redacts by MATCHING THE
@@ -4243,6 +4247,12 @@ _ck_render B  --set-string database.password="$_ck_B"
 _ck_render S1 --set-string database.password="$_ck_S1"
 _ck_render S2 --set-string database.password="$_ck_S2"
 _ck_render C  --set-string database.password="$_ck_A" --set-string database.name=other-db
+# ARM U. gd-p2-rev's C1: the projection dropped the WHOLE userinfo, so rotating
+# database.user left the digest byte-identical and no pod rolled - while
+# NOTES.txt told the operator, in the section written to prevent exactly this,
+# that rotating the user rolls them automatically. Same password as A, different
+# user, and the digest must MOVE.
+_ck_render U  --set-string database.password="$_ck_A" --set-string database.user="$_ck_U"
 
 # ARM 0. NOT AN ASSERTION - A META-FAILURE, because "nothing was analysed" is a
 # third outcome and this whole step compares digests for EQUALITY. Two empty
@@ -4256,7 +4266,7 @@ _ck_render C  --set-string database.password="$_ck_A" --set-string database.name
 # helm failing a schema check on all four arms, every digest was sha256 of the
 # empty string, and THREE of their four guards passed on it. The one that caught
 # it was an absolute count. Both arms of that lesson are below.
-for _n in A A2 B S1 S2 C; do
+for _n in A A2 B S1 S2 C U; do
   _rc="$(cat "$WORK/ck-$_n.rc")"
   [[ "$_rc" == 0 ]] || meta_failure "the settings-checksum arm $_n did not render (helm exit $_rc): $(head -3 "$WORK/ck-$_n.err"). Nothing in this step was measured."
   [[ -s "$WORK/ck-$_n.yaml" ]] || meta_failure "the settings-checksum arm $_n rendered an empty document. Every equality below would hold on it."
@@ -4273,10 +4283,12 @@ done
 _uA="$(_ck_url "$WORK/ck-A.yaml")"; _uB="$(_ck_url "$WORK/ck-B.yaml")"
 _uS1="$(_ck_url "$WORK/ck-S1.yaml")"; _uS2="$(_ck_url "$WORK/ck-S2.yaml")"
 _uC="$(_ck_url "$WORK/ck-C.yaml")"; _uA2="$(_ck_url "$WORK/ck-A2.yaml")"
+_uU="$(_ck_url "$WORK/ck-U.yaml")"
 # THE OPERAND SWEEP: all six, not just the one the old -n happened to name.
 # gd-p2-rev killed _uB specifically because _uA was the only guarded one.
 _ck_is_dsn A "$_uA"; _ck_is_dsn A2 "$_uA2"; _ck_is_dsn B "$_uB"
 _ck_is_dsn S1 "$_uS1"; _ck_is_dsn S2 "$_uS2"; _ck_is_dsn C "$_uC"
+_ck_is_dsn U "$_uU"
 [[ "$_uA" != "$_uB" ]] || meta_failure "the A and B renders carry the SAME server.database.url ($_uA), so the password-only differential below is comparing a chart against itself. This is the exact false green the arm exists to prevent."
 [[ "$_uS1" != "$_uS2" ]] || meta_failure "the S1 and S2 renders carry the same server.database.url, so the percent-encoded differential is comparing a chart against itself."
 [[ "$_uA" != "$_uC" ]] || meta_failure "the A and C renders carry the same server.database.url, so the positive control below cannot fire on a change that never happened."
@@ -4300,15 +4312,46 @@ case "$_uS1" in
   *) ;;
 esac
 
-# SIX, derived from the renders on disk. The mutation control and the
+# gd-p2-rev's OPTIONAL follow-up to R1, taken. A SHAPE GUARD SEPARATES
+# RIGHT-SHAPE FROM WRONG-SHAPE; IT DOES NOT SEPARATE EXTRACTED FROM FABRICATED.
+# They measured it: planting _uB = postgres://zzz:zzz@127.0.0.1:5432/zzz?sslmode=disable
+# passes _ck_is_dsn, satisfies _uA != _uB, and the whole password differential
+# then rests on a precondition that a hand-written constant met vacuously -
+# rc=0, 303/303. The digest side survives the same plant because its comparisons
+# MEAN something downstream; the DSN side had nothing catching it.
+#
+# The remedy is precedented three lines up: the S1 arm already asserts the
+# planted password REACHED the rendered DSN. Extended to every arm whose planted
+# value is known here. This is a guard on a guard, not a security assertion -
+# the security claim is that these values are ABSENT from the digest, and it is
+# asserted elsewhere. Here they must be PRESENT, in the render they came from,
+# or the differential is between two strings nobody rendered.
+_ck_planted() { # <label> <dsn> <needle>
+  case "$2" in
+    *"$3"*) ;;
+    *) meta_failure "the ${1} render's DSN does not contain the value planted into it (looked for ${3} in ${2:-<empty>}). It has the right shape, so _ck_is_dsn accepted it, but a well-formed DSN that no arm of this step actually rendered satisfies every difference check below by construction and proves nothing about the chart." ;;
+  esac
+}
+_ck_planted A  "$_uA"  "$_ck_A"
+_ck_planted A2 "$_uA2" "$_ck_A"
+_ck_planted B  "$_uB"  "$_ck_B"
+_ck_planted C  "$_uC"  "$_ck_A"
+_ck_planted U  "$_uU"  "$_ck_U"
+# S1/S2 are deliberately absent: their planted passwords are percent-encoded on
+# the way in, so PRESENCE of the literal is the thing that must NOT hold, and the
+# case statement above asserts exactly that inversion for S1.
+
+# SEVEN, derived from the renders on disk. The mutation control and the
 # existing-secret arm are rendered further down and are covered where they land.
-_ck_require_live 6 "$WORK"/ck-*.yaml
+_ck_require_live 7 "$WORK"/ck-*.yaml
 
 _dA="$(_ck_digest "$WORK/ck-A.yaml")"; _dA2="$(_ck_digest "$WORK/ck-A2.yaml")"
 _dB="$(_ck_digest "$WORK/ck-B.yaml")"; _dS1="$(_ck_digest "$WORK/ck-S1.yaml")"
 _dS2="$(_ck_digest "$WORK/ck-S2.yaml")"; _dC="$(_ck_digest "$WORK/ck-C.yaml")"
+_dU="$(_ck_digest "$WORK/ck-U.yaml")"
 _ck_is_digest A "$_dA"; _ck_is_digest A2 "$_dA2"; _ck_is_digest B "$_dB"
 _ck_is_digest S1 "$_dS1"; _ck_is_digest S2 "$_dS2"; _ck_is_digest C "$_dC"
+_ck_is_digest U "$_dU"
 [[ "$_dA" == "$_dA2" ]] || meta_failure "two renders of identical inputs produced different checksum/settings values ($_dA vs $_dA2). The digest is not a function of the inputs and nothing below is interpretable."
 
 if [[ "$_dA" == "$_dB" ]]; then
@@ -4327,6 +4370,20 @@ if [[ "$_dA" == "$_dS1" ]]; then
   pass "checksum/settings is identical across four different passwords, so the digest is independent of the credential rather than merely insensitive to one pair"
 else
   fail "checksum/settings differs between two passwords that are not a rotation pair ($_dA vs $_dS1), so some part of the credential still reaches the digest input."
+fi
+
+# gd-p2-rev's C1, AND IT IS AN INEQUALITY ARM SITTING AMONG EQUALITIES, WHICH IS
+# WHY IT WAS MISSING. Every other arm here asks the digest to STAY PUT, and the
+# projection that made them pass was over-redacting: it blanked the entire
+# userinfo, username included. The username is not a credential - it is in
+# values.yaml, in NOTES.txt and in the plain settings document - so blanking it
+# bought no secrecy and cost a real configuration change its pod roll. Measured
+# by gd-p2-rev: rotate database.user, digest byte-identical, no roll, while
+# NOTES.txt said the roll happens automatically.
+if [[ "$_dU" != "$_dA" ]]; then
+  pass "rotating database.user DOES move checksum/settings, so the sentence in NOTES.txt offering it as the automatic-roll workaround is true"
+else
+  fail "checksum/settings did not move when database.user changed ($_dA). NOTES.txt tells operators to rotate the user in the same upgrade and the roll happens automatically; it does not, and an operator rotating a leaked credential gets a green upgrade and keeps serving on the retired one. There is no correction anywhere else in the render."
 fi
 
 # THE POSITIVE CONTROL, and without it the three arms above are satisfied by a
