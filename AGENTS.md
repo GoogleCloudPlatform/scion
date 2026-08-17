@@ -118,6 +118,18 @@ Likewise, do not mess with any active agents while testing the tool, such as cre
 
 You are operating in a restricted, non-interactive sandbox environment. Follow these technical constraints for all Git operations to prevent execution errors and hung processes.
 
+### 0. Install the shared-workspace guard first
+
+If `SCION_WORKSPACE_MODE` is `shared-plain` or `worktree-per-agent`, the working tree, the clone, or both are shared with every other agent in the project. Before your first git command:
+
+```sh
+export PATH="$PWD/hack/wsguard/bin:$PATH"
+```
+
+This puts a `git` shim in front of the real git that refuses the operations which destroy other agents' work — `checkout`, `switch`, `restore`, `reset`, `clean -f`, `stash`, `branch -D` — and refuses reads of `FETCH_HEAD`, which is a single slot in the shared `.git` that another agent's fetch can overwrite between your fetch and your read, returning a wrong answer rather than an error. It refuses only inside the shared root and only for those operations; `git clean -n`, `git status`, and your own clone under `/tmp` are untouched. It exits `77` for a refusal and `78` when it cannot tell which repository you meant, and it prints what to do instead. See [`hack/wsguard/README.md`](hack/wsguard/README.md); `make wsguard` fires it.
+
+This is not a substitute for knowing the rule. The guard exists because on 2026-08-17 an agent that knew the rule ran `git checkout --` on the shared tree anyway and lost its own uncommitted work.
+
 ### 1. Prefer Local-Only Operations
 * **Restriction:** The environment may likely be in a worktree in a container, without the credentials to work with `origin`. Commands like `git fetch`, `git pull`, or `git push` may fail.
 * **Directive:** Always assume the local `main` branch is the source of truth.

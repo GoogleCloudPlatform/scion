@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog wsguard golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -100,6 +100,10 @@ check-security-marker-gates:
 ## check-authorization-catalog: Validate authorization operation catalog, permission coverage, and generated report
 check-authorization-catalog:
 	@./hack/check-authorization-catalog.sh
+
+## wsguard: Fire the shared-workspace git guard (hack/wsguard) and prove the harness can fail
+wsguard:
+	@./hack/wsguard/selftest.sh --prove-it
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
@@ -186,13 +190,13 @@ tidy-extras:
 	fi; \
 	echo "All extras modules tidied."
 
-## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
-ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog test-fast build
+## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, workspace guard, tests, build)
+ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog wsguard test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint compat-literals check-authz-guards check-conversation-upsert-guard golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint compat-literals check-authz-guards check-conversation-upsert-guard wsguard golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 

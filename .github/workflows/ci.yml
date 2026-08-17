@@ -120,6 +120,12 @@ jobs:
           esac
           exit "$rc"
 
+      # Fires the shared-workspace git guard against real destructive commands
+      # in throwaway repositories, after first proving the harness can fail.
+      # A control that has never been fired is not a control.
+      - name: Fire Workspace Guard
+        run: make wsguard
+
       - name: Run Tests
         run: make test-fast
 

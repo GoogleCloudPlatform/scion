@@ -1,0 +1,505 @@
+#!/usr/bin/env bash
+#
+# wsguard — a PATH shim named `git` that refuses the git operations which
+# destroy other agents' work in a SHARED workspace, and which cannot be caught
+# after the fact.
+#
+# WHY THIS EXISTS
+#
+# On 2026-08-17 an agent on this project ran `git checkout --` on a shared
+# working tree and destroyed its own uncommitted work. It disclosed the mistake
+# itself, and its framing is the design principle for this guard:
+#
+#     "the rule earns its keep by being reported, not by being unbroken."
+#
+# So this shim is not a sandbox. It can be bypassed by anyone who types
+# /usr/local/bin/git, and it has a deliberate override. What it removes is the
+# *accident*: the case where the operator did not know the tree was shared, or
+# knew and forgot, and got no warning until the work was already gone.
+#
+# THE HAZARD HAS TWO HEADS, AND A GUARD THAT COVERS ONE IS NOT A GUARD
+#
+#   (a) The destructive command itself — checkout, switch, restore, reset,
+#       clean -f, stash, branch -D. In a shared tree these destroy work
+#       belonging to agents who are not running the command and who get no
+#       warning. This one at least announces itself: the work is visibly gone.
+#
+#   (b) FETCH_HEAD and the other single-slot refs are SHARED GLOBALS. Two
+#       agents fetching concurrently into one clone overwrite each other's
+#       FETCH_HEAD, so `git fetch <url> <ref> && git log FETCH_HEAD` can read a
+#       ref that a different agent fetched. This one is invisible: it does not
+#       error, it returns a confident wrong answer. It is the more dangerous of
+#       the two and it is the reason a hook-based guard was rejected — see
+#       MECHANISM below.
+#
+# MECHANISM: WHY A PATH SHIM AND NOT A HOOK
+#
+# Git has no pre-checkout hook. The hooks that exist are:
+#
+#   post-checkout           fires AFTER the working tree has been overwritten.
+#   reference-transaction   can abort a ref update, so it sees branch switching
+#                           and `reset`, but `git checkout -- <path>`,
+#                           `git restore <path>` and `git clean -fd` touch no
+#                           ref at all and are therefore invisible to it.
+#                           FETCH_HEAD is not written through the ref backend
+#                           either, so hazard (b) is invisible to it too.
+#
+# The single most destructive form — `git checkout -- .` — is precisely the one
+# no hook can see before the damage. A hook set would have been a control that
+# passes vacuously against the case it was built for. The alternatives
+# considered and rejected are recorded in hack/wsguard/README.md.
+#
+# SCOPE — THIS IS AN INSTRUMENT, NOT A BLANKET
+#
+# A guard that refuses everything gets uninstalled in a week, and deserves to
+# be. This one refuses only inside the guarded root (the shared mount, default
+# /workspace), only in the workspace modes where the resource is actually
+# shared, and only for the enumerated operations. The same commands in your own
+# private clone under /tmp are permitted, and the selftest proves it.
+#
+#   rule (a), destructive-to-working-tree: armed only in `shared-plain`, where
+#       the working tree itself is common to every agent.
+#   rule (b), FETCH_HEAD as a shared global: armed in `shared-plain` AND in
+#       `worktree-per-agent`, because in that mode the working tree is private
+#       but the underlying clone — and therefore .git/FETCH_HEAD — is not.
+#
+# EXIT CODES
+#
+#   77  REFUSED. The command was understood, matched a rule, and WAS NOT RUN.
+#   78  CANNOT EVALUATE. The guard is armed and the command is one it watches,
+#       but it could not determine which repository the command would act on,
+#       so it took no reading and WAS NOT RUN.
+#   *   anything else is the real git's own exit code, passed through
+#       untouched, because the shim execs it.
+#
+# 77 and 78 are distinct on purpose, and neither collides with git's own codes
+# (git uses 1, 128, 129 and occasionally 2). A caller reading only the status
+# must be able to tell "I refused you" from "I could not tell, so I did not
+# act" from "git ran and said no". Collapsing those three is how a gate starts
+# reporting clean for the wrong reason.
+#
+# ENVIRONMENT
+#
+#   SCION_WORKSPACE_MODE       arms the guard: shared-plain / worktree-per-agent
+#   SCION_WSGUARD=off          disables the guard entirely (announced on stderr)
+#   SCION_WSGUARD_FORCE=1      arms both rules regardless of workspace mode
+#   SCION_WSGUARD_ROOT=<dir>   guarded root; defaults to /workspace
+#   SCION_WSGUARD_AUDIT=<file> override audit log; defaults to <root>/.git/wsguard-audit.log
+#   SCION_WSGUARD_OVERRIDE=<reason>
+#                              permit a refused command. The reason must be at
+#                              least 12 characters of actual prose: an override
+#                              that does not say why is refused like any other
+#                              destructive command. Every use is announced on
+#                              stderr and appended to the audit log, because the
+#                              rule earns its keep by being reported.
+#
+# INSTALL
+#
+#   export PATH="<repo>/hack/wsguard/bin:$PATH"
+#
+# VERIFY (do this; a control that has never been fired is not a control)
+#
+#   hack/wsguard/selftest.sh
+#
+set -uo pipefail
+
+readonly EX_REFUSED=77
+readonly EX_CANNOT_EVALUATE=78
+
+self_path="${BASH_SOURCE[0]}"
+self_dir="$(cd -- "$(dirname -- "$self_path")" && pwd -P)"
+
+# ---------------------------------------------------------------------------
+# Locate the real git: the first `git` on PATH that is not this shim.
+# ---------------------------------------------------------------------------
+find_real_git() {
+  local dir resolved candidate
+  local IFS=:
+  for dir in $PATH; do
+    [[ -z "$dir" ]] && dir="."
+    resolved="$(cd -- "$dir" 2>/dev/null && pwd -P)" || continue
+    [[ "$resolved" == "$self_dir" ]] && continue
+    candidate="$resolved/git"
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+REAL_GIT="$(find_real_git)" || {
+  cat >&2 <<EOF
+wsguard: could not find a real git on PATH behind the shim at $self_dir.
+wsguard: NOTHING WAS RUN. This is a broken environment, not a policy refusal.
+EOF
+  exit "$EX_CANNOT_EVALUATE"
+}
+
+passthrough() { exec "$REAL_GIT" "$@"; }
+
+if [[ "${SCION_WSGUARD:-}" == "off" ]]; then
+  echo "wsguard: DISABLED via SCION_WSGUARD=off — the shared-workspace guard is not in effect." >&2
+  passthrough "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Arming. Rule (a) protects the working tree; rule (b) protects single-slot
+# refs in the .git directory, which are shared in one more mode than the tree.
+# ---------------------------------------------------------------------------
+mode="${SCION_WORKSPACE_MODE:-}"
+forced="${SCION_WSGUARD_FORCE:-}"
+tree_shared=0
+refs_shared=0
+case "$mode" in
+  shared-plain)       tree_shared=1; refs_shared=1 ;;
+  worktree-per-agent) refs_shared=1 ;;
+esac
+if [[ "$forced" == "1" ]]; then
+  tree_shared=1
+  refs_shared=1
+fi
+
+if (( tree_shared == 0 && refs_shared == 0 )); then
+  passthrough "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Split argv into git's global options, the subcommand, and the rest.
+# The global options are handed back to the real git verbatim when resolving
+# the target repository, so that -C / --git-dir / --work-tree are honoured by
+# git's own resolution rather than by a reimplementation of it here.
+# ---------------------------------------------------------------------------
+argv=("$@")
+pre=()
+subcmd=""
+rest=()
+idx=0
+while (( idx < ${#argv[@]} )); do
+  tok="${argv[idx]}"
+  case "$tok" in
+    -C|-c|--git-dir|--work-tree|--namespace|--exec-path|--config-env)
+      pre+=("$tok")
+      idx=$(( idx + 1 ))
+      if (( idx < ${#argv[@]} )); then
+        pre+=("${argv[idx]}")
+        idx=$(( idx + 1 ))
+      fi
+      ;;
+    --) break ;;
+    -*)
+      pre+=("$tok")
+      idx=$(( idx + 1 ))
+      ;;
+    *)
+      subcmd="$tok"
+      rest=("${argv[@]:idx+1}")
+      break
+      ;;
+  esac
+done
+
+[[ -z "$subcmd" ]] && passthrough "$@"
+
+# `git <anything> -h` and `--help` never touch the tree. Let them through
+# before classification so that the guard never stands between an operator and
+# the documentation for the command it just refused.
+for tok in ${rest[@]+"${rest[@]}"}; do
+  case "$tok" in
+    -h|--help) passthrough "$@" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Does this invocation even mention something we watch? Fast path first: the
+# shim sits in front of every git call in the container, so the common case
+# must not pay for a subprocess.
+# ---------------------------------------------------------------------------
+mentions_fetch_head=0
+for tok in "${argv[@]}"; do
+  case "$tok" in
+    FETCH_HEAD|FETCH_HEAD[~^:@.]*) mentions_fetch_head=1; break ;;
+  esac
+done
+
+watched=0
+case "$subcmd" in
+  checkout|switch|restore|reset|clean|stash|branch) (( tree_shared == 1 )) && watched=1 ;;
+  fetch)                                            (( refs_shared == 1 )) && watched=1 ;;
+esac
+if (( mentions_fetch_head == 1 && refs_shared == 1 )); then
+  watched=1
+fi
+
+(( watched == 0 )) && passthrough "$@"
+
+# ---------------------------------------------------------------------------
+# Which repository would this command act on? Resolved by the real git with
+# the caller's own global options, so that `git -C /elsewhere checkout` is
+# judged against /elsewhere and not against the current directory.
+#
+# stderr from the probe is captured rather than discarded, and is reprinted
+# whenever it is load-bearing. Sending it to /dev/null is how a `command not
+# found` became a confident false claim about a SHA on this project.
+# ---------------------------------------------------------------------------
+guard_root="${SCION_WSGUARD_ROOT:-/workspace}"
+if [[ -d "$guard_root" ]]; then
+  guard_root="$(cd -- "$guard_root" && pwd -P)"
+fi
+
+probe_err="$(mktemp)"
+probe_status=0
+toplevel="$("$REAL_GIT" ${pre[@]+"${pre[@]}"} rev-parse --show-toplevel 2>"$probe_err")" || probe_status=$?
+
+if (( probe_status != 0 )); then
+  {
+    echo "wsguard: CANNOT EVALUATE — \`git $subcmd\` is a guarded operation, but the"
+    echo "wsguard: repository it would act on could not be determined, so no reading"
+    echo "wsguard: was taken and the command WAS NOT RUN."
+    echo "wsguard:"
+    echo "wsguard: git rev-parse --show-toplevel exited $probe_status and said:"
+    sed 's/^/wsguard:   /' "$probe_err"
+    echo "wsguard:"
+    echo "wsguard: This is fail-closed by design. The guard will not permit a"
+    echo "wsguard: destructive operation on the grounds that it could not tell whether"
+    echo "wsguard: the target was the shared workspace at $guard_root."
+  } >&2
+  rm -f "$probe_err"
+  exit "$EX_CANNOT_EVALUATE"
+fi
+rm -f "$probe_err"
+
+toplevel="$(cd -- "$toplevel" && pwd -P)"
+if [[ "$toplevel" != "$guard_root" && "$toplevel" != "$guard_root"/* ]]; then
+  # A private clone. Nothing here is shared; the operator may do as they like.
+  passthrough "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Classification. Each rule sets `verdict=refuse` and fills in the diagnostic.
+# ---------------------------------------------------------------------------
+verdict="allow"
+rule=""
+why=""
+instead=()
+
+refuse() {
+  verdict="refuse"
+  rule="$1"
+  why="$2"
+  shift 2
+  instead=("$@")
+}
+
+# --- rule (b): reading a single-slot ref that another agent may have moved ---
+if (( mentions_fetch_head == 1 && refs_shared == 1 )); then
+  refuse "b/fetch-head-read" \
+    "FETCH_HEAD is a single slot in the shared .git directory, not a ref you own. Any agent that fetches between your fetch and your read replaces it, and the read then succeeds against the wrong commit — no error, just a wrong answer." \
+    "git fetch <remote> <ref>:refs/wsguard/${SCION_AGENT_SLUG:-$USER}/<slug>" \
+    "git log refs/wsguard/${SCION_AGENT_SLUG:-$USER}/<slug>"
+fi
+
+if [[ "$verdict" == "allow" ]]; then
+  case "$subcmd" in
+
+    # --- rule (a): commands that overwrite the shared working tree ---------
+    checkout|switch)
+      refuse "a/working-tree" \
+        "\`git $subcmd\` in a shared working tree replaces files and moves HEAD for every agent in this project at once, including agents with uncommitted work who are given no warning and no way to recover it." \
+        "git show <ref>:<path>            # read a file at another ref" \
+        "git archive <sha> <path> | tar -x -C /tmp/inspect   # read a whole tree" \
+        "git clone --no-hardlinks $guard_root /tmp/mine      # then do as you like there"
+      ;;
+
+    restore)
+      refuse "a/working-tree" \
+        "\`git restore\` discards uncommitted changes in the shared working tree. Changes you did not make are indistinguishable from changes you did, and there is no reflog for a working-tree modification that was never staged." \
+        "git diff -- <path>               # see what you would be discarding" \
+        "git stash push -m '<who>: <why>' -- <path>          # in a repo you own" \
+        "ask the agent whose change it is, in the shared tree"
+      ;;
+
+    reset)
+      refuse "a/working-tree" \
+        "\`git reset\` moves the shared HEAD and rewrites the shared index. --hard additionally discards every agent's uncommitted work in one step." \
+        "git revert <sha>                 # undo a commit without moving HEAD backwards" \
+        "git clone --no-hardlinks $guard_root /tmp/mine      # then reset there"
+      ;;
+
+    clean)
+      clean_dry=0
+      clean_force=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --dry-run) clean_dry=1 ;;
+          --force)   clean_force=1 ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              case "${chars:k:1}" in
+                n) clean_dry=1 ;;
+                f) clean_force=1 ;;
+              esac
+            done
+            ;;
+        esac
+      done
+      if (( clean_force == 1 || clean_dry == 0 )); then
+        refuse "a/working-tree" \
+          "\`git clean\` deletes untracked files outright. In a shared tree those files are other agents' scratch work, notes, and half-written code, and they are not in any object database — a clean is the one destructive git operation with no recovery path at all." \
+          "git clean -n                     # permitted: says what it would delete" \
+          "git status --porcelain           # permitted: shows who is holding what"
+      fi
+      ;;
+
+    stash)
+      stash_verb=""
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          -*) ;;
+          *) stash_verb="$tok"; break ;;
+        esac
+      done
+      case "$stash_verb" in
+        list|show) ;;
+        *)
+          refuse "a/working-tree" \
+            "\`git stash\` removes the working-tree changes of every agent in this project, not just yours, and drops them into one shared stack where nobody else knows to look for them." \
+            "git stash list                   # permitted" \
+            "git stash show                   # permitted" \
+            "git diff > /tmp/mine.patch       # keep your own changes without moving anyone else's"
+          ;;
+      esac
+      ;;
+
+    branch)
+      branch_destructive=""
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        case "$tok" in
+          --) break ;;
+          --delete) branch_destructive="--delete" ;;
+          --move)   branch_destructive="--move" ;;
+          --force)  branch_destructive="--force" ;;
+          --*) ;;
+          -?*)
+            chars="${tok#-}"
+            for (( k = 0; k < ${#chars}; k++ )); do
+              case "${chars:k:1}" in
+                d|D) branch_destructive="-${chars:k:1}" ;;
+                m|M) branch_destructive="-${chars:k:1}" ;;
+                f)   branch_destructive="-f" ;;
+              esac
+            done
+            ;;
+        esac
+      done
+      if [[ -n "$branch_destructive" ]]; then
+        refuse "a/shared-refs" \
+          "\`git branch $branch_destructive\` deletes, renames or force-moves a branch in a ref namespace that every agent in this project shares. Another agent's work may be reachable only from that name." \
+          "git branch                       # permitted: listing" \
+          "git branch <new-name> <sha>      # permitted: creating" \
+          "ask the branch's owner before removing or moving it"
+      fi
+      ;;
+
+    # --- rule (b): a fetch whose only record is the shared FETCH_HEAD slot --
+    fetch)
+      fetch_multiple=0
+      positionals=()
+      skip_next=0
+      for tok in ${rest[@]+"${rest[@]}"}; do
+        if (( skip_next == 1 )); then
+          skip_next=0
+          continue
+        fi
+        case "$tok" in
+          --multiple) fetch_multiple=1 ;;
+          --depth|--deepen|--shallow-since|--shallow-exclude|--negotiation-tip|--upload-pack|--refmap|--server-option|--filter|--jobs|-j|-o)
+            skip_next=1 ;;
+          -*) ;;
+          *) positionals+=("$tok") ;;
+        esac
+      done
+      if (( fetch_multiple == 0 && ${#positionals[@]} >= 2 )); then
+        for (( k = 1; k < ${#positionals[@]}; k++ )); do
+          case "${positionals[k]}" in
+            *:*) ;;
+            *)
+              refuse "b/fetch-head-write" \
+                "\`git fetch <remote> ${positionals[k]}\` records its result only in FETCH_HEAD, a single slot in the shared .git directory. A concurrent fetch by another agent overwrites it between your fetch and your read, and the read cannot tell. Name a destination ref and the race disappears." \
+                "git fetch ${positionals[0]} ${positionals[k]}:refs/wsguard/${SCION_AGENT_SLUG:-$USER}/${positionals[k]##*/}" \
+                "git log refs/wsguard/${SCION_AGENT_SLUG:-$USER}/${positionals[k]##*/}"
+              break
+              ;;
+          esac
+        done
+      fi
+      ;;
+  esac
+fi
+
+[[ "$verdict" == "allow" ]] && passthrough "$@"
+
+# ---------------------------------------------------------------------------
+# Refused. Print the diagnostic, then consider the override.
+# ---------------------------------------------------------------------------
+{
+  echo "wsguard: REFUSED [$rule] — this command WAS NOT RUN."
+  echo "wsguard:"
+  echo "wsguard:   \$ git $*"
+  echo "wsguard:"
+  echo "wsguard: repository : $toplevel"
+  echo "wsguard: guarded    : $guard_root (SCION_WORKSPACE_MODE=${mode:-unset}${forced:+, SCION_WSGUARD_FORCE=$forced})"
+  echo "wsguard:"
+  printf 'wsguard: %s\n' "$why"
+  echo "wsguard:"
+  echo "wsguard: Instead:"
+  for line in ${instead[@]+"${instead[@]}"}; do
+    echo "wsguard:   $line"
+  done
+} >&2
+
+override="${SCION_WSGUARD_OVERRIDE:-}"
+if [[ -z "$override" ]]; then
+  {
+    echo "wsguard:"
+    echo "wsguard: If you have decided you need this anyway, say why and it will be"
+    echo "wsguard: permitted and recorded:"
+    echo "wsguard:"
+    echo "wsguard:   SCION_WSGUARD_OVERRIDE='<why, in a sentence>' git $*"
+  } >&2
+  exit "$EX_REFUSED"
+fi
+
+if (( ${#override} < 12 )); then
+  {
+    echo "wsguard:"
+    echo "wsguard: SCION_WSGUARD_OVERRIDE was set to '$override', which is not a reason."
+    echo "wsguard: An override that does not say why is worth nothing to whoever reads"
+    echo "wsguard: the audit log afterwards. Give at least 12 characters of prose."
+    echo "wsguard: The command WAS NOT RUN."
+  } >&2
+  exit "$EX_REFUSED"
+fi
+
+audit_log="${SCION_WSGUARD_AUDIT:-$guard_root/.git/wsguard-audit.log}"
+audit_line="$(date -u '+%Y-%m-%dT%H:%M:%SZ')	${SCION_AGENT_NAME:-${USER:-unknown}}	$rule	$override	git $*"
+audit_status=0
+printf '%s\n' "$audit_line" >>"$audit_log" || audit_status=$?
+
+{
+  echo "wsguard:"
+  echo "wsguard: OVERRIDDEN. Proceeding because SCION_WSGUARD_OVERRIDE says:"
+  echo "wsguard:   $override"
+  if (( audit_status == 0 )); then
+    echo "wsguard: Recorded in $audit_log"
+  else
+    echo "wsguard: COULD NOT RECORD this override in $audit_log (append exited $audit_status)."
+    echo "wsguard: Proceeding anyway, but the only account of this is the line above,"
+    echo "wsguard: in a terminal nobody else can read. Report it yourself."
+  fi
+} >&2
+
+passthrough "$@"
