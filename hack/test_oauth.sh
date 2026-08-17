@@ -17,7 +17,6 @@
 
 set -e
 
-REPO_ROOT=$(pwd)
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf "$TEST_TMP"' EXIT
 

@@ -325,7 +325,7 @@ setup_test_grove() {
     fi
 
     # Extract the grove ID for later use
-    GROVE_ID=$($SCION config get grove_id 2>/dev/null || "")
+    GROVE_ID=$($SCION config get grove_id 2>/dev/null || echo "")
     if [[ -z "$GROVE_ID" ]]; then
         # Fall back to reading settings.yaml directly
         GROVE_ID=$(grep 'grove_id:' "$grove_dir/.scion/settings.yaml" 2>/dev/null | awk '{print $2}' || echo "")

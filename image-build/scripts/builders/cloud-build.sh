@@ -21,6 +21,7 @@
 # and per-image step ordering are concerns of the static cloudbuild-*.yaml
 # files that ship alongside this script.
 
+# shellcheck disable=SC2034 # sourced by build-images.sh, which reads BUILDER_MODE
 BUILDER_MODE="target"
 
 builder_check() {

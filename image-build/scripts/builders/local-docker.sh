@@ -17,6 +17,7 @@
 #
 # Implements the per-image builder contract on top of `docker buildx`.
 
+# shellcheck disable=SC2034 # sourced by build-images.sh, which reads BUILDER_MODE
 BUILDER_MODE="per-image"
 BUILDX_INSTANCE="scion-builder"
 

@@ -41,11 +41,15 @@
 set -euo pipefail
 
 # --- Colors ---
+# shellcheck disable=SC2034 # part of the standard colour palette, kept complete
 RED='\033[0;31m'
+# shellcheck disable=SC2034 # part of the standard colour palette, kept complete
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+# shellcheck disable=SC2034 # part of the standard colour palette, kept complete
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+# shellcheck disable=SC2034 # part of the standard colour palette, kept complete
 DIM='\033[2m'
 RESET='\033[0m'
 
@@ -225,14 +229,14 @@ infer_dependencies() {
     # that i depends on (i.e., whose tip is an ancestor of i's tip)
     local -a ancestors_of
     for ((i = 0; i < count; i++)); do
-        ancestors_of[$i]=""
+        ancestors_of[i]=""
         for ((j = 0; j < count; j++)); do
             if [ "$i" -eq "$j" ]; then
                 continue
             fi
             # Is j's tip an ancestor of i's tip? If so, i depends on j.
             if git merge-base --is-ancestor "${ref_arr[$j]}" "${ref_arr[$i]}" 2>/dev/null; then
-                ancestors_of[$i]="${ancestors_of[$i]} $j"
+                ancestors_of[i]="${ancestors_of[i]} $j"
             fi
         done
     done

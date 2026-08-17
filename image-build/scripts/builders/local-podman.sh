@@ -19,6 +19,7 @@
 # values are rejected with an actionable error (QEMU binfmt setup is the
 # user's responsibility and must be opted into deliberately).
 
+# shellcheck disable=SC2034 # sourced by build-images.sh, which reads BUILDER_MODE
 BUILDER_MODE="per-image"
 
 builder_check() {
@@ -35,7 +36,7 @@ builder_prepare() {
 
 # See local-docker.sh for the flag contract.
 builder_build() {
-  local image_name="" context_dir="" dockerfile="" tags="" platforms="" push="false" load="false"
+  local image_name="" context_dir="" dockerfile="" tags="" platforms="" push="false"
   local -a build_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -47,7 +48,7 @@ builder_build() {
       --platforms)   platforms="$2"; shift 2 ;;
       --build-arg)   build_args+=("$2"); shift 2 ;;
       --push)        push="$2"; shift 2 ;;
-      --load)        load="$2"; shift 2 ;;
+      --load)        shift 2 ;;  # accepted for CLI parity; --load is implicit for podman
       *) echo "local-podman: unknown builder_build flag: $1" >&2; return 1 ;;
     esac
   done

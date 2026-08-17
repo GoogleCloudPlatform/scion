@@ -50,7 +50,8 @@ print_header "SCHEDULER & THREAD DENSITY"
 check_tool "vmstat" && vmstat 1 3
 
 echo -e "\n${BOLD}Total Daemon Threads (dockerd/containerd):${NC}"
-ps -eLo comm,pid | grep -E 'dockerd|containerd' | wc -l
+# shellcheck disable=SC2009 # counting threads (ps -eLo); pgrep cannot count threads
+ps -eLo comm,pid | grep -cE 'dockerd|containerd'
 
 echo -e "\n${BOLD}Top 10 Thread-Heavy Processes:${NC}"
 ps -eo nlwp,pid,args --sort=-nlwp | head -n 11

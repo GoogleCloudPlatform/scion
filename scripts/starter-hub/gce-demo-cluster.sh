@@ -18,6 +18,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hub-config.sh
 source "${SCRIPT_DIR}/hub-config.sh"
 
 function delete_resources() {
@@ -54,7 +55,7 @@ if ! gcloud container clusters describe "${CLUSTER_NAME}" --region "${REGION}" -
         --region "${REGION}" \
         --project "${PROJECT_ID}" \
         --release-channel "regular" \
-        --labels=env=${HUB_NAME},project=scion,type=scion-hub-cluster
+        --labels=env="${HUB_NAME}",project=scion,type=scion-hub-cluster
 else
     echo "Cluster '${CLUSTER_NAME}' already exists."
 fi
