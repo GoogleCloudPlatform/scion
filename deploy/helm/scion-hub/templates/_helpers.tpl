@@ -974,36 +974,141 @@ into CI logs.
    was about the byte in front of the credential, and a multi-line witness makes
    it look like a narrower bug than it is.
 
-   WHY THE ALTERNATION HAD TO BE TIGHTENED IN THE SAME COMMIT. "sk-[A-Za-z0-9]"
-   and a bare "xox[abprs]-" are three or four characters of prefix plus one
-   alphanumeric, which is a substring of ordinary English. The old narrow anchor
-   was concealing that, so widening the anchor without adding the length floors
-   would have traded a false negative on every credential for a false positive
-   on every annotation -- and hub.podAnnotations has no value constraint in the
-   schema, so that is a chart refusing to render because someone wrote a
-   description. Hence "{16,}" and "{8,}" on those two alternatives ONLY. The
-   specific prefixes -- ghp_ gho_ ghs_ github_pat_ AKIA+8 "-----BEGIN " -- carry
-   enough signal to stand without a floor and are deliberately untouched.
+   WHY THE ALTERNATION IS NOT FLOORED, AND WHY THIS PARAGRAPH REPLACES ONE THAT
+   SAID THE OPPOSITE. This block previously read:
 
-   THE CONCEALMENT WAS PARTIAL, WHICH IS WORTH KNOWING BEFORE YOU TRUST A "no
-   false positives today" READING OF THE OLD PATTERN. Measured through sprig's
-   own regexMatch, the old pattern already refused two ordinary prose leaves --
-   "sk-learn pipeline" and "xoxb-team" -- because when the operator writes a
-   description, the prose IS at offset 0, which is exactly where the old anchor
-   looked. Those were live refusals of credential-free charts, not hypotheticals
-   un-masked by this commit; the floors are what fix them. Both are committed as
-   negative controls, along with "the sk-8 connector is documented" and "owned by
-   a task-force team", because this is a guard whose failure in the other
-   direction is rejecting a chart that contains no credential at all.
+       "WHY THE ALTERNATION HAD TO BE TIGHTENED IN THE SAME COMMIT ... Hence
+        {16,} and {8,} on those two alternatives ONLY."
+
+   I wrote that (215a6f85, 2026-08-17) and it is withdrawn here, by me, on
+   2026-08-17. The floors are removed. What killed them is a closed-form
+   argument, not a count -- gd-regmis-rev, 14:0xZ:
+
+       sk-proj-9xQvMKp2LrTdW7YbN4hJc0FgZ8sAe1Ru   REAL, 40 chars
+       sk-triton-inference-server-gpu-a100-pool   LEGITIMATE, 40 chars
+
+   Two strings of EQUAL LENGTH requiring OPPOSITE verdicts. No floor "{N,}" can
+   separate them, because a floor is a predicate on length alone and length does
+   not distinguish these. The floors were never a weak filter to be tuned; they
+   were the wrong KIND of predicate, and no value of N was ever going to work.
+   THE PREMISE OF THE PARAGRAPH ABOVE WAS DEAD ON ARRIVAL AND I DID NOT CHECK IT.
+
+   AND THE SENTENCE ABOVE THIS ONE IS STILL BINDING: the anchor and the
+   alternation are one change, and this edit honours that by moving both in a
+   single commit -- the anchor class stays, the floors go, and "(?i)" goes with
+   them. Splitting them is what the old note forbade and it is still forbidden.
+
+   WHAT THIS COSTS, MEASURED ON THE PRODUCTION APERTURE RATHER THAN ON A CORPUS
+   I BUILT TO ARGUE WITH. gd-p3-rev, 14:08Z, real helm, 19 rendered surfaces:
+
+       pattern            false positives        missed credentials
+       shipping today     608/1368 (32 distinct)   76/285  (4 arms)
+       THIS COMMIT        608/1368 (32 distinct)    0/285
+       floored variant    152/1368  (8 distinct)   19/285  (1 arm)
+
+   THIS COMMIT IS EXACTLY FALSE-POSITIVE NEUTRAL against what ships today, and
+   it closes all four missed arms. It is not a trade; the FP column is the same
+   number twice.
+
+   THE FP SET CHANGES MEMBERSHIP WITHOUT CHANGING SIZE, AND THE SWAP IS THE PART
+   WORTH READING. Dropping "(?i)" REMOVES "SK-Hynix-pool" and "akia12345678".
+   The ANCHOR FIX ADDS "/opt/sk-tools/bin" and a mid-string "sk-8". Two out, two
+   in. THE TWO NEW ONES ARE THE ANCHOR'S PRICE, NOT THE PREFIX LIST'S -- anyone
+   reading this later and reaching for the prefix list to reclaim them will be
+   editing the wrong half of the expression.
+
+   THE LARGEST REMAINING FP BLOCK IS NOT TOUCHED BY ANY OF THIS. Seven of the
+   eight false positives that survive even the floored variant are the un-floored
+   "github_" family (ghp_ gho_ ghs_ github_pat_). They are false positives under
+   the shipping pattern too. That is a follow-up with its own issue, deliberately
+   not scoped here, and it is the reason the FP column above is not zero for any
+   candidate.
 
    KNOWN RESIDUAL, DISCLOSED RATHER THAN CHASED: an attached shorthand argument,
    "-sghp_A1b2...", stays SILENT, because "s" is a token character and admitting
    it would re-admit "alphghp_notatoken" and the whole prose class with it. That
    is an argument-parsing bypass and belongs to the arg layer, not here. It is a
    known hole with an owner, not an oversight.
+
+   THE CLASS LIST BELOW IS THE SINGLE SOURCE OF TRUTH FOR THE PATTERN. The
+   alternation is BUILT from it by join, so a prefix cannot be added to the
+   matcher without also acquiring an English name, and the two cannot drift
+   apart. That is not tidiness: the failure message names the class, and a class
+   name that had to be maintained in parallel with the pattern would eventually
+   name the wrong one.
+
+   THE ECHO IS REMOVED, NOT SHRUNK, AND THAT IS THE WHOLE POINT. The obvious
+   repair was to keep a truncated echo and make it honest -- regexFind the match
+   instead of the head of the string. That fixes today and leaves a trap. MINIMUM
+   MATCH LENGTH PER ALTERNATIVE, measured two ways and agreeing (gd-p0-dev via
+   sre_parse.getwidth, gd-p3-rev by arithmetic on the literals, 14:30Z):
+
+       sk-[A-Za-z0-9]   4     github_pat_      11
+       ghp_             4     -----BEGIN       11
+       gho_             4     AKIA[A-Z0-9]{8}  12
+       ghs_             4
+       xox[abprs]-      5
+
+   FIVE OF THE EIGHT ARMS HAVE A MINIMUM AT OR UNDER 10, so a "trunc 10" echo
+   publishes the ENTIRE value for any match that short. That is harmless today
+   only because of an invariant nobody had written down: no real credential in
+   these eight families is ten bytes or fewer -- a GitHub PAT is 40, an OpenAI
+   project key 48+, an AWS access key ID 20, a Slack bot token ~50. NOTHING
+   ENFORCES THAT INVARIANT. Add one short-format issuer to the list above and a
+   truncated echo silently becomes full disclosure, with no test going red.
+   gd-p3-rev found that and it is the reason this branch echoes nothing at all:
+   an invariant that has to hold for a guard to be safe is a defect waiting for
+   the next author, and removing the echo discharges it by construction instead
+   of documenting it.
+
+   WHY AN ENGLISH CLASS NAME RATHER THAN THE BARE PREFIX. gd-em specified a
+   projection -- a second regexFind of the literals alone, printing "sk-", "ghp_",
+   "AKIA". That is sound and it was the fallback. The list above is chosen instead
+   because it prints the prefix AND what the prefix means, at the same zero
+   entropy cost, since every class string is a compile-time literal that never
+   touches the value. The drift risk gd-em was avoiding -- a text-to-English
+   mapping maintained in parallel with the pattern -- does not arise, because the
+   pattern is BUILT from this list rather than written beside it.
+
+   THE COST, RECORDED SO IT IS A DECISION AND NOT A SIDE EFFECT (gd-p3-rev,
+   14:30Z): "ghp_pool" is a real false positive from the production corpus -- it
+   is somebody's node pool. Today it is echoed whole and the operator recognises
+   it instantly; here they get the class and the path instead. DIAGNOSTIC VALUE
+   AND DISCLOSURE RISK ARE INVERSELY COUPLED ON THIS LINE, and an echo is most
+   informative exactly where it is harmless. The path is what locates the leaf,
+   the path already shipped, and it does not need the value beside it.
+
+   AND THE MESSAGE NAMES THE CLASS RATHER THAN QUOTING THE VALUE. It used to say
+   (starting %q) with trunc 10 of the value. That was WRONG TWICE. It leaked ten
+   bytes of a live credential into CI logs, contradicting the non-echo rule this
+   same helper states four hundred lines up; and once the anchor reaches
+   mid-string, "starting" became FALSE -- gd-consumer measured (starting "rotate
+   bef") and (starting "deploy not") on rows this pattern exists to catch, where
+   the credential is nowhere near the start of the value. A PREFIX FIELD ON A
+   NON-PREFIX MATCH IS NOT A SMALL LEAK, IT IS A WRONG ANSWER. The path is
+   already in $source and the path is true, so the value adds nothing an
+   operator needs to find the leaf.
 */}}
-{{- if regexMatch "(?i)(^|[^A-Za-z0-9_-])(sk-[A-Za-z0-9_-]{16,}|ghp_|gho_|ghs_|github_pat_|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{8}|-----BEGIN )" $s }}
-{{- fail (printf "%s (starting %q) has the shape of a credential. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (trunc 10 $s)) }}
+{{- $credClasses := list
+      (dict "re" "sk-[A-Za-z0-9]"    "class" "an OpenAI-style API key (sk- prefix)")
+      (dict "re" "ghp_"              "class" "a GitHub personal access token (ghp_ prefix)")
+      (dict "re" "gho_"              "class" "a GitHub OAuth token (gho_ prefix)")
+      (dict "re" "ghs_"              "class" "a GitHub server-to-server token (ghs_ prefix)")
+      (dict "re" "github_pat_"       "class" "a GitHub fine-grained PAT (github_pat_ prefix)")
+      (dict "re" "xox[abprs]-"       "class" "a Slack token (xox[abprs]- prefix)")
+      (dict "re" "AKIA[A-Z0-9]{8}"   "class" "an AWS access key ID (AKIA prefix)")
+      (dict "re" "-----BEGIN "       "class" "a PEM private key block header")
+}}
+{{- $anchor := "(^|[^A-Za-z0-9_-])" }}
+{{- $alts := list }}
+{{- range $c := $credClasses }}{{- $alts = append $alts $c.re }}{{- end }}
+{{- if regexMatch (printf "%s(%s)" $anchor (join "|" $alts)) $s }}
+{{- $class := "" }}
+{{- range $c := $credClasses }}
+{{- if and (eq $class "") (regexMatch (printf "%s(%s)" $anchor $c.re) $s) }}{{- $class = $c.class }}{{- end }}
+{{- end }}
+{{- if eq $class "" }}{{- $class = "a credential (BUG: the alternation matched but no single class did - the class list and the pattern have been allowed to disagree)" }}{{- end }}
+{{- fail (printf "%s has the shape of a credential: %s. THE VALUE IS NOT REPRODUCED HERE, DELIBERATELY - a guard whose error message prints the secret it just caught has moved that secret from argv into CI logs. The path above locates the leaf; the class names what was matched. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source $class) }}
 {{- end }}
 {{- end }}
 

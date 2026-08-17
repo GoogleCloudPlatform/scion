@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=125   # 77 (upstream) + 33 (F2) + 3 (map-KEY) + 12 (URL-userinfo F3).
+EXPECTED_TOTAL=130   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -242,17 +242,19 @@ accept "explicit port, @ in query" --set 'hub.args[0]=--upstream=https://example
 # accept() and delete this comment, having first re-run the seven fire rows above.
 reject "KNOWN FP: port + @ in path" "embeds credentials in a URL" --set 'hub.args[0]=--upstream=https://example.com:8080/a@b/c'
 reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAA'
-# LENGTHENED DELIBERATELY, AND DO NOT SHORTEN IT BACK. "sk-" carries a length
-# floor because three characters of prefix plus one alphanumeric is a substring
-# of ordinary English; the old witness "sk-AAAAAAAAAAAA" sat under the floor and
-# went red when the floor landed. A red row there meant the FIXTURE was a toy,
-# not that the pattern was wrong. This is the shape a real key has.
 reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-proj-A1b2C3d4E5f6G7h8I9j0'
-# The floor's cost, asserted rather than left implicit: a short sk- string is NOT
-# treated as a credential, and that is a deliberate trade against the prose class
-# below. If someone lowers the floor to catch this, the prose rows go red and the
-# chart starts refusing credential-free charts.
-accept "short sk- string is under the floor" --set 'hub.args[0]=--x=sk-9A'
+# 🔴 THE ROW BELOW WAS AN accept FOR MOST OF TODAY AND THAT WAS MY DEFECT, NOT A
+# TRADE. In 215a6f85 I added length floors to the credential alternation, which
+# made "sk-9A" render clean, and I INVERTED THIS ROW -- a production reject row
+# inherited from main, where its witness read "sk-AAAAAAAAAAAA" -- so that my own
+# suite would go green on the change. It did. That is precisely the problem: the
+# suite could no longer show me the casualty, because I had deleted the row that
+# WAS the casualty. Restored to reject by me, gd-p0-dev, 2026-08-17.
+#
+# RATIFIED BY gd-em AND gke-deploy-lead AFTER I DISCLOSED IT: NOTHING IN THIS
+# BRANCH MAY WEAKEN A PRODUCTION reject ROW, and any diff flipping an
+# accept/reject verb must list the row in the PR description with a reason.
+reject "short sk- string"   "shape of a credential"       --set 'hub.args[0]=--x=sk-9A'
 reject "AKIA prefix"        "shape of a credential"       --set 'hub.args[0]=--x=AKIAABCDEFGH1234'
 # ORDERING PIN. Both messages are rejections, and asserting WHICH one fires is
 # what keeps a guard from taking credit for a catch it did not make. This row
@@ -297,7 +299,7 @@ ml() { # ml <file> <block scalar body>
 ml pem   "      owner: platform-eng\n      -----BEGIN RSA PRIVATE KEY-----\n      MIIEowIBAAKCAQEA\n      -----END RSA PRIVATE KEY-----" \
   && reject "PEM block on a non-first line"  "shape of a credential" -f "$MLTMP/pem.yaml"
 ml tokln "      owner: platform-eng\n      ghp_A1b2C3d4E5f6G7h8\n      tier: gold" \
-  && reject "token at a non-first line start" "shape of a credential" -f "$MLTMP/tokln.yaml"
+  && reject "R3: credential alone on LINE 2 of a scalar" "shape of a credential" -f "$MLTMP/tokln.yaml"
 # These two are why (?m) alone was not enough: the credential is MID-line, after
 # "token: ", so a line-start anchor never reaches it. They need the widened class.
 ml tokkv "      owner: platform-eng\n      token: ghp_A1b2C3d4E5f6G7h8\n      tier: gold" \
@@ -358,6 +360,19 @@ case "$_kout" in
   *"a map key"*)          echo "ok    key-check message locates the leaf without printing it" ;;
   *) echo "FAIL  key-check message did not name the surface"; failed=$((failed + 1)) ;;
 esac
+# R2 PAIRING (gd-p3-rev, ratified by gd-em 14:20Z at CRITICAL). The key-position
+# reject above only means something beside a VALUE-position row planted in THE
+# SAME MAP. Without it, "the key axis fires" and "this fixture shape fires for
+# some other reason" are the same observation. Same annotation map, same
+# credential, other side of the colon.
+{ printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n'
+  printf '    example.com/tok: ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\n'; } > "$MLTMP/k2.yaml"
+reject "same credential in VALUE position" "shape of a credential" -f "$MLTMP/k2.yaml"
+# ⚠ THE PATH IN THESE MESSAGES DOES NOT ROUND-TRIP, and that is known and not
+# fixed here (gd-em 14:27Z §5). "values.hub.nodeSelector.cloud.google.com/pool"
+# is ambiguous between a dotted KEY and four nested maps, and dotted keys are
+# ordinary in this chart -- "cloud.google.com/gke-spot" is in its own values.
+# Still far better than no path. Not a defect this commit undertakes to repair.
 # KEYS GET THE VALUE AXIS, NOT THE NAME AXIS, AND THIS IS THE ROW THAT PINS IT.
 # The name axis hard-fails on an underscore because pflag rejects one in a flag
 # name. Annotation keys are not flags, and underscores are legal in them, so
@@ -365,29 +380,85 @@ esac
 accept "ordinary key with an underscore" \
   --set 'hub.podAnnotations.app_version=1.2'
 
-echo "== NEGATIVE CONTROLS: ordinary prose must still render =="
-# THE ANCHOR AND THE ALTERNATION ARE ONE FIX AND THESE ROWS ARE THE HALF THAT
-# PROVES IT. Repairing the anchor while leaving "sk-[A-Za-z0-9]" and a bare
-# "xox[abprs]-" in the alternation makes every one of these red: three characters
-# of prefix plus one alphanumeric is a substring of ordinary English, and
-# hub.podAnnotations has no value constraint in the schema. A suite of positive
-# rows cannot see that - both the correct fix and the anchor-only one fire on
-# every credential arm - so these are the only rows here that discriminate.
+echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
+# R6 (gd-p3-rev's sweep, made gd-em's own at 14:20Z). "/readyz" appeared ZERO
+# times across all six committed test scripts while two probes in deployment.yaml
+# depend on it. It is a hard constraint on this project -- the path is /readyz,
+# NOT /api/v1/readyz and NOT /healthz -- and until these two rows it was protected
+# by nothing at all. A constraint that lives only in a brief is not a constraint.
 #
-# TWO OF THEM WERE LIVE FAILURES, NOT HYPOTHETICALS. Measured against the tree
-# before the floors landed, "sk-learn pipeline" and "xoxb-team" were REFUSED: an
-# annotation whose value is prose puts that prose at offset 0, which is exactly
-# where the old anchor looked. The concealment only ever covered values that did
-# not BEGIN with the unsafe prefix.
-sl p1 "'sk-learn pipeline'"       && accept "prose 'sk-learn pipeline'"    -f "$MLTMP/p1.yaml"
-sl p2 "'xoxb-team'"               && accept "prose 'xoxb-team'"            -f "$MLTMP/p2.yaml"
-sl p3 "'my sk-8 skateboard deck'" && accept "prose 'sk-8 skateboard'"      -f "$MLTMP/p3.yaml"
-sl p4 "'avoid xoxb-style naming'" && accept "prose 'xoxb-style naming'"    -f "$MLTMP/p4.yaml"
-sl p5 "'/opt/sk-tools/bin'"       && accept "path '/opt/sk-tools/bin'"     -f "$MLTMP/p5.yaml"
+# TWO ASSERTIONS, POSITIVE AND EXHAUSTIVE, BECAUSE EITHER ALONE IS WEAK. The
+# count row alone passes if a second probe is added pointing somewhere wrong and
+# a correct one is deleted. The no-other-path row alone passes VACUOUSLY if the
+# probes stop rendering altogether -- zero paths is zero wrong paths. Together
+# they pin "exactly two, and both of them /readyz".
+executed=$((executed + 1))
+_probeout="$("$HELM" template t "$CHART" "${BASE[@]}" -s templates/deployment.yaml 2>&1)"
+_nready=$(printf '%s\n' "$_probeout" | grep -c 'path: /readyz')
+if [ "$_nready" -eq 2 ]; then
+  echo "ok    both probes point at /readyz (exactly 2)"
+else
+  echo "FAIL  expected exactly 2 'path: /readyz' in the Deployment, got ${_nready}"
+  failed=$((failed + 1))
+fi
+# Whole chart, not just the Deployment: an httpGet path introduced in any other
+# template is in scope for this constraint too.
+executed=$((executed + 1))
+_nother=$(render | grep 'path:' | grep -cv 'path: /readyz')
+if [ "$_nother" -eq 0 ]; then
+  echo "ok    no probe path other than /readyz renders anywhere in the chart"
+else
+  echo "FAIL  ${_nother} probe path(s) other than /readyz render:"
+  render | grep 'path:' | grep -v 'path: /readyz' | sed 's/^/        /'
+  failed=$((failed + 1))
+fi
+
+echo "== THE FALSE-POSITIVE SET: prose this pattern REFUSES, pinned as its cost =="
+# 🔴 REWRITTEN BY ME, gd-p0-dev, 2026-08-17, REPLACING A COMMENT I ALSO WROTE
+# EARLIER TODAY (215a6f85) THAT SAID THE OPPOSITE. The old block introduced these
+# as negative controls proving that length floors kept ordinary English
+# renderable. The floors are gone -- no floor can separate a 40-character real
+# key from a 40-character legitimate string, which is a closed-form result and
+# not a tuning failure -- so these values are REFUSED now, and the rows say so.
+#
+# FLIP, DO NOT DELETE. Every reject row below is a KNOWN FALSE POSITIVE. If you
+# narrow the pattern and reclaim one, its row goes red: THAT IS THE ROW WORKING,
+# and the repair is to flip it back to accept() with a note, NEVER to delete it.
+# A deleted FP row is a cost that has stopped being counted.
+#
+# FRAME, BECAUSE SIX IS NOT A COVERAGE FIGURE: these are 6 rows from a corpus I
+# built by hand. The production aperture is 32 distinct legitimate values over 19
+# rendered surfaces (gd-p3-rev, 14:08Z, measured with real helm). THIS IS A
+# SAMPLE AND MUST NOT BE READ AS THE FALSE-POSITIVE SET. It exists so the cost is
+# visible in the suite at all, not so that it is quantified here.
+#
+# AND THE COST DID NOT RISE. Against the pattern shipping in main the FP count is
+# IDENTICAL -- 608/1368, 32 distinct, before and after -- because dropping "(?i)"
+# removes two while the anchor fix adds two. Membership changes; size does not.
+# The two rows immediately below are the OUT side of that swap, and they are what
+# make it a swap rather than an assertion.
+sl h1 "'SK-Hynix-pool'"   && accept "SK-Hynix-pool (an FP under (?i), reclaimed)"  -f "$MLTMP/h1.yaml"
+sl h2 "'akia12345678'"    && accept "akia12345678 (an FP under (?i), reclaimed)"   -f "$MLTMP/h2.yaml"
+# The IN side. Both are the ANCHOR's price, NOT the prefix list's -- the prefixes
+# below are byte-identical to main's. Anyone reaching for the alternation to
+# reclaim these is editing the wrong half of the expression.
+sl p1 "'sk-learn pipeline'"       && reject "KNOWN FP, FLIP DONT DELETE: prose 'sk-learn pipeline'" "shape of a credential" -f "$MLTMP/p1.yaml"
+sl p2 "'xoxb-team'"               && reject "KNOWN FP, FLIP DONT DELETE: prose 'xoxb-team'"         "shape of a credential" -f "$MLTMP/p2.yaml"
+sl p3 "'my sk-8 skateboard deck'" && reject "KNOWN FP, FLIP DONT DELETE: prose 'sk-8 skateboard'"   "shape of a credential" -f "$MLTMP/p3.yaml"
+sl p4 "'avoid xoxb-style naming'" && reject "KNOWN FP, FLIP DONT DELETE: prose 'xoxb-style naming'" "shape of a credential" -f "$MLTMP/p4.yaml"
+sl p5 "'/opt/sk-tools/bin'"       && reject "KNOWN FP, FLIP DONT DELETE: path '/opt/sk-tools/bin'"  "shape of a credential" -f "$MLTMP/p5.yaml"
 ml prose "      note: the sk-8 connector is documented\n      tier: gold" \
-  && accept "prose mentioning sk-8 in a leaf"  -f "$MLTMP/prose.yaml"
+  && reject "KNOWN FP, FLIP DONT DELETE: prose 'sk-8' in a leaf" "shape of a credential" -f "$MLTMP/prose.yaml"
+# 🛑 THIS ONE DID NOT FLIP, AND IT IS THE ONLY ROW IN THE BLOCK THAT
+# DISCRIMINATES. "task-force" contains "sk-f", but the byte in front of it is
+# "a", which IS in the token class, so the anchor never engages. Measured, not
+# reasoned: of the seven prose rows this block used to carry, six refuse and this
+# one still renders.
+# IF THIS ROW EVER GOES RED, THE ANCHOR CLASS HAS BEEN WIDENED INTO A PLAIN
+# SUBSTRING SEARCH and every English word containing a prefix becomes a refusal.
+# The six rows above cannot detect that -- they are red either way.
 ml task  "      note: owned by a task-force team\n      tier: gold" \
-  && accept "prose 'task-force' (sk- mid-word)" -f "$MLTMP/task.yaml"
+  && accept "mid-word sk- in 'task-force' is NOT matched" -f "$MLTMP/task.yaml"
 ml clean "      owner: platform-eng\n      tier: gold" \
   && accept "credential-free multi-line leaf"   -f "$MLTMP/clean.yaml"
 

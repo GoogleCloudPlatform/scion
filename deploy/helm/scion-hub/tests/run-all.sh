@@ -119,7 +119,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=263   # 49 chart-integrity + 125 render-guards + 39 reserved-flags + 4 update-strategy + 46 rbac-collision. reserved-flags: +8 shorthand-cluster rows.
+EXPECTED_ASSERTIONS=268   # 49 chart-integrity + 130 render-guards + 39 reserved-flags + 4 update-strategy + 46 rbac-collision.
 EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
@@ -139,7 +139,7 @@ EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 SCRIPTS=(
   reserved-flags.sh     # 39 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
-  render-guards.sh      # 125 - every other render-time refusal, incl. the HA-unlanded gate
+  render-guards.sh      # 130 - every other render-time refusal, incl. the HA-unlanded gate
   chart-integrity.sh    # 49 - .helmignore breadth, the packaged file set, base-url, signing key, session annotation, checksum redaction, NOTES rotation, scheduling guards
   rbac-collision.sh     # 46 - the cluster-scoped RBAC name, and two pinned residuals
 )
