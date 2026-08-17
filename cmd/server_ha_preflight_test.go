@@ -123,10 +123,15 @@ func TestValidateHostedHAPreflightRejectsUnsafeBackends(t *testing.T) {
 func TestValidateHostedHAPreflightAcceptsGCLBAudience(t *testing.T) {
 	withHostedHAGuards(t)
 	cfg := validHostedHAConfig()
-	cfg.Auth.Proxy.IAP.Audience = "/projects/123456789/global/backendServices/987654321"
+	cfg.Auth.Proxy.IAP.Audience = "/projects/486315127503/global/backendServices/987654321"
 	cfg.Auth.Transport.OIDCAudience = cfg.Auth.Proxy.IAP.Audience
 
-	require.NoError(t, validateHostedHAPreflight(cfg))
+	var err error
+	logged := captureLog(t, func() {
+		err = validateHostedHAPreflight(cfg)
+	})
+	require.NoError(t, err)
+	require.NotContains(t, logged, "looks like a bootstrap placeholder")
 }
 
 func TestValidateHostedHAPreflightRequiresSessionSecret(t *testing.T) {
@@ -263,4 +268,49 @@ func TestIAPAudienceShape(t *testing.T) {
 	require.True(t, isSupportedIAPAudience("/projects/123/locations/us-central1/services/scion"))
 	require.True(t, isSupportedIAPAudience("/projects/123/global/backendServices/456"))
 	require.False(t, isSupportedIAPAudience(strings.TrimSpace("")))
+}
+
+func TestIsLikelyPlaceholderAudience(t *testing.T) {
+	tests := []struct {
+		name     string
+		audience string
+		want     bool
+	}{
+		{"canonical placeholder", "/projects/000000000/global/backendServices/0", true},
+		{"zero backend ID", "/projects/486315127503/global/backendServices/0", true},
+		{"padded zero backend service ID", "/projects/486315127503/global/backendServices/000000", true},
+		{"all-zeros project", "/projects/000000000/global/backendServices/12345", true},
+		{"all-zeros project short", "/projects/0/global/backendServices/12345", true},
+		{"dummy project number", "/projects/123456789/global/backendServices/12345", true},
+		{"real audience", "/projects/486315127503/global/backendServices/987654321", false},
+		{"cloud run (not checked)", "/projects/123/locations/us-central1/services/scion-hub", false},
+		{"cloud run with dummy project (not checked)", "/projects/123456789/locations/us-central1/services/scion-hub", false},
+		{"empty", "", false},
+		{"malformed", "/projects//global/backendServices/12345", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isLikelyPlaceholderAudience(tt.audience))
+		})
+	}
+}
+
+// A placeholder audience is intentionally non-fatal: it is the supported GKE
+// bootstrap path, where the real backend-service ID does not exist until the
+// ingress has reconciled.
+func TestValidateHostedHAPreflightAcceptsPlaceholderGCLBAudience(t *testing.T) {
+	withHostedHAGuards(t)
+	cfg := validHostedHAConfig()
+	cfg.Auth.Proxy.IAP.Audience = "/projects/000000000/global/backendServices/0"
+	cfg.Auth.Transport.OIDCAudience = cfg.Auth.Proxy.IAP.Audience
+
+	// Non-fatality alone is not the contract: the operator must also be told
+	// the deployment will 401 until the real backend-service ID is wired in.
+	var err error
+	logged := captureLog(t, func() {
+		err = validateHostedHAPreflight(cfg)
+	})
+	require.NoError(t, err)
+	require.Contains(t, logged, "looks like a bootstrap placeholder")
+	require.Contains(t, logged, cfg.Auth.Proxy.IAP.Audience)
 }
