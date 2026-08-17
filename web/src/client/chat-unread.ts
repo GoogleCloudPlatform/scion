@@ -27,6 +27,7 @@
  */
 
 import { apiFetch } from './api.js';
+import { isChatNotificationStatus } from './chat-notifications.js';
 import { setUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
@@ -72,12 +73,13 @@ export class ChatUnreadCounter {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listening = false;
   private readonly boundSchedule = (): void => this.scheduleRefresh();
+  private readonly boundNotification = (e: Event): void => this.onNotification(e);
 
   /** Begins tracking, with one immediate refresh. */
   start(): void {
     if (this.listening) return;
     // Anything that can create or clear an unread conversation.
-    stateManager.addEventListener('notification-created', this.boundSchedule);
+    stateManager.addEventListener('notification-created', this.boundNotification);
     stateManager.addEventListener('chat-message-received', this.boundSchedule);
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
@@ -86,7 +88,7 @@ export class ChatUnreadCounter {
 
   stop(): void {
     if (!this.listening) return;
-    stateManager.removeEventListener('notification-created', this.boundSchedule);
+    stateManager.removeEventListener('notification-created', this.boundNotification);
     stateManager.removeEventListener('chat-message-received', this.boundSchedule);
     stateManager.removeEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = false;
@@ -113,6 +115,24 @@ export class ChatUnreadCounter {
   setDMUnread(dms: readonly UnreadDM[]): void {
     this.dmUnread = countUnreadDMs(dms);
     this.publish();
+  }
+
+  /**
+   * Refreshes for chat notifications only.
+   *
+   * Agent-status notifications cannot change an unread chat count, and they
+   * still broadcast to every logged-in session (#1125) — so without this
+   * guard one agent-status event anywhere on the deployment costs every
+   * signed-in browser a `/chat/spaces` + `/chat/dms` pair, on every page.
+   * `/chat/spaces` is the heaviest chat endpoint there is.
+   *
+   * Unscoped events carry no payload, so they fail the same test as a
+   * non-chat status and need no separate branch.
+   */
+  private onNotification(e: Event): void {
+    const { detail } = e as CustomEvent<{ data?: { status?: string } } | undefined>;
+    if (!isChatNotificationStatus(detail?.data?.status)) return;
+    this.scheduleRefresh();
   }
 
   /** Coalesces a burst of events into a single refresh. */

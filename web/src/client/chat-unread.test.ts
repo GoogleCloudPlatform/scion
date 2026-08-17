@@ -26,6 +26,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+import { MENTION_STATUS } from './chat-notifications.js';
 import {
   ChatUnreadCounter,
   countUnreadDMs,
@@ -230,6 +231,56 @@ describe('ChatUnreadCounter', () => {
       // below would pass without the space half being under test at all.
       expect(spaceHalf).toBeGreaterThan(0);
       expect(getUnreadBadge()).toBe(spaceHalf + countUnreadDMs(serverDMs));
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('refreshes for a chat notification', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    apiFetch.mockClear();
+
+    try {
+      stateManager.dispatchEvent(
+        new CustomEvent('notification-created', {
+          detail: { state: {}, data: { status: MENTION_STATUS } },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      expect(apiFetch).toHaveBeenCalled();
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('ignores notifications that cannot change an unread chat count', async () => {
+    // Agent-status notifications still broadcast to every session (#1125).
+    // Refreshing on them would put /chat/spaces on every page of every
+    // signed-in browser for an event about somebody else's agent.
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    apiFetch.mockClear();
+
+    try {
+      // User-scoped, but not a chat status.
+      stateManager.dispatchEvent(
+        new CustomEvent('notification-created', {
+          detail: { state: {}, data: { status: 'COMPLETED' } },
+        })
+      );
+      // Unscoped agent-status broadcast: notify() sends the state, no payload.
+      stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      expect(apiFetch).not.toHaveBeenCalled();
     } finally {
       counter.stop();
     }
