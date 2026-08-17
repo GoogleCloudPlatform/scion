@@ -122,7 +122,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=259
+EXPECTED_TOTAL=261
 
 failures=0
 assertions=0
@@ -154,6 +154,76 @@ if ! "$HELM" version --short >/dev/null 2>&1; then
 fi
 if ! "$KUBECONFORM" -v >/dev/null 2>&1; then
   meta_failure "kubeconform does not run (tried: $KUBECONFORM). Nothing below was checked. Set KUBECONFORM= if it is installed elsewhere."
+fi
+
+# A PATH IS NOT PROVENANCE. Two versions of helm render different manifests, and
+# a number produced by an unnamed helm is not reproducible even by someone who
+# has helm. This banner prints on EVERY run including the all-green one, because
+# a toolchain disclosure that appears only beside failures is a disclosure that
+# is missing from every result anyone quotes.
+#
+# Upstream-verifiable, chained rather than asserted - the sha256 below is the
+# BINARY's, and get.helm.sh publishes the TARBALL's, so the chain that binds
+# them is:
+#
+#   curl -sSLO https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz
+#   curl -sSL  https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz.sha256sum
+#     f5355c79190951eed23c5432a3b920e071f4c00a64f75e077de0dd4cb7b294ea
+#   sha256sum helm-v3.16.3-linux-amd64.tar.gz          # matches the above
+#   tar -xzf helm-v3.16.3-linux-amd64.tar.gz
+#   sha256sum linux-amd64/helm
+#     6a1dffedcf78a687aedc71a918cff0af8f0988184488dddb3615e24abc4e7f2b
+#
+#   curl -sSLO https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+#   curl -sSL  https://github.com/yannh/kubeconform/releases/download/v0.6.7/CHECKSUMS
+#     95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+#   tar -xzf kubeconform-linux-amd64.tar.gz && sha256sum kubeconform
+#     9e867e86e277de971bed3cfe46cf07f1d08db212e9188389670b3685c38281e7
+#
+# Both chains were run end to end on 2026-08-17 and both extracted binaries were
+# `cmp`-identical to the ones this suite uses. A reader who wants the same bytes
+# runs the four commands; a reader who has different bytes sees it in the banner
+# rather than inferring it from a diverging count.
+# NO `2>/dev/null` IN THIS BLOCK (gd-em, 11:05, binding). The banner is a
+# published measurement, and mechanism C - a zsh tied variable bound as a loop
+# or `read` variable - destroys PATH and announces itself on STDERR AND NOWHERE
+# ELSE. Suppressing this stream is exactly how a run that could not execute
+# `helm` at all reports `unknown` and keeps going. Stderr goes to a file and its
+# line count is published beside the result: `stderr=0 lines` is a finding.
+_tcerr="$(mktemp)"   # $WORK does not exist yet at this point in the script, and
+                     # the EXIT trap set below for $WORK would replace one set here.
+_hv="$("$HELM" version --short 2>>"$_tcerr" || echo unknown)"
+_kv="$("$KUBECONFORM" -v 2>>"$_tcerr" || echo unknown)"
+_hp="$(command -v "$HELM" 2>>"$_tcerr" || printf '%s' "$HELM")"
+_kp="$(command -v "$KUBECONFORM" 2>>"$_tcerr" || printf '%s' "$KUBECONFORM")"
+echo "toolchain  helm         $_hv  $_hp  sha256=$(sha256sum "$_hp" 2>>"$_tcerr" | cut -c1-16)"
+echo "toolchain  kubeconform  $_kv  $_kp  sha256=$(sha256sum "$_kp" 2>>"$_tcerr" | cut -c1-16)"
+echo "toolchain  stderr       $(wc -l <"$_tcerr" | tr -d ' ') lines$([[ -s "$_tcerr" ]] && printf ':\n%s' "$(cat "$_tcerr")")"
+rm -f "$_tcerr"
+
+# kubeconform's DEFAULT schema location is REMOTE. With no route to it, every
+# document below comes back `Errors: 1, failed downloading schema` - which does
+# not match the expected summary, so without this probe the suite would print
+# five lines of the form "kubeconform minimal: wanted ... got ..." and ACCUSE THE
+# CHART OF BEING INVALID BECAUSE THE NETWORK WAS DOWN.
+#
+# MEASURED, v0.6.7, by pointing the tool at a closed port:
+#
+#   $ kubeconform -strict -summary -schema-location 'https://127.0.0.1:9/{{.ResourceKind}}.json' <cm.yaml
+#   stdin - ConfigMap x failed validation: failed downloading schema at
+#     https://127.0.0.1:9/configmap.json: ... connect: connection refused
+#   Summary: 1 resource found parsing stdin - Valid: 0, Invalid: 0, Errors: 1, Skipped: 0
+#   $ echo $?
+#   1
+#
+# So this probe is also the instrument's POSITIVE CONTROL: it asserts, on every
+# run, that kubeconform returns Valid:1 for a document that is known good. An
+# instrument that cannot say "valid" about anything cannot be trusted when it
+# says "valid" about the chart.
+_kcprobe="$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: verify-sh-probe\ndata:\n  a: "b"\n' \
+  | "$KUBECONFORM" -strict -summary 2>&1 || true)"
+if ! grep -qF "Valid: 1, Invalid: 0, Errors: 0, Skipped: 0" <<<"$_kcprobe"; then
+  meta_failure "kubeconform cannot validate a known-good ConfigMap, so it cannot be asked about the chart. This is almost always the schema registry being unreachable - kubeconform's default -schema-location is remote. Output: $_kcprobe"
 fi
 
 in_list() {
@@ -317,7 +387,13 @@ for name in "${PERMUTATIONS[@]}"; do
   # the moment anyone adds --ignore-missing-schemas.
   kcout="$("$KUBECONFORM" -strict -summary <"$WORK/$name.yaml" 2>&1 || true)"
   kcwant="Valid: ${EXPECTED_DOCS[$name]}, Invalid: 0, Errors: 0, Skipped: 0"
-  if grep -qF "$kcwant" <<<"$kcout"; then
+  if grep -qF "failed downloading schema" <<<"$kcout"; then
+    # The preflight probe should have caught this. If it fires HERE the registry
+    # went away mid-run, and the distinction still has to be made, because the
+    # branch below would report it as "the chart is invalid" - which is a claim
+    # about the subject made from a fact about the instrument.
+    meta_failure "kubeconform could not retrieve a schema while validating $name, so this is not a result about the chart: $kcout"
+  elif grep -qF "$kcwant" <<<"$kcout"; then
     pass "kubeconform $name validated ${EXPECTED_DOCS[$name]} documents, none skipped"
   else
     fail "kubeconform $name: wanted '$kcwant', got '$kcout'"
@@ -1257,8 +1333,65 @@ else
   if ! "$HELM" template probe "$probe_dir" "${BASE[@]}" >"$WORK/probe-paths.yaml" 2>&1; then
     fail "the values walk did not render - the leaf enumeration below is empty"
   fi
+  # THE LEAF FILTER, AND ITS ANTI-JOIN.
+  #
+  # This filter is the only thing between the values walk and the mutation loop,
+  # and until now its extent was asserted with a FLOOR - `probe_total -ge 50`.
+  # A floor cannot see a fail-open. Measured, not reasoned: replacing the -F
+  # below with -E makes '|' an empty alternation that matches every line, the
+  # kept set grows, the floor is still satisfied, and the suite still printed
+  # `assertions: 259/259 failures: 0`. The headline was insensitive to a
+  # deliberate defect in the machinery that produces it.
+  #
+  # So the size is asserted three ways and NONE of them uses the '|' predicate
+  # on the right-hand side (rule 61: a fixture derived from the predicate can
+  # only confirm the predicate):
+  #
+  #   kept + dropped == walked      the join closes; no line is unaccounted for
+  #   dropped        == 1           the dark rows, published rather than implied
+  #   kept           == walked - 1  extent, derived from templates/paths.yaml's
+  #                                 shape - it emits exactly one blank line
+  #                                 before the first leaf and nothing else
+  #                                 without a '|'
+  #
+  # and separately, below, the KEY SET is compared against an enumeration of
+  # values.yaml built by awk, which shares no code and no engine with the helm
+  # walk. That is the independently-derived expectation the extent amendment
+  # asks for; a count agreeing with a count would not be.
   sed -n '/paths: |/,$p' "$WORK/probe-paths.yaml" \
-    | sed -e '1d' -e 's/^    //' | grep -F '|' >"$WORK/probe-leaves.txt" || true
+    | sed -e '1d' -e 's/^    //' >"$WORK/probe-walk.txt"
+  grep -F  '|' "$WORK/probe-walk.txt" >"$WORK/probe-leaves.txt"    || true
+  grep -vF '|' "$WORK/probe-walk.txt" >"$WORK/probe-nonleaves.txt" || true
+  probe_walked=$(wc -l <"$WORK/probe-walk.txt")
+  probe_kept=$(wc -l <"$WORK/probe-leaves.txt")
+  probe_dropped=$(wc -l <"$WORK/probe-nonleaves.txt")
+
+  # The independent enumeration. Indentation-based, two-space, list items
+  # counted as leaves of their parent. RULE 130 (ag-dev): a parser that cannot
+  # parse takes the STRICT branch - a line it cannot decompose exits 2 and
+  # becomes a meta-failure, never a silently smaller key set, because a smaller
+  # key set on this side turns the comparison below green for the wrong reason.
+  if ! awk '
+      /^[[:space:]]*#/ {next} /^[[:space:]]*$/ {next}
+      { line=$0; sub(/[[:space:]]+$/,"",line); ind=match(line,/[^ ]/)-1
+        body=substr(line,ind+1); d=int(ind/2)
+        s=""; for(i=0;i<d;i++) s=(s=="" ? st[i] : s "." st[i])
+        if (body ~ /^- /) { print s "[]"; next }
+        p=index(body,":")
+        if (p==0) { printf "unparsed values.yaml line: %s\n", line > "/dev/stderr"; exit 2 }
+        k=substr(body,1,p-1); val=substr(body,p+1); gsub(/^[ \t]+|[ \t]+$/,"",val)
+        st[d]=k; for(i=d+1;i<20;i++) st[i]=""
+        if (val != "") print (s=="" ? k : s "." k)
+      }' "$CHART_DIR/values.yaml" | sort -u >"$WORK/probe-values-keys.txt"; then
+    meta_failure "the awk enumeration of values.yaml could not parse a line, so the values walk has nothing independent to be compared against"
+  fi
+  # BASE may --set a key that values.yaml does not carry; the walk sees it, awk
+  # cannot. Parsed out of the BASE array itself rather than listed by hand, so
+  # a phase adding a --set does not have to remember this line.
+  printf '%s\n' "${BASE[@]}" \
+    | sed -n 's/^\([A-Za-z_][A-Za-z0-9_.]*\)=.*/\1/p' | sort -u >"$WORK/probe-base-keys.txt"
+  sort -u "$WORK/probe-values-keys.txt" "$WORK/probe-base-keys.txt" >"$WORK/probe-expected-keys.txt"
+  cut -d'|' -f1 "$WORK/probe-leaves.txt" | sort -u >"$WORK/probe-walk-keys.txt"
 
   # LEAVES WITH NO LEGAL MUTATION. Not "leaves that are awkward" - leaves where
   # every value other than the default is REFUSED BY A RENDER GUARD, so there is
@@ -1349,10 +1482,33 @@ else
     | sort -u >"$WORK/probe-declared.txt"
   sort -u "$WORK/probe-observed.txt" >"$WORK/probe-observed-sorted.txt"
 
-  if [[ $probe_total -ge 50 ]]; then
-    pass "the values walk enumerated $probe_total leaves to mutate"
+  # ANTI-JOIN, PART ONE: the parts sum to the denominator. A filter that drops a
+  # line on the floor is invisible to any assertion that only looks at what the
+  # filter kept.
+  if [[ $((probe_kept + probe_dropped)) -eq $probe_walked ]]; then
+    pass "the leaf filter accounts for every line the walk emitted: $probe_kept kept + $probe_dropped dropped == $probe_walked walked"
   else
-    fail "the values walk enumerated only $probe_total leaves - values.yaml has ~60 and this step is checking almost nothing"
+    fail "the leaf filter lost lines: $probe_kept kept + $probe_dropped dropped != $probe_walked walked"
+  fi
+  # ANTI-JOIN, PART TWO: the dark rows are asserted, not merely reported. This is
+  # the assertion that goes red on a fail-open in the filter, because its
+  # right-hand side is derived from templates/paths.yaml's shape and never from
+  # the filter's own predicate.
+  if [[ $probe_dropped -eq 1 && $probe_kept -eq $((probe_walked - 1)) ]]; then
+    pass "the leaf filter dropped exactly the one non-leaf line the walk emits, keeping $probe_kept of $probe_walked"
+  else
+    fail "the leaf filter dropped $probe_dropped lines and kept $probe_kept of $probe_walked - templates/paths.yaml emits one blank line and one '|' line per leaf, so exactly one line should be dropped. Dropped rows: $(tr '\n' ' ' <"$WORK/probe-nonleaves.txt")"
+  fi
+  # EXTENT, AGAINST AN INDEPENDENTLY-DERIVED EXPECTATION. Set equality in both
+  # directions with the symmetric difference printed, not a count against a
+  # count and not a floor: the walk is helm's recursive template, the
+  # expectation is awk over values.yaml plus the BASE overrides, and the two
+  # share nothing but the file they read.
+  probe_keydiff="$(comm -3 "$WORK/probe-expected-keys.txt" "$WORK/probe-walk-keys.txt")"
+  if [[ -z "$probe_keydiff" ]]; then
+    pass "the values walk enumerated exactly the $(wc -l <"$WORK/probe-walk-keys.txt" | tr -d ' ') leaves awk finds in values.yaml plus BASE, same set both directions"
+  else
+    fail "the values walk and the awk enumeration of values.yaml disagree. Left column = expected but not walked, right column = walked but not expected:"$'\n'"$probe_keydiff"
   fi
   if [[ $probe_err -eq 0 ]]; then
     pass "every leaf could be mutated and rendered"
