@@ -3839,6 +3839,15 @@ _banned_path="/health""z"
 # wrapper was measured to silently narrow the file set on this project; an
 # explicit path is one the instrument cannot decline to visit. -F because the
 # pattern is a literal and -F is the only flag that cannot reinterpret it.
+# /usr/bin/grep BY FULL PATH, and no -z/-Z/--null anywhere in this block. Both
+# matter and neither is style. The stock binary sees binary files; the shell
+# function that shadows `grep` in some interactive environments passes -I and
+# --exclude-dir=.git, so it would skip a needle sitting in a binary or under
+# .git. MEASURED, planted needle in a binary blob: /usr/bin/grep -lF finds it,
+# the wrapped form does not. The chart tree holds 0 binaries and 0 .git paths
+# today, so this changes no current result - it means the gate keeps working if
+# that stops being true. Adding -z or -0 here to "harden" the list would switch
+# engines mid-gate, which is the opposite of hardening.
 _sweep() { [[ $# -ge 2 ]] && /usr/bin/grep -lF -- "$1" "${@:2}" 2>/dev/null || true; }
 
 # THE NEEDLE'S IDENTITY, PINNED. Measured 2026-08-17: with the needle mutated

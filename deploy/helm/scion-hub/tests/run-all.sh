@@ -507,6 +507,32 @@ fi
 # Not summed into EXPECTED_ASSERTIONS for the same reason hack/verify.sh is
 # not: it is not one of the enumerated tests/ scripts. It carries its own
 # committed number, failing in both directions.
+# THE BANNED-PATH NEEDLE, PINNED FROM OUTSIDE THE INSTRUMENT THAT USES IT.
+#
+# hack/verify.sh sweeps the tree for the deprecated liveness path and pins the
+# needle against a digest. That pin is real but it is WEAKER THAN IT LOOKS, and
+# the weakness is worth naming rather than leaving for a reader to find: the
+# digest lives in the same file as the needle, so one edit moves both and the
+# pin travels with the thing it is pinning. An instrument cannot pin its own
+# needle - if it could, the pin would move with the needle. (gd-prec, who also
+# noted that most agents clean on this are clean because somebody handed them a
+# frozen input, which is exactly what happened here: the constraint came from
+# the phase brief, not from my control design.)
+#
+# This copy does not make the pin external - it is still in the repository and
+# still editable. What it does is make the edit CROSS-FILE and therefore
+# visible in a diff that a mechanical sweep of hack/ would not touch. Same
+# reasoning as EXPECTED_ASSERTIONS duplicating each script's own total above:
+# without the duplicate, changing the needle AND its digest together is green
+# everywhere and the breach produces no symptom that points at the number.
+EXPECTED_BANNED_NEEDLE_DIGEST=15a99506b4e1757d
+_vsh="${HERE}/../hack/verify.sh"
+if [ ! -f "$_vsh" ]; then
+  note "hack/verify.sh is missing, so the banned-path needle cannot be cross-checked."
+elif ! grep -qF "$EXPECTED_BANNED_NEEDLE_DIGEST" "$_vsh"; then
+  note "hack/verify.sh does not carry the banned-path needle digest ${EXPECTED_BANNED_NEEDLE_DIGEST}. Either the needle changed - in which case the tree sweep is reporting absences about some other string - or the pin was removed. Both are breaches; neither is a number to update until you know which."
+fi
+
 EXPECTED_ENTRY_C_ASSERTIONS=5
 _entry_c="${HERE}/../hack/trigger-entry-c.sh"
 if [ ! -f "$_entry_c" ]; then
