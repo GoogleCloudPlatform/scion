@@ -170,7 +170,23 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # render (2). 1+1+2+1+2 = 7, and 314+7 = 321.
 # The _ck_planted() guard that landed alongside arm U adds none: it is
 # meta_failure, for the same reason arm 0 is.
-EXPECTED_TOTAL=321
+#
+# 321 -> 340 IS A REBASE, NOT AN ADDED ASSERTION, and it is the one entry in
+# this list that is READ OFF A RUN rather than summed - because the term that
+# moved is the base, which this branch does not author and therefore cannot
+# sum. This branch was based on scion/gke-chart-p1 at a5551ff9 (committed
+# EXPECTED_TOTAL=254) and is now based on 78b035f1 (committed 274). The pin
+# below is the driver's own output, pasted unedited, produced by:
+#   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
+# The summed route is kept as an INDEPENDENT CHECK on that paste, and the two
+# agree: this branch's own contribution is 321 - 254 = 67, the new base is 274,
+# 274 + 67 = 341, less 1 for the NOT_YET needle retired below - P1 wrote
+# "Cloud SQL and the database URL" to go red the moment Phase 2 landed the
+# database URL, Phase 2 landed it, and retiring it is that gate working - which
+# is 340. A pin adjusted to fit and a pin re-derived look identical in a diff;
+# the point of writing both routes down is that here they were computed
+# separately and had to meet.
+EXPECTED_TOTAL=340
 
 failures=0
 assertions=0
@@ -2491,7 +2507,11 @@ else
       # The guard prints the leaves it objected to in parentheses. Reading them
       # back is the whole point: "refused" and "refused about you" are different
       # facts and this loop used to conflate them.
-      _ex_named="$(sed -n 's/.*inline settings values (\([^)]*\)).*/\1/p' "$WORK/probe-ex.yaml" | head -1)"
+      # `|| true` because this assignment is a pipeline and an unguarded one
+      # aborts the script under `set -e` with no summary line - see the
+      # pipeline-assignment sweep near the end of this file. An empty result is
+      # not swallowed: it is the meta-failure immediately below.
+      _ex_named="$(sed -n 's/.*inline settings values (\([^)]*\)).*/\1/p' "$WORK/probe-ex.yaml" | head -1 || true)"
       if [[ -z "$_ex_named" ]]; then
         meta_failure "the config.existingSecret refusal for [$leaf] printed no parenthesised list of inline values, so there is nothing to compare the leaf against and every leaf below would be booked on an unreadable refusal. The guard's message shape changed; this reader has to change with it. Got: $(grep -m1 'inline settings values' "$WORK/probe-ex.yaml")"
       fi
@@ -3490,7 +3510,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=35
+PIPE_SITES_EXPECTED=42
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
@@ -3593,14 +3613,21 @@ step "NOTES.txt's \"does not yet do\" list is true of what the chart renders"
 # cannot drift from the text it is about, because neither side is allowed to
 # move alone.
 declare -A NOT_YET=(
-  ["Cloud SQL and the database URL"]='settings:^ *url:'
+  # "Cloud SQL and the database URL" WAS HERE, AND ITS REMOVAL IS THIS STEP
+  # WORKING RATHER THAN THIS STEP BEING EDITED AROUND. P1 wrote the needle to go
+  # red the moment P2 landed the database URL; P2 landed it, the anti-join went
+  # red in both directions on the first post-rebase run, and the phrase is gone
+  # from the notes because the notes stopped being able to claim it. The render
+  # now DOES carry `url:` under settings, which is what the needle was watching
+  # for. Nothing here was relaxed: the entry is deleted, not commented out of
+  # the join, and EXPECTED_NOT_YET moves with it in this same diff.
   ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
   ["Filestore"]='settings:workspace_storage'
   ["the session secret"]='settings:session_secret|signing_key'
   ["the OAuth client secret"]='settings:client_secret'
   ["Ingress or IAP"]='kinds:^kind: (Ingress|BackendConfig)'
 )
-EXPECTED_NOT_YET=6
+EXPECTED_NOT_YET=5
 
 # The sentence, read out of the shipped template. It carries no template
 # actions - checked, it is static prose - so the source text and the rendered
