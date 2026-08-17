@@ -388,9 +388,39 @@ else
     # file path. -count=1 defeats the test cache: a cached PASS is a statement
     # about an earlier tree.
     _gout="$( (cd "${HERE}/../../../.." && go test ./cmd -run TestHelmChart -count=1) 2>&1 )"; _grc=$?
-    if [ "$_grc" -ne 0 ]; then
+    # A GO RUN THAT NEVER REACHED A TEST IS AN INSTRUMENT FAULT, NOT A CHART
+    # FAULT - the symmetric twin of the kubeconform-registry probe in verify.sh,
+    # and filed by gd-p1-rev (round 4, item 6) after walking into it: they
+    # extracted deploy/ and cmd/ without go.mod and got `FAILED (exit 1)` with
+    # no reason at all, because the filter below matches none of the lines the
+    # toolchain emits when the package cannot be built.
+    #
+    # MEASURED, three arms, all three previously reported as "the chart is wrong":
+    #   gate name drifted, a genuine test failure  -> --- FAIL, --- committed,
+    #                                                 --- derived now.  POSITIVE
+    #                                                 CONTROL: the filter works
+    #                                                 for the case it was written
+    #                                                 for, so this fix must not
+    #                                                 capture it.
+    #   syntax error planted                       -> [setup failed]; the
+    #                                                 compiler's own
+    #                                                 `cmd/...go:564:16: expected
+    #                                                 ')'` line IS DROPPED
+    #   no go.mod in the tree                      -> ZERO lines survive
+    #
+    # The empty-filter limb is the one that catches the third arm, and it is why
+    # the test is on the FILTER'S OUTPUT rather than on a list of toolchain
+    # phrases: a build failure this list does not enumerate still produces no
+    # diagnostic, and a hand-listed set of compiler messages is the enumeration
+    # that quietly stops being complete. Both limbs print $_gout WHOLE, because
+    # the entire complaint here is that a filter ate the explanation.
+    _gfiltered="$(printf '%s\n' "$_gout" | grep -E 'HARNESS ERROR|VACUOUS|^ *---|^(ok|FAIL)')" || true
+    if [ "$_grc" -ne 0 ] && { printf '%s\n' "$_gout" | grep -qE '\[setup failed\]|\[build failed\]|^go: ' || [ -z "$_gfiltered" ]; }; then
+      note "go test ./cmd exited ${_grc} without running a test - the package did not build or the module was not found. This is a fault in the instrument, not a finding about the chart, so it is a meta-failure and NOT a chart failure. Full output follows."
+      printf '%s\n' "$_gout" | sed 's/^/    /'
+    elif [ "$_grc" -ne 0 ]; then
       echo ">>> cmd/helm_chart_ha_contract_test.go: FAILED (exit ${_grc})"
-      printf '%s\n' "$_gout" | grep -E 'HARNESS ERROR|VACUOUS|^ *---|^(ok|FAIL)' | sed 's/^/    /'
+      printf '%s\n' "$_gfiltered" | sed 's/^/    /'
       real_failure=1
     else
       echo ">>> cmd/helm_chart_ha_contract_test.go: ok (${_ct} tests; hack/ha-gates.txt re-derived and unchanged)"

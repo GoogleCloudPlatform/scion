@@ -201,10 +201,34 @@ fi
 #   tar -xzf kubeconform-linux-amd64.tar.gz && sha256sum kubeconform
 #     9e867e86e277de971bed3cfe46cf07f1d08db212e9188389670b3685c38281e7
 #
-# Both chains were run end to end on 2026-08-17 and both extracted binaries were
-# `cmp`-identical to the ones this suite uses. A reader who wants the same bytes
-# runs the four commands; a reader who has different bytes sees it in the banner
-# rather than inferring it from a diverging count.
+# Both chains were run end to end on 2026-08-17 against the binaries at
+# /tmp/linux-amd64/helm and /tmp/kubeconform on the authoring box, and the two
+# sha256 values above are what they produced.
+#
+# WHAT THAT SENTENCE MAY NOT SAY, AND ORIGINALLY DID (gd-p1-rev, RQ-2, round 4).
+# It said the extracted binaries were `cmp`-identical to "the ones this suite
+# uses", and THIS SUITE'S RESOLUTION RULE IS `${KUBECONFORM:-kubeconform}` - a
+# PATH lookup. Which bytes this suite uses is therefore a property of the
+# reader's environment, and no sentence written in this file can be true about
+# it. gd-p1-rev measured the counterexample on the first box that was not mine:
+# sha256 225bc03c464df3be, `kubeconform -v` -> `development`, a source build
+# rather than the v0.6.7 release tarball. The comment was false there and true
+# here, which is the worst available combination, because the honest sha256 row
+# printed two lines down then reads as confirming a chain it does not belong to.
+#
+# SO THE CLAIM IS NOW MADE BY THE RUN INSTEAD OF BY THE COMMENT. The banner
+# compares the resolved binary against the pin and prints the verdict. A comment
+# asking the reader to believe a chain is a request; a row that recomputes it
+# every run is a mechanism.
+#
+# THIS IS A DISCLOSURE AND NOT A GATE, deliberately. A mismatch prints and the
+# run continues at exit 0. Failing on it would convert someone else's toolchain
+# into an accusation against the chart - the exact defect the kubeconform
+# registry probe below exists to prevent, and the one gd-p1-rev's own extraction
+# ran into from the other side when a missing go.mod was reported as a chart
+# failure. A reader who wants the same bytes runs the four commands above.
+_helm_pin=6a1dffedcf78a687aedc71a918cff0af8f0988184488dddb3615e24abc4e7f2b
+_kc_pin=9e867e86e277de971bed3cfe46cf07f1d08db212e9188389670b3685c38281e7
 # NO `2>/dev/null` IN THIS BLOCK (gd-em, 11:05, binding). The banner is a
 # published measurement, and mechanism C - a zsh tied variable bound as a loop
 # or `read` variable - destroys PATH and announces itself on STDERR AND NOWHERE
@@ -217,8 +241,20 @@ _hv="$("$HELM" version --short 2>>"$_tcerr" || echo unknown)"
 _kv="$("$KUBECONFORM" -v 2>>"$_tcerr" || echo unknown)"
 _hp="$(command -v "$HELM" 2>>"$_tcerr" || printf '%s' "$HELM")"
 _kp="$(command -v "$KUBECONFORM" 2>>"$_tcerr" || printf '%s' "$KUBECONFORM")"
-echo "toolchain  helm         $_hv  $_hp  sha256=$(sha256sum "$_hp" 2>>"$_tcerr" | cut -c1-16)"
-echo "toolchain  kubeconform  $_kv  $_kp  sha256=$(sha256sum "$_kp" 2>>"$_tcerr" | cut -c1-16)"
+# The pipeline's status is `cut`'s, which is 0 even when sha256sum could not
+# read the file, so the empty string is the failure signal here and is named
+# rather than left to print as a blank field.
+_hs="$(sha256sum "$_hp" 2>>"$_tcerr" | cut -d' ' -f1)"; _hs="${_hs:-unreadable}"
+_ks="$(sha256sum "$_kp" 2>>"$_tcerr" | cut -d' ' -f1)"; _ks="${_ks:-unreadable}"
+_pin_verdict() {  # $1 = the sha256 this run resolved, $2 = the pinned sha256
+  if [[ "$1" == "$2" ]]; then
+    printf 'pin=MATCHES the chain above'
+  else
+    printf 'pin=DIFFERS from the chain above (chain: %s...) - the counts below were produced by THESE bytes, not by the documented ones' "${2:0:16}"
+  fi
+}
+echo "toolchain  helm         $_hv  $_hp  sha256=${_hs:0:16}  $(_pin_verdict "$_hs" "$_helm_pin")"
+echo "toolchain  kubeconform  $_kv  $_kp  sha256=${_ks:0:16}  $(_pin_verdict "$_ks" "$_kc_pin")"
 echo "toolchain  stderr       $(wc -l <"$_tcerr" | tr -d ' ') lines$([[ -s "$_tcerr" ]] && printf ':\n%s' "$(cat "$_tcerr")")"
 rm -f "$_tcerr"
 
@@ -1378,7 +1414,7 @@ else
   # THE LEAF FILTER, AND ITS ANTI-JOIN.
   #
   # This filter is the only thing between the values walk and the mutation loop,
-  # and until now its extent was asserted with a FLOOR - `probe_total -ge 50`.
+  # and until now its extent was asserted with a FLOOR - kept leaves `-ge 50`.
   # A floor cannot see a fail-open. Measured, not reasoned: replacing the -F
   # below with -E makes '|' an empty alternation that matches every line, the
   # kept set grows, the floor is still satisfied, and the suite still printed
@@ -1460,7 +1496,11 @@ else
     exit 2
   fi
 
-  probe_total=0 probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
+  # probe_total is deliberately absent (gd-p1-rev, N-1, round 4). It counted the
+  # kept leaves for the `-ge 50` floor, the floor is gone, and its four
+  # surviving siblings are all read below. A counter nobody reads is a reader's
+  # invitation to assume something is checked.
+  probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
   : >"$WORK/probe-observed.txt"
   probe_quiet_names="" probe_err_names="" probe_unaccounted=""
   probe_skipped=0
@@ -1470,7 +1510,6 @@ else
     if [[ " ${PROBE_UNMUTABLE[*]} " == *" $leaf "* ]]; then
       probe_skipped=$((probe_skipped + 1)); continue
     fi
-    probe_total=$((probe_total + 1))
     spec="${PROBE_MUTATION[$leaf]:-}"
     if [[ -z "$spec" ]]; then
       case "$kind" in
