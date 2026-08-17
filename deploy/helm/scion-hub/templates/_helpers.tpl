@@ -1109,10 +1109,27 @@ readable by anyone with pod read access. That is the same harm $unsafeToPass and
 the value axis below exist to prevent, reached by a spelling that skips both.
 
 So the name axis, and only the name axis, runs on the left of the `=`. It judges
-the NAME, so it stays silent on `global=y` and `token-ttl=5m` and fires on
-anything whose trailing word says the value is credential material. No list is
-consulted here on purpose: a positional cannot misconfigure the hub, it can only
-expose, so exposure is the only thing worth failing on.
+the NAME, so it stays silent on `global=y` and `token-ttl=5m` and fires on names
+whose trailing hyphen-separated word says the value is credential material. No
+list is consulted here on purpose: a positional cannot misconfigure the hub, it
+can only expose, so exposure is the only thing worth failing on.
+
+That is the whole of what this catches, and the limit is worth stating because
+the axis it leans on is narrow. It does NOT catch a credential passed with no
+name at all - a bare positional `hunter2` - and it cannot: there is no sound way
+to recognise an arbitrary high-entropy string without failing renders that are
+fine. The value axis below is not a backstop for that either. It matches URL and
+query-string credentials and known prefixes, so it is silent on any secret whose
+shape is unremarkable, and separately on any secret containing a character the
+userinfo encoder rewrites - which is most of what a password policy would call
+strong. Detect by structure, never by matching the value.
+
+The name is trimmed before it is judged. `regexMatch` is anchored, so a derived
+name that kept a trailing space could not match the credential pattern and
+`session-secret =hunter2` rendered clean with the secret on argv. Neither
+whitespace guard above reaches that spelling: the trim check at the top compares
+the whole entry and this one's ends are ordinary characters, and the whitespace
+check is flag-only, which a positional never enters.
 
 Do not "simplify" this by moving it back inside the hasPrefix block. It exists
 precisely because that block does not run for this spelling.
@@ -1129,7 +1146,7 @@ before calling, which is advice addressed to this line, not to them: a false
 positive of exactly the kind the hasPrefix fix was written to remove. Translated,
 `some_var=value` renders and `session_secret=hunter2` fails for its real reason.
 */}}
-{{- include "scion-hub.assertNoCredentialName" (dict "name" (lower (replace "_" "-" (first (splitList "=" $arg)))) "source" "hub.args positional") }}
+{{- include "scion-hub.assertNoCredentialName" (dict "name" (lower (replace "_" "-" (trim (first (splitList "=" $arg))))) "source" "hub.args positional") }}
 {{- end }}
 {{- $args = append $args $arg }}
 {{- end }}
