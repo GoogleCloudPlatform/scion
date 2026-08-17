@@ -1093,6 +1093,43 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
 {{- end }}
 {{- include "scion-hub.assertNoCredentialName" (dict "name" $flag "source" "hub.args flag") }}
+{{- else if contains "=" $arg }}
+{{- /*
+A POSITIONAL IS IGNORED BY pflag, BUT ITS TEXT IS STILL ON argv.
+
+The reserved-list checks above are deliberately flag-only: pflag does not read a
+positional as a flag, so `global` or `c` alone cannot replace anything the chart
+set, and failing the render on them was a false positive that blocked legitimate
+values. That reasoning is sound for the BARE word, and the bare word is the
+benign member of the class.
+
+It does not extend to `name=value`. Nothing is SET - pflag still ignores it - but
+`session-secret=hunter2` puts the secret in the pod spec and in /proc/1/cmdline,
+readable by anyone with pod read access. That is the same harm $unsafeToPass and
+the value axis below exist to prevent, reached by a spelling that skips both.
+
+So the name axis, and only the name axis, runs on the left of the `=`. It judges
+the NAME, so it stays silent on `global=y` and `token-ttl=5m` and fires on
+anything whose trailing word says the value is credential material. No list is
+consulted here on purpose: a positional cannot misconfigure the hub, it can only
+expose, so exposure is the only thing worth failing on.
+
+Do not "simplify" this by moving it back inside the hasPrefix block. It exists
+precisely because that block does not run for this spelling.
+
+The underscore is translated rather than passed through, which the name axis
+asks every caller to decide and which the FLAG path above deliberately does not
+do. The two answers differ because the reasons differ. On the flag path an
+underscore is a real error - no flag on `server start` has one, so pflag would
+reject --some_var and the hub would crash-loop - and failing says so at render
+time. A positional is never parsed as a flag, so there is no crash-loop to warn
+about and that reason does not transfer. Passing `some_var=value` through
+untranslated failed the render with a message telling the operator to translate
+before calling, which is advice addressed to this line, not to them: a false
+positive of exactly the kind the hasPrefix fix was written to remove. Translated,
+`some_var=value` renders and `session_secret=hunter2` fails for its real reason.
+*/}}
+{{- include "scion-hub.assertNoCredentialName" (dict "name" (lower (replace "_" "-" (first (splitList "=" $arg)))) "source" "hub.args positional") }}
 {{- end }}
 {{- $args = append $args $arg }}
 {{- end }}
