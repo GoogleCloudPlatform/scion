@@ -227,9 +227,33 @@ entire name. Substring matching was tried first and rejected: it fired on
 --max-tokens, --token-ttl and --secret-manager-project, and because hub.args is
 append-only with no override, a false positive there is unusable rather than
 merely annoying.
+
+THE SEGMENT SEPARATOR IS THE HYPHEN, AND A CALLER WHOSE NAMES USE ANY OTHER
+SEPARATOR MUST TRANSLATE BEFORE CALLING. That is argv semantics and it is
+deliberate; it is also a trap, because environment variable names separate with
+underscores. Passed SESSION_SECRET unchanged, the pattern above matches nothing:
+it needs a hyphen or start-of-string before "secret", and "session_secret"
+offers neither. The guard would render, appear in the diff, read as applied, and
+catch precisely the value it was added for. A reviewer asking "is this guard
+correct" finds a correct guard; the question that finds this is "is it reachable
+in the state it guards against".
+
+So the underscore check below is not input validation, it is the reachability
+check, and it fails loudly rather than letting the caller proceed with an inert
+guard. Translate at the call site - "_" to "-" - and call this unchanged. The
+alternative, widening the class to (^|[-_]), was rejected: the hyphen rule is
+correct for argv, and the caller with the other convention is the one that
+should adapt. Do one or the other, never both.
+
+An underscore in a flag name is also a real error on the argv path: no flag on
+`server start` uses one, so pflag would reject it and the hub would crash-loop.
+Failing here says so at render time.
 */}}
 {{- define "scion-hub.assertNoCredentialName" -}}
 {{- $n := lower (toString .name) }}
+{{- if contains "_" $n }}
+{{- fail (printf "%s %q contains an underscore, and this check separates segments on the hyphen. Translate \"_\" to \"-\" before calling (environment variable names need this; flag names do not, and no flag on `server start` has an underscore). Called with the name as-is, the check matches nothing and silently protects nothing." .source $n) }}
+{{- end }}
 {{- if regexMatch "(^|-)(secret|password|passwd|token|credential|key|apikey|pat)$" $n }}
 {{- fail (printf "%s %q names credential material. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret. (The match is on a trailing word: --token-ttl and --max-tokens are fine, --admin-token is not.)" .source $n) }}
 {{- end }}
@@ -356,11 +380,38 @@ the entries below are NOT all verifiable by checking what the chart renders.
 {{- $neverPassed := list "config" "c" }}
 
 {{- /*
-3. The chart's configuration owns these, so passing them on argv creates a
-   second source for a setting that is already delivered through the settings
-   file. Judgment call worth recording: base-url sits here rather than in list 2
-   because a later phase could legitimately choose argv as its delivery channel
-   for it, whereas for --config that choice would be self-defeating.
+3. The chart already delivers these settings through a channel other than argv,
+   so passing them here creates a second source for one value. Not verifiable
+   against the rendered arguments, by construction - the rendered argument list
+   is where these must NOT appear. Check them against the other channel.
+
+   NAME THE CHANNEL WHEN YOU ADD AN ENTRY, because it is not the same channel
+   for every entry and the precedence differs. admin-emails, db, storage-bucket
+   and storage-dir are delivered through the settings file. base-url is
+   delivered as the SCION_SERVER_BASE_URL environment variable.
+
+   Precedence for base-url, read from the hub rather than assumed, because "two
+   sources" only matters if one of them silently loses:
+
+     cmd/server_foreground.go:2102 (initWebServer, the OAuth redirect base)
+       --base-url, else SCION_SERVER_BASE_URL, else http://localhost:<web-port>
+     cmd/server_foreground.go:1310 (resolveHubEndpoint, the URL agents dial)
+       settings file server.hub.public_url, else --base-url, else
+       SCION_SERVER_BASE_URL, else project settings, else localhost
+
+   Two consequences, both silent. ARGV BEATS THE ENVIRONMENT AT BOTH SITES: a
+   future phase that emits --base-url shadows the environment variable, with no
+   error and, unless --debug is on, no log line either. And the two sites do not
+   agree with each other - the settings file outranks argv when resolving the
+   agent-facing endpoint but is not consulted at all for the OAuth redirect - so
+   argv plus a settings file that sets public_url yields two different base URLs
+   in one process, each correct by its own rule.
+
+   That is why this entry is reserved rather than merely discouraged. A later
+   phase may still choose argv as the delivery channel for base-url, and this
+   list is where it says so: move the entry, do not add a second emitter beside
+   the existing one. For --config that choice would be self-defeating, which is
+   why it is in list 2 instead.
 */}}
 {{- $ownedByConfig := list "admin-emails" "base-url" "db" "storage-bucket" "storage-dir" }}
 
