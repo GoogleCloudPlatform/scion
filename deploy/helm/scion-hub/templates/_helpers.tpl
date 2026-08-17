@@ -202,9 +202,18 @@ Assert that a flag or variable NAME does not announce credential material.
 Call as:
   {{- include "scion-hub.assertNoCredentialName" (dict "name" $n "source" "hub.args flag") }}
 
-The value axis (below) cannot catch --admin-token=hunter2, because "hunter2" has
-no recognisable shape. The name axis catches it, and the two are complementary:
-one reads what the value looks like, the other reads what the operator called it.
+THIS IS NOT REDUNDANT WITH THE VALUE CHECK BELOW, and the next person to read
+both will suspect that it is. It is not, for one reason: a credential value is
+not distinguishable by inspection. --admin-token=hunter2 is caught here and
+cannot be caught there, because "hunter2" has no shape - no scheme, no prefix,
+nothing to match on. It is an ordinary word. The value axis reads what the value
+looks like; the name axis reads what the operator called it, and when the value
+is unremarkable the name is the only signal left.
+
+This is not hypothetical. An earlier revision of this guard dropped the name
+axis in favour of value shapes, on the reasoning that names are what produce
+false positives. That regressed exactly this case, and it did so while looking
+like a security improvement. Do not remove either axis.
 
 The rule is position, not substring, and the distinction is the whole reason this
 is not a naive contains-check. A credential noun at the END of a flag name says
@@ -278,21 +287,21 @@ which behind a load balancer is unreachable and unauthenticated by accident.
 hub.args appends to this list and can never replace it. Two guards apply to
 anything appended.
 
-The RESERVED list is by flag name, checked against cmd/server.go's actual flag
-set rather than guessed. It has three groups. Flags the chart itself sets, where
-a second value would contradict the manifest: hosted, production, host,
-web-port, port. Flags that are a second source for something a settings.yaml
-owns, where the manifest would keep reporting the operator's intent while the
-hub ran on something else: config, admin-emails, base-url, db, storage-bucket,
-storage-dir. And flags that weaken authentication or put credentials on argv:
-session-secret, dev-auth, enable-test-login, web-assets-dir.
+The RESERVED flags are grouped by WHY they are reserved, in four lists below,
+and the grouping is load-bearing rather than tidy. Most entries are reserved
+because the chart already sets them, and those can be checked against the
+rendered arguments. Two are reserved because nothing may ever set them - not the
+operator and not a future phase of this chart - and for those, finding no match
+in the rendered arguments is the expected steady state, not evidence that the
+entry is stale. A flat list under one comment invites the next maintainer to
+verify each entry against what the chart renders, conclude that --config was
+added in error, and remove it; that removal would look exactly like tidying and
+would reopen the largest hole in this guard. The failure messages differ per
+group so the reason is visible at the point it fires.
 
-config is the one worth naming individually. --config redirects the hub's entire
-configuration load (cmd/server.go:237 -> cmd/server_foreground.go:827,
-config.LoadGlobalConfig) away from $HOME/.scion/settings.yaml, which is the
-chart's whole configuration delivery vector. One appended argument would detach
-the hub from every value this chart renders while hub.hubId, the pod annotation
-and the schema all continued to report the operator's intent.
+Every entry was checked against cmd/server.go's actual flag set rather than
+guessed - the first version of this list was guessed and missed five flags,
+including --config.
 
 SHORTHANDS MUST BE LISTED BY LETTER. The normalisation below reduces -x and --x
 to the same token, so a shorthand is only caught if its letter is on the list.
@@ -318,10 +327,47 @@ way to override; names are handled by the exact-match reserved list instead.
     "--host" "0.0.0.0"
     "--auto-provide"
     "--global" }}
-{{- $reserved := list
-    "hosted" "production" "host" "web-port" "port"
-    "config" "c" "admin-emails" "base-url" "db" "storage-bucket" "storage-dir"
-    "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
+{{- /*
+Four lists, not one, because they are reserved for four different reasons and a
+flat list loses the reason. See the block comment above for why that matters:
+the entries below are NOT all verifiable by checking what the chart renders.
+*/}}
+
+{{- /*
+1. The chart renders these itself. A second value would contradict the manifest.
+   Verifiable against the rendered args - if the chart stops setting one of
+   these, it should leave this list at the same time.
+*/}}
+{{- $setByChart := list "hosted" "production" "host" "web-port" "port" }}
+
+{{- /*
+2. NOTHING may pass these. Not the operator, and not a future phase of this
+   chart either.
+
+   DO NOT REMOVE THESE BECAUSE THE CHART DOES NOT SET THEM. That is the point of
+   them, not evidence that they were added by mistake. --config redirects
+   config.LoadGlobalConfig away from $HOME/.scion/settings.yaml, which is where
+   every value this chart renders is delivered; a hub started with it runs on a
+   file the chart has never seen while every guard, the schema and the hub-id
+   annotation continue to report the operator's intent. There is no legitimate
+   reason for this chart to emit it, so "nothing in the rendered args matches
+   this entry" is the expected steady state forever.
+*/}}
+{{- $neverPassed := list "config" "c" }}
+
+{{- /*
+3. The chart's configuration owns these, so passing them on argv creates a
+   second source for a setting that is already delivered through the settings
+   file. Judgment call worth recording: base-url sits here rather than in list 2
+   because a later phase could legitimately choose argv as its delivery channel
+   for it, whereas for --config that choice would be self-defeating.
+*/}}
+{{- $ownedByConfig := list "admin-emails" "base-url" "db" "storage-bucket" "storage-dir" }}
+
+{{- /*
+4. These weaken authentication or place credentials where they can be read.
+*/}}
+{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
 {{- range $raw := .Values.hub.args }}
 {{- $arg := toString $raw }}
 {{- if ne $arg (trim $arg) }}
@@ -331,8 +377,17 @@ way to override; names are handled by the exact-match reserved list instead.
 {{- fail (printf "hub.args entry %q contains whitespace. Pass a flag and its value as two separate array elements; a single element with a space in it is an unknown flag name to pflag, so the guards below would not see the flag and the hub would crash-loop at startup." $arg) }}
 {{- end }}
 {{- $flag := trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg))) }}
-{{- if has $flag $reserved }}
-{{- fail (printf "hub.args may not contain -%s: it is reserved. Either the chart sets it and a second value would contradict the rendered manifest, or it is a second source for something the chart's configuration owns, or it weakens authentication or puts a credential on argv." $flag) }}
+{{- if has $flag $setByChart }}
+{{- fail (printf "hub.args may not contain -%s: the chart sets it, and a second value would contradict the rendered manifest - disabling hosted mode, unbinding the listener, or desynchronising the probes from hub.webPort." $flag) }}
+{{- end }}
+{{- if has $flag $neverPassed }}
+{{- fail (printf "hub.args may not contain -%s: it redirects the hub's entire configuration load away from the settings file this chart delivers, so the hub would run on a file the chart has never seen while every rendered value continued to report the operator's intent." $flag) }}
+{{- end }}
+{{- if has $flag $ownedByConfig }}
+{{- fail (printf "hub.args may not contain -%s: the chart's configuration already owns this setting, and passing it on argv creates a second source that silently wins over the rendered one." $flag) }}
+{{- end }}
+{{- if has $flag $unsafeToPass }}
+{{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
 {{- end }}
 {{- if hasPrefix "-" $arg }}
 {{- include "scion-hub.assertNoCredentialName" (dict "name" $flag "source" "hub.args flag") }}
