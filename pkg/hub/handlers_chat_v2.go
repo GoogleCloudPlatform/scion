@@ -1038,6 +1038,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
+	// Phase-3: Store reply-to reference if provided.
+	if replyToID != "" {
+		s.mu.RLock()
+		replyWcs := s.webChatStore
+		s.mu.RUnlock()
+		if replyWcs != nil {
+			if err := replyWcs.SetMessageReplyTo(ctx, storeMsg.ID, replyToID); err != nil {
+				slog.Error("Failed to store reply_to_id", "messageId", storeMsg.ID, "replyToId", replyToID, "error", err)
+			}
+		}
+	}
+
 	// W7: Link attachments to the persisted message.
 	s.mu.RLock()
 	linkWcs := s.webChatStore
@@ -1184,6 +1196,13 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
 		return
+	}
+
+	// Phase-3: Store reply-to reference if provided.
+	if replyToID != "" && wcs != nil {
+		if err := wcs.SetMessageReplyTo(ctx, storeMsg.ID, replyToID); err != nil {
+			slog.Error("Failed to store reply_to_id", "messageId", storeMsg.ID, "replyToId", replyToID, "error", err)
+		}
 	}
 
 	// Phase-3: Store reply-to reference if provided.
@@ -1405,11 +1424,15 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		projectID = ""
 	}
 
-	// Soft-delete: set deleted_at in extension table.
+	// Soft-delete: set deleted_at in extension table and redact content
+	// in the main messages table so no other component can read it.
 	now := time.Now().UTC()
 	if err := wcs.SetMessageDeleted(ctx, messageID, now); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete message", nil)
 		return
+	}
+	if err := wcs.UpdateMessageContent(ctx, messageID, ""); err != nil {
+		slog.Error("Failed to clear message content on delete", "messageId", messageID, "error", err)
 	}
 
 	// Publish SSE event.

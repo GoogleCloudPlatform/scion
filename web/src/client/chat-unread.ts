@@ -73,6 +73,8 @@ export class ChatUnreadCounter {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listening = false;
   private stopped = false;
+  /** Incrementing counter to detect stale refresh results. */
+  private refreshId = 0;
   private readonly boundSchedule = (): void => this.scheduleRefresh();
   private readonly boundNotification = (e: Event): void => this.onNotification(e);
 
@@ -148,8 +150,10 @@ export class ChatUnreadCounter {
 
   /** Recomputes both halves from the server. */
   async refresh(): Promise<void> {
+    const localId = ++this.refreshId;
     const [spaces, dms] = await Promise.all([this.fetchSpaces(), this.fetchDMs()]);
-    if (this.stopped) return;
+    // Discard stale results: a newer refresh was started while we awaited.
+    if (this.stopped || localId !== this.refreshId) return;
     if (spaces) this.spaceUnread = countUnreadSpaces(spaces);
     if (dms) this.dmUnread = countUnreadDMs(dms);
     this.publish();

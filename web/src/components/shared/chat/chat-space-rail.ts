@@ -1093,6 +1093,128 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Thread export (#1064)
+  // ---------------------------------------------------------------------------
+
+  /** Message shape returned by the conversations messages endpoint. */
+  private async fetchThreadMessages(threadId: string): Promise<Array<{
+    sender_name?: string;
+    sender?: string;
+    body?: string;
+    content?: string;
+    created_at?: string;
+    timestamp?: string;
+    attachments?: string[];
+  }>> {
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(threadId)}/messages`
+      );
+      if (!res.ok) return [];
+      const data = (await res.json()) as { messages?: unknown[] };
+      return (data.messages ?? []) as Array<{
+        sender_name?: string;
+        sender?: string;
+        body?: string;
+        content?: string;
+        created_at?: string;
+        timestamp?: string;
+        attachments?: string[];
+      }>;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Format thread messages into a markdown document. */
+  private formatThreadAsMarkdown(
+    thread: ChatSpaceThread,
+    messages: Array<{
+      sender_name?: string;
+      sender?: string;
+      body?: string;
+      content?: string;
+      created_at?: string;
+      timestamp?: string;
+      attachments?: string[];
+    }>
+  ): string {
+    const lines: string[] = [];
+    lines.push(`# Thread: ${thread.name}`);
+    lines.push(`Exported: ${new Date().toLocaleString()}`);
+    lines.push('');
+    lines.push('---');
+
+    for (const msg of messages) {
+      const sender = msg.sender_name ?? msg.sender ?? 'Unknown';
+      const ts = msg.created_at ?? msg.timestamp ?? '';
+      const content = msg.body ?? msg.content ?? '';
+      const formattedTs = ts ? new Date(ts).toLocaleString() : '';
+
+      lines.push('');
+      lines.push(`**${sender}** (${formattedTs}):`);
+      lines.push(content);
+
+      // Include attachments as markdown links
+      if (msg.attachments && msg.attachments.length > 0) {
+        lines.push('');
+        for (const att of msg.attachments) {
+          const basename = att.split('/').pop() ?? att;
+          lines.push(`- [${basename}](${att})`);
+        }
+      }
+
+      lines.push('');
+      lines.push('---');
+    }
+
+    return lines.join('\n');
+  }
+
+  /** Copy thread content as markdown to clipboard. */
+  private async handleExportThread(thread: ChatSpaceThread): Promise<void> {
+    this.contextMenuTarget = null;
+    const messages = await this.fetchThreadMessages(thread.id);
+    const markdown = this.formatThreadAsMarkdown(thread, messages);
+
+    try {
+      await navigator.clipboard.writeText(markdown);
+      this.showExportToast('Copied to clipboard');
+    } catch {
+      // Fallback: if clipboard fails, still offer the download
+      this.showExportToast('Clipboard unavailable — use Download instead');
+    }
+  }
+
+  /** Download thread content as a markdown file. */
+  private async handleDownloadThread(thread: ChatSpaceThread): Promise<void> {
+    this.contextMenuTarget = null;
+    const messages = await this.fetchThreadMessages(thread.id);
+    const markdown = this.formatThreadAsMarkdown(thread, messages);
+
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${thread.name.replace(/[^a-zA-Z0-9_-]/g, '-')}.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+
+  /** Show a brief toast notification for export actions. */
+  private showExportToast(message: string): void {
+    this.dispatchEvent(
+      new CustomEvent('show-toast', {
+        bubbles: true,
+        composed: true,
+        detail: { message, variant: 'primary', duration: 3000 },
+      })
+    );
+  }
+
   private startRename(thread: ChatSpaceThread): void {
     this.contextMenuTarget = null;
     if (thread.isGeneral) return;
@@ -1523,6 +1645,20 @@ export class ScionChatSpaceRail extends LitElement {
         >
           <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
           ${thread.muted ? 'Unmute' : 'Mute'}
+        </div>
+        <div
+          class="context-menu-item"
+          @click=${() => this.handleExportThread(thread)}
+        >
+          <sl-icon name="file-earmark-text"></sl-icon>
+          Copy as Markdown
+        </div>
+        <div
+          class="context-menu-item"
+          @click=${() => this.handleDownloadThread(thread)}
+        >
+          <sl-icon name="download"></sl-icon>
+          Download as Markdown
         </div>
         ${!thread.isGeneral
           ? html`

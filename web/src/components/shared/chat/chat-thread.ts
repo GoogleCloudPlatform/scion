@@ -48,6 +48,8 @@ import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-visibility-toggle.js';
 import './chat-interagent-marker.js';
+import './send-to-agent-picker.js';
+import type { AgentSelectedDetail } from './send-to-agent-picker.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -209,6 +211,20 @@ export class ScionChatThread extends LitElement {
     content: string;
   } | null = null;
 
+  // ---- Phase-5: Context menu + Send-to-agent state ----
+
+  /** The message targeted by the right-click context menu. */
+  @state() private contextMenuMessage: Message | null = null;
+
+  /** Position of the right-click context menu. */
+  @state() private contextMenuPosition: { x: number; y: number } = { x: 0, y: 0 };
+
+  /** Whether the agent picker is visible. */
+  @state() private showAgentPicker = false;
+
+  /** Temporarily stored message for send-to-agent flow. */
+  private _pendingSendToAgentMessage: Message | null = null;
+
   /** Message extensions keyed by message ID. */
   private v2MessageExtMap = new Map<
     string,
@@ -226,9 +242,6 @@ export class ScionChatThread extends LitElement {
 
   /** Bound listener for v2 SSE message-deleted events. */
   private _v2DeleteHandler = this.handleV2MessageDeleted.bind(this);
-
-  /** Timer for delayed unread watermark advancement. */
-  private _unreadWatermarkTimeout: ReturnType<typeof setTimeout> | null = null;
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
@@ -579,6 +592,56 @@ export class ScionChatThread extends LitElement {
         background: transparent;
       }
     }
+
+    /* Phase-5: Context menu */
+    .context-menu-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 149;
+    }
+
+    .context-menu {
+      position: fixed;
+      z-index: 150;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      min-width: 180px;
+      padding: 0.25rem 0;
+    }
+
+    .context-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      color: var(--scion-text, #1e293b);
+      white-space: nowrap;
+      transition: background 0.1s;
+    }
+
+    .context-menu-item:hover {
+      background: var(--scion-primary-50, #eff6ff);
+    }
+
+    .context-menu-item sl-icon {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    /* Phase-5: Slash command system message */
+    .system-info-message {
+      padding: 0.5rem 1rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-radius: 0.375rem;
+      margin: 0.25rem 1rem;
+      white-space: pre-wrap;
+    }
   `;
 
   /** Auto-trigger loadHistory when the component first renders in v2 mode. */
@@ -618,11 +681,7 @@ export class ScionChatThread extends LitElement {
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
 
-    // Clear unread divider state and cancel any pending watermark advancement.
-    if (this._unreadWatermarkTimeout) {
-      clearTimeout(this._unreadWatermarkTimeout);
-      this._unreadWatermarkTimeout = null;
-    }
+    // Clear unread divider state.
     this.lastReadMessageId = '';
     this.showUnreadDivider = false;
 
@@ -666,15 +725,9 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
-    this.clearSeenState();
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
     this.clearSeenState();
-    // Clean up unread watermark advancement timer
-    if (this._unreadWatermarkTimeout) {
-      clearTimeout(this._unreadWatermarkTimeout);
-      this._unreadWatermarkTimeout = null;
-    }
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
       clearTimeout(entry.timer);
@@ -1035,7 +1088,6 @@ export class ScionChatThread extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       this.loading = false;
-      this.scrollToBottomAfterRender();
       // Determine scroll target: permalink hash > unread divider > bottom.
       const hashMsgId = this.parseMessageHash();
       if (hashMsgId) {
@@ -1047,8 +1099,7 @@ export class ScionChatThread extends LitElement {
       }
       // Advance read watermark after a short delay so the user sees the divider.
       if (this.showUnreadDivider && this.messages.length > 0) {
-        this._unreadWatermarkTimeout = setTimeout(() => {
-          this._unreadWatermarkTimeout = null;
+        setTimeout(() => {
           const lastMsg = this.messages[this.messages.length - 1];
           if (lastMsg) {
             void this.advanceReadWatermark(lastMsg.id);
@@ -1159,29 +1210,98 @@ export class ScionChatThread extends LitElement {
     return this._currentUserId || this.currentUserId;
   }
 
-  /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
+  /** Handle v2 SSE chat message events.
+   *
+   * If the SSE event carries a full message payload (has `id` and content),
+   * merge it directly via `mergeMessages()` instead of doing a full 50-message
+   * backfill. Fall back to `backfillV2()` when the event is a lightweight
+   * notification (e.g. just a threadId).
+   */
   private handleV2ChatMessage(e: Event): void {
     type ChatEventData = {
       threadId?: string;
       conversationKey?: string;
       topicId?: string;
       senderId?: string;
+      // Full message fields from UserMessageEvent:
+      id?: string;
+      msg?: string;
+      sender?: string;
+      recipient?: string;
+      recipientId?: string;
+      type?: string;
+      projectId?: string;
+      agentId?: string;
+      createdAt?: string;
+      channel?: string;
+      visibility?: string;
+      groupId?: string;
+      dispatchState?: string;
+      urgent?: boolean;
+      broadcasted?: boolean;
+      read?: boolean;
+      attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
-    if (eventData) {
-      // Filter: only process events for this conversation
-      const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
-      if (eventKey && eventKey !== this.conversationKey) {
-        return; // Not for this conversation
-      }
-      // The sender finished typing the moment their message landed — drop the
-      // indicator now rather than waiting out TYPING_EXPIRY_MS.
-      this.clearTypingForUser(eventData.senderId);
+    if (!eventData) {
+      void this.backfillV2();
+      return;
     }
+
+    // Filter: only process events for this conversation
+    const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
+    if (eventKey && eventKey !== this.conversationKey) {
+      return; // Not for this conversation
+    }
+
+    // The sender finished typing the moment their message landed — drop the
+    // indicator now rather than waiting out TYPING_EXPIRY_MS.
+    this.clearTypingForUser(eventData.senderId);
+
+    // If the event carries a full message payload, merge directly instead of
+    // doing a round-trip backfill.
+    // SSE events from PublishUserMessage carry the full message payload.
+    // mergeMessages() deduplicates by ID (last-write-wins via Map.set),
+    // so if both the POST response and the SSE event provide the same
+    // message, the later arrival's fields prevail — this is acceptable.
+    if (eventData.id && (eventData.msg !== undefined || eventData.type)) {
+      const msg: Message = {
+        id: eventData.id,
+        projectId: eventData.projectId || '',
+        sender: eventData.sender || '',
+        senderId: eventData.senderId || '',
+        recipient: eventData.recipient || '',
+        recipientId: eventData.recipientId || '',
+        msg: eventData.msg || '',
+        type: eventData.type || '',
+        agentId: eventData.agentId || '',
+        createdAt: eventData.createdAt || new Date().toISOString(),
+        ...(eventData.channel != null ? { channel: eventData.channel } : {}),
+        ...(eventData.threadId != null ? { threadId: eventData.threadId } : {}),
+        ...(eventData.visibility != null ? { visibility: eventData.visibility } : {}),
+        ...(eventData.groupId != null ? { groupId: eventData.groupId } : {}),
+        ...(eventData.dispatchState != null ? { dispatchState: eventData.dispatchState } : {}),
+        ...(eventData.urgent != null ? { urgent: eventData.urgent } : {}),
+        ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
+        ...(eventData.read != null ? { read: eventData.read } : {}),
+      };
+      this.mergeMessages([msg]);
+
+      // Update attachment map if the event carries attachment data.
+      if (eventData.attachments && eventData.attachments.length > 0) {
+        this.v2AttachmentMap.set(msg.id, eventData.attachments);
+      }
+
+      this.scrollToBottomAfterRender();
+      this.maybeAdvanceReadWatermark();
+      return;
+    }
+
+    // Lightweight notification (no full message) — fall back to backfill.
     void this.backfillV2();
   }
 
@@ -1497,8 +1617,12 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
 
     try {
+      // Generate an idempotency key so duplicate sends (e.g. network retry)
+      // are collapsed server-side.
+      const idempotencyKey = crypto.randomUUID();
       const body: Record<string, unknown> = {
         content: text,
+        idempotency_key: idempotencyKey,
       };
       if (mentions && mentions.length > 0) {
         body.mentions = mentions;
@@ -1970,6 +2094,254 @@ export class ScionChatThread extends LitElement {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Phase-5: Context menu + Send-to-agent
+  // ---------------------------------------------------------------------------
+
+  /** Render the context menu overlay when a message is right-clicked. */
+  private renderContextMenu() {
+    if (!this.contextMenuMessage) return nothing;
+
+    return html`
+      <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
+      <div
+        class="context-menu"
+        style="left: ${this.contextMenuPosition.x}px; top: ${this.contextMenuPosition.y}px;"
+      >
+        <div class="context-menu-item" @click=${this.handleSendToAgent}>
+          <sl-icon name="send"></sl-icon>
+          Send to Agent...
+        </div>
+      </div>
+    `;
+  }
+
+  /** Handle right-click on a message to show context menu. */
+  private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
+    e.preventDefault();
+    this.contextMenuMessage = msg;
+    this.contextMenuPosition = { x: e.clientX, y: e.clientY };
+    // Close agent picker if open
+    this.showAgentPicker = false;
+  }
+
+  /** Close the context menu. */
+  private closeContextMenu(): void {
+    this.contextMenuMessage = null;
+  }
+
+  /** Handle "Send to Agent..." click from context menu. */
+  private handleSendToAgent(): void {
+    // Close context menu and show agent picker
+    const pos = { ...this.contextMenuPosition };
+    this.contextMenuPosition = pos;
+    this.showAgentPicker = true;
+    // Keep contextMenuMessage so we have the message content
+    // but close the visual context menu
+    const msg = this.contextMenuMessage;
+    this.contextMenuMessage = null;
+    // Re-store message for the picker callback
+    this._pendingSendToAgentMessage = msg;
+  }
+
+  /** Handle agent selection from the picker. */
+  private handleAgentSelected(e: CustomEvent<AgentSelectedDetail>): void {
+    const { agentId } = e.detail;
+    const msg = this._pendingSendToAgentMessage;
+    this._pendingSendToAgentMessage = null;
+    this.showAgentPicker = false;
+
+    if (!msg) return;
+
+    // Store context in sessionStorage to avoid URL length overflow (msg.msg
+    // can be 16 000 runes → 48 KB+ when percent-encoded).
+    const contextKey = `scion-send-ctx-${crypto.randomUUID().slice(0, 8)}`;
+    sessionStorage.setItem(contextKey, msg.msg);
+    const url = `/chat/dm/agent/${encodeURIComponent(agentId)}?ctx=${contextKey}`;
+    const navEvent = new CustomEvent('navigate', {
+      detail: { url },
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    this.dispatchEvent(navEvent);
+    if (!navEvent.defaultPrevented) {
+      window.location.href = url;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase-5: Slash command handling
+  // ---------------------------------------------------------------------------
+
+  /** Handle slash commands dispatched from the composer. */
+  private async handleSlashCommand(
+    e: CustomEvent<{ command: string; args: string }>
+  ): Promise<void> {
+    const { command, args } = e.detail;
+
+    switch (command) {
+      case 'status':
+        await this.handleSlashStatus();
+        break;
+      case 'clear':
+        this.handleSlashClear();
+        break;
+      case 'help':
+        this.handleSlashHelp();
+        break;
+      case 'spawn':
+        await this.handleSlashSpawn(args);
+        break;
+      case 'stop':
+        await this.handleSlashStop(args);
+        break;
+      case 'default':
+        await this.handleDefaultCommand(`/default ${args}`);
+        break;
+      default:
+        this.insertLocalSystemMessage(`Unknown command: /${command}`);
+        break;
+    }
+  }
+
+  /** /status — Fetch agent status for the project. */
+  private async handleSlashStatus(): Promise<void> {
+    if (!this.projectId) {
+      this.insertLocalSystemMessage('No project context available.');
+      return;
+    }
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/agents?project=${encodeURIComponent(this.projectId)}`
+      );
+      if (!res.ok) {
+        this.insertLocalSystemMessage('Failed to fetch project status.');
+        return;
+      }
+      const data = (await res.json()) as { items?: Agent[] };
+      const agents = data?.items ?? [];
+
+      if (agents.length === 0) {
+        this.insertLocalSystemMessage('No agents found in this project.');
+        return;
+      }
+
+      const lines = agents.map((a) => {
+        const slug = a.slug || a.name || 'unknown';
+        const phase = a.phase || 'unknown';
+        return `  ${slug}: ${phase}`;
+      });
+      this.insertLocalSystemMessage(`Project agents:\n${lines.join('\n')}`);
+    } catch {
+      this.insertLocalSystemMessage('Failed to fetch project status.');
+    }
+  }
+
+  /** /clear — Clear messages locally. */
+  private handleSlashClear(): void {
+    this.messageMap.clear();
+    this.messages = [];
+    this.interagentMessages = [];
+    this.insertLocalSystemMessage('Conversation cleared.');
+  }
+
+  /** /help — List available commands. */
+  private handleSlashHelp(): void {
+    const helpText = [
+      'Available commands:',
+      '  /status — Show project agent status',
+      '  /clear — Clear the conversation view',
+      '  /help — Show this help message',
+      '  /spawn <template> — Spawn a new agent from a template',
+      '  /stop <agent> — Stop a running agent',
+      '  /default <agent|clear> — Set or clear the thread default agent',
+    ].join('\n');
+    this.insertLocalSystemMessage(helpText);
+  }
+
+  /** /spawn <template> — Spawn a new agent. */
+  private async handleSlashSpawn(args: string): Promise<void> {
+    const template = args.trim();
+    if (!template) {
+      this.insertLocalSystemMessage('Usage: /spawn <template>');
+      return;
+    }
+
+    try {
+      const body: Record<string, unknown> = {
+        template,
+        project_id: this.projectId,
+      };
+      const res = await apiFetch('/api/v1/agents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to spawn agent');
+        this.insertLocalSystemMessage(`Failed to spawn agent: ${errMsg}`);
+        return;
+      }
+
+      const data = (await res.json()) as { name?: string; slug?: string };
+      const name = data?.slug || data?.name || template;
+      this.insertLocalSystemMessage(`Agent "${name}" spawned successfully.`);
+    } catch (err) {
+      this.insertLocalSystemMessage(
+        `Failed to spawn agent: ${err instanceof Error ? err.message : 'unknown error'}`
+      );
+    }
+  }
+
+  /** /stop <agent> — Stop a running agent. */
+  private async handleSlashStop(args: string): Promise<void> {
+    const agentSlug = args.trim();
+    if (!agentSlug) {
+      this.insertLocalSystemMessage('Usage: /stop <agent-slug>');
+      return;
+    }
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(agentSlug)}`,
+        { method: 'DELETE' }
+      );
+
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to stop agent');
+        this.insertLocalSystemMessage(`Failed to stop agent: ${errMsg}`);
+        return;
+      }
+
+      this.insertLocalSystemMessage(`Agent "${agentSlug}" stop requested.`);
+    } catch (err) {
+      this.insertLocalSystemMessage(
+        `Failed to stop agent: ${err instanceof Error ? err.message : 'unknown error'}`
+      );
+    }
+  }
+
+  /** Insert a local-only system message into the thread. */
+  private insertLocalSystemMessage(text: string): void {
+    const localMsg: Message = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      projectId: this.projectId,
+      sender: 'system',
+      senderId: '',
+      recipient: '',
+      recipientId: '',
+      msg: text,
+      type: 'system',
+      agentId: '',
+      createdAt: new Date().toISOString(),
+    };
+    this.mergeMessages([localMsg]);
+    this.scrollToBottomAfterRender();
+  }
+
   /** Focus the composer textarea when clicking the message area background. */
   private handleMessageAreaClick(e: MouseEvent): void {
     const target = e.target as HTMLElement;
@@ -2095,7 +2467,16 @@ export class ScionChatThread extends LitElement {
           @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
           @default-agent-change=${this.handleDefaultAgentChange}
+          @chat-slash-command=${this.handleSlashCommand}
         ></scion-chat-composer>
+        ${this.renderContextMenu()}
+        <scion-send-to-agent-picker
+          .agents=${this.agents}
+          ?open=${this.showAgentPicker}
+          .posX=${this.contextMenuPosition.x}
+          .posY=${this.contextMenuPosition.y}
+          @agent-selected=${this.handleAgentSelected}
+        ></scion-send-to-agent-picker>
       </div>
     `;
   }
@@ -2377,6 +2758,7 @@ export class ScionChatThread extends LitElement {
 
       rows.push(html`
         <scion-chat-message
+          @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
           id="msg-${msg.id}"
           body=${msg.msg}
           sender=${msg.sender}
