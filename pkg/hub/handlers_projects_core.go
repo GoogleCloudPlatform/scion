@@ -786,7 +786,7 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	// mount point to build a path from, so the config is treated as unset and
 	// this falls through to the local path. A deployment in that state fails
 	// its readiness check and never serves.
-	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" {
+	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil {
 		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
 			subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
 			if subPathRoot == "" {
