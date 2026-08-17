@@ -477,7 +477,11 @@ describe('scion-chat-thread initial scroll position', () => {
       },
       set(this: HTMLElement, value: number) {
         scrollTops.set(this, value);
-        if (this.classList.contains('messages-scroll')) {
+        // isConnected keeps a detached element's late scroll out of the shared
+        // recorder: the setter lives on the prototype, so an element torn down
+        // by a previous test can still write here if its refetch chain lands
+        // afterwards, and the positive control would count it as its own.
+        if (this.classList.contains('messages-scroll') && this.isConnected) {
           scrollWrites.push({
             top: value,
             messagesRendered: this.querySelectorAll('scion-chat-message').length,
@@ -527,8 +531,11 @@ describe('scion-chat-thread initial scroll position', () => {
     scrollWrites = [];
 
     // A message arrives on the SSE stream and triggers a background refetch.
+    // Wait for the *next* history call: the mount already made one, so waiting
+    // for any call at all would be satisfied before the emit is even handled.
+    const before = historyCalls();
     emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm4' });
-    await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(before));
     // Drain the whole refetch chain — apiFetch promise, .json(), the merge and
     // the deferred updateComplete.then() — before looking. A single microtask
     // is not enough: the assertion would run before a scroll could have
@@ -547,8 +554,9 @@ describe('scion-chat-thread initial scroll position', () => {
     const el = await mountWithHistory();
     scrollWrites = [];
 
+    const before = historyCalls();
     emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm5' });
-    await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(before));
     await flushRefetch(el);
 
     expect(
