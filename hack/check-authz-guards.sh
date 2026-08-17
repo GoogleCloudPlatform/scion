@@ -68,17 +68,34 @@
 #
 #   0  analysed, no violations
 #   1  analysed, violations found — the list is on stderr
-#   2  COULD NOT ANALYSE (rg missing, no candidate files) — nothing was examined
+#   2  COULD NOT ANALYSE: no candidate files matched — nothing was examined
+#   3  COULD NOT ANALYSE: ripgrep (rg) is not installed — nothing was examined
 #
-# 2 is separate from 1 on purpose. Both fail a build, which is the point: a run
-# that examined no source must not be indistinguishable from a clean one to
-# anything reading only the exit code, or this check becomes the thing it exists
-# to prevent — a guard that never fires. But the two mean opposite things to
-# whoever reads the log. 1 is a security finding against named code; 2 is a
-# broken environment and accuses nobody. Note this differs from the exit-0-on-
-# missing-rg convention in hack/check-project-compat-literals.sh; the difference
-# is deliberate, because a formatting check that silently skips costs a reformat
-# later, while an authorization check that silently skips ships a bypass.
+# 2 and 3 are separate from 1 on purpose. All three fail a build, which is the
+# point: a run that examined no source must not be indistinguishable from a
+# clean one to anything reading only the exit code, or this check becomes the
+# thing it exists to prevent — a guard that never fires. But they mean different
+# things to whoever reads the log. 1 is a security finding against named code;
+# 2 and 3 accuse nobody.
+#
+# 2 and 3 are separate from each other because they ask opposite things of
+# whoever has to act. 3 is a statement about the runner: the check could not
+# run, install ripgrep or run it somewhere that has it, and nothing at all is
+# implied about the source. 2 is a statement about the tree: the tools were
+# there, the scan ran, and it was pointed at something that holds no code to
+# examine — wrong cwd, partial or empty checkout. Collapsing them into one code
+# leaves a caller unable to tell a broken image from a broken checkout.
+#
+# Both refusals print on stdout as well as stderr. Any consumer that keeps the
+# exit code while reading only stdout — a CI step summary, a caller that runs
+# this under `2>/dev/null` — would otherwise receive the refusal's exit code
+# with none of its words, and a refusal nobody can read is barely better than
+# the wrong answer it replaces.
+#
+# Note this differs from the exit-0-on-missing-rg convention in
+# hack/check-project-compat-literals.sh; the difference is deliberate, because a
+# formatting check that silently skips costs a reformat later, while an
+# authorization check that silently skips ships a bypass.
 set -euo pipefail
 
 # Classifier. Walks each candidate guard with a brace-depth counter so the
@@ -376,8 +393,13 @@ provenance() {
 }
 
 if ! command -v rg >/dev/null 2>&1; then
-  echo "check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)" >&2
-  exit 2
+  # 3, not 2: this says nothing about the tree, only that the instrument this
+  # check measures with is absent from the runner. Printed on both streams so a
+  # consumer reading either one sees why the build failed.
+  msg="check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)"
+  echo "$msg"
+  echo "$msg" >&2
+  exit 3
 fi
 
 # Narrow to files that mention the getter or the assertion at all. The
@@ -395,7 +417,9 @@ if [[ ${#candidate_files[@]} -eq 0 ]]; then
   # therefore means the scan ran somewhere unexpected — wrong cwd, empty or
   # partial checkout — not that the codebase is clean. If every last caller is
   # ever removed for real, fix this script deliberately rather than silencing it.
-  echo "check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)" >&2
+  msg="check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)"
+  echo "$msg"
+  echo "$msg" >&2
   exit 2
 fi
 
