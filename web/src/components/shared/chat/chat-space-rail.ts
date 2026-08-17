@@ -1007,9 +1007,12 @@ export class ScionChatSpaceRail extends LitElement {
   private async handleMarkSpaceRead(projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     try {
-      await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/read`, {
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/read`, {
         method: 'POST',
       });
+      // A refused request leaves every watermark where it was, so clearing the
+      // dots here would show the space as read until the next reload (#1029).
+      if (!res.ok) return;
       // Update all threads in this space locally
       const threads = this.threadsBySpace.get(projectId) || [];
       const newMap = new Map(this.threadsBySpace);

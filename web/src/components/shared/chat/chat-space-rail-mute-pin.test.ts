@@ -230,6 +230,25 @@ describe('space rail — space badge follows mute', () => {
     expect(badge(el)).toBe(1);
   });
 
+  it('clears the space badge when mark-all-read succeeds', async () => {
+    const el = createRail([thread({ hasUnread: true })]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await el.handleMarkSpaceRead(SPACE.projectId);
+
+    expect(storedThread(el).hasUnread).toBe(false);
+    expect(badge(el)).toBe(0);
+  });
+
+  it('keeps the space badge when the server refuses mark-all-read', async () => {
+    const el = createRail([thread({ hasUnread: true })]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 500 }));
+
+    await el.handleMarkSpaceRead(SPACE.projectId);
+
+    expect(storedThread(el).hasUnread).toBe(true);
+    expect(badge(el)).toBe(1);
+  });
 });
 
 describe('space rail — pin toggle', () => {
