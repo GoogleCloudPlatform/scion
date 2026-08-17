@@ -74,13 +74,13 @@
 #   4  COULD NOT ANALYSE: no candidate files matched — nothing was examined
 #
 # 2 is reserved and deliberately left unused, because it is the one code this
-# script cannot own. GNU make 4.3 flattens every non-zero recipe exit to 2, so
-# anything invoked through a makefile — as this check is — reaches its caller as
-# 2 no matter which code it actually returned. Reserving 2 means a consumer
-# seeing it knows information was lost, rather than confidently reporting an
-# empty corpus when the real answer may be 22 violations. A meaningful code in
-# that slot would not merely erase the distinction, it would assert a specific
-# false one. Read 2 as "ask the log", never as an answer.
+# script cannot own. GNU make flattens every non-zero recipe exit to 2, so
+# anything invoked through a makefile — as this check is intended to be —
+# reaches its caller as 2 no matter which code it actually returned. Reserving 2
+# means a consumer seeing it knows information was lost, rather than confidently
+# reporting an empty corpus when the real answer may be 22 violations. A
+# meaningful code in that slot would not merely erase the distinction, it would
+# assert a specific false one. Read 2 as "ask the log", never as an answer.
 #
 # 3 and 4 are separate from 1 on purpose. All three fail a build, which is the
 # point: a run that examined no source must not be indistinguishable from a
@@ -369,7 +369,7 @@ func (s *Server) failClosedAfterBranch(ctx context.Context) bool {
 FIXTURE
 
   want="$(grep -n '^[[:space:]]*// WANT$' "$fixture" | cut -d: -f1 | awk '{print $1 + 1}')"
-  got="$(awk "$classifier" "$fixture" | cut -d: -f2)"
+  got="$(awk "$classifier" "$fixture" | cut -d: -f2 || true)"
 
   if [[ "$want" == "$got" ]]; then
     echo "check-authz-guards self-test: PASS ($(grep -c '// WANT$' "$fixture") flagged, $(grep -c '// WANT-NOT$' "$fixture") correctly ignored)"
@@ -431,6 +431,8 @@ mapfile -t candidate_files < <(
 )
 
 if [[ ${#candidate_files[@]} -eq 0 ]]; then
+  # 4, not 3: the tools were there but the tree held nothing to examine.
+  #
   # In this repo the getter always matches something: ~25 attribution sites use
   # it legitimately and are deliberately not being converted. Zero candidates
   # therefore means the scan ran somewhere unexpected — wrong cwd, empty or
