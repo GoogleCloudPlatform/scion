@@ -25,6 +25,23 @@
 # The live checks are in VALIDATION.md and have not been run.
 #
 # Requires: helm, kubeconform, diff. No cluster.
+#
+# Exit codes. The two failure codes mean different things and need different
+# reactions: 1 is "the chart is wrong", 2 is "the checks did not run, and this
+# output is not evidence about the chart either way".
+#
+#   0  every check ran and passed
+#   1  the chart failed a check
+#   2  META-FAILURE - the run is not evidence: a tool is missing, or the number
+#      of assertions executed was not exactly EXPECTED_TOTAL
+#
+# MEASURED, NOT ASSUMED: before the preflight below existed, running this file
+# with no helm on PATH printed FIVE PASSING ASSERTIONS - among them "emits no
+# dead SCION_SERVER_DATABASE_/OIDC_ variable", the single check this phase most
+# needs to be true - because each of them greps a rendered manifest for a string
+# that must be ABSENT, and every one of those manifests was an empty file. A
+# negative assertion against a file that does not exist is the cheapest false
+# pass there is, and no amount of care inside the check prevents it.
 
 set -euo pipefail
 
@@ -76,10 +93,43 @@ declare -A HUB_HOME=(
 # output is a skip that silently grows to cover a regression.
 NO_RENDERED_SETTINGS=(existing-secret)
 
+# The number of assertions this file is committed to executing. Compared with
+# -ne, so it fails in BOTH directions: short means something was skipped, over
+# means an assertion was added without the number being committed in the diff.
+# Update it in the same commit that changes the count, deliberately.
+EXPECTED_TOTAL=200
+
 failures=0
-pass() { printf '  ok      %s\n' "$1"; }
-fail() { printf '  FAIL    %s\n' "$1"; failures=$((failures + 1)); }
+assertions=0
+pass() { printf '  ok      %s\n' "$1"; assertions=$((assertions + 1)); }
+fail() { printf '  FAIL    %s\n' "$1"; failures=$((failures + 1)); assertions=$((assertions + 1)); }
 step() { printf '\n== %s\n' "$1"; }
+
+# The run is not evidence. Exits 2, and says so in those words, because "the
+# checks did not run" and "the chart is broken" need different reactions.
+meta_failure() {
+  printf '\n  META-FAILURE  %s\n' "$1"
+  printf 'This run is NOT evidence about the chart, in either direction.\n'
+  exit 2
+}
+
+# --------------------------------------------------------------------------
+# Preflight. Before any assertion, because the assertions cannot survive its
+# absence: most of this file greps rendered manifests for strings that must NOT
+# be there, and an empty file satisfies every one of them. See the exit-code
+# note at the top - with no helm on PATH this suite printed five green lines,
+# one of them the dead-environment-variable check that is this phase's stated
+# acceptance criterion.
+#
+# Both tools are asked to RUN, not merely to exist. A file on PATH that is not
+# executable, or a helm too old to know a flag this file uses, is a different
+# failure with the same consequence.
+if ! "$HELM" version --short >/dev/null 2>&1; then
+  meta_failure "helm does not run (tried: $HELM). Nothing below was checked - and without this guard most of it would have reported ok. Set HELM= if it is installed elsewhere."
+fi
+if ! "$KUBECONFORM" -v >/dev/null 2>&1; then
+  meta_failure "kubeconform does not run (tried: $KUBECONFORM). Nothing below was checked. Set KUBECONFORM= if it is installed elsewhere."
+fi
 
 in_list() {
   local needle="$1"; shift
@@ -181,12 +231,14 @@ step "render and schema-validate"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+render_failures=0
 for name in "${PERMUTATIONS[@]}"; do
   if render "$name" >"$WORK/$name.yaml" 2>"$WORK/$name.err"; then
     pass "template $name"
   else
     fail "template $name"
     cat "$WORK/$name.err"
+    render_failures=$((render_failures + 1))
     continue
   fi
   if "$KUBECONFORM" -strict -summary <"$WORK/$name.yaml" >/dev/null 2>&1; then
@@ -196,6 +248,25 @@ for name in "${PERMUTATIONS[@]}"; do
     "$KUBECONFORM" -strict <"$WORK/$name.yaml" || true
   fi
 done
+
+# Stop here if a permutation did not render. Every check below this line reads
+# those five files, and most of them ask whether a string is ABSENT - which an
+# empty file answers yes to. Continuing would turn one real failure into a
+# hundred and ninety green lines and one red one.
+#
+# This is exit 1 and not a meta-failure: helm ran, and it said the chart is
+# wrong. The distinction is the point of having two codes.
+if [[ $render_failures -gt 0 ]]; then
+  printf '\n%d permutation(s) failed to render. Stopping: every check below reads those files,\n' "$render_failures"
+  printf 'and a check for an absent string passes against a file that is not there.\n'
+  # Said out loud rather than left to be noticed. This run IS short of
+  # EXPECTED_TOTAL, deliberately, and the count check below never executes - so
+  # the one line that would otherwise report the shortfall is missing from the
+  # output at the moment the output is shortest.
+  printf 'assertions: %d/%d - NOT CHECKED, the run stopped here on purpose.\n' "$assertions" "$EXPECTED_TOTAL"
+  printf '%d check(s) FAILED.\n' "$failures"
+  exit 1
+fi
 
 # --------------------------------------------------------------------------
 if [[ $UPDATE -eq 1 ]]; then
@@ -1683,6 +1754,18 @@ fi
 
 # --------------------------------------------------------------------------
 printf '\n'
+printf 'assertions: %d/%d   failures: %d\n' "$assertions" "$EXPECTED_TOTAL" "$failures"
+
+# The count check is NOT gated on there being no failures. A guard whose enabling
+# condition shares a cause with the failure it detects is switched off exactly
+# when it is needed: a run that went wrong is the run most likely to have skipped
+# assertions, and it is the run whose count nobody can otherwise reconstruct. So
+# the number is checked first, on every path, and it counts assertions EXECUTED
+# rather than assertions passed - which is a question orthogonal to whether the
+# chart is correct.
+if [[ $assertions -ne $EXPECTED_TOTAL ]]; then
+  meta_failure "$assertions assertions executed, and this file is committed to exactly $EXPECTED_TOTAL. Short means checks were skipped; over means checks were added without the number being committed alongside them. Change EXPECTED_TOTAL deliberately, in the commit that changes the count."
+fi
 if [[ $failures -eq 0 ]]; then
   printf 'All static checks passed. Nothing here has been run against a cluster; see VALIDATION.md.\n'
   exit 0
