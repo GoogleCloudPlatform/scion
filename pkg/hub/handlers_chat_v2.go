@@ -229,6 +229,10 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationTyping(w, r, key)
 	case "interagent":
 		s.handleConversationInteragent(w, r, key)
+	case "mute":
+		s.handleConversationMute(w, r, key)
+	case "pin":
+		s.handleConversationPin(w, r, key)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1563,6 +1567,136 @@ func (s *Server) writeConversationReadState(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// authorizeConversationAccess authorizes the caller for a conversation key,
+// applying the same rule the read path uses: a DM is readable by its
+// participants, a topic by anyone with read access to its project. It writes
+// the error response itself and returns false when access is refused.
+func (s *Server) authorizeConversationAccess(
+	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string,
+) bool {
+	if strings.HasPrefix(key, "dm:") {
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return false
+		}
+		if !isDMParticipant(key, userID) {
+			Forbidden(w)
+			return false
+		}
+		return true
+	}
+
+	ctx := r.Context()
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return false
+	}
+	return s.authorize(w, r, projectResource(project), ActionRead)
+}
+
+// handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
+// Body: {"muted": bool}. A muted conversation raises no notifications
+// (ChatNotifier already honours the flag) and shows no unread badge.
+func (s *Server) handleConversationMute(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	var body struct {
+		Muted *bool `json:"muted"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+	if body.Muted == nil {
+		ValidationError(w, "muted is required", nil)
+		return
+	}
+
+	if err := wcs.SetMuted(r.Context(), user.ID(), key, *body.Muted); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update mute state", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"muted": *body.Muted})
+}
+
+// handleConversationPin handles PUT /api/v1/chat/conversations/{key}/pin.
+// Body: {"pinned": bool}. Pinned threads sort above the rest of their space.
+func (s *Server) handleConversationPin(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	var body struct {
+		Pinned *bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+	if body.Pinned == nil {
+		ValidationError(w, "pinned is required", nil)
+		return
+	}
+
+	if err := wcs.SetPinned(r.Context(), user.ID(), key, *body.Pinned); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update pin state", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"pinned": *body.Pinned})
+}
+
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.
 func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
@@ -1674,6 +1808,7 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		rs, _ := wcs.GetReadState(ctx, user.ID(), dm.ConversationKey)
 		if rs != nil {
 			entry.LastReadMessageID = rs.LastReadMessageID
+			entry.Muted = rs.Muted
 			entry.HasUnread = dm.LastMessageID != "" && dm.LastMessageID != rs.LastReadMessageID
 		} else {
 			entry.HasUnread = dm.LastMessageID != ""
@@ -2584,6 +2719,7 @@ type chatDMEntry struct {
 	LastActivityAt     time.Time `json:"lastActivityAt"`
 	LastReadMessageID  string    `json:"lastReadMessageId,omitempty"`
 	HasUnread          bool      `json:"hasUnread"`
+	Muted              bool      `json:"muted"`
 	LastMessagePreview string    `json:"lastMessagePreview,omitempty"`
 	LastMessageSender  string    `json:"lastMessageSender,omitempty"`
 }
