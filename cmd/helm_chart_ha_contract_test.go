@@ -74,7 +74,7 @@ type supplier func(cfg *config.GlobalConfig, msg string) (granted string, ok boo
 
 // gateSupplier builds the supply table. audience is a parameter and not a
 // constant precisely because the count depends on it.
-func gateSupplier(audience string) supplier {
+func gateSupplier(t *testing.T, audience string) supplier {
 	// audienceTried guards against a walk that supplies a value the gate
 	// rejects and then supplies it again forever.
 	audienceTried := false
@@ -96,7 +96,11 @@ func gateSupplier(audience string) supplier {
 		case strings.Contains(msg, "durable session/signing secret"):
 			// resolveSessionSecret reads this by literal os.Getenv, so the
 			// grant has to be an environment variable and not a config field.
-			_ = os.Setenv("SCION_SERVER_SESSION_SECRET", "probe-secret")
+			// t.Setenv, not os.Setenv: os.Setenv leaves the variable set for
+			// every test that runs after this one in package cmd, and
+			// resolveSessionSecret is exactly the kind of thing another test
+			// will read. t.Setenv unsets it when the test ends.
+			t.Setenv("SCION_SERVER_SESSION_SECRET", "probe-secret")
 			return `env SCION_SERVER_SESSION_SECRET="probe-secret"`, true
 		case strings.Contains(msg, "server.auth.mode=proxy"):
 			cfg.Auth.Mode = "proxy"
@@ -187,6 +191,54 @@ var authoredProxyGates = []string{
 // TestHelmChartHAGateWalk derives the gate list and compares it to the
 // committed artifact. Run with -update-chart-contract to rewrite the artifact.
 func TestHelmChartHAGateWalk(t *testing.T) {
+	// THE REGRESSION GUARD FOR THE SAVE/RESTORE IN walkOne, AND IT IS REGISTERED
+	// HERE RATHER THAN AS A SEPARATE TEST ON PURPOSE. A test that reads these
+	// globals and asserts they are false only detects the leak if the go test
+	// runner happens to schedule it after this one, and ordering across files in
+	// a package is not a thing to build a guard on. Cleanups run LIFO, so this
+	// one - registered before any walkOne runs - runs AFTER every restore
+	// walkOne stacks up, which is precisely when the question is meaningful.
+	//
+	// Positive control, run by hand at 36a3fead by gd-p1-rev and re-run here:
+	// delete the two restore lines in walkOne and this fires with
+	// hostedMode=true enableHub=true.
+	entryHosted, entryHub := hostedMode, enableHub
+	entrySecret, entrySecretSet := os.LookupEnv("SCION_SERVER_SESSION_SECRET")
+	t.Cleanup(func() {
+		if hostedMode != entryHosted || enableHub != entryHub {
+			t.Errorf("this test leaked package-level state: hostedMode %v -> %v, enableHub %v -> %v. walkOne sets both and must restore both, or the next test in package cmd inherits a mode it never asked for.",
+				entryHosted, hostedMode, entryHub, enableHub)
+		}
+		// The third global this test writes is not a variable in the package, it
+		// is the process environment: gateSupplier grants the durable-session
+		// gate the only way resolveSessionSecret can see it, an env var.
+		//
+		// WHAT THIS ROW ACTUALLY PINS, MEASURED RATHER THAN ASSUMED. I first
+		// wrote it as "gateSupplier must use t.Setenv, never os.Setenv" and that
+		// message was a diagnosis this assertion cannot make:
+		//
+		//   os.Setenv instead of t.Setenv, walkOne's unset loop intact   PASSES
+		//   os.Setenv AND walkOne's unset loop at :376 removed           FAILS
+		//   clean                                                        PASSES
+		//
+		// The middle row is the only one that fires, so the guard is on the
+		// END STATE - "the walk leaves no session secret behind" - and TWO
+		// independent mechanisms currently deliver it: t.Setenv's restore, and
+		// walkOne clearing the variable at the top of every arm. Either alone
+		// is enough, which is why swapping one out is invisible here.
+		//
+		// It is kept rather than deleted because the end state is the thing that
+		// can hurt a later test, and it is the only assertion that would survive
+		// someone deciding the per-arm isolation loop is redundant. But it is NOT
+		// the guard for the t.Setenv change; that change is covered by review and
+		// by the fact that it cannot be worse than os.Setenv.
+		gotSecret, gotSet := os.LookupEnv("SCION_SERVER_SESSION_SECRET")
+		if gotSet != entrySecretSet || gotSecret != entrySecret {
+			t.Errorf("this test left SCION_SERVER_SESSION_SECRET behind: set=%v value=%q on entry, set=%v value=%q on exit. Both the per-arm unset loop in walkOne and gateSupplier's t.Setenv have to be gone for this to fire, so check both.",
+				entrySecretSet, entrySecret, gotSet, gotSecret)
+		}
+	})
+
 	goldens, err := filepath.Glob(chartDir + "/golden/*.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +298,7 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 			{"audience malformed", audienceMalformed},
 		} {
 			fmt.Fprintf(&b, "\n===== %s [%s = %q]\n", filepath.Base(g), arm.label, arm.audience)
-			n, keys := walkOne(t, &b, settings, gateSupplier(arm.audience))
+			n, keys := walkOne(t, &b, settings, gateSupplier(t, arm.audience))
 			totalRefusals += n
 			if filepath.Base(g) == "settings.yaml" && arm.audience == audienceWellFormed {
 				derivedProxyGates, proxyArmWalked = keys, true
@@ -363,6 +415,20 @@ func walkOne(t *testing.T, b *strings.Builder, settings string, sup supplier) (i
 		fmt.Fprintf(b, "TERMINATED loading the rendered settings.yaml: %v\n", err)
 		return 0, nil
 	}
+	// SAVE AND RESTORE, because these two are package-level globals in cmd and
+	// this walk is not the only test in the package. Without the Cleanup they
+	// are still true when TestHelmChartHAGateWalk returns, and the next test
+	// that reads either one inherits a state it never set. gd-p1-rev measured
+	// the leak rather than predicting it: a throwaway probe reading the two
+	// globals after the walk reports hostedMode=true enableHub=true without
+	// these lines and false/false with them.
+	//
+	// walkOne is called once per (golden, audience arm), so several Cleanups
+	// stack. They run LIFO, so the last one registered restores the value the
+	// second-to-last saw, and the first one registered - which captured the
+	// true original - runs last.
+	prevHosted, prevHub := hostedMode, enableHub
+	t.Cleanup(func() { hostedMode, enableHub = prevHosted, prevHub })
 	hostedMode = cfg.Mode == "hosted" || cfg.Mode == "production"
 	enableHub = true
 
