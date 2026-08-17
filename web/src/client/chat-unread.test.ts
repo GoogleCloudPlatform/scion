@@ -236,6 +236,45 @@ describe('ChatUnreadCounter', () => {
     }
   });
 
+  it('keeps the DM count moving while rail loads arrive', async () => {
+    // The mirror of the test above, in the other direction. Today the rail's
+    // 2s debounce cannot fire inside the badge's 500ms window, so this cannot
+    // happen in production — but that is an accident of two constants set
+    // independently, and shortening the rail debounce below the badge debounce
+    // would silently reintroduce the starvation with nothing to catch it.
+    // Neither setter cancels a refresh it only half owns; this pins that.
+    vi.useFakeTimers();
+    let serverSpaces: UnreadSpace[] = [];
+    let serverDMs: UnreadDM[] = [];
+    apiFetch.mockImplementation((url: string) => {
+      const body = url.includes('/chat/dms') ? { dms: serverDMs } : { spaces: serverSpaces };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getUnreadBadge()).toBe(0);
+
+    try {
+      serverSpaces = [{ unreadCount: 2 }];
+      serverDMs = [{ hasUnread: true }, { hasUnread: true }];
+
+      for (let i = 0; i < 10; i++) {
+        stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+        await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS / 2);
+        counter.setSpaceUnread(serverSpaces);
+      }
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS * 4);
+
+      const dmHalf = countUnreadDMs(serverDMs);
+      expect(dmHalf).toBeGreaterThan(0);
+      expect(getUnreadBadge()).toBe(countUnreadSpaces(serverSpaces) + dmHalf);
+    } finally {
+      counter.stop();
+    }
+  });
+
   it('refreshes for a chat notification', async () => {
     vi.useFakeTimers();
     mockChatApi([{ unreadCount: 1 }], []);

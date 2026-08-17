@@ -95,23 +95,22 @@ export class ChatUnreadCounter {
     this.cancelPending();
   }
 
-  /** Space rollup, from data the chat rail already loaded. */
+  /**
+   * Space rollup, from data the chat rail already loaded.
+   *
+   * Neither setter cancels a pending refresh. Each owns one half, and the
+   * refresh they would cancel carries both — so cancelling starves the other
+   * half for as long as pushes keep arriving. The cost of not cancelling is
+   * one redundant fetch that overwrites a push with equally-correct server
+   * data; the cost of cancelling was a tab-title badge that stopped moving
+   * during exactly the burst it exists to report.
+   */
   setSpaceUnread(spaces: readonly UnreadSpace[]): void {
     this.spaceUnread = countUnreadSpaces(spaces);
     this.publish();
-    // A push from the page is fresher than anything a queued fetch would
-    // return, and would otherwise be overwritten by it moments later.
-    this.cancelPending();
   }
 
-  /**
-   * DM half, from data the chat page already loaded.
-   *
-   * Deliberately does not cancel a pending refresh, unlike `setSpaceUnread`:
-   * this owns only `dmUnread`, and the refresh it would cancel also carries
-   * the space half. The chat page pushes DMs in on every inbound message, so
-   * cancelling here starves the thread count for the whole of a busy burst.
-   */
+  /** DM half, from data the chat page already loaded. */
   setDMUnread(dms: readonly UnreadDM[]): void {
     this.dmUnread = countUnreadDMs(dms);
     this.publish();
