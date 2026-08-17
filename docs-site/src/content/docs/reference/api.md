@@ -47,6 +47,26 @@ Agent state uses a layered model:
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
 
+#### Chat Attachments (`/api/v1/chat/attachments`)
+- `POST /`: Upload one or more files (`multipart/form-data`, field `files`, optional `project_id`). Max 10 files, 10 MB each.
+- `GET /:id`: Download a stored attachment. Responses carry `X-Content-Type-Options: nosniff`, and `Content-Disposition: inline` only for image types — everything else is served as an `attachment`.
+
+Uploads are accepted or refused **per file**, and the response reports both outcomes:
+
+```json
+{
+  "attachments": [{ "id": "…", "name": "compose.yaml", "mime": "text/plain", "size": 42, "url": "/api/v1/chat/attachments/…" }],
+  "failures":    [{ "name": "setup.sh", "error": "files with a .sh extension are not accepted" }]
+}
+```
+
+Status codes:
+- `201 Created` — **at least one** file was stored. `failures` may be non-empty. Previously a single bad file failed the whole batch with `400` and stored nothing; clients that treat `201` as "all files stored" must now read `failures`, or they will drop files silently.
+- `400 Bad Request` — nothing was stored and the caller can fix it (blocked extension, unaccepted type, oversized file).
+- `500 Internal Server Error` — nothing was stored and the failure was server-side.
+
+The stored MIME type is derived from the file's content plus its extension; the `Content-Type` a client declares on the part is ignored. Executable extensions (`.exe`, `.sh`, `.js`, `.ps1`, and their peers) and markup extensions (`.html`, `.svg`, and their peers) are refused whatever the content is.
+
 #### Templates (`/api/v1/templates`)
 - `GET /`: List available agent templates.
 - `POST /`: Upload a new template or version.
