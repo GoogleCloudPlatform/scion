@@ -111,3 +111,19 @@ func deviceID(fi os.FileInfo) (uint64, bool) {
 	}
 	return uint64(st.Dev), true
 }
+
+// warnEphemeralProjectPath reports, once per slug, that a hub-managed project
+// is being served from the pod's local disk because the shared volume has no
+// content for it yet.
+//
+// Once per slug rather than once per call: hubManagedProjectPath is on the
+// WebDAV, clone and cache request paths, so a deployment sitting in this state
+// would otherwise emit a line per request for as long as it runs. The
+// condition is a property of the deployment, not of the request.
+func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
+	if _, alreadyWarned := s.warnedEphemeralProjects.LoadOrStore(slug, struct{}{}); alreadyWarned {
+		return
+	}
+	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; gke-shared-volume mount has no content yet",
+		"slug", slug, "local_path", localPath, "volume_path", volumePath)
+}

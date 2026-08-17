@@ -891,6 +891,11 @@ type Server struct {
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
+
+	// warnedEphemeralProjects holds the project slugs already reported as being
+	// served from ephemeral local storage, keeping that warning to one line per
+	// slug on a request path. See warnEphemeralProjectPath.
+	warnedEphemeralProjects sync.Map
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to

@@ -17,11 +17,14 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -444,6 +447,7 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
 
 	srv, _ := testServer(t)
+	logs := captureProjectsLog(t, srv)
 	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
 		Backend: "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{
@@ -454,6 +458,21 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 	path, err := srv.hubManagedProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, localDir, path)
+
+	// The warning is the only thing that distinguishes this fallback from the
+	// unfixed code, which returns the same local path without ever consulting
+	// the volume — so asserting on it is what makes this test discriminate,
+	// and it is also the only coverage the warning has.
+	assert.Contains(t, logs.String(), "served from ephemeral local path")
+	assert.Contains(t, logs.String(), filepath.Join(mountBase, "workspace-vol"))
+
+	// Repeated resolutions must not repeat the warning: this runs on the
+	// WebDAV, clone and cache paths.
+	for range 3 {
+		_, err := srv.hubManagedProjectPath(slug)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
 }
 
 // A gke-shared-volume config without a volume name has no mount point to build
@@ -796,6 +815,17 @@ func TestCheckWorkspaceStorageHealth_MountPathPerBackend(t *testing.T) {
 			assert.Equal(t, tt.want, checks["workspace_storage"])
 		})
 	}
+}
+
+// captureProjectsLog redirects the projects subsystem logger into a buffer the
+// test can assert on.
+func captureProjectsLog(t *testing.T, srv *Server) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev := srv.projectsLog
+	srv.projectsLog = slog.New(slog.NewTextHandler(buf, nil))
+	t.Cleanup(func() { srv.projectsLog = prev })
+	return buf
 }
 
 // setContainerRootPath overrides the reference path isMountedVolume compares
