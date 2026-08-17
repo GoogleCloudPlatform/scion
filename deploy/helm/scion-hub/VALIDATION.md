@@ -249,14 +249,37 @@ once the workspace share is an NFS mount.
 #### 2. `$HOME/.scion` is writable and the settings file is not
 
     kubectl exec <hub-pod> -- touch /home/scion/.scion/probe && echo dir-writable
-    kubectl exec <hub-pod> -- ls -d /home/scion/.scion/storage
     kubectl exec <hub-pod> -- sh -c '>> /home/scion/.scion/settings.yaml' ; echo $?
+    kubectl exec <hub-pod> -- ls -a /home/scion/.scion
 
-Pass: the directory accepts a write, `storage/` exists, and the append to
-`settings.yaml` fails. The directory is the hub's whole state directory —
-`storage/`, `templates/` and `scion-token` all live in it — so a read-only
-directory breaks the hub for reasons unrelated to configuration. Only the one
-file is read-only.
+Pass: the directory accepts a write and the append to `settings.yaml` fails. The
+directory is the hub's whole state directory — `storage/`, `scion-token` and
+anything else it needs at runtime are created in it — so a read-only directory
+breaks the hub for reasons unrelated to configuration. Only the one file is
+read-only.
+
+**Do not expect that directory to be populated, and do not treat an almost-empty
+one as a failure.** This is worth stating because the obvious reading of "state
+directory" is wrong here, in a way that will otherwise send somebody hunting.
+
+Two mechanisms combine. `cmd/server_foreground.go:110` refreshes bundled
+templates only in the `else if !hostedMode` branch — hosted mode bootstraps into
+the hub via `BootstrapBundledResources` and deliberately bypasses local
+`~/.scion` materialisation. And the branch above it, `config.InitGlobal`, which
+does run in hosted mode and would create `agents/` and `harness-configs/`, is
+reached only `if os.Stat(globalDir)` reports the directory missing. The chart
+mounts an `emptyDir` at exactly that path, so the directory always exists and
+that branch never fires.
+
+So the chart's own mount changes which startup path the hub takes. That is
+believed to be harmless — hosted mode is designed not to need those directories,
+and `InitMachine` would not have overwritten the mounted `settings.yaml` in any
+case, because it seeds a default only when no settings file is found — but it is
+a behaviour difference introduced by the deployment rather than by the hub, and
+it has never been observed. **Record what is actually in that directory.** If
+the hub logs anything about a missing `agents/` or `harness-configs/` directory,
+or about templates it could not find, that is this, and it is a finding worth
+reporting rather than a local fix.
 
 #### 3. What silently does not persist, until ptone/scion#1091
 
