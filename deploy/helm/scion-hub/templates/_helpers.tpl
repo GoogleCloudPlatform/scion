@@ -677,12 +677,22 @@ the mechanism was sound and only the justification was invented:
     driver this chart already renders; the workspace-share phase lands the RWX
     volume.
     Concurrency correctness becomes a live question at that point, and it is
-    answered there by Postgres advisory locks (pg_try_advisory_lock,
-    pkg/provision/provision.go:109-116, "for cross-node mutual exclusion", and
-    the blocking pg_advisory_lock in migrateStore at
-    cmd/server_foreground.go:1168-1200) - by the hub, not by this chart. If a
-    refusal is ever warranted here, it will be warranted then, and it will need
-    a harm found in that tree.
+    answered there by Postgres advisory locks - by the hub, not by this chart:
+    the ProvisionInput.Locker field (store.AdvisoryLocker), whose doc comment
+    says pg_try_advisory_lock is "for cross-node mutual exclusion", and the
+    blocking pg_advisory_lock on store.LockSchemaMigration taken by
+    migrateStore. If a refusal is ever warranted here, it will be warranted
+    then, and it will need a harm found in that tree.
+    CITED BY SYMBOL, NOT BY OFFSET, AND THE REASON IS THAT BOTH OFFSETS THIS
+    PARAGRAPH ORIGINALLY CARRIED HAD ALREADY EXPIRED. It said provision.go
+    :109-116, which is now :110-117; and server_foreground.go:1168-1200 for
+    migrateStore, which is not close - migrateStore begins at :1226 and takes
+    the lock at :1241, while :1168-1200 is the database/sql driver-open switch.
+    Only the first was reported. The second was found by checking the citation
+    that had not been questioned, which is the general lesson: A STALE LINE
+    NUMBER IS EVIDENCE ABOUT THE OTHER LINE NUMBERS BESIDE IT, because they
+    aged in the same tree at the same rate. A grep for the symbol survives the
+    next refactor; a range does not.
   - And no third candidate can rescue it, without anyone having to look for
     one. The refusal triggered only when replicaCount <= 1. Any harm from
     CONCURRENCY is strictly worse at two replicas - permanent instead of
@@ -1487,6 +1497,101 @@ Exactly one list is.
 {{- $neverPassed := list "config" "c" "project" "g" "grove" "profile" "p" }}
 
 {{- /*
+2b. THE SAME RESERVED SHORTHANDS AGAIN, AS SINGLE CHARACTERS, FOR THE CLUSTER
+    WALK BELOW. This list is not a second policy and must never be allowed to
+    become one: it is $neverPassed's one-character entries, and if you add a
+    shorthand there you add it here, or the cluster form of it goes unguarded.
+
+    WHY A SEPARATE CHECK EXISTS AT ALL. The name checks above tokenise the
+    argument as ONE flag name. pflag does not. For a SINGLE-dash argument pflag
+    walks the argument as a CLUSTER of one-character shorthands, left to right,
+    and stops at the first shorthand that takes a value - the entire remainder
+    of the argument becomes that value, with no separator required.
+
+      -yc/etc/evil   ->  -y sets yes=true, THEN c takes "/etc/evil"
+                         => --config=/etc/evil, silently, from an argument whose
+                            first token is a harmless boolean.
+      -cy/etc/evil   ->  c takes "y/etc/evil"  => --config=y/etc/evil
+      -project-id    ->  p takes "roject-id"   => --profile=roject-id
+      -ctx           ->  c takes "tx"          => --config=tx
+
+    ALL FOUR REACH A RESERVED FLAG AND ALL FOUR PASS THE NAME CHECKS ABOVE,
+    because "yc/etc/evil" is not a member of any list. The first is the bypass:
+    it defeats a tokeniser that reads only the FIRST character, which is the
+    repair this guard was originally going to ship.
+
+    MEASURED, not read off the documentation: github.com/spf13/pflag at the
+    version this repo pins in go.mod, v1.0.10, and independently at v1.0.5.
+    The behaviour is the '-farg' branch of pflag's parseShortArgs.
+
+    PROVENANCE OF THE SET, BY FILE AND LINE, because a shorthand that is not
+    registered cannot be clustered and one that is registered elsewhere would
+    not appear here:
+
+      -c  --config   cmd/server.go:237  (StringVarP, local to `server start`)
+      -g  --project  cmd/root.go:249    (StringVarP, persistent)
+      -p  --profile  cmd/root.go:255    (StringVarP, persistent)
+      -y  --yes      cmd/root.go:263    (BoolVarP,   persistent)  <- NOT reserved
+
+    THE COMPLETE SET OF SHORTHANDS REACHABLE ON `server start` HAS EXACTLY FOUR
+    MEMBERS, and that number is the point rather than a detail: it is why the
+    negative fixture below can be exhaustive. Obtained by walking the real cobra
+    command tree in a throwaway test in package cmd, NOT from `--help`, which in
+    an agent container prints the ROOT help after an "unknown command" error and
+    will hand you a plausible flag list for the wrong command. Three of the four
+    are reserved, so THE SET OF SHORTHANDS THAT MUST STILL BE ACCEPTED HAS
+    EXACTLY ONE MEMBER: -y. The fixture asserts that one, and asserting it is
+    what stops this guard from degenerating into "refuse every single-dash arg".
+
+    --global HAS NO SHORTHAND (cmd/root.go:254 is BoolVar, not BoolVarP), so
+    there is no -G to cluster and none is listed. It is reserved by name in
+    $setByChart and that is the only axis it can be reached on.
+
+    CASE. THIS AXIS IS CASE-SENSITIVE AND THE NAME AXIS ABOVE IS NOT. That is a
+    deliberate divergence from the lowercase-both-sides rule that governs the
+    name lists, and the reason is that the rule's justification does not hold
+    here. On the name axis, --CONFIG is an unknown flag that would crash-loop,
+    so folding it into --config turns a crash into a render error and the
+    message stays true. On the shorthand axis, -C IS NOT -c: pflag shorthands
+    are distinct by case, measured at v1.0.10 (-C reaches a different flag
+    entirely when one is registered). Folding case here would refuse -C with a
+    message claiming it redirects the config load, which is false - no -C is
+    registered on this command, so -C is simply unknown. A GUARD THAT FIRES FOR
+    A TRUE REASON AND PRINTS A FALSE ONE IS WORSE THAN NO GUARD, because the
+    operator acts on the reason. If an uppercase shorthand is ever registered,
+    add the character to this list; do not add `lower`.
+
+    WHAT THIS GUARD DOES NOT CATCH, STATED SO NOBODY READS THE FIXTURE AS
+    COVERAGE: -C/x is ACCEPTED here and still crash-loops the pod, because -C is
+    an UNKNOWN shorthand and pflag rejects the whole argument at startup.
+    Refusing unknown shorthands would need the CLI's complete registered flag
+    table, which this chart does not own and cannot see. The question this check
+    answers is "does this cluster reach a flag we have a stated reason to
+    refuse" - NOT "is this a valid argument". The reserved lists have always
+    been a deliberately partial guard over a surface owned by another component,
+    and the fixture below commits -C/x as an ACCEPT row to record that boundary
+    rather than leave it as an untested absence.
+*/}}
+{{- $neverPassedShorthand := list "c" "g" "p" }}
+
+{{- /*
+    Shorthands that CONSUME the rest of the cluster as their value. Everything
+    after one of these is a VALUE, not a flag, and must not be scanned: -cgp is
+    --config=gp, and it contains no -g and no -p. A boolean shorthand consumes
+    nothing and the walk continues past it, which is exactly why -yc/etc/evil
+    reaches -c at all.
+
+    Today every member of this list is also reserved, so the walk fails before it
+    can stop and the stop is unreachable. IT IS WRITTEN ANYWAY, and this is not
+    defensive coding for its own sake: the moment a value-taking shorthand is
+    registered that is NOT reserved, its value would start being scanned as flags
+    and this guard would refuse arguments that are entirely legitimate - the
+    over-fire would arrive silently and look like the guard working. Deleting the
+    stop makes today's tests pass and breaks that future day quietly.
+*/}}
+{{- $valueTakingShorthand := list "c" "g" "p" }}
+
+{{- /*
 3. Not the lever they appear to be. Each of these is a flag an operator could
    reasonably reach for, which either aliases something the chart controls or is
    silently ignored in the configuration this chart renders. NOT verifiable
@@ -1828,6 +1933,32 @@ overlay on the other, and no single verb covers both.
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
+{{- end }}
+{{- /*
+   THE CLUSTER WALK. See the $neverPassedShorthand comment for the pflag
+   behaviour, the measured rows, the flag-table provenance and the case rule.
+
+   ONLY for a SINGLE-dash argument: `--yc` is a long flag named "yc" and pflag
+   does not cluster it, so applying this to `--` forms would refuse names that
+   merely happen to contain a reserved letter. $flagRaw is already the cluster -
+   its `--` trim is a no-op here and its `-` trim removes the one dash - and it
+   is the ORIGINAL case, which this axis requires.
+
+   The walk carries its own stop flag in a dict because a Helm range cannot
+   break. $scan is scoped to this argument.
+*/}}
+{{- if not (hasPrefix "--" $arg) }}
+{{- $scan := dict "stopped" false }}
+{{- range $ch := splitList "" $flagRaw }}
+{{- if not $scan.stopped }}
+{{- if has $ch $neverPassedShorthand }}
+{{- fail (printf "hub.args entry %q may not be passed: pflag reads a single-dash argument as a CLUSTER of one-character shorthands, and the character %q in it is the reserved shorthand -%s. THE CLUSTER IS THE REASON THIS IS REFUSED - the argument does not have to start with the reserved character, and it does not have to look like a flag name at all. pflag walks the cluster left to right and the first shorthand that takes a value consumes the ENTIRE remainder as its value, with no = and no space required: -yc/etc/evil sets yes AND then --config=/etc/evil. See the reserved-flag comment for why -%s is reserved; the hazard is that one and this entry reaches it by a spelling the name checks cannot see. If you need the boolean shorthands, pass them as separate array elements: -y on its own is accepted." $arg $ch $ch $ch) }}
+{{- end }}
+{{- if has $ch $valueTakingShorthand }}
+{{- $_ := set $scan "stopped" true }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- /*
    $flagRaw, NOT $flag. The reserved-name lists above are matched case-insensitively
