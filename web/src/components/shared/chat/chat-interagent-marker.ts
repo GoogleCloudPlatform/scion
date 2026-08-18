@@ -26,7 +26,8 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
+import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import type { Message } from '../../../shared/types.js';
 
 @customElement('scion-chat-interagent-marker')
@@ -50,6 +51,18 @@ export class ScionChatInteragentMarker extends LitElement {
   /** Whether this marker is hidden (eye toggle off). */
   @property({ type: Boolean, reflect: true })
   override hidden = false;
+
+  /** Message currently shown in the full-content popover, if any. */
+  @state()
+  private expandedMessage: Message | null = null;
+
+  /** Rendered HTML for the expanded message popover. */
+  @state()
+  private expandedHtml = '';
+
+  /** Set of message IDs whose `.ia-body` is truncated by the line clamp. */
+  @state()
+  private truncatedIds: ReadonlySet<string> = new Set();
 
   static override styles = css`
     :host {
@@ -141,6 +154,85 @@ export class ScionChatInteragentMarker extends LitElement {
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
     }
+
+    /* Expand icon button — shown only on truncated messages */
+    .ia-expand {
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+
+    .ia-expand sl-icon-button::part(base) {
+      padding: 0.125rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .ia-expand sl-icon-button::part(base):hover {
+      color: var(--scion-primary-600, #2563eb);
+    }
+
+    /* Full message popover dialog */
+    .ia-full-preview::part(panel) {
+      width: 90vw;
+      max-width: 700px;
+    }
+
+    .ia-full-preview::part(body) {
+      padding: 1rem;
+    }
+
+    .ia-full-preview .ia-full-header {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .ia-full-preview .ia-full-header .ia-sender,
+    .ia-full-preview .ia-full-header .ia-recipient {
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .ia-full-preview .ia-full-body {
+      font-size: 0.875rem;
+      line-height: 1.6;
+      color: var(--scion-text, #1e293b);
+      overflow-wrap: break-word;
+    }
+
+    .ia-full-preview .ia-full-body p {
+      margin: 0 0 0.5em;
+    }
+
+    .ia-full-preview .ia-full-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    .ia-full-preview .ia-full-body pre {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      padding: 0.75rem;
+      overflow-x: auto;
+      margin: 0.5em 0;
+    }
+
+    .ia-full-preview .ia-full-body code {
+      font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
+      font-size: 0.8125em;
+    }
+
+    .ia-full-preview .ia-full-body-plain {
+      white-space: pre-wrap;
+      font-size: 0.875rem;
+      line-height: 1.6;
+      color: var(--scion-text, #1e293b);
+    }
   `;
 
   override updated(changed: Map<string, unknown>): void {
@@ -151,6 +243,11 @@ export class ScionChatInteragentMarker extends LitElement {
         this.expanded = this.globalExpanded;
       }
     }
+    // Detect which message bodies are truncated by the CSS line clamp.
+    // Only run when expanded or messages actually change to avoid layout thrashing.
+    if (this.expanded && (changed.has('expanded') || changed.has('messages'))) {
+      this.detectTruncation();
+    }
   }
 
   /** Format a sender/recipient like "agent:slug" to just "slug". */
@@ -160,9 +257,80 @@ export class ScionChatInteragentMarker extends LitElement {
     return value;
   }
 
+  /**
+   * After render, check each `.ia-body` element to see if its content is
+   * clipped by the 2-line CSS clamp. Uses `requestAnimationFrame` to ensure
+   * layout has been computed.
+   */
+  private detectTruncation(): void {
+    requestAnimationFrame(() => {
+      const bodies = this.shadowRoot?.querySelectorAll<HTMLElement>('.ia-body[data-msg-id]');
+      if (!bodies) return;
+      const next = new Set<string>();
+      bodies.forEach((el) => {
+        if (el.scrollHeight > el.clientHeight + 1) {
+          const id = el.dataset.msgId;
+          if (id) next.add(id);
+        }
+      });
+      // Only update state if the set actually changed to avoid re-render loops.
+      if (next.size !== this.truncatedIds.size || [...next].some((id) => !this.truncatedIds.has(id))) {
+        this.truncatedIds = next;
+      }
+    });
+  }
+
+  /** Open the full-content popover for a message. */
+  private async openMessagePreview(msg: Message, e: Event): Promise<void> {
+    e.stopPropagation(); // Don't toggle the marker collapse.
+    // Await markdown rendering first, then set both expandedHtml and
+    // expandedMessage in the same microtask so Lit batches into one render,
+    // avoiding a content flash from plain text to rendered HTML.
+    let htmlContent = '';
+    try {
+      const renderer = await getMarkdownRenderer();
+      htmlContent = renderer.render(msg.msg);
+    } catch {
+      htmlContent = '';
+    }
+    this.expandedHtml = htmlContent;
+    this.expandedMessage = msg;
+  }
+
+  /** Close the message popover. */
+  private closeMessagePreview(e: Event): void {
+    if (e.target === e.currentTarget) {
+      this.expandedMessage = null;
+      this.expandedHtml = '';
+    }
+  }
+
   /** Toggle expanded state — click anywhere on the pill. */
   private toggle(): void {
     this.expanded = !this.expanded;
+  }
+
+  /** Render the full-content dialog for a single message. */
+  private renderMessagePreview() {
+    const msg = this.expandedMessage;
+    if (!msg) return nothing;
+    return html`
+      <sl-dialog
+        class="ia-full-preview"
+        open
+        label="Agent Message"
+        @sl-after-hide=${(e: Event) => this.closeMessagePreview(e)}
+      >
+        <div class="ia-full-header">
+          <span class="ia-sender">${this.formatParticipant(msg.sender)}</span>
+          <span class="ia-arrow">&rarr;</span>
+          <span class="ia-recipient">${this.formatParticipant(msg.recipient)}</span>
+        </div>
+        ${this.expandedHtml
+          ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
+          : html`<div class="ia-full-body-plain">${msg.msg}</div>`}
+      </sl-dialog>
+    `;
   }
 
   override render() {
@@ -177,13 +345,25 @@ export class ScionChatInteragentMarker extends LitElement {
                       <span class="ia-sender">${this.formatParticipant(m.sender)}</span>
                       <span class="ia-arrow">&rarr;</span>
                       <span class="ia-recipient">${this.formatParticipant(m.recipient)}</span>:
-                      <span class="ia-body">${m.msg}</span>
+                      <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
+                      ${this.truncatedIds.has(m.id)
+                        ? html`
+                            <span class="ia-expand">
+                              <sl-icon-button
+                                name="arrows-angle-expand"
+                                label="Expand message"
+                                @click=${(e: Event) => this.openMessagePreview(m, e)}
+                              ></sl-icon-button>
+                            </span>
+                          `
+                        : nothing}
                     </div>
                   `
                 )
               : nothing}
           </div>
         </sl-tooltip>
+        ${this.renderMessagePreview()}
       `;
     }
 
