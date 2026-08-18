@@ -114,6 +114,7 @@ export class ScionPageTerminal extends LitElement {
   private captureAuthScopeDialogOpen = false;
 
   /** Remembers the scope chosen in the scope dialog so force-update reuses it. */
+  @state()
   private captureAuthSelectedScope: 'project' | 'user' = 'project';
 
   // --- Drag-and-drop file upload state ---
@@ -1513,7 +1514,13 @@ export class ScionPageTerminal extends LitElement {
         }}
       >
         <p>Where should the captured credentials be stored?</p>
-        <sl-radio-group id="capture-scope-group" value="project">
+        <sl-radio-group
+          id="capture-scope-group"
+          .value=${this.captureAuthSelectedScope}
+          @sl-change=${(e: any) => {
+            this.captureAuthSelectedScope = e.target.value;
+          }}
+        >
           <sl-radio-button value="project"
             >Project secret (all project agents)</sl-radio-button
           >
@@ -1533,13 +1540,8 @@ export class ScionPageTerminal extends LitElement {
           slot="footer"
           variant="primary"
           @click=${() => {
-            const group = this.shadowRoot?.querySelector<HTMLElement & { value: string }>(
-              '#capture-scope-group',
-            );
-            const scope = (group?.value ?? 'project') as 'project' | 'user';
-            this.captureAuthSelectedScope = scope;
             this.captureAuthScopeDialogOpen = false;
-            void this.handleCaptureAuth(false, scope);
+            void this.handleCaptureAuth(false, this.captureAuthSelectedScope);
           }}
           >Capture</sl-button
         >

@@ -558,7 +558,10 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 		}
 		return &result, nil
 	case http.StatusNoContent:
-		return &SetSecretResponse{Key: key, Scope: "project"}, nil
+		if scope == "" {
+			scope = "project"
+		}
+		return &SetSecretResponse{Key: key, Scope: scope}, nil
 	case http.StatusConflict:
 		return nil, fmt.Errorf("secret %q already exists (use --force to overwrite)", key)
 	default:

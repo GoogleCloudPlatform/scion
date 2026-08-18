@@ -1010,7 +1010,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 		scopeID = agentIdent.OriginUserID()
 		if scopeID == "" {
-			ValidationError(w, "agent token lacks user context required for user-scoped secrets", nil)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent token lacks user context required for user-scoped secrets", nil)
 			return
 		}
 	default:
@@ -1151,6 +1151,7 @@ func (s *Server) validateAgentSecretAccess(w http.ResponseWriter, r *http.Reques
 
 // agentGetSecret handles GET /api/v1/agents/{agentID}/secrets/{key}.
 // Returns the secret value (base64-encoded) along with type and target metadata.
+// Supports both project-scoped and user-scoped secrets via the ?scope= query parameter.
 func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID, key string) {
 	ctx := r.Context()
 
@@ -1160,16 +1161,45 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 		return
 	}
 
+	// Determine scope and scopeID.
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = store.ScopeProject
+	}
+	var scopeID string
+	switch scope {
+	case store.ScopeProject:
+		scopeID = projectID
+	case store.ScopeUser:
+		agentIdent := GetAgentIdentityFromContext(ctx)
+		if agentIdent == nil {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
+			return
+		}
+		scopeID = agentIdent.OriginUserID()
+		if scopeID == "" {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent token lacks user context required for user-scoped secrets", nil)
+			return
+		}
+	default:
+		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
+			"field":   "scope",
+			"value":   scope,
+			"allowed": []string{"project", "user"},
+		})
+		return
+	}
+
 	// Retrieve the secret including its value.
-	secretVal, err := s.secretBackend.Get(ctx, key, store.ScopeProject, projectID)
+	secretVal, err := s.secretBackend.Get(ctx, key, scope, scopeID)
 	if err != nil {
-		LogAgentSecretRead(ctx, s.auditLogger, agentID, projectID, key, false, err.Error())
+		LogAgentSecretRead(ctx, s.auditLogger, agentID, scopeID, key, false, err.Error())
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	// Audit log the successful read.
-	LogAgentSecretRead(ctx, s.auditLogger, agentID, projectID, key, true, "")
+	LogAgentSecretRead(ctx, s.auditLogger, agentID, scopeID, key, true, "")
 
 	writeJSON(w, http.StatusOK, AgentGetSecretResponse{
 		Key:    secretVal.Name,
@@ -1180,7 +1210,9 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 }
 
 // agentListSecrets handles GET /api/v1/agents/{agentID}/secrets (no key).
-// Returns metadata for all secrets in the agent's project (no values).
+// Returns metadata for secrets accessible to the agent.
+// Supports both project-scoped and user-scoped secrets via the ?scope= query parameter.
+// When no scope is specified, secrets from both project and user scopes are returned.
 func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentID string) {
 	ctx := r.Context()
 
@@ -1189,17 +1221,82 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	metas, err := s.secretBackend.List(ctx, secret.Filter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	})
-	if err != nil {
-		writeErrorFromErr(w, err, "")
+	scope := r.URL.Query().Get("scope")
+
+	// Collect secrets based on requested scope.
+	var allMetas []secret.SecretMeta
+
+	switch scope {
+	case "": // No scope filter: include both project and user secrets.
+		projectMetas, err := s.secretBackend.List(ctx, secret.Filter{
+			Scope:   store.ScopeProject,
+			ScopeID: projectID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		allMetas = append(allMetas, projectMetas...)
+
+		// Include user-scoped secrets if agent has user context.
+		agentIdent := GetAgentIdentityFromContext(ctx)
+		if agentIdent != nil {
+			if userID := agentIdent.OriginUserID(); userID != "" {
+				userMetas, err := s.secretBackend.List(ctx, secret.Filter{
+					Scope:   store.ScopeUser,
+					ScopeID: userID,
+				})
+				if err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				allMetas = append(allMetas, userMetas...)
+			}
+		}
+
+	case store.ScopeProject:
+		metas, err := s.secretBackend.List(ctx, secret.Filter{
+			Scope:   store.ScopeProject,
+			ScopeID: projectID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		allMetas = metas
+
+	case store.ScopeUser:
+		agentIdent := GetAgentIdentityFromContext(ctx)
+		if agentIdent == nil {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
+			return
+		}
+		userID := agentIdent.OriginUserID()
+		if userID == "" {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent token lacks user context required for user-scoped secrets", nil)
+			return
+		}
+		metas, err := s.secretBackend.List(ctx, secret.Filter{
+			Scope:   store.ScopeUser,
+			ScopeID: userID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		allMetas = metas
+
+	default:
+		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
+			"field":   "scope",
+			"value":   scope,
+			"allowed": []string{"project", "user"},
+		})
 		return
 	}
 
-	secrets := make([]AgentSecretMeta, len(metas))
-	for i, m := range metas {
+	secrets := make([]AgentSecretMeta, len(allMetas))
+	for i, m := range allMetas {
 		secrets[i] = AgentSecretMeta{
 			Key:    m.Name,
 			Type:   m.SecretType,
