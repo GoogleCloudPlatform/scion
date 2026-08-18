@@ -96,6 +96,11 @@ During startup in Hosted HA mode, Scion performs strict preflight checks to vali
      ```
      Warning: hosted HA deployment has no explicit hub base URL; falling back to http://localhost:8080, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.
      ```
+4. **Synthetic Bootstrap Placeholders (GKE Two-Step Flow)**: During automated deployment sequences (such as GKE two-step bootstrap flow), you may need to spin up the Hub config before your GKE backend service (and its real IAP audience) is fully provisioned. If the Hub detects that the `audience` looks like a synthetic bootstrap placeholder (containing the word `placeholder`), it will emit a startup warning rather than failing-closed:
+   ```
+   Warning: IAP audience "/projects/1234/global/backendServices/placeholder" looks like a synthetic bootstrap placeholder. This is supported to facilitate GKE bootstrap, but you must update this configuration with your live IAP audience once provisioned.
+   ```
+   This allows the Hub to start up, register with local databases/brokers, and complete initial bootstrap before the final GCLB resource is available.
 :::
 
 #### Issuer and JWKS overrides

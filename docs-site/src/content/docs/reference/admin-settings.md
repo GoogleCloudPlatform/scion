@@ -72,6 +72,10 @@ The "Reset to bootstrap" feature requires a backend endpoint that is not yet ava
 
 ## Environment Variable Namespaces
 
+:::tip[Boolean Environments]
+Operational boolean settings configured via environment variables (such as `SCION_SEED_*` and `SCION_SERVER_*`) are processed using the standard `parseBoolEnv` logic. They support case-insensitive spellings for `yes`/`y`/`on` and `no`/`n`/`off`, and issue startup warnings on unrecognized non-empty inputs to help administrators catch configuration typos.
+:::
+
 ### `SCION_SEED_*` (New)
 
 Use `SCION_SEED_*` to provide initial/default values for operational settings. Seeds are overridable — admins can change them in the UI, and the database value takes precedence.
