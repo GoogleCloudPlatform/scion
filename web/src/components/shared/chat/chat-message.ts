@@ -520,6 +520,8 @@ export class ScionChatMessage extends LitElement {
   @state()
   private copiedIds: ReadonlySet<string> = new Set();
 
+  private copyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   private renderTaskId = 0;
 
   private previewObserver: IntersectionObserver | null = null;
@@ -1509,7 +1511,9 @@ export class ScionChatMessage extends LitElement {
         const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
         void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
-        setTimeout(() => {
+        const prev = (btn as any)._copyTimer as ReturnType<typeof setTimeout> | undefined;
+        if (prev) clearTimeout(prev);
+        (btn as any)._copyTimer = setTimeout(() => {
           if (!this.isConnected) return;
           btn.textContent = 'Copy';
         }, 1500);
@@ -2218,12 +2222,16 @@ export class ScionChatMessage extends LitElement {
       const next = new Set(this.copiedIds);
       next.add(id);
       this.copiedIds = next;
-      setTimeout(() => {
+      const existing = this.copyTimers.get(id);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
         if (!this.isConnected) return;
         const after = new Set(this.copiedIds);
         after.delete(id);
         this.copiedIds = after;
+        this.copyTimers.delete(id);
       }, 1500);
+      this.copyTimers.set(id, timer);
     } catch {
       // Clipboard write may fail in insecure contexts; silently ignore.
     }
