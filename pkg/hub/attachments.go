@@ -102,12 +102,14 @@ var DangerousMimeTypes = map[string]bool{
 	"application/javascript":   true,
 	"text/javascript":          true,
 	"application/x-javascript": true,
+	"application/ecmascript":   true,
+	"text/ecmascript":          true,
 }
 
 // IsDangerousMimeType reports whether a sniffed MIME type should be
 // rejected on upload.
-func IsDangerousMimeType(mime string) bool {
-	return DangerousMimeTypes[mime]
+func IsDangerousMimeType(mimeType string) bool {
+	return DangerousMimeTypes[strings.ToLower(mimeType)]
 }
 
 // DangerousExtensions lists extensions that should be rejected even if
@@ -139,6 +141,11 @@ var DangerousExtensions = map[string]bool{
 	// double-click.
 	".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".csh": true,
 	".command": true, ".desktop": true,
+	// Windows shortcut and settings files that can execute commands or modify
+	// the system on open — none has a legitimate chat attachment use.
+	".lnk": true, ".url": true, ".scf": true, ".reg": true,
+	".settingcontent-ms": true, ".cpl": true,
+	".application": true, ".appref-ms": true,
 }
 
 // attachmentExt returns the lower-cased extension that the blocklist above and
