@@ -587,3 +587,59 @@ describe('scion-chat-thread initial scroll position', () => {
     expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
   });
 });
+
+/**
+ * SSE-delivered messages with attachments must render the attachment previews
+ * immediately — not only after the next user-triggered re-render. The bug was
+ * that v2AttachmentMap was populated AFTER mergeMessages(), so the Lit render
+ * triggered by the messages array reassignment saw an empty attachment map.
+ */
+describe('scion-chat-thread SSE attachment preview', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('renders attachment refs on the first render after an SSE message arrives', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    el.members = [
+      { id: 'user-me', kind: 'user' as const, name: 'Me', email: 'me@example.com' },
+      { id: 'agent-1', kind: 'agent' as const, name: 'Bot', email: 'agent:bot' },
+    ];
+    await el.updateComplete;
+
+    // Simulate an SSE message from an agent with an attachment.
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'msg-attach-1',
+      msg: 'Here is a file',
+      sender: 'agent:bot',
+      senderId: 'agent-1',
+      type: 'assistant-reply',
+      createdAt: new Date().toISOString(),
+      attachments: [
+        { id: 'att-1', name: 'report.pdf', mime: 'application/pdf', size: 1024 },
+      ],
+    });
+
+    // Wait for the message to render.
+    await vi.waitFor(() => {
+      const msgs = el.shadowRoot?.querySelectorAll('scion-chat-message');
+      expect(msgs?.length).toBe(1);
+    });
+    await el.updateComplete;
+
+    // The attachment refs should be populated on the first render.
+    const chatMsg = el.shadowRoot?.querySelector('scion-chat-message') as
+      | import('./chat-message.js').ScionChatMessage
+      | null;
+    expect(chatMsg).not.toBeNull();
+    expect(chatMsg!.attachmentRefs).toHaveLength(1);
+    expect(chatMsg!.attachmentRefs[0].name).toBe('report.pdf');
+  });
+});

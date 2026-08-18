@@ -1289,12 +1289,14 @@ export class ScionChatThread extends LitElement {
         ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
         ...(eventData.read != null ? { read: eventData.read } : {}),
       };
-      this.mergeMessages([msg]);
-
-      // Update attachment map if the event carries attachment data.
+      // Update attachment map BEFORE mergeMessages so the triggered re-render
+      // already sees the refs. v2AttachmentMap is not @state() — writing it
+      // after mergeMessages would leave the first render without attachments.
       if (eventData.attachments && eventData.attachments.length > 0) {
         this.v2AttachmentMap.set(msg.id, eventData.attachments);
       }
+
+      this.mergeMessages([msg]);
 
       this.scrollToBottomAfterRender();
       this.maybeAdvanceReadWatermark();
