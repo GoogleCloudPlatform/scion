@@ -35,6 +35,7 @@ import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import '../code-editor.js';
+import '../markdown-preview.js';
 
 /** Structured attachment reference from the W7 API. */
 export interface AttachmentRefInfo {
@@ -75,6 +76,7 @@ const TEXT_EXTENSIONS = new Set([
   '.jsx',
   '.log',
   '.md',
+  '.markdown',
   '.py',
   '.rs',
   '.sh',
@@ -245,6 +247,12 @@ function styleEntityLinks(htmlStr: string): string {
 function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
   return dot > 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+/** True when the file is a Markdown document. */
+function isMarkdownFile(name: string): boolean {
+  const ext = extensionOf(name);
+  return ext === '.md' || ext === '.markdown';
 }
 
 /**
@@ -497,6 +505,20 @@ export class ScionChatMessage extends LitElement {
   /** Attachment shown in the full-height overlay, if any. */
   @state()
   private expanded: AttachmentRefInfo | null = null;
+
+  /**
+   * Per-attachment toggle: true = show raw source, false/absent = show
+   * rendered preview (only meaningful for markdown files).
+   */
+  @state()
+  private mdSourceView: ReadonlyMap<string, boolean> = new Map();
+
+  /**
+   * Tracks which attachment IDs have a "Copied!" feedback timer active,
+   * so the button shows a check icon instead of the clipboard icon.
+   */
+  @state()
+  private copiedIds: ReadonlySet<string> = new Set();
 
   private renderTaskId = 0;
 
@@ -990,6 +1012,23 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    /* Markdown preview body — let the component fill the card. */
+    .md-preview-body {
+      padding: 0;
+      --scion-border: transparent;
+      --scion-radius: 0;
+    }
+
+    .md-preview-body scion-markdown-preview {
+      --scion-radius: 0;
+    }
+
+    .md-preview-body scion-markdown-preview::part(container) {
+      border: none;
+      border-radius: 0;
+      max-height: 200px;
+    }
+
     /*
      * The card already draws a frame, so the editor's own border is hidden by
      * blanking the custom property it reads.
@@ -1471,6 +1510,7 @@ export class ScionChatMessage extends LitElement {
         void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
         setTimeout(() => {
+          if (!this.isConnected) return;
           btn.textContent = 'Copy';
         }, 1500);
       });
@@ -2096,15 +2136,50 @@ export class ScionChatMessage extends LitElement {
   /** A short read-only slice of a text attachment, with expand + download. */
   private renderCodePreview(ref: AttachmentRefInfo) {
     const state = this.previews.get(ref.id);
-    // Only fade the bottom edge when the file really does run past the slice.
-    const clipped =
-      state?.status === 'ready' && (state.text ?? '').split('\n').length > PREVIEW_VISIBLE_LINES;
+    const isMd = isMarkdownFile(ref.name);
+    const showSource = isMd && (this.mdSourceView.get(ref.id) ?? false);
+
+    // Only fade the bottom edge when the file really does run past the slice
+    // and we are NOT showing rendered markdown (rendered view scrolls itself).
+    const hasText = state?.status === 'ready' && !!state.text;
+    const exceedsLimit =
+      hasText &&
+      (() => {
+        let count = 0;
+        let pos = -1;
+        const text = state.text!;
+        while ((pos = text.indexOf('\n', pos + 1)) !== -1) {
+          if (++count >= PREVIEW_VISIBLE_LINES) return true;
+        }
+        return false;
+      })();
+    const clipped = !isMd && exceedsLimit;
+    const sourceClipped = showSource && exceedsLimit;
+
     return html`
       <div class="attachment-preview" data-id=${ref.id}>
         <div class="preview-header">
           <span class="preview-filename" title=${ref.name}>${ref.name}</span>
           <span class="preview-size">${formatFileSize(ref.size)}</span>
           <div class="preview-actions">
+            ${isMd
+              ? html`
+                  <sl-icon-button
+                    name=${showSource ? 'eye' : 'code'}
+                    label=${showSource ? 'Preview' : 'Source'}
+                    @click=${() => this.toggleMdSource(ref.id)}
+                  ></sl-icon-button>
+                `
+              : nothing}
+            ${isMd && showSource
+              ? html`
+                  <sl-icon-button
+                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
+                    label="Copy to clipboard"
+                    @click=${() => this.copyAttachmentText(ref.id)}
+                  ></sl-icon-button>
+                `
+              : nothing}
             <sl-icon-button
               name="arrows-angle-expand"
               label="Expand ${ref.name}"
@@ -2118,11 +2193,56 @@ export class ScionChatMessage extends LitElement {
             ></sl-icon-button>
           </div>
         </div>
-        <div class="preview-body ${clipped ? 'clipped' : ''}">
-          ${this.renderPreviewBody(ref, state)}
-        </div>
+        ${isMd && !showSource
+          ? html`<div class="md-preview-body">${this.renderMdPreviewBody(ref, state)}</div>`
+          : html`<div class="preview-body ${clipped || sourceClipped ? 'clipped' : ''}">
+              ${this.renderPreviewBody(ref, state)}
+            </div>`}
       </div>
     `;
+  }
+
+  /** Toggle between rendered and source view for a markdown attachment. */
+  private toggleMdSource(id: string): void {
+    const next = new Map(this.mdSourceView);
+    next.set(id, !(next.get(id) ?? false));
+    this.mdSourceView = next;
+  }
+
+  /** Copy attachment text to clipboard with brief "Copied!" feedback. */
+  private async copyAttachmentText(id: string): Promise<void> {
+    const state = this.previews.get(id);
+    if (!state || state.status !== 'ready' || !state.text) return;
+    try {
+      await navigator.clipboard.writeText(state.text);
+      const next = new Set(this.copiedIds);
+      next.add(id);
+      this.copiedIds = next;
+      setTimeout(() => {
+        if (!this.isConnected) return;
+        const after = new Set(this.copiedIds);
+        after.delete(id);
+        this.copiedIds = after;
+      }, 1500);
+    } catch {
+      // Clipboard write may fail in insecure contexts; silently ignore.
+    }
+  }
+
+  /** Rendered markdown body for a markdown attachment preview. */
+  private renderMdPreviewBody(_ref: AttachmentRefInfo, state: PreviewState | undefined) {
+    if (!state || state.status === 'loading') {
+      return html`
+        <div class="preview-placeholder">
+          <sl-spinner></sl-spinner>
+          Loading preview…
+        </div>
+      `;
+    }
+    if (state.status === 'error') {
+      return html`<div class="preview-placeholder error">${state.error}</div>`;
+    }
+    return html`<scion-markdown-preview .content=${state.text ?? ''}></scion-markdown-preview>`;
   }
 
   /** Editor, spinner or error for one preview, depending on load state. */
@@ -2153,6 +2273,10 @@ export class ScionChatMessage extends LitElement {
     const ref = this.expanded;
     if (!ref) return nothing;
 
+    const isMd = isMarkdownFile(ref.name);
+    const showSource = isMd && (this.mdSourceView.get(ref.id) ?? false);
+    const state = this.previews.get(ref.id);
+
     return html`
       <sl-dialog
         class="full-preview"
@@ -2164,11 +2288,34 @@ export class ScionChatMessage extends LitElement {
       >
         ${IMAGE_MIMES.has(ref.mime)
           ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
-          : this.renderPreviewBody(ref, this.previews.get(ref.id), true)}
-        <sl-button slot="footer" href=${attachmentURL(ref.id)} download=${ref.name}>
-          <sl-icon slot="prefix" name="download"></sl-icon>
-          Download
-        </sl-button>
+          : isMd && !showSource
+            ? this.renderMdPreviewBody(ref, state)
+            : this.renderPreviewBody(ref, state, true)}
+        <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
+          ${isMd
+            ? html`
+                <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
+                  <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
+                  ${showSource ? 'Preview' : 'Source'}
+                </sl-button>
+              `
+            : nothing}
+          ${isMd && showSource
+            ? html`
+                <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
+                  <sl-icon
+                    slot="prefix"
+                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
+                  ></sl-icon>
+                  ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
+                </sl-button>
+              `
+            : nothing}
+          <sl-button href=${attachmentURL(ref.id)} download=${ref.name}>
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Download
+          </sl-button>
+        </div>
       </sl-dialog>
     `;
   }

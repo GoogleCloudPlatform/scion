@@ -244,7 +244,7 @@ export class ScionMarkdownPreview extends LitElement {
       `;
     }
 
-    return html`<div class="preview-container" .innerHTML=${this.renderedHtml}></div>`;
+    return html`<div class="preview-container" part="container" .innerHTML=${this.renderedHtml}></div>`;
   }
 }
 
