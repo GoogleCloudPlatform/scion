@@ -244,7 +244,8 @@ export class ScionChatInteragentMarker extends LitElement {
       }
     }
     // Detect which message bodies are truncated by the CSS line clamp.
-    if (this.expanded) {
+    // Only run when expanded or messages actually change to avoid layout thrashing.
+    if (this.expanded && (changed.has('expanded') || changed.has('messages'))) {
       this.detectTruncation();
     }
   }
@@ -282,14 +283,18 @@ export class ScionChatInteragentMarker extends LitElement {
   /** Open the full-content popover for a message. */
   private async openMessagePreview(msg: Message, e: Event): Promise<void> {
     e.stopPropagation(); // Don't toggle the marker collapse.
-    this.expandedMessage = msg;
-    // Render markdown for the popover body.
+    // Await markdown rendering first, then set both expandedHtml and
+    // expandedMessage in the same microtask so Lit batches into one render,
+    // avoiding a content flash from plain text to rendered HTML.
+    let htmlContent = '';
     try {
       const renderer = await getMarkdownRenderer();
-      this.expandedHtml = renderer.render(msg.msg);
+      htmlContent = renderer.render(msg.msg);
     } catch {
-      this.expandedHtml = '';
+      htmlContent = '';
     }
+    this.expandedHtml = htmlContent;
+    this.expandedMessage = msg;
   }
 
   /** Close the message popover. */
