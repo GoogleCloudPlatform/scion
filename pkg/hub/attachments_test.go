@@ -526,19 +526,19 @@ func TestUploadHandler_ValidFile(t *testing.T) {
 	_, wcs, _ := testAttachmentServer(t)
 	_ = wcs
 
-	// Test MIME validation directly (handler tests require full server with
-	// store mocking; core storage is covered by LocalDiskAttachmentStore tests).
-	assert.True(t, AllowedMimeTypes["image/jpeg"])
-	assert.True(t, AllowedMimeTypes["text/plain"])
-	assert.False(t, AllowedMimeTypes["application/x-executable"])
+	// Safe MIME types are not on the deny-list.
+	assert.False(t, IsDangerousMimeType("image/jpeg"))
+	assert.False(t, IsDangerousMimeType("text/plain"))
+	assert.False(t, IsDangerousMimeType("application/x-executable"))
+	assert.False(t, IsDangerousMimeType("application/x-gzip"))
+	assert.False(t, IsDangerousMimeType("application/octet-stream"))
 }
 
 func TestUploadHandler_DisallowedMime(t *testing.T) {
-	// Verify the allowlist rejects dangerous types.
-	assert.False(t, AllowedMimeTypes["application/x-executable"])
-	assert.False(t, AllowedMimeTypes["application/x-sharedlib"])
-	assert.False(t, AllowedMimeTypes["application/javascript"])
-	assert.False(t, AllowedMimeTypes["text/html"])
+	// Verify the deny-list rejects dangerous browser-executable types.
+	assert.True(t, IsDangerousMimeType("application/javascript"))
+	assert.True(t, IsDangerousMimeType("text/html"))
+	assert.True(t, IsDangerousMimeType("text/javascript"))
 }
 
 func TestUploadHandler_MaxFiles(t *testing.T) {

@@ -230,28 +230,18 @@ describe('composer — whole-request error messages', () => {
 });
 
 describe('composer — file picker filter', () => {
-  it('offers the developer formats the server now accepts', async () => {
-    for (const ext of ['.json', '.yaml', '.go', '.py', '.tsx', '.jsx', '.env', '.sql', '.md']) {
-      expect(ATTACHMENT_ACCEPT).toContain(ext);
-    }
-    expect(ATTACHMENT_ACCEPT).toContain('image/png');
-    expect(ATTACHMENT_ACCEPT).toContain('application/pdf');
+  it('ATTACHMENT_ACCEPT is empty so the picker offers all files', () => {
+    expect(ATTACHMENT_ACCEPT).toBe('');
   });
 
-  it('does not offer the blocked extensions', async () => {
-    for (const ext of ['.exe', '.bat', '.sh', '.ps1', '.jar']) {
-      expect(ATTACHMENT_ACCEPT).not.toContain(ext);
-    }
-    // .js is blocked; .jsx is not, and contains no ".js," token.
-    expect(ATTACHMENT_ACCEPT.split(',')).not.toContain('.js');
-  });
-
-  it('puts the filter on the file input', async () => {
+  it('does not restrict the file input with an accept attribute', async () => {
     const el = createComposer();
     document.body.appendChild(el);
     await el.updateComplete;
 
     const input = el.shadowRoot.querySelector('input[type="file"]');
-    expect(input?.getAttribute('accept')).toBe(ATTACHMENT_ACCEPT);
+    expect(input).toBeTruthy();
+    // No accept attribute — the server enforces the deny-list.
+    expect(input?.hasAttribute('accept')).toBe(false);
   });
 });

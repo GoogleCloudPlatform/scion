@@ -76,7 +76,10 @@ const (
 	MaxFilenameLength = 255
 )
 
-// AllowedMimeTypes maps allowed MIME types to their canonical extensions.
+// AllowedMimeTypes is kept for backward compatibility with tests that
+// assert specific entries. New code should call IsDangerousMimeType
+// instead: the upload path now accepts everything except the deny-listed
+// types below.
 var AllowedMimeTypes = map[string]bool{
 	// Images
 	"image/jpeg": true,
@@ -89,6 +92,22 @@ var AllowedMimeTypes = map[string]bool{
 	"text/markdown":   true,
 	// Archives
 	"application/zip": true,
+}
+
+// DangerousMimeTypes lists MIME types that are rejected on upload. These
+// are the types a browser will execute or render as a top-level document
+// if they ever escape the download path. Everything else is accepted.
+var DangerousMimeTypes = map[string]bool{
+	"text/html":                true,
+	"application/javascript":   true,
+	"text/javascript":          true,
+	"application/x-javascript": true,
+}
+
+// IsDangerousMimeType reports whether a sniffed MIME type should be
+// rejected on upload.
+func IsDangerousMimeType(mime string) bool {
+	return DangerousMimeTypes[mime]
 }
 
 // DangerousExtensions lists extensions that should be rejected even if
