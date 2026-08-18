@@ -1801,6 +1801,7 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// Query 1: messages where the DM agent's UUID appears in sender_id
 	// or recipient_id.
 	filter := store.MessageFilter{
+		ProjectID:     agent.ProjectID,
 		ParticipantID: agentID,
 		Before:        before,
 		After:         after,
@@ -1818,9 +1819,10 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// direction that ParticipantID misses for older data.
 	agentSender := "agent:" + agent.Slug
 	senderFilter := store.MessageFilter{
-		Sender: agentSender,
-		Before: before,
-		After:  after,
+		ProjectID: agent.ProjectID,
+		Sender:    agentSender,
+		Before:    before,
+		After:     after,
 	}
 	senderResult, err := s.store.ListMessages(ctx, senderFilter, opts)
 	if err != nil {
