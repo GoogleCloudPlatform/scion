@@ -2736,11 +2736,14 @@ export class ScionChatThread extends LitElement {
           ? msg.senderId !== this.currentUserId
           : this.isSenderAgent(msg)
         : msg.senderId === this.agentId;
-      // Routing is a property of the AUTHOR, not of the viewer: every human
-      // message in a default-agent conversation was routed to that agent, and
-      // no agent message ever is. `isFromAgent` above only means "not mine",
-      // so it cannot be reused here.
+      // Routing is a property of the individual message, not the current UI
+      // default-agent state. Use the per-message `recipient` field (set at
+      // send time) so historical messages without a default agent don't
+      // retroactively show a routing header.
       const isAgentSender = this.isSenderAgent(msg);
+      const msgRoutedTo = !isAgentSender && msg.recipient
+        ? (msg.recipient.startsWith('agent:') ? msg.recipient.slice(6) : msg.recipient)
+        : '';
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -2779,7 +2782,7 @@ export class ScionChatThread extends LitElement {
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
-          routedTo=${!isAgentSender && this.defaultAgent ? this.defaultAgent : ''}
+          routedTo=${msgRoutedTo}
           messageId=${msg.id}
           ?isOwn=${isOwnMessage}
           ?canEdit=${canEditDelete}

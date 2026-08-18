@@ -548,6 +548,7 @@ export class ScionChatMessage extends LitElement {
     .bubble {
       max-width: min(70%, 600px);
       min-width: 3rem;
+      position: relative;
     }
 
     .bubble-header {
@@ -1152,7 +1153,8 @@ export class ScionChatMessage extends LitElement {
     /* ---- Phase-3: Message action bar ---- */
     .message-actions {
       position: absolute;
-      top: -0.25rem;
+      top: -12px;
+      right: 8px;
       display: flex;
       gap: 0.0625rem;
       padding: 0.125rem;
@@ -1161,30 +1163,30 @@ export class ScionChatMessage extends LitElement {
       border: 1px solid var(--scion-neutral-200, #e2e8f0);
       box-shadow: 0 1px 3px rgba(0,0,0,0.1);
       opacity: 0;
-      transition: opacity 0.15s ease;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 0.15s ease, visibility 0.15s ease;
       z-index: 10;
-    }
-
-    .message-wrapper.from-user .message-actions {
-      right: 1rem;
-    }
-
-    .message-wrapper.from-agent .message-actions {
-      left: 3.5rem;
     }
 
     .message-wrapper:hover .message-actions,
     .message-wrapper:focus-within .message-actions,
     .message-actions.pinned {
       opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
     }
 
     @media (hover: none) {
       .message-actions {
         opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
       }
       .message-actions.pinned {
         opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
       }
     }
 
@@ -1710,12 +1712,14 @@ export class ScionChatMessage extends LitElement {
         <sl-icon-button
           name="reply"
           label="Reply"
+          title="Reply"
           @click=${this.handleReply}
         ></sl-icon-button>
         ${this.isOwn && this.canEdit
           ? html`<sl-icon-button
               name="pencil"
               label="Edit"
+              title="Edit"
               @click=${this.handleEdit}
             ></sl-icon-button>`
           : nothing}
@@ -1723,17 +1727,20 @@ export class ScionChatMessage extends LitElement {
           ? html`<sl-icon-button
               name="trash"
               label="Delete"
+              title="Delete"
               @click=${this.handleDelete}
             ></sl-icon-button>`
           : nothing}
         <sl-icon-button
           name="clipboard"
           label="Copy text"
+          title="Copy message"
           @click=${this.handleCopyText}
         ></sl-icon-button>
         <sl-icon-button
           name="link-45deg"
           label="Copy link"
+          title="Copy link"
           @click=${this.handleCopyLink}
         ></sl-icon-button>
       </div>
@@ -1853,7 +1860,6 @@ export class ScionChatMessage extends LitElement {
         class="message-wrapper ${dirClass}${visClass}${groupClass}"
         @touchstart=${this.handleTouchStart}
       >
-        ${!isDeleted ? this.renderActionBar() : nothing}
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}
@@ -1862,6 +1868,7 @@ export class ScionChatMessage extends LitElement {
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
         <div class="bubble">
+          ${!isDeleted ? this.renderActionBar() : nothing}
           ${this.visibility === 'verbose'
             ? html`
                 <span class="verbose-label">

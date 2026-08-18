@@ -98,11 +98,11 @@ describe('scion-chat-thread route-to-agent indicator', () => {
   });
 
   /**
-   * Routing is a property of the author: every human message in a thread with a
-   * default agent was routed to that agent, whoever sent it. Agent replies were
-   * not routed anywhere.
+   * Routing uses per-message recipient data (set at send time), not the
+   * current default-agent UI state. Only messages whose `recipient` field
+   * was populated at send time show the routing header.
    */
-  it('marks all human messages as routed and no agent message', async () => {
+  it('marks only messages with a recipient as routed, not all human messages', async () => {
     apiFetch.mockResolvedValue({
       ok: true,
       status: 200,
@@ -113,6 +113,7 @@ describe('scion-chat-thread route-to-agent indicator', () => {
               id: 'm1',
               sender: 'me@example.com',
               senderId: 'user-me',
+              recipient: 'agent:coder',
               msg: 'mine',
               createdAt: '2026-01-01T00:00:00Z',
             },
@@ -120,7 +121,7 @@ describe('scion-chat-thread route-to-agent indicator', () => {
               id: 'm2',
               sender: 'them@example.com',
               senderId: 'user-them',
-              msg: 'theirs',
+              msg: 'theirs (sent before default agent set)',
               createdAt: '2026-01-01T00:01:00Z',
             },
             {
@@ -154,7 +155,8 @@ describe('scion-chat-thread route-to-agent indicator', () => {
     const routed = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-message') ?? []).map(
       (m) => m.getAttribute('routedTo')
     );
-    expect(routed).toEqual(['coder', 'coder', '']);
+    // m1 has recipient=agent:coder → shows "coder"; m2 has no recipient → empty; m3 is agent → empty
+    expect(routed).toEqual(['coder', '', '']);
   });
 });
 
