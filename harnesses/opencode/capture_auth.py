@@ -28,7 +28,7 @@ _OPENCODE_AUTH = os.path.join(
 )
 
 
-def _capture_auth_json(quiet: bool = False) -> bool:
+def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
     """Capture ~/.local/share/opencode/auth.json as an OPENCODE_AUTH file secret.
 
     Uses --force unconditionally: capture_auth_main() may have already set
@@ -50,6 +50,7 @@ def _capture_auth_json(quiet: bool = False) -> bool:
         "--type", "file",
         "--target", _OPENCODE_AUTH,
         "--force",
+        "--scope", scope,
     ]
 
     try:
@@ -71,9 +72,14 @@ def _capture_auth_json(quiet: bool = False) -> bool:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--scope", choices=["project", "user"], default="project")
+    known, _ = parser.parse_known_args()
+
     rc = scion_harness.capture_auth_main()
 
-    auth_ok = _capture_auth_json(quiet=(rc == 0))
+    auth_ok = _capture_auth_json(quiet=(rc == 0), scope=known.scope)
 
     if rc != 0 and auth_ok:
         sys.exit(0)

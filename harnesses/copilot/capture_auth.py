@@ -28,7 +28,7 @@ _COPILOT_CONFIG = os.path.join(
 )
 
 
-def _capture_config_json(force: bool = False) -> bool:
+def _capture_config_json(force: bool = False, scope: str = "project") -> bool:
     """Capture ~/.copilot/config.json as a COPILOT_CONFIG file secret."""
     if not os.path.isfile(_COPILOT_CONFIG):
         print(
@@ -43,6 +43,7 @@ def _capture_config_json(force: bool = False) -> bool:
         f"@{_COPILOT_CONFIG}",
         "--type", "file",
         "--target", _COPILOT_CONFIG,
+        "--scope", scope,
     ]
     if force:
         cmd.append("--force")
@@ -71,10 +72,15 @@ def _capture_config_json(force: bool = False) -> bool:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--scope", choices=["project", "user"], default="project")
+    known, _ = parser.parse_known_args()
+
     rc = scion_harness.capture_auth_main()
 
     force = "--force" in sys.argv
-    config_ok = _capture_config_json(force)
+    config_ok = _capture_config_json(force, known.scope)
 
     if rc != 0 and config_ok:
         sys.exit(0)

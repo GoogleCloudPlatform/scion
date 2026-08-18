@@ -887,6 +887,7 @@ type AgentSetSecretRequest struct {
 	Type     string `json:"type,omitempty"`     // environment (default), variable, file
 	Target   string `json:"target,omitempty"`   // Injection target path
 	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
+	Scope    string `json:"scope,omitempty"`    // "project" (default) or "user"
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -992,6 +993,35 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
+	// Determine scope and scopeID.
+	scope := req.Scope
+	if scope == "" {
+		scope = store.ScopeProject
+	}
+	var scopeID string
+	switch scope {
+	case store.ScopeProject:
+		scopeID = projectID
+	case store.ScopeUser:
+		agentIdent := GetAgentIdentityFromContext(ctx)
+		if agentIdent == nil {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
+			return
+		}
+		scopeID = agentIdent.OriginUserID()
+		if scopeID == "" {
+			ValidationError(w, "agent token lacks user context required for user-scoped secrets", nil)
+			return
+		}
+	default:
+		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
+			"field":   "scope",
+			"value":   scope,
+			"allowed": []string{"project", "user"},
+		})
+		return
+	}
+
 	var decoded []byte
 	if req.Encoding == "raw" {
 		// Caller explicitly opted in to raw text — store the value as-is.
@@ -1051,9 +1081,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	// Note: the backend's UpsertSecret has the same check-then-write pattern
 	// internally, so this is consistent with the existing TOCTOU window.
 	if !req.Force {
-		_, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
+		_, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		if err == nil {
-			Conflict(w, fmt.Sprintf("Secret %q already exists at project scope. Use force=true to overwrite.", key))
+			Conflict(w, fmt.Sprintf("Secret %q already exists at %s scope. Use force=true to overwrite.", key, scope))
 			return
 		}
 		if !errors.Is(err, store.ErrNotFound) {
@@ -1067,8 +1097,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		Value:      string(decoded),
 		SecretType: secretType,
 		Target:     target,
-		Scope:      store.ScopeProject,
-		ScopeID:    projectID,
+		Scope:      scope,
+		ScopeID:    scopeID,
 		CreatedBy:  fmt.Sprintf("agent:%s", agentID),
 		UpdatedBy:  fmt.Sprintf("agent:%s", agentID),
 	}
@@ -1082,8 +1112,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	if created {
 		writeJSON(w, http.StatusCreated, AgentSetSecretResponse{
 			Key:     key,
-			Scope:   store.ScopeProject,
-			ScopeID: projectID,
+			Scope:   scope,
+			ScopeID: scopeID,
 		})
 	} else {
 		w.WriteHeader(http.StatusNoContent)

@@ -50,11 +50,12 @@ def _extract_oauth_from_scrollback() -> str | None:
     return None
 
 
-def _store_oauth_token(token: str) -> bool:
+def _store_oauth_token(token: str, scope: str = "project") -> bool:
     """Store a token as CLAUDE_CODE_OAUTH_TOKEN via sciontool secret set."""
     try:
         result = subprocess.run(
-            ["sciontool", "secret", "set", "CLAUDE_CODE_OAUTH_TOKEN", token],
+            ["sciontool", "secret", "set", "CLAUDE_CODE_OAUTH_TOKEN", token,
+             "--scope", scope],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
@@ -68,10 +69,17 @@ def _store_oauth_token(token: str) -> bool:
 
 
 def main() -> int:
+    # Parse --scope from argv so we can forward it to both capture_auth_main
+    # and the Claude-specific scrollback capture.
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--scope", choices=["project", "user"], default="project")
+    known, _ = parser.parse_known_args()
+
     config_rc = scion_harness.capture_auth_main()
 
     token = _extract_oauth_from_scrollback()
-    scrollback_ok = _store_oauth_token(token) if token else False
+    scrollback_ok = _store_oauth_token(token, known.scope) if token else False
 
     if config_rc == 0 or scrollback_ok:
         return 0
