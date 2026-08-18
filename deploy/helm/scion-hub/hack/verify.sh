@@ -190,7 +190,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # arm itself: A and B are caught by every arm in that step because they stop the
 # chart rendering, and C - the rewrite from a literal to a pattern - renders
 # clean with a credential in the digest and was caught by nothing.
-EXPECTED_TOTAL=341
+EXPECTED_TOTAL=343
 
 failures=0
 assertions=0
@@ -1326,7 +1326,13 @@ notes_arm() { # notes_arm <label> <rendered notes> <golden name>
 
 render_notes "$WORK/notes-oauth.txt" -f "$CHART_DIR/ci/values-settings-oauth.yaml"
 notes_arm proxy "$WORK/notes-ack.txt"   "settings.yaml"
-notes_arm oauth "$WORK/notes-oauth.txt" "settings-oauth.yaml"
+# THE OAUTH ARM'S CANON BLOCK HAS NO KEY ENTRIES after 1b3c9418 moved the IAP
+# gates inside `if cfg.Auth.Mode == "proxy"` and the Cloud SQL phase landed
+# server.database.url. The single remaining oauth gate (durable session secret)
+# is a PROSE entry, not a KEY, so notes_arm's KEY-based extraction yields an
+# empty _canon and its exclusivity check becomes vacuous. The gate itself is
+# already verified by the HA_GATE_PATTERNS loop above.
+# notes_arm oauth "$WORK/notes-oauth.txt" "settings-oauth.yaml"
 
 # BOTH DIRECTIONS. The suppressed-refusal paragraph must appear for a release on
 # an HA route and must NOT appear for one that is on none.
@@ -3514,7 +3520,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=42
+PIPE_SITES_EXPECTED=44
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else

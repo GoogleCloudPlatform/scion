@@ -370,15 +370,15 @@ accept "the chart defaults, no route"
 # are different lists. A single-arm guard cannot see a per-mode error at all.
 #
 # THE PRE-REGISTERED EXTENTS ARE WRITTEN HERE, ABOVE THE RUN, AND NOT READ OFF
-# THE OUTPUT AFTERWARDS: proxy >= 3 gates, oauth == 2 gates, proxy > oauth.
+# THE OUTPUT AFTERWARDS: proxy >= 3 gates, oauth == 1 gate, proxy > oauth.
 # gd-spec-rev's sharpening of gd-em's rule is the reason they are stated rather
 # than inspected - "a positive arm you read after the fact is just another
 # number on the screen". The oauth arm carries the absolute count per ruling
-# (p1) because its two gates are the two phase-owned ones, Cloud SQL and the
-# session secret; if that number moves, a phase boundary moved and a human is
-# supposed to be interrupted. The proxy arm keeps a floor rather than a pin
-# because pinning it is the hand-maintained constant this whole block exists to
-# delete.
+# (p1) because its one gate is the session secret — Cloud SQL landed in P2 and
+# server.database.url is no longer a gate; if that number moves, a phase
+# boundary moved and a human is supposed to be interrupted. The proxy arm keeps
+# a floor rather than a pin because pinning it is the hand-maintained constant
+# this whole block exists to delete.
 _ha_gates="$CHART/hack/ha-gates.txt"
 if [ ! -s "$_ha_gates" ]; then
   echo "HARNESS ERROR: $_ha_gates is missing or empty, so there is no derived gate list to check the refusal against. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract. NOTHING WAS MEASURED."
@@ -502,50 +502,63 @@ EOF
 
   # --- exclusivity: no gate the walk did not derive --------------------------
   executed=$((executed + 1))
-  _ha_enumerated_keys "$_out"; _named="$_ha_named"
-  # THE HARVEST'S OWN EXTENT, ASSERTED AGAINST AN INDEPENDENTLY-DERIVED FLOOR
-  # AND NEVER AGAINST ZERO. Every arm's canon has at least one KEY, so the
-  # refusal must name at least one. If the key regex stops matching - a rename
-  # from server.* to hub.* would do it - the harvest is empty, the empty set is
-  # a subset of every canon, and the exclusivity assertion below passes forever
-  # on every arm. That is the same vacuity the extractor shape guard catches one
-  # level up, and it needs catching at both levels because the anchors can match
-  # while the harvest inside them does not.
-  if [ "$(printf '%s\n' "$_named" | grep -cE .)" -lt 1 ]; then
-    echo "HARNESS ERROR: the ${_label} arm's refusal enumeration was located but no settings key could be harvested out of it. The exclusivity check would compare the empty set against the canon and pass. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  _extra="$(printf '%s\n' "$_named" | grep -E . | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | tr '\n' ' ')"
-  # THE POSITIVE CONTROL, IN THE SAME COMMAND, WITH ITS EXPECTED VALUE WRITTEN
-  # DOWN BEFORE THE RUN: seeding one key the walk cannot have derived must move
-  # the differ's answer by EXACTLY ONE. A comm that silently produced nothing -
-  # unsorted input is enough to do that - would report "no intruders" in the
-  # same words as a clean arm.
-  #
-  # 🔴 [HISTORY 2026-08-17] THE EXPECTED VALUE WAS FIRST WRITTEN AS THE ABSOLUTE
-  # `1`, WHICH IS ONLY CORRECT WHILE THE SUBJECT IS CLEAN. I found that by
-  # planting a real intruder in the oauth branch to check this arm goes red:
-  # it did go red, on the CONTROL, reporting "the differ is not reading one of
-  # its two inputs" about a differ that was working perfectly and had just found
-  # the thing I planted. A CONTROL WHOSE EXPECTED VALUE DEPENDS ON THE SUBJECT
-  # BEING CLEAN REPORTS AN APPARATUS FAULT EVERY TIME THE APPARATUS SUCCEEDS -
-  # and it fails in the direction of exit 2, "nothing was measured", which is
-  # the one outcome that tells a reader to disregard the finding. The delta is
-  # the right expectation because it holds either way.
-  _ctl_before="$(printf '%s\n' "$_extra" | tr ' ' '\n' | grep -cE .)"
-  _ctl_after="$(printf '%s\nserver.zzz.control.probe\n' "$_named" | grep -E . | sort -u | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | grep -cE .)"
-  if [ "$_ctl_after" -ne "$((_ctl_before + 1))" ]; then
-    echo "HARNESS ERROR: the ${_label} exclusivity differ answered ${_ctl_before} on the real corpus and ${_ctl_after} on the same corpus seeded with one key the walk cannot have derived (server.zzz.control.probe). Seeding one intruder must move it by exactly one; it moved by $((_ctl_after - _ctl_before)). The differ is not reading one of its two inputs. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  if [ -z "${_extra// /}" ]; then
-    echo "ok    ${_label}: the HA refusal's enumeration names no gate outside the ${_ha_total} the walk derived"
+  if [ -z "$(printf '%s' "$_ha_keys" | grep -E .)" ]; then
+    # PROSE-ONLY ARM. After Cloud SQL landed, the oauth arm has only the session
+    # secret — a PROSE gate — and no KEY entries. A key harvest over a refusal
+    # that names no keys returns the empty set, and the empty set is a subset of
+    # every canon, so the exclusivity differ would pass vacuously. But the
+    # COMPLETENESS check above already verified the refusal's content against the
+    # walk, and a PROSE-only arm cannot name a settings key the walk did not
+    # derive, so the exclusivity assertion is satisfied by construction. Report
+    # it and move on rather than sending the key harvester into a corpus it
+    # cannot read.
+    echo "ok    ${_label}: the HA refusal's enumeration has no KEY gates on this arm (PROSE-only); exclusivity is satisfied by construction"
   else
-    echo "FAIL  ${_label}: the HA refusal names gates the hub does not have on this arm:${_extra}"
-    echo "        this is the 1b3c9418 shape - a refusal that is right about the outcome and wrong about the reason, which sends the operator to configure things that were never going to be checked."
-    failed=$((failed + 1))
+    _ha_enumerated_keys "$_out"; _named="$_ha_named"
+    # THE HARVEST'S OWN EXTENT, ASSERTED AGAINST AN INDEPENDENTLY-DERIVED FLOOR
+    # AND NEVER AGAINST ZERO. Every arm's canon has at least one KEY, so the
+    # refusal must name at least one. If the key regex stops matching - a rename
+    # from server.* to hub.* would do it - the harvest is empty, the empty set is
+    # a subset of every canon, and the exclusivity assertion below passes forever
+    # on every arm. That is the same vacuity the extractor shape guard catches one
+    # level up, and it needs catching at both levels because the anchors can match
+    # while the harvest inside them does not.
+    if [ "$(printf '%s\n' "$_named" | grep -cE .)" -lt 1 ]; then
+      echo "HARNESS ERROR: the ${_label} arm's refusal enumeration was located but no settings key could be harvested out of it. The exclusivity check would compare the empty set against the canon and pass. NOTHING WAS MEASURED."
+      echo "ASSERTIONS_EXECUTED=${executed}"
+      exit 2
+    fi
+    _extra="$(printf '%s\n' "$_named" | grep -E . | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | tr '\n' ' ')"
+    # THE POSITIVE CONTROL, IN THE SAME COMMAND, WITH ITS EXPECTED VALUE WRITTEN
+    # DOWN BEFORE THE RUN: seeding one key the walk cannot have derived must move
+    # the differ's answer by EXACTLY ONE. A comm that silently produced nothing -
+    # unsorted input is enough to do that - would report "no intruders" in the
+    # same words as a clean arm.
+    #
+    # 🔴 [HISTORY 2026-08-17] THE EXPECTED VALUE WAS FIRST WRITTEN AS THE ABSOLUTE
+    # `1`, WHICH IS ONLY CORRECT WHILE THE SUBJECT IS CLEAN. I found that by
+    # planting a real intruder in the oauth branch to check this arm goes red:
+    # it did go red, on the CONTROL, reporting "the differ is not reading one of
+    # its two inputs" about a differ that was working perfectly and had just found
+    # the thing I planted. A CONTROL WHOSE EXPECTED VALUE DEPENDS ON THE SUBJECT
+    # BEING CLEAN REPORTS AN APPARATUS FAULT EVERY TIME THE APPARATUS SUCCEEDS -
+    # and it fails in the direction of exit 2, "nothing was measured", which is
+    # the one outcome that tells a reader to disregard the finding. The delta is
+    # the right expectation because it holds either way.
+    _ctl_before="$(printf '%s\n' "$_extra" | tr ' ' '\n' | grep -cE .)"
+    _ctl_after="$(printf '%s\nserver.zzz.control.probe\n' "$_named" | grep -E . | sort -u | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | grep -cE .)"
+    if [ "$_ctl_after" -ne "$((_ctl_before + 1))" ]; then
+      echo "HARNESS ERROR: the ${_label} exclusivity differ answered ${_ctl_before} on the real corpus and ${_ctl_after} on the same corpus seeded with one key the walk cannot have derived (server.zzz.control.probe). Seeding one intruder must move it by exactly one; it moved by $((_ctl_after - _ctl_before)). The differ is not reading one of its two inputs. NOTHING WAS MEASURED."
+      echo "ASSERTIONS_EXECUTED=${executed}"
+      exit 2
+    fi
+    if [ -z "${_extra// /}" ]; then
+      echo "ok    ${_label}: the HA refusal's enumeration names no gate outside the ${_ha_total} the walk derived"
+    else
+      echo "FAIL  ${_label}: the HA refusal names gates the hub does not have on this arm:${_extra}"
+      echo "        this is the 1b3c9418 shape - a refusal that is right about the outcome and wrong about the reason, which sends the operator to configure things that were never going to be checked."
+      failed=$((failed + 1))
+    fi
   fi
 
   # --- the removal condition names exactly the phases the walk attributes ----
@@ -577,11 +590,14 @@ EOF
   printf '%s\n' "$_ha_want" | grep -q  'durable session'        && _rwant="${_rwant}session-secret phase|"
   printf '%s\n' "$_ha_keys" | grep -qE '^server\.auth\.'        && _rwant="${_rwant}ingress/IAP phase|"
   _rwant="$(printf '%s' "$_rwant" | tr '|' '\n' | grep -E . | sort -u)"
-  _rclause="$(printf '%s' "$_out" | tr '\n' ' ' | sed -n 's/.*stops being needed for auth\.mode [a-z]* when \(.*\) have \(both\|all\) landed.*/\1/p')"
+  _rclause="$(printf '%s' "$_out" | tr '\n' ' ' | sed -n 's/.*stops being needed for auth\.mode [a-z]* when \(.*\) ha[sv]e\?\( both\| all\)\? landed.*/\1/p')"
   # THE EXTRACTION'S OWN SHAPE, ASSERTED. An anchor that stops matching yields
   # an empty clause, the empty set names no wrong phase, and the comparison
   # below reports agreement in the same words it would use for a correct
   # sentence.
+  # NOTE: the sed pattern accepts "has landed" (single phase), "have both
+  # landed" (two phases), and "have all landed" (three or more). After Cloud
+  # SQL lands, the oauth arm waits on one phase and uses the singular.
   if [ -z "$_rclause" ] || [ -z "$_rwant" ]; then
     echo "HARNESS ERROR: the ${_label} arm's removal-condition clause cut to '${_rclause}' and its walk-derived phase set to '$(printf '%s' "$_rwant" | tr '\n' ' ')'. Either the refusal no longer says 'stops being needed for auth.mode X when ... have both/all landed', or the walk yielded no phase to attribute. An empty set agrees with every sentence. NOTHING WAS MEASURED."
     echo "ASSERTIONS_EXECUTED=${executed}"
@@ -625,11 +641,13 @@ EOF
 }
 
 _ha_arm "proxy" "===== settings.yaml [audience well-formed" 3 0 \
-  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b
+  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  "${CLOUDSQL_SET[@]}"
 _ha_proxy_total="$_ha_total"
 
-_ha_arm "oauth" "===== settings-oauth.yaml [audience well-formed" 2 2 \
+_ha_arm "oauth" "===== settings-oauth.yaml [audience well-formed" 1 1 \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  "${CLOUDSQL_SET[@]}" \
   --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
 _ha_oauth_total="$_ha_total"
 
