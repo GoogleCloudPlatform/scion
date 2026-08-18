@@ -59,24 +59,15 @@ export interface UploadFailure {
 }
 
 /**
- * What the file picker offers. The MIME types cover what browsers recognise;
- * the extensions cover the developer formats they do not, which browsers
- * report as application/octet-stream and the server classifies by content
- * (see ClassifyAttachment). Keep in step with textLikeExtensions in
- * pkg/hub/attachment_classify.go.
+ * What the file picker offers. An empty string means "all files" — the
+ * server enforces a deny-list of dangerous executable extensions (.exe,
+ * .bat, .sh, etc.) and dangerous MIME types (text/html,
+ * application/javascript), so the frontend no longer needs to duplicate
+ * that logic.  Keeping a restrictive accept list here caused file types
+ * the server would happily store (e.g. .tar.gz) to be un-selectable in
+ * the file picker (#1156).
  */
-export const ATTACHMENT_ACCEPT = [
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-  'application/pdf',
-  'application/zip',
-  '.txt,.md,.rst,.adoc,.log,.csv',
-  '.json,.yaml,.yml,.toml,.ini,.cfg,.env,.xml',
-  '.diff,.patch,.sql,.graphql,.proto',
-  '.ts,.tsx,.jsx,.py,.go,.rs,.rb,.java,.kt,.swift,.c,.cpp,.h,.hpp,.cs',
-].join(',');
+export const ATTACHMENT_ACCEPT = '';
 
 /** Event detail for the chat-send custom event. */
 export interface ChatSendDetail {
@@ -700,7 +691,6 @@ export class ScionChatComposer extends LitElement {
                 <input
                   type="file"
                   multiple
-                  accept=${ATTACHMENT_ACCEPT}
                   style="display:none"
                   @change=${this.handleFileSelected}
                 />

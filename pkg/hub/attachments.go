@@ -76,7 +76,10 @@ const (
 	MaxFilenameLength = 255
 )
 
-// AllowedMimeTypes maps allowed MIME types to their canonical extensions.
+// AllowedMimeTypes is kept for backward compatibility with tests that
+// assert specific entries. New code should call IsDangerousMimeType
+// instead: the upload path now accepts everything except the deny-listed
+// types below.
 var AllowedMimeTypes = map[string]bool{
 	// Images
 	"image/jpeg": true,
@@ -89,6 +92,24 @@ var AllowedMimeTypes = map[string]bool{
 	"text/markdown":   true,
 	// Archives
 	"application/zip": true,
+}
+
+// DangerousMimeTypes lists MIME types that are rejected on upload. These
+// are the types a browser will execute or render as a top-level document
+// if they ever escape the download path. Everything else is accepted.
+var DangerousMimeTypes = map[string]bool{
+	"text/html":                true,
+	"application/javascript":   true,
+	"text/javascript":          true,
+	"application/x-javascript": true,
+	"application/ecmascript":   true,
+	"text/ecmascript":          true,
+}
+
+// IsDangerousMimeType reports whether a sniffed MIME type should be
+// rejected on upload.
+func IsDangerousMimeType(mimeType string) bool {
+	return DangerousMimeTypes[strings.ToLower(mimeType)]
 }
 
 // DangerousExtensions lists extensions that should be rejected even if
@@ -120,6 +141,11 @@ var DangerousExtensions = map[string]bool{
 	// double-click.
 	".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".csh": true,
 	".command": true, ".desktop": true,
+	// Windows shortcut and settings files that can execute commands or modify
+	// the system on open — none has a legitimate chat attachment use.
+	".lnk": true, ".url": true, ".scf": true, ".reg": true,
+	".settingcontent-ms": true, ".cpl": true,
+	".application": true, ".appref-ms": true,
 }
 
 // attachmentExt returns the lower-cased extension that the blocklist above and

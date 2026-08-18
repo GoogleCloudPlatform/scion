@@ -121,14 +121,14 @@ func ClassifyAttachment(filename string, head []byte) (string, error) {
 	}
 
 	// Everything else is what the bytes say it is, checked against the
-	// allowlist. text/html and application/javascript are not on it, so a
+	// deny-list. text/html and application/javascript are refused, so a
 	// sniffed HTML or script body is refused here whatever it is called — which
 	// is the other half of the markup rule above: the extension check catches
 	// the payloads the sniff misses, the sniff catches the ones renamed .txt.
-	if AllowedMimeTypes[detected] {
-		return detected, nil
+	if IsDangerousMimeType(detected) {
+		return "", fmt.Errorf("file type %q is not accepted", detected)
 	}
-	return "", fmt.Errorf("file type %q is not accepted", detected)
+	return detected, nil
 }
 
 // isTextContentType reports whether a sniffed type means "these bytes are

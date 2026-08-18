@@ -59,8 +59,8 @@ func TestClassifyAttachment_TextLikeExtensions(t *testing.T) {
 			if got != want {
 				t.Errorf("ClassifyAttachment(%q) = %q, want %q", ext, got, want)
 			}
-			if !AllowedMimeTypes[got] {
-				t.Errorf("%q classified as %q, which the allowlist rejects", ext, got)
+			if IsDangerousMimeType(got) {
+				t.Errorf("%q classified as %q, which the deny-list rejects", ext, got)
 			}
 		})
 	}
@@ -195,14 +195,43 @@ func TestAttachmentUpload_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T
 	}
 }
 
-// The allowlist entries the brief pins (D3). Nothing in this change may flip
-// them, whatever route the file arrives by.
-func TestAllowedMimeTypes_HTMLAndJavaScriptStayBlocked(t *testing.T) {
-	if AllowedMimeTypes["text/html"] {
-		t.Error("AllowedMimeTypes[text/html] is true")
+// HTML and JavaScript are on the deny-list and must never be accepted,
+// whatever route the file arrives by.
+func TestDangerousMimeTypes_HTMLAndJavaScriptStayBlocked(t *testing.T) {
+	if !IsDangerousMimeType("text/html") {
+		t.Error("text/html is not on the deny-list")
 	}
-	if AllowedMimeTypes["application/javascript"] {
-		t.Error("AllowedMimeTypes[application/javascript] is true")
+	if !IsDangerousMimeType("application/javascript") {
+		t.Error("application/javascript is not on the deny-list")
+	}
+	if !IsDangerousMimeType("text/javascript") {
+		t.Error("text/javascript is not on the deny-list")
+	}
+}
+
+// Types that were previously rejected by the allowlist should now be accepted.
+func TestClassifyAttachment_AcceptsFormerlyRejectedTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []byte
+		want    string
+	}{
+		// A gzip archive (.tar.gz) was the motivating case for #1156.
+		{"archive.tar.gz", []byte("\x1f\x8b\x08\x00" + strings.Repeat("\x00", 16)), "application/x-gzip"},
+		// application/octet-stream (the fallback for unknown content) should
+		// now be accepted rather than rejected.
+		{"random.bin", []byte("\x00\x01\x02\x03" + strings.Repeat("\x00", 16)), "application/octet-stream"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ClassifyAttachment(tt.name, tt.content)
+			if err != nil {
+				t.Fatalf("ClassifyAttachment(%q) rejected: %v", tt.name, err)
+			}
+			if got != tt.want {
+				t.Errorf("ClassifyAttachment(%q) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
 	}
 }
 
