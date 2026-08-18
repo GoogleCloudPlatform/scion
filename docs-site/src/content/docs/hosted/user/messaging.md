@@ -14,23 +14,72 @@ In the Web Dashboard, the **Inbox Tray** provides a centralized view of all mess
 
 ## Native Web Chat
 
-Scion features an interactive, top-level **Native Web Chat** interface in the Web Dashboard (enabled via the `web.native_chat` feature flag). Rather than being isolated inside a single tab, chat is promoted to a top-level workspace view (a fourth `ShellType` in the SPA) that provides a cohesive environment for real-time collaboration with all agents and team members.
+Scion features an interactive, top-level **Native Web Chat** interface in the Web Dashboard (enabled via the `web.native_chat` feature flag). Rather than being isolated inside a single tab, chat is promoted to a top-level workspace view (a fourth `ShellType` in the SPA) that provides a cohesive, real-time collaborative environment for humans and agents.
 
 ### Core Layout & Navigation
 
 - **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
-- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats, backed by deep DM routing and persistence fixes. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
+- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
 - **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message.
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
 - **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
 - **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
-- **Attachments, Search & Notifications**:
-  - **Attachments & Image Overlay**: The chat composer supports file and image uploads, allowing users to send documents or visual context directly to threads. Uploaded images feature an interactive, full-screen **image overlay viewer** with smooth zoom controls.
-  - **Search**: Built-in chat search lets you quickly query across historical messages and active threads to find crucial context.
-  - **Notifications**: Integrated chat-specific notifications, including native browser push notifications and persistent unread counts, ensure you stay informed of incoming messages.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
+
+---
+
+### Advanced Collaboration & Productivity
+
+The native web chat includes a complete suite of collaboration and developer productivity tools (Phases 0–5):
+
+#### 1. Message Action Bar
+Hovering over a message (on desktop) or long-pressing (on mobile) reveals a contextual **action bar** providing several per-message actions:
+- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
+- **Edit / Delete**: Edit or delete your own messages.
+- **Copy Permalink**: Generate a direct link to any message in the thread.
+
+#### 2. Advanced Organization
+- **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
+- **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
+- **Custom Space Ordering**: Reorder your chat spaces using intuitive drag-and-drop navigation in the sidebar.
+
+#### 3. High-Density Developer Utilities
+- **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
+- **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition.
+- **Rich Agent Output Rendering**: Dispatched agents can render complex interactive payloads directly inside the chat, including structural diffs, test suite results, and interactive JSON/YAML tree-structures.
+- **Thread Export**: Export any collaborative thread as a clean Markdown document, useful for sharing agent reasoning or saving session histories.
+- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
+
+---
+
+### Push Notifications & Presence
+
+- **Real-Time Browser Notifications**: Stay informed of `@mentions` and incoming DMs with native browser push notifications.
+- **Smart Suppression**: Notifications are mute-aware and automatically suppressed for active conversations (threads you are currently looking at) to prevent alert fatigue.
+- **Unread Badges**: The tab title dynamically updates with an unread badge count when you are away from the tab.
+- **Per-Thread Draft Persistence**: Drafts are saved locally per-thread, so if you switch threads or close the tab, your unsent message remains waiting when you return.
+
+---
+
+### Advanced Attachment Management
+
+The web composer features a security-hardened, developer-friendly file upload system:
+- **Executable Deny-List Strategy**: To maximize flexibility for developers, attachment uploads use a security-first deny-list rather than a restrictive mime-type allow-list. It blocks executable binaries/scripts but permits **34+ developer file types** (including configuration files, source code, and data structures).
+- **Paste-to-Upload**: Paste images or file content directly from your clipboard into the composer for instant attachment.
+- **Markdown Attachment Rendering**: Markdown files uploaded as attachments render directly within the chat bubble, featuring a source/preview toggle and a one-click clipboard copy.
+- **Partial Success Reporting**: When uploading multiple files simultaneously, the system supports partial success—successful uploads are staged instantly while failed individual files report explicit inline errors.
+
+---
+
+### Performance & Safety Safeguards
+
+- **Token-Bucket Rate Limiting**: Per-sender token-bucket rate limits prevent message flooding, ensuring platform stability and protecting backend model endpoints.
+- **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
+- **SSE Direct Append**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering.
+- **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
+- **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
 
 ### Three-State Visibility Filtering
 
@@ -47,6 +96,7 @@ The visibility filter is processed **server-side** for efficiency, and your filt
 When writing instructions, you can easily pull other agents into the thread:
 - **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
+- **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
 
@@ -178,9 +228,9 @@ When a human or an agent sends a message, Scion automatically scans for recipien
 Any name starting with `@` in the message body (e.g., `@dev-lead`) is automatically parsed. If the name matches an active agent within the same project, Scion generates a secondary message of type `mention` and delivers it to that agent.
 
 #### Comma-Separated Carbon Copy (`--cc`)
-When sending a message via the CLI, you can explicitly designate additional recipients using the `--cc` flag:
+When sending a message via the CLI, you can explicitly designate additional recipients using the `--cc` flag. This flag is **repeatable** and also accepts a **comma-separated list** (with strict empty-value validation):
 ```bash
-scion message agent:tech-lead "Let's review the deployment strategy" --cc dev-agent,qa-agent
+scion message agent:tech-lead "Let's review the deployment strategy" --cc dev-agent,qa-agent --cc another-agent
 ```
 For each recipient listed in the `--cc` flag, Scion resolves their name against the active project's agents list and dispatches a dedicated notification of type `mention`.
 

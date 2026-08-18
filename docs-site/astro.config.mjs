@@ -170,6 +170,7 @@ export default defineConfig({
 							items: [
 								{ label: 'HA Overview', slug: 'hosted/ha/overview' },
 								{ label: 'Deploy on GCP (Cloud Run + GKE)', slug: 'hosted/ha/setup-gcp' },
+								{ label: 'Deploy via Helm (GKE)', slug: 'hosted/ha/helm' },
 								{ label: 'Kubernetes Runtime', slug: 'hosted/ha/kubernetes' },
 								{ label: 'Runtime Brokers & Profiles', slug: 'hosted/ha/runtime-broker' },
 								{ label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },

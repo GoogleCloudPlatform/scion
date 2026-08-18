@@ -340,6 +340,23 @@ These environment variables control server-side logging behavior. They are not p
 
 See the [Local Development Logging guide](/scion/contributing/logging/) for details on log formats, request log fields, and Cloud Logging integration.
 
+### Boolean Environment Variable Parsing (`parseBoolEnv`)
+
+For server and infrastructure configurations, Scion parses several boolean environment variables using a robust, operator-friendly `parseBoolEnv` parser:
+
+- **Supported Truthy Values:** `true`, `1`, `t`, `yes`, `y`, `on` (case-insensitive, whitespace-trimmed).
+- **Supported Falsy Values:** `false`, `0`, `f`, `no`, `n`, `off` (case-insensitive, whitespace-trimmed).
+- **Safety Warnings:** Unset, empty, or unparseable values default to `false`. However, to prevent configuration typos from silently disabling critical features, any **unrecognized non-empty value** (e.g., `SCION_LOG_GCP=trur`) will trigger an explicit **warning at startup** and default to `false`.
+
+#### Tracked Boolean Variables:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `SCION_SERVER_ADMIN_MODE` | Forces the server into emergency maintenance mode (break-glass removal). | `false` |
+| `SCION_TRACING_ENABLED` | Enables OpenTelemetry tracing when a GCP Project ID is configured. | `false` |
+| `SCION_LOG_GCP` | Enables Google Cloud Logging JSON format on standard output. | `false` |
+| `SCION_REQUIRE_STABLE_SIGNING_KEY` | Demands a persistent session/JWT signing key. When enabled, startup aborts (fail-closed) if no stable key/secret can be resolved in hosted mode, preventing JWT signature mismatches across replica restarts. | `false` |
+
 ### Hub Endpoint Resolution
 
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
