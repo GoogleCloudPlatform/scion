@@ -502,7 +502,7 @@ EOF
 
   # --- exclusivity: no gate the walk did not derive --------------------------
   executed=$((executed + 1))
-  if [ -z "$(printf '%s' "$_ha_keys" | grep -E .)" ]; then
+  if ! printf '%s' "$_ha_keys" | grep -qE .; then
     # PROSE-ONLY ARM. After Cloud SQL landed, the oauth arm has only the session
     # secret — a PROSE gate — and no KEY entries. A key harvest over a refusal
     # that names no keys returns the empty set, and the empty set is a subset of

@@ -1869,7 +1869,7 @@ for _row in "${_ns_rows[@]}"; do
   if [[ "$_got" == "$_want" ]]; then
     pass "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>}: $_want"
   else
-    fail "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>} (${_ver:-<empty>}): expected $_want, got $_got. $( [[ "$_want" == refuse ]] && echo 'A cluster that cannot honour restartPolicy on an init container will install this and hang in Init forever.' || true )$( [[ "$_want" == notice ]] && echo 'The check did not run and did not say so, which reads identically to a check that ran and approved.' || true )$( [[ "$_want" == quiet ]] && echo 'A version the guard can read and approve must produce no notice, or the notice means nothing when it does appear.' || true )"
+    fail "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>} (${_ver:-<empty>}): expected $_want, got $_got. $( if [[ "$_want" == refuse ]]; then echo 'A cluster that cannot honour restartPolicy on an init container will install this and hang in Init forever.'; fi )$( if [[ "$_want" == notice ]]; then echo 'The check did not run and did not say so, which reads identically to a check that ran and approved.'; fi )$( if [[ "$_want" == quiet ]]; then echo 'A version the guard can read and approve must produce no notice, or the notice means nothing when it does appear.'; fi )"
   fi
 done
 
@@ -2274,7 +2274,7 @@ probe_leaf_live_under_es() { # <leaf> <comma-list of leaves to drop> <spec args.
   # here, so this tracks the guard instead of a copy of it.
   local i=0 _f _a
   while (( i < $# )); do
-    _f="${@:i+1:1}"; _a="${@:i+2:1}"
+    _f="${*:i+1:1}"; _a="${*:i+2:1}"
     if [[ "$_f" == --set* && "$drop" == *",${_a%%=*},"* ]]; then
       i=$((i + 2)); continue
     fi
@@ -2680,6 +2680,7 @@ else
       fail "config.existingSecret + cloudsql + database.auth=$_es_auth does not render (helm exit $_es_rc): $(head -2 "$WORK/probe-es-$_es_auth.yaml"). The operator is refused whichever way they turn, which is not a guard - it is the silent removal of a supported install, announced as an error message about something else."
     fi
   done
+  # shellcheck disable=SC2086  # intentional: splits the space-separated companion list to count entries
   _pc_n="$(printf '%s\n' $probe_companion_used | grep -c . || true)"
   if [[ "$_pc_n" -eq ${#PROBE_REFUSED_BY_COMPANION[@]} ]]; then
     pass "both companion-refused exemptions were exercised by a real leaf ($probe_companion_used ), so neither is excusing a case that no longer happens"
@@ -4838,6 +4839,7 @@ fi
 # in this file and is used here because the alternative is no assertion at all.
 # It is stated as a limit, not sold as a proof: it catches the rewrite that
 # mutation C performed, and it would not catch a literal that is merely wrong.
+# shellcheck disable=SC2016  # $redacted and $projection are literal Go template variables, not shell expansions
 _probe_src="$(grep -c 'probe := replace (printf ":%s@" \$redacted) "@" \$projection' "$CHART_DIR/templates/_helpers.tpl" || true)"
 _probe_any="$(grep -c 'probe :=' "$CHART_DIR/templates/_helpers.tpl" || true)"
 if [[ "$_probe_any" != "1" ]]; then
