@@ -49,6 +49,7 @@ Hovering over a message (on desktop) or long-pressing (on mobile) reveals a cont
 - **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition.
 - **Rich Agent Output Rendering**: Dispatched agents can render complex interactive payloads directly inside the chat, including structural diffs, test suite results, and interactive JSON/YAML tree-structures.
+- **Collapsed Agent-to-Agent Messages**: To keep threads readable, background agent-to-agent messages (visible under the **Full** density filter) are collapsed into a compact, click-to-expand badge. When expanded, these messages are displayed with 2-line truncation. If a message is truncated, an expand icon (`arrows-angle-expand`) appears next to it, allowing you to open a full-screen Markdown-rendered popover dialog.
 - **Thread Export**: Export any collaborative thread as a clean Markdown document, useful for sharing agent reasoning or saving session histories.
 - **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
 
@@ -77,7 +78,7 @@ The web composer features a security-hardened, developer-friendly file upload sy
 
 - **Token-Bucket Rate Limiting**: Per-sender token-bucket rate limits prevent message flooding, ensuring platform stability and protecting backend model endpoints.
 - **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
-- **SSE Direct Append**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering.
+- **SSE Direct Append & Real-Time Attachments**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering. Additionally, attachment previews render immediately on incoming SSE messages, ensuring the user interface instantly displays attachment references without waiting for subsequent user-triggered renders.
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
 - **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
 
