@@ -38,14 +38,14 @@ import './inbox-tray.js';
 
 /** Extract a project ID from a dashboard-style path (`/projects/:id/…`). */
 export function projectIdFromDashboardPath(path: string): string | null {
-  const m = path.match(/^\/projects\/([^/]+)/);
+  const m = path.match(/^\/projects\/([^/?#]+)/);
   // `/projects/new` is the creation form, not a project-scoped page.
   return m && m[1] !== 'new' ? m[1] : null;
 }
 
 /** Extract a project ID from a legacy chat space path (`/chat/space/:id/…`). */
 export function projectIdFromChatSpacePath(path: string): string | null {
-  const m = path.match(/^\/chat\/space\/([^/]+)/);
+  const m = path.match(/^\/chat\/space\/([^/?#]+)/);
   return m ? m[1] : null;
 }
 
@@ -57,7 +57,7 @@ export function projectIdFromChatSpacePath(path: string): string | null {
 export function slugFromChatPath(path: string): string | null {
   if (/^\/chat\/space\//.test(path)) return null;
   if (/^\/chat\/dm\//.test(path)) return null;
-  const m = path.match(/^\/chat\/([^/]+)/);
+  const m = path.match(/^\/chat\/([^/?#]+)/);
   return m ? m[1] : null;
 }
 
@@ -468,6 +468,9 @@ export class ScionHeader extends LitElement {
         }
       }
     }
+
+    // Guard: component may have disconnected during async slug resolution.
+    if (!this.isConnected) return;
 
     this.dispatchEvent(
       new CustomEvent('nav-click', {

@@ -60,6 +60,11 @@ describe('projectIdFromDashboardPath', () => {
     expect(projectIdFromDashboardPath('/agents/foo')).toBeNull();
     expect(projectIdFromDashboardPath('/chat')).toBeNull();
   });
+
+  it('ignores query parameters and hash fragments', () => {
+    expect(projectIdFromDashboardPath('/projects/abc-123?foo=bar')).toBe('abc-123');
+    expect(projectIdFromDashboardPath('/projects/abc-123#hash')).toBe('abc-123');
+  });
 });
 
 describe('projectIdFromChatSpacePath', () => {
@@ -81,6 +86,11 @@ describe('projectIdFromChatSpacePath', () => {
 
   it('returns null for bare /chat', () => {
     expect(projectIdFromChatSpacePath('/chat')).toBeNull();
+  });
+
+  it('ignores query parameters and hash fragments', () => {
+    expect(projectIdFromChatSpacePath('/chat/space/proj-42?thread=topic-7')).toBe('proj-42');
+    expect(projectIdFromChatSpacePath('/chat/space/proj-42#hash')).toBe('proj-42');
   });
 });
 
@@ -108,5 +118,10 @@ describe('slugFromChatPath', () => {
   it('returns null for non-chat paths', () => {
     expect(slugFromChatPath('/')).toBeNull();
     expect(slugFromChatPath('/projects/abc')).toBeNull();
+  });
+
+  it('ignores query parameters and hash fragments', () => {
+    expect(slugFromChatPath('/chat/my-project?foo=bar')).toBe('my-project');
+    expect(slugFromChatPath('/chat/my-project#hash')).toBe('my-project');
   });
 });
