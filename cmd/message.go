@@ -46,6 +46,7 @@ var msgWake bool
 var msgChannel string
 var msgThreadID string
 var msgCC []string
+var msgBodyFile string
 
 // emitDeprecationWarning prints a deprecation notice to stderr.
 func emitDeprecationWarning(flag, replacement string) {
@@ -96,12 +97,32 @@ Recipients:
   conv:<uuid>        Send to a conversation by ID
   #<thread>          Send to a named thread
 
+Message body can be provided as:
+  - Positional arguments: scion message agent "hello world"
+  - File: scion message agent --body-file msg.txt
+  - Stdin: echo "hello" | scion message agent -
+
 Examples:
   scion message my-agent "Please review the PR"
   scion message @my-agent "Please review the PR"
   scion message user:alice "I need clarification on the auth module"
-  scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
-	Args:              cobra.MinimumNArgs(1),
+  scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"
+  scion message my-agent --body-file /path/to/message.txt
+  echo "message with backticks" | scion message my-agent -`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		// --body-file provides the message, so we only need recipient
+		bodyFile, _ := cmd.Flags().GetString("body-file")
+		if bodyFile != "" {
+			if len(args) < 1 {
+				return fmt.Errorf("recipient is required")
+			}
+			return nil
+		}
+		if len(args) < 2 {
+			return fmt.Errorf("recipient and message are required unless --body-file is used")
+		}
+		return nil
+	},
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Refuse removed flags with actionable errors.
@@ -132,11 +153,13 @@ Examples:
 		var message string
 
 		{
-			if len(args) < 2 {
-				return fmt.Errorf("recipient and message are required")
+			if len(args) < 1 {
+				return fmt.Errorf("recipient is required")
 			}
 			recipient := args[0]
-			message = strings.Join(args[1:], " ")
+			if len(args) > 1 {
+				message = strings.Join(args[1:], " ")
+			}
 
 			// Try parsing as an S4 conversation reference first.
 			// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
@@ -170,6 +193,23 @@ Examples:
 				// Strip optional "agent:" prefix for backwards compatibility
 				agentName = api.Slugify(strings.TrimPrefix(recipient, "agent:"))
 			}
+		}
+
+		// Validate --body-file conflicts
+		if msgBodyFile != "" && len(args) > 1 {
+			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+
+		// Resolve body from --body-file or stdin
+		var err error
+		message, err = resolveMessageBody(msgBodyFile, message)
+		if err != nil {
+			return err
+		}
+
+		// Ensure we have a message body
+		if message == "" && !msgRaw {
+			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
 		// Validate scheduling flags
@@ -275,7 +315,6 @@ Examples:
 
 		// Check if Hub should be used
 		var hubCtx *HubContext
-		var err error
 		if convRef != nil {
 			// Conversation references require Hub mode for resolution
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
@@ -1049,11 +1088,35 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 	wg.Wait()
 }
 
+// resolveMessageBody determines the message body from flags or positional args.
+// Priority: --body-file > positional args. If body is "-", read from stdin.
+func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
+	if bodyFile != "" {
+		if positionalBody != "" {
+			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		data, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read body file: %w", err)
+		}
+		return string(data), nil
+	}
+	if positionalBody == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("failed to read message from stdin: %w", err)
+		}
+		return strings.TrimRight(string(data), "\n"), nil
+	}
+	return positionalBody, nil
+}
+
 func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
@@ -1080,6 +1143,7 @@ func init() {
 	_ = messageCmd.Flags().MarkHidden("channel")
 	_ = messageCmd.Flags().MarkHidden("thread-id")
 	_ = messageCmd.Flags().MarkHidden("cc")
+
 
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
