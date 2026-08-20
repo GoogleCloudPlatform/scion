@@ -592,12 +592,39 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	}
 
 	// Propagate no-auth intent from the agent's applied config.
+	// NoAuth suppresses LLM-auth secrets (API keys, credential files) but must
+	// NOT suppress git-related credentials (GITHUB_TOKEN) which are needed for
+	// repository clone/pull operations regardless of LLM auth status.
 	noAuth := agent.AppliedConfig != nil && agent.AppliedConfig.NoAuth
 	if noAuth {
 		req.NoAuth = true
 		req.ResolvedSecrets = nil
 		if d.debug {
 			d.log.Debug("NoAuth enabled: skipping secret resolution", "agent_id", agent.ID)
+		}
+
+		// Exempt git credentials from NoAuth suppression. GITHUB_TOKEN is
+		// stored in the project secrets table but is unrelated to LLM auth —
+		// it enables repository clone/pull in clone-per-agent workspaces.
+		// Without this, NoAuth blanket-suppresses all secrets including
+		// GITHUB_TOKEN, causing git clone failures (#1165).
+		if agent.ProjectID != "" && d.secretBackend != nil {
+			ghSecret, err := d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, agent.ProjectID)
+			if err != nil {
+				if d.debug {
+					d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from project secrets",
+						"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
+				}
+			} else if ghSecret != nil && ghSecret.Value != "" {
+				if req.ResolvedEnv == nil {
+					req.ResolvedEnv = make(map[string]string)
+				}
+				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+				if d.debug {
+					d.log.Debug("NoAuth: resolved GITHUB_TOKEN from project secrets for git operations",
+						"agent_id", agent.ID, "project_id", agent.ProjectID)
+				}
+			}
 		}
 	}
 
