@@ -45,6 +45,7 @@ type SetEnvVarRequest struct {
 	Sensitive     bool   `json:"sensitive,omitempty"`
 	InjectionMode string `json:"injectionMode,omitempty"`
 	Secret        bool   `json:"secret,omitempty"`
+	AllowProgeny  bool   `json:"allowProgeny,omitempty"` // Allow creator's progeny agents to access (user scope, always mode only)
 }
 
 type SetEnvVarResponse struct {
@@ -367,6 +368,28 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	// allowProgeny is only valid on user-scoped env vars with injection_mode=always
+	if req.AllowProgeny {
+		if scope != store.ScopeUser {
+			ValidationError(w, "allowProgeny is only supported on user-scoped env vars", map[string]interface{}{
+				"field": "allowProgeny",
+				"scope": scope,
+			})
+			return
+		}
+		im := req.InjectionMode
+		if im == "" {
+			im = store.InjectionModeAsNeeded
+		}
+		if im != store.InjectionModeAlways {
+			ValidationError(w, "allowProgeny requires injectionMode to be 'always'", map[string]interface{}{
+				"field":         "allowProgeny",
+				"injectionMode": im,
+			})
+			return
+		}
+	}
+
 	var createdBy string
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		createdBy = userIdent.ID()
@@ -432,6 +455,7 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		Sensitive:     req.Sensitive,
 		InjectionMode: injectionMode,
 		Secret:        false,
+		AllowProgeny:  req.AllowProgeny,
 	}
 	envVar.CreatedBy = createdBy
 
@@ -440,6 +464,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// Manage implicit env var progeny policy lifecycle
+	s.ensureEnvVarProgenyPolicy(ctx, envVar)
 
 	// Clean up any existing secret with same key (demotion from secret to plain)
 	if s.secretBackend != nil {
@@ -469,6 +496,13 @@ func (s *Server) deleteEnvVar(w http.ResponseWriter, r *http.Request, key string
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), true)
 	if !ok {
 		return
+	}
+
+	// Check for progeny policy cleanup before deletion
+	if scope == store.ScopeUser {
+		if existing, err := s.store.GetEnvVar(ctx, key, scope, scopeID); err == nil && existing.AllowProgeny {
+			s.deleteEnvVarProgenyPolicy(ctx, existing.ID)
+		}
 	}
 
 	if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
@@ -624,6 +658,81 @@ func (s *Server) deleteProgenyPolicy(ctx context.Context, secretID string) {
 	for _, p := range existing.Items {
 		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			s.envSecretLog.Warn("failed to delete progeny policy", "policyID", p.ID, "error", err)
+		}
+	}
+}
+
+// =============================================================================
+// Progeny policy helpers for env vars
+// =============================================================================
+
+// envVarProgenyPolicyName returns the canonical policy name for a progeny env var policy.
+func envVarProgenyPolicyName(envVarID string) string {
+	return "progeny-envvar-access:" + envVarID
+}
+
+// ensureEnvVarProgenyPolicy creates or deletes the implicit progeny policy for an
+// env var based on the allowProgeny flag.
+func (s *Server) ensureEnvVarProgenyPolicy(ctx context.Context, ev *store.EnvVar) {
+	if ev.Scope != store.ScopeUser {
+		return
+	}
+
+	policyName := envVarProgenyPolicyName(ev.ID)
+
+	if ev.AllowProgeny {
+		existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+		if err != nil {
+			s.envSecretLog.Warn("failed to check for existing env var progeny policy", "envVar", ev.Key, "error", err)
+			return
+		}
+		if existing.TotalCount > 0 {
+			return
+		}
+
+		policy := &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         policyName,
+			Description:  "Implicit policy granting progeny agents read access to env var " + ev.Key,
+			ScopeType:    store.PolicyScopeResource,
+			ScopeID:      ev.ID,
+			ResourceType: "envvar",
+			ResourceID:   ev.ID,
+			Actions:      []string{"read"},
+			Effect:       store.PolicyEffectAllow,
+			Conditions: &store.PolicyConditions{
+				DelegatedFrom: &store.DelegatedFromCondition{
+					PrincipalType: "user",
+					PrincipalID:   ev.CreatedBy,
+				},
+			},
+			Labels: map[string]string{
+				"scion.dev/managed-by":   "progeny-envvar-access",
+				"scion.dev/envvar-key":   ev.Key,
+				"scion.dev/envvar-id":    ev.ID,
+				"scion.dev/envvar-scope": ev.Scope,
+			},
+			CreatedBy: ev.CreatedBy,
+		}
+		if err := s.store.CreatePolicy(ctx, policy); err != nil {
+			s.envSecretLog.Warn("failed to create env var progeny policy", "envVar", ev.Key, "error", err)
+		}
+	} else {
+		s.deleteEnvVarProgenyPolicy(ctx, ev.ID)
+	}
+}
+
+// deleteEnvVarProgenyPolicy removes the implicit progeny policy for an env var by its ID.
+func (s *Server) deleteEnvVarProgenyPolicy(ctx context.Context, envVarID string) {
+	policyName := envVarProgenyPolicyName(envVarID)
+	existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	if err != nil {
+		s.envSecretLog.Warn("failed to look up env var progeny policy for deletion", "envVarID", envVarID, "error", err)
+		return
+	}
+	for _, p := range existing.Items {
+		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.envSecretLog.Warn("failed to delete env var progeny policy", "policyID", p.ID, "error", err)
 		}
 	}
 }

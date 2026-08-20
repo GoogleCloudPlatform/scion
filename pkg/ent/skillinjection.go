@@ -28,6 +28,8 @@ type SkillInjection struct {
 	SkillAs string `json:"skill_as,omitempty"`
 	// Optional holds the value of the "optional" field.
 	Optional bool `json:"optional,omitempty"`
+	// AllowProgeny holds the value of the "allow_progeny" field.
+	AllowProgeny bool `json:"allow_progeny,omitempty"`
 	// SortOrder holds the value of the "sort_order" field.
 	SortOrder int `json:"sort_order,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
@@ -42,7 +44,7 @@ func (*SkillInjection) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case skillinjection.FieldOptional:
+		case skillinjection.FieldOptional, skillinjection.FieldAllowProgeny:
 			values[i] = new(sql.NullBool)
 		case skillinjection.FieldSortOrder:
 			values[i] = new(sql.NullInt64)
@@ -102,6 +104,12 @@ func (_m *SkillInjection) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field optional", values[i])
 			} else if value.Valid {
 				_m.Optional = value.Bool
+			}
+		case skillinjection.FieldAllowProgeny:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field allow_progeny", values[i])
+			} else if value.Valid {
+				_m.AllowProgeny = value.Bool
 			}
 		case skillinjection.FieldSortOrder:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -171,6 +179,9 @@ func (_m *SkillInjection) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("optional=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Optional))
+	builder.WriteString(", ")
+	builder.WriteString("allow_progeny=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AllowProgeny))
 	builder.WriteString(", ")
 	builder.WriteString("sort_order=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SortOrder))

@@ -146,6 +146,20 @@ func (_u *EnvVarUpdate) SetNillableSecret(v *bool) *EnvVarUpdate {
 	return _u
 }
 
+// SetAllowProgeny sets the "allow_progeny" field.
+func (_u *EnvVarUpdate) SetAllowProgeny(v bool) *EnvVarUpdate {
+	_u.mutation.SetAllowProgeny(v)
+	return _u
+}
+
+// SetNillableAllowProgeny sets the "allow_progeny" field if the given value is not nil.
+func (_u *EnvVarUpdate) SetNillableAllowProgeny(v *bool) *EnvVarUpdate {
+	if v != nil {
+		_u.SetAllowProgeny(*v)
+	}
+	return _u
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_u *EnvVarUpdate) SetCreatedBy(v string) *EnvVarUpdate {
 	_u.mutation.SetCreatedBy(v)
@@ -271,6 +285,9 @@ func (_u *EnvVarUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Secret(); ok {
 		_spec.SetField(envvar.FieldSecret, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.AllowProgeny(); ok {
+		_spec.SetField(envvar.FieldAllowProgeny, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(envvar.FieldCreatedBy, field.TypeString, value)
@@ -415,6 +432,20 @@ func (_u *EnvVarUpdateOne) SetSecret(v bool) *EnvVarUpdateOne {
 func (_u *EnvVarUpdateOne) SetNillableSecret(v *bool) *EnvVarUpdateOne {
 	if v != nil {
 		_u.SetSecret(*v)
+	}
+	return _u
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (_u *EnvVarUpdateOne) SetAllowProgeny(v bool) *EnvVarUpdateOne {
+	_u.mutation.SetAllowProgeny(v)
+	return _u
+}
+
+// SetNillableAllowProgeny sets the "allow_progeny" field if the given value is not nil.
+func (_u *EnvVarUpdateOne) SetNillableAllowProgeny(v *bool) *EnvVarUpdateOne {
+	if v != nil {
+		_u.SetAllowProgeny(*v)
 	}
 	return _u
 }
@@ -574,6 +605,9 @@ func (_u *EnvVarUpdateOne) sqlSave(ctx context.Context) (_node *EnvVar, err erro
 	}
 	if value, ok := _u.mutation.Secret(); ok {
 		_spec.SetField(envvar.FieldSecret, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.AllowProgeny(); ok {
+		_spec.SetField(envvar.FieldAllowProgeny, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(envvar.FieldCreatedBy, field.TypeString, value)

@@ -36,6 +36,7 @@ func (SkillInjection) Fields() []ent.Field {
 		field.String("skill_uri"),                     // full skill URI (may include version pin)
 		field.String("skill_as").Optional(),           // alias
 		field.Bool("optional").Default(false),
+		field.Bool("allow_progeny").Default(false),
 		field.Int("sort_order").Default(0),
 		field.Time("created_at").Default(time.Now).Immutable(),
 		field.String("created_by").Optional(),

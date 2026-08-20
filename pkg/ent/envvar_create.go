@@ -104,6 +104,20 @@ func (_c *EnvVarCreate) SetNillableSecret(v *bool) *EnvVarCreate {
 	return _c
 }
 
+// SetAllowProgeny sets the "allow_progeny" field.
+func (_c *EnvVarCreate) SetAllowProgeny(v bool) *EnvVarCreate {
+	_c.mutation.SetAllowProgeny(v)
+	return _c
+}
+
+// SetNillableAllowProgeny sets the "allow_progeny" field if the given value is not nil.
+func (_c *EnvVarCreate) SetNillableAllowProgeny(v *bool) *EnvVarCreate {
+	if v != nil {
+		_c.SetAllowProgeny(*v)
+	}
+	return _c
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_c *EnvVarCreate) SetCreatedBy(v string) *EnvVarCreate {
 	_c.mutation.SetCreatedBy(v)
@@ -207,6 +221,10 @@ func (_c *EnvVarCreate) defaults() {
 		v := envvar.DefaultSecret
 		_c.mutation.SetSecret(v)
 	}
+	if _, ok := _c.mutation.AllowProgeny(); !ok {
+		v := envvar.DefaultAllowProgeny
+		_c.mutation.SetAllowProgeny(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := envvar.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -258,6 +276,9 @@ func (_c *EnvVarCreate) check() error {
 	}
 	if _, ok := _c.mutation.Secret(); !ok {
 		return &ValidationError{Name: "secret", err: errors.New(`ent: missing required field "EnvVar.secret"`)}
+	}
+	if _, ok := _c.mutation.AllowProgeny(); !ok {
+		return &ValidationError{Name: "allow_progeny", err: errors.New(`ent: missing required field "EnvVar.allow_progeny"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "EnvVar.created"`)}
@@ -332,6 +353,10 @@ func (_c *EnvVarCreate) createSpec() (*EnvVar, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Secret(); ok {
 		_spec.SetField(envvar.FieldSecret, field.TypeBool, value)
 		_node.Secret = value
+	}
+	if value, ok := _c.mutation.AllowProgeny(); ok {
+		_spec.SetField(envvar.FieldAllowProgeny, field.TypeBool, value)
+		_node.AllowProgeny = value
 	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(envvar.FieldCreatedBy, field.TypeString, value)
@@ -496,6 +521,18 @@ func (u *EnvVarUpsert) SetSecret(v bool) *EnvVarUpsert {
 // UpdateSecret sets the "secret" field to the value that was provided on create.
 func (u *EnvVarUpsert) UpdateSecret() *EnvVarUpsert {
 	u.SetExcluded(envvar.FieldSecret)
+	return u
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (u *EnvVarUpsert) SetAllowProgeny(v bool) *EnvVarUpsert {
+	u.Set(envvar.FieldAllowProgeny, v)
+	return u
+}
+
+// UpdateAllowProgeny sets the "allow_progeny" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateAllowProgeny() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldAllowProgeny)
 	return u
 }
 
@@ -696,6 +733,20 @@ func (u *EnvVarUpsertOne) SetSecret(v bool) *EnvVarUpsertOne {
 func (u *EnvVarUpsertOne) UpdateSecret() *EnvVarUpsertOne {
 	return u.Update(func(s *EnvVarUpsert) {
 		s.UpdateSecret()
+	})
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (u *EnvVarUpsertOne) SetAllowProgeny(v bool) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetAllowProgeny(v)
+	})
+}
+
+// UpdateAllowProgeny sets the "allow_progeny" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateAllowProgeny() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateAllowProgeny()
 	})
 }
 
@@ -1068,6 +1119,20 @@ func (u *EnvVarUpsertBulk) SetSecret(v bool) *EnvVarUpsertBulk {
 func (u *EnvVarUpsertBulk) UpdateSecret() *EnvVarUpsertBulk {
 	return u.Update(func(s *EnvVarUpsert) {
 		s.UpdateSecret()
+	})
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (u *EnvVarUpsertBulk) SetAllowProgeny(v bool) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetAllowProgeny(v)
+	})
+}
+
+// UpdateAllowProgeny sets the "allow_progeny" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateAllowProgeny() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateAllowProgeny()
 	})
 }
 

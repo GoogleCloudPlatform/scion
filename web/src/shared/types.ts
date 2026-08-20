@@ -548,6 +548,7 @@ export interface EnvVar {
   sensitive: boolean;
   injectionMode: InjectionMode;
   secret: boolean;
+  allowProgeny?: boolean;
   created: string;
   updated: string;
   createdBy?: string;

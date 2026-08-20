@@ -25,6 +25,8 @@ const (
 	FieldSkillAs = "skill_as"
 	// FieldOptional holds the string denoting the optional field in the database.
 	FieldOptional = "optional"
+	// FieldAllowProgeny holds the string denoting the allow_progeny field in the database.
+	FieldAllowProgeny = "allow_progeny"
 	// FieldSortOrder holds the string denoting the sort_order field in the database.
 	FieldSortOrder = "sort_order"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -43,6 +45,7 @@ var Columns = []string{
 	FieldSkillURI,
 	FieldSkillAs,
 	FieldOptional,
+	FieldAllowProgeny,
 	FieldSortOrder,
 	FieldCreatedAt,
 	FieldCreatedBy,
@@ -61,6 +64,8 @@ func ValidColumn(column string) bool {
 var (
 	// DefaultOptional holds the default value on creation for the "optional" field.
 	DefaultOptional bool
+	// DefaultAllowProgeny holds the default value on creation for the "allow_progeny" field.
+	DefaultAllowProgeny bool
 	// DefaultSortOrder holds the default value on creation for the "sort_order" field.
 	DefaultSortOrder int
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
@@ -123,6 +128,11 @@ func BySkillAs(opts ...sql.OrderTermOption) OrderOption {
 // ByOptional orders the results by the optional field.
 func ByOptional(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOptional, opts...).ToFunc()
+}
+
+// ByAllowProgeny orders the results by the allow_progeny field.
+func ByAllowProgeny(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAllowProgeny, opts...).ToFunc()
 }
 
 // BySortOrder orders the results by the sort_order field.

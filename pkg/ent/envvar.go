@@ -34,6 +34,8 @@ type EnvVar struct {
 	InjectionMode envvar.InjectionMode `json:"injection_mode,omitempty"`
 	// Secret holds the value of the "secret" field.
 	Secret bool `json:"secret,omitempty"`
+	// AllowProgeny holds the value of the "allow_progeny" field.
+	AllowProgeny bool `json:"allow_progeny,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// Created holds the value of the "created" field.
@@ -48,7 +50,7 @@ func (*EnvVar) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case envvar.FieldSensitive, envvar.FieldSecret:
+		case envvar.FieldSensitive, envvar.FieldSecret, envvar.FieldAllowProgeny:
 			values[i] = new(sql.NullBool)
 		case envvar.FieldKey, envvar.FieldValue, envvar.FieldScope, envvar.FieldScopeID, envvar.FieldDescription, envvar.FieldInjectionMode, envvar.FieldCreatedBy:
 			values[i] = new(sql.NullString)
@@ -124,6 +126,12 @@ func (_m *EnvVar) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field secret", values[i])
 			} else if value.Valid {
 				_m.Secret = value.Bool
+			}
+		case envvar.FieldAllowProgeny:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field allow_progeny", values[i])
+			} else if value.Valid {
+				_m.AllowProgeny = value.Bool
 			}
 		case envvar.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -202,6 +210,9 @@ func (_m *EnvVar) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("secret=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Secret))
+	builder.WriteString(", ")
+	builder.WriteString("allow_progeny=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AllowProgeny))
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)
