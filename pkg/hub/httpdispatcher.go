@@ -625,6 +625,29 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 						"agent_id", agent.ID, "project_id", agent.ProjectID)
 				}
 			}
+
+			// Fall back to the creating user's profile-level GITHUB_TOKEN,
+			// mirroring the cascade in resolveCloneToken. Users who store
+			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
+			// would otherwise still hit the NoAuth suppression bug (#1165).
+			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
+				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
+				if err != nil {
+					if d.debug {
+						d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from user secrets",
+							"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
+					}
+				} else if ghSecret != nil && ghSecret.Value != "" {
+					if req.ResolvedEnv == nil {
+						req.ResolvedEnv = make(map[string]string)
+					}
+					req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+					if d.debug {
+						d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
+							"agent_id", agent.ID, "owner_id", agent.OwnerID)
+					}
+				}
+			}
 		}
 	}
 

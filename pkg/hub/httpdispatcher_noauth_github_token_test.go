@@ -31,11 +31,27 @@ import (
 type mockGitTokenSecretBackend struct {
 	secrets      []secret.SecretWithValue
 	getResponses map[string]*secret.SecretWithValue
-	getCalls     []string // track which secrets were fetched via Get
+	// getScopedResponses maps "name:scope" to a response, allowing
+	// scope-aware lookups (e.g. project vs user scope for GITHUB_TOKEN).
+	// When set for a key, it takes precedence over getResponses.
+	getScopedResponses map[string]*secret.SecretWithValue
+	getCalls           []getCall // track which secrets were fetched via Get
+}
+
+type getCall struct {
+	Name    string
+	Scope   string
+	ScopeID string
 }
 
 func (m *mockGitTokenSecretBackend) Get(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
-	m.getCalls = append(m.getCalls, name)
+	m.getCalls = append(m.getCalls, getCall{Name: name, Scope: scope, ScopeID: scopeID})
+	// Check scope-specific responses first
+	if m.getScopedResponses != nil {
+		if sv, ok := m.getScopedResponses[name+":"+scope]; ok {
+			return sv, nil
+		}
+	}
 	if sv, ok := m.getResponses[name]; ok {
 		return sv, nil
 	}
@@ -165,10 +181,81 @@ func TestBuildCreateRequest_NoAuth_GitHubTokenSurvives(t *testing.T) {
 
 		// Without a project, Get should not have been called for GITHUB_TOKEN
 		for _, call := range backend.getCalls {
-			if call == "GITHUB_TOKEN" {
+			if call.Name == "GITHUB_TOKEN" {
 				t.Error("expected no GITHUB_TOKEN Get call when agent has no project")
 			}
 		}
+	})
+
+	t.Run("NoAuth=true falls back to user-scope GITHUB_TOKEN when project scope is empty", func(t *testing.T) {
+		userGHTokenValue := "ghp_user_profile_token_67890"
+
+		// Backend with no project-scope GITHUB_TOKEN but a user-scope one
+		userScopeBackend := &mockGitTokenSecretBackend{
+			secrets: []secret.SecretWithValue{
+				{SecretMeta: secret.SecretMeta{Name: "API_KEY", SecretType: "environment", Target: "API_KEY"}, Value: apiKeyValue},
+			},
+			getScopedResponses: map[string]*secret.SecretWithValue{
+				"GITHUB_TOKEN:" + secret.ScopeUser: {
+					SecretMeta: secret.SecretMeta{
+						Name:       "GITHUB_TOKEN",
+						SecretType: "environment",
+						Target:     "GITHUB_TOKEN",
+						Scope:      secret.ScopeUser,
+					},
+					Value: userGHTokenValue,
+				},
+			},
+		}
+		dispatcher.SetSecretBackend(userScopeBackend)
+
+		agent := &store.Agent{
+			ID:              tid("agent-noauth-user-gh"),
+			Name:            "noauth-user-gh-agent",
+			Slug:            "noauth-user-gh-agent",
+			OwnerID:         tid("user-1"),
+			ProjectID:       tid("project-1"),
+			RuntimeBrokerID: tid("host-1"),
+			AppliedConfig:   &store.AgentAppliedConfig{NoAuth: true},
+		}
+
+		req, err := dispatcher.buildCreateRequest(ctx, agent, "TestNoAuthUserScopeGitToken")
+		if err != nil {
+			t.Fatalf("buildCreateRequest failed: %v", err)
+		}
+
+		if !req.NoAuth {
+			t.Error("expected req.NoAuth to be true")
+		}
+
+		// ResolvedSecrets must still be nil (NoAuth suppresses LLM secrets)
+		if len(req.ResolvedSecrets) != 0 {
+			t.Errorf("expected no resolved secrets with NoAuth, got %d", len(req.ResolvedSecrets))
+		}
+
+		// GITHUB_TOKEN must be resolved from user scope
+		if got := req.ResolvedEnv["GITHUB_TOKEN"]; got != userGHTokenValue {
+			t.Errorf("expected GITHUB_TOKEN=%q in ResolvedEnv (user-scope fallback), got %q", userGHTokenValue, got)
+		}
+
+		// Verify both scopes were tried: project first, then user
+		if len(userScopeBackend.getCalls) < 2 {
+			t.Fatalf("expected at least 2 Get calls, got %d", len(userScopeBackend.getCalls))
+		}
+		if userScopeBackend.getCalls[0].Scope != secret.ScopeProject {
+			t.Errorf("expected first Get call to be project scope, got %q", userScopeBackend.getCalls[0].Scope)
+		}
+		if userScopeBackend.getCalls[1].Scope != secret.ScopeUser {
+			t.Errorf("expected second Get call to be user scope, got %q", userScopeBackend.getCalls[1].Scope)
+		}
+
+		// LLM API keys must NOT be in ResolvedEnv
+		if v, ok := req.ResolvedEnv["API_KEY"]; ok && v != "" {
+			t.Errorf("expected API_KEY to not be injected into ResolvedEnv with NoAuth, got %q", v)
+		}
+
+		// Restore original backend for remaining tests
+		dispatcher.SetSecretBackend(backend)
 	})
 
 	t.Run("NoAuth=false resolves secrets normally including GITHUB_TOKEN", func(t *testing.T) {
