@@ -338,7 +338,8 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 
-	// Project-level override
+	// Project-level value for the same key, but user is the strongest scope
+	// (runtime_broker < hub < project < user), so user's value must win.
 	seedSecret(t, s, &store.Secret{
 		ID:             tid("s3"),
 		Key:            "API_KEY",
@@ -368,16 +369,16 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		byName[sv.Name] = sv
 	}
 
-	// API_KEY overridden by project
+	// API_KEY: user scope wins over project (user is stronger)
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	if apiKey.Value != "grove-api-key" {
-		t.Errorf("expected project API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
+	if apiKey.Value != "user-api-key" {
+		t.Errorf("expected user API_KEY value %q, got %q", "user-api-key", apiKey.Value)
 	}
-	if apiKey.Scope != ScopeProject {
-		t.Errorf("expected API_KEY scope %q, got %q", ScopeProject, apiKey.Scope)
+	if apiKey.Scope != ScopeUser {
+		t.Errorf("expected API_KEY scope %q, got %q", ScopeUser, apiKey.Scope)
 	}
 
 	// TLS_CERT from user (no override)
@@ -419,7 +420,15 @@ func TestLocalBackend_ResolveNoScopes(t *testing.T) {
 	}
 }
 
-func TestLocalBackend_ResolveBrokerOverride(t *testing.T) {
+// TestLocalBackend_ResolveUserOverridesBroker asserts the documented scope
+// precedence (runtime_broker < hub < project < user, lowest first — see
+// envScopePrecedence in pkg/hub/httpdispatcher.go): runtime_broker is the
+// most infrastructural and least specific scope, so it must be the weakest,
+// not an override nobody can escape. This test used to be named
+// TestLocalBackend_ResolveBrokerOverride and asserted the opposite (broker
+// beating user) — that was the bug, not the spec; see the scope-ordering
+// comment in Resolve() for the incident this came from.
+func TestLocalBackend_ResolveUserOverridesBroker(t *testing.T) {
 	backend, s := createTestBackend(t)
 	ctx := context.Background()
 
@@ -450,11 +459,11 @@ func TestLocalBackend_ResolveBrokerOverride(t *testing.T) {
 	if len(resolved) != 1 {
 		t.Fatalf("expected 1 resolved secret, got %d", len(resolved))
 	}
-	if resolved[0].Value != "broker-key" {
-		t.Errorf("expected broker override %q, got %q", "broker-key", resolved[0].Value)
+	if resolved[0].Value != "user-key" {
+		t.Errorf("expected user scope to win over broker, got %q", resolved[0].Value)
 	}
-	if resolved[0].Scope != ScopeRuntimeBroker {
-		t.Errorf("expected scope %q, got %q", ScopeRuntimeBroker, resolved[0].Scope)
+	if resolved[0].Scope != ScopeUser {
+		t.Errorf("expected scope %q, got %q", ScopeUser, resolved[0].Scope)
 	}
 }
 
@@ -569,12 +578,13 @@ func TestLocalBackend_ResolveDuplicateTargetAcrossScopes(t *testing.T) {
 		t.Fatalf("expected 1 file secret for /tmp/my-secret.json, got %d", len(fileSecrets))
 	}
 
-	// Project-level (higher scope) should win
-	if fileSecrets[0].Name != "my-key" {
-		t.Errorf("expected project-level secret 'my-key' to win, got %q", fileSecrets[0].Name)
+	// User is the strongest scope (runtime_broker < hub < project < user),
+	// so the user-level secret should win.
+	if fileSecrets[0].Name != "my-svc-account" {
+		t.Errorf("expected user-level secret 'my-svc-account' to win, got %q", fileSecrets[0].Name)
 	}
-	if fileSecrets[0].Value != "grove-cert-data" {
-		t.Errorf("expected project-level value, got %q", fileSecrets[0].Value)
+	if fileSecrets[0].Value != "user-cert-data" {
+		t.Errorf("expected user-level value, got %q", fileSecrets[0].Value)
 	}
 }
 
@@ -618,8 +628,9 @@ func TestLocalBackend_ResolveDuplicateEnvTargetAcrossScopes(t *testing.T) {
 	if len(envSecrets) != 1 {
 		t.Fatalf("expected 1 env secret for FOO_VAR, got %d", len(envSecrets))
 	}
-	if envSecrets[0].Name != "grove-foo" {
-		t.Errorf("expected project-level secret to win, got %q", envSecrets[0].Name)
+	// User is the strongest scope (runtime_broker < hub < project < user).
+	if envSecrets[0].Name != "user-foo" {
+		t.Errorf("expected user-level secret to win, got %q", envSecrets[0].Name)
 	}
 }
 

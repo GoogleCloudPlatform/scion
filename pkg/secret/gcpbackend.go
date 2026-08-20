@@ -276,17 +276,27 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 		scopeID string
 	}
 
-	var scopes []scopeEntry
-	// Hub scope is always included as lowest precedence
-	scopes = append(scopes, scopeEntry{scope: store.ScopeHub, scopeID: b.hubID})
-	if userID != "" {
-		scopes = append(scopes, scopeEntry{scope: store.ScopeUser, scopeID: userID})
+	// Scope precedence, lowest first: runtime_broker < hub < project < user.
+	// Later entries in this slice overwrite earlier ones in the merge loop
+	// below, so this order must match envScopePrecedence in
+	// pkg/hub/httpdispatcher.go — broker is the most infrastructural and
+	// least specific of the four scopes, so it is intentionally the
+	// weakest, not an override nobody can escape. (Previously this listed
+	// hub, user, project, broker, which put broker last and therefore
+	// strongest — the opposite of every other precedence-ordered resolver
+	// in this codebase, and the reason a stale broker-scoped secret could
+	// silently shadow a project-scoped one regardless of which was meant
+	// to win.)
+	scopes := make([]scopeEntry, 0, 4)
+	if brokerID != "" {
+		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
 	}
+	scopes = append(scopes, scopeEntry{scope: store.ScopeHub, scopeID: b.hubID})
 	if projectID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeProject, scopeID: projectID})
 	}
-	if brokerID != "" {
-		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
+	if userID != "" {
+		scopes = append(scopes, scopeEntry{scope: store.ScopeUser, scopeID: userID})
 	}
 
 	for _, sc := range scopes {
