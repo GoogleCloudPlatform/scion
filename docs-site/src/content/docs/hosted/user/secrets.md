@@ -190,7 +190,7 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
-*   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (representing the root user of the ancestry chain, i.e., `Ancestry[0]`). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
+*   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (the user who originally started the agent chain). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
 *   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Successful and failed retrieval attempts log an audit event (`agent_secret_read`) identifying the calling agent, requested key, and status.
 
 ---
