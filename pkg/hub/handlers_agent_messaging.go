@@ -174,13 +174,24 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			creatorID = agent.OwnerID
 		}
 		if creatorID != "" {
-			if u, err := s.store.GetUser(ctx, creatorID); err == nil {
+			u, err := s.store.GetUser(ctx, creatorID)
+			switch {
+			case err == nil:
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
+			case errors.Is(err, store.ErrNotFound):
+				// Creator/owner record no longer exists (e.g. deleted user).
+				// Fall through to the "recipient is required" response below.
+			default:
+				// A real backend error (DB down, etc.) shouldn't be reported
+				// as a 400 validation error — that would mask a transient
+				// failure as a client mistake.
+				writeErrorFromErr(w, err, "")
+				return
 			}
 		}
 	}
