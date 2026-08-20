@@ -405,7 +405,7 @@ func TestGCPBackend_Resolve(t *testing.T) {
 		ScopeID:    "user-1",
 	})
 
-	// Project-level override
+	// Project-level value for the same key (user scope wins)
 	_, _, _ = backend.Set(ctx, &SetSecretInput{
 		Name:       "API_KEY",
 		Value:      "grove-api-key",

@@ -1661,7 +1661,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 			}
 		} else {
 			// Iterate in reverse: resolved is ordered lowest-precedence first
-			// (hub < user < project < runtime_broker), so walking backwards
+			// (runtime_broker < hub < project < user), so walking backwards
 			// lets higher-precedence secrets win.
 			for i := len(resolved) - 1; i >= 0; i-- {
 				sv := resolved[i]
@@ -2556,27 +2556,10 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 // resolveSecrets queries secrets from all applicable scopes and merges them
 // into a flat list. Higher scopes override lower:
 //
-//	hub  <  user  <  project  <  runtime_broker
+//	runtime_broker  <  hub  <  project  <  user
 //
-// 🔴 SECRETS AND ENV VARS DO NOT USE THE SAME ORDER. Compare
-// envScopePrecedence above: env vars rank runtime_broker LOWEST and user
-// HIGHEST; secrets rank them the other way round, on both axes.
-//
-// DO NOT READ THIS COMMENT AS DOCUMENTING A DESIGNED DIFFERENCE. NOBODY HAS
-// ESTABLISHED THAT THE DIVERGENCE IS INTENTIONAL. It is FILED, as issue #624,
-// and open. What this comment records is only what the code does today: the
-// secret order is implemented independently in pkg/secret (both backends build
-// the scope list in this order and merge last-wins, and scopePrecedence ranks
-// it numerically). So editing this comment to match the env one would make it
-// describe code that does not exist — the divergence has to be closed in
-// pkg/secret, under #624, or not at all.
-//
-// Phase 10 widened the gap rather than creating it: demoting runtime_broker for
-// env vars added the second axis. That makes the pull toward "harmonising" the
-// two stronger, and it is exactly the change that must not be made here.
-//
-// The hub rung was missing from this comment before Phase 10; both backends
-// have always queried it as the lowest scope.
+// This matches envScopePrecedence (see above). The divergence previously
+// tracked in issue #624 was corrected in PR #1227.
 func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
 	if d.secretBackend == nil {
 		if d.debug {
