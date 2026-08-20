@@ -286,31 +286,38 @@ present or the agent fails to start with an actionable error.
 ## Capturing Credentials from a Running Agent
 
 For harnesses that authenticate through an interactive login (rather than a plain API key), you
-can capture the credentials an agent produced and store them as a project secret, so future
+can capture the credentials an agent produced and store them as a secret, so future
 agents start pre-authenticated instead of dropping to no-auth.
 
-After logging in interactively inside the agent (via `scion attach` or the terminal page), run the
-harness bundle's capture script from inside the container:
+After logging in interactively inside the agent (via `scion attach` or the terminal page), you can run the credential capture process.
 
-```bash
-python3 ~/.scion/harness/capture_auth.py
-```
+### Secret Scope Selection
+
+Credential capture supports scoping captured credentials to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents).
+
+*   **In the Web UI**: Clicking the **Capture Auth** button triggers an interactive dialog allowing you to choose between **Project** scope and **User** scope before executing the capture script.
+*   **Via CLI/Script**: The `capture_auth.py` script accepts a `--scope` argument (`project` or `user`). If omitted, it defaults to `project` for backward compatibility:
+    ```bash
+    # Capture credentials to the project scope (default)
+    python3 ~/.scion/harness/capture_auth.py
+
+    # Capture credentials to the user scope (personal secret)
+    python3 ~/.scion/harness/capture_auth.py --scope user
+    ```
 
 ### How capture works
 
 The host generates a capture manifest (`inputs/capture-auth-config.json`) from the harness's
 `auth.types.*.required_files` declarations — every credential file the harness can authenticate
 with that has a well-known path. `capture_auth.py` reads that manifest, locates each file the
-harness just wrote, and stores it as a project secret by shelling out to
-`sciontool secret set <key> @<file> --type <type> --target <path>`.
+harness just wrote, and stores it as a secret by shelling out to
+`sciontool secret set <key> @<file> --type <type> --target <path> --scope <project|user>`.
 
 - **What is captured** — the harness's credential file(s). For example, Codex captures
   `~/.codex/auth.json` as the `CODEX_AUTH` file secret; Gemini captures
   `~/.gemini/oauth_creds.json` as `GEMINI_OAUTH_CREDS`. See the table in
   [The Three-Stage Auth Workflow](#the-three-stage-auth-workflow).
-- **Where it goes** — into the project **secret store** (the Hub's secret store in Hub mode). This
-  is why captured credentials survive container restarts: the file lives in the store, not in the
-  ephemeral container, and the host re-stages it on every subsequent start.
+- **Where it goes** — into the **secret store** (the Hub's secret store in Hub mode), scoped either to the project or the originating user. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
 - **Harness-specific extras** — some bundles override the generic flow:
   - **Claude** additionally scans the terminal scrollback for the `sk-ant-oat…` token printed by
     `claude setup-token` and stores it as the `CLAUDE_CODE_OAUTH_TOKEN` environment secret.
@@ -337,7 +344,7 @@ python3 ~/.scion/harness/capture_auth.py --force
 
 :::note
 There is currently no `scion auth capture` CLI wrapper; capture is performed by running
-`capture_auth.py` inside the agent, which delegates to `sciontool secret set`.
+`capture_auth.py` inside the agent (or clicking the button in the Web UI), which delegates to `sciontool secret set`.
 :::
 
 ## Persistence Across Restarts
