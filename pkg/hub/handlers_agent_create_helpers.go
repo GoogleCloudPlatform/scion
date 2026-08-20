@@ -1259,6 +1259,10 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 // runtime by the broker's resolveAuthEnvOverlay from settings.yaml or GCP
 // metadata — credentials the Hub cannot see at preflight time (#1165).
 func (s *Server) isAuthTypeSatisfied(ctx context.Context, agent *store.Agent, authMeta *config.HarnessAuthMetadata, authType string, gcpSAAssigned bool) (bool, error) {
+	if authMeta == nil {
+		return false, nil
+	}
+
 	// Determine whether this is a GCP-backed auth type whose runtime
 	// environment will be provided by the broker/GCP metadata server.
 	gcpRuntime := false

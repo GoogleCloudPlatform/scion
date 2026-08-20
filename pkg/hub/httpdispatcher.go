@@ -616,9 +616,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 						"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
 				}
 			} else if ghSecret != nil && ghSecret.Value != "" {
-				if req.ResolvedEnv == nil {
-					req.ResolvedEnv = make(map[string]string)
-				}
 				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
 				if d.debug {
 					d.log.Debug("NoAuth: resolved GITHUB_TOKEN from project secrets for git operations",
@@ -638,9 +635,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 							"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
 					}
 				} else if ghSecret != nil && ghSecret.Value != "" {
-					if req.ResolvedEnv == nil {
-						req.ResolvedEnv = make(map[string]string)
-					}
 					req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
 					if d.debug {
 						d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
