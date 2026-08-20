@@ -1337,7 +1337,13 @@ func readAgentTokenFile() string {
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 // Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
-// to avoid stale scion-token files from previous remote hub connections.
+// to avoid stale scion-token files from previous remote hub connections. This exception
+// is suppressed for hub-managed agents (config.IsHubManagedAgent(), i.e. SCION_AGENT_ID
+// is set): inside a container the Runtime Broker started, the scion-token file is freshly
+// minted for *this* Hub, not stale, and some Hub endpoints (e.g. an agent's own outbound
+// message to a user) require the real per-agent identity that only that token carries —
+// dev auth resolves to a superuser/dev identity, not any specific agent, so it 401s on
+// self-only endpoints. See https://github.com/GoogleCloudPlatform/scion/issues/<TBD>.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 
@@ -1353,7 +1359,7 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 	// 2. Check for agent token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true

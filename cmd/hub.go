@@ -452,6 +452,11 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 	// When the endpoint is localhost and dev auth is available, prefer dev auth
 	// over a non-dev agent token — the scion-token may be stale from a previous
 	// remote hub connection while the dev-token was written by the running local server.
+	// Not for hub-managed agents (config.IsHubManagedAgent()): inside a
+	// broker-started container the scion-token is freshly minted for this Hub,
+	// not stale, and dev auth doesn't carry the per-agent identity some
+	// endpoints require — see the comment on createHubClient in
+	// pkg/hubsync/sync.go.
 	if token := readAgentTokenFile(); token != "" {
 		if apiclient.IsDevToken(token) {
 			info.Method = "Agent token (dev)"
@@ -461,7 +466,7 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 			info.TokenExpiry = parseJWTExpiry(token)
 			return info
 		}
-		if isLocalhostEndpoint(endpoint) {
+		if isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken, devSource := apiclient.ResolveDevTokenWithSource(); devToken != "" {
 				util.Debugf("Skipping non-dev agent token from scion-token file; using dev auth (%s) for localhost endpoint", devSource)
 				info.Method = "Dev auth"
@@ -540,7 +545,9 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
 	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
-	// to avoid stale scion-token files from previous remote hub connections.
+	// to avoid stale scion-token files from previous remote hub connections. This exception
+	// is suppressed for hub-managed agents (config.IsHubManagedAgent()) — see the matching
+	// comment on createHubClient in pkg/hubsync/sync.go for why.
 	authConfigured := false
 
 	// Check for OAuth credentials from scion hub auth login
@@ -552,7 +559,7 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Check for agent auth token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
