@@ -385,6 +385,7 @@ type SetSecretRequest struct {
 	Type   string `json:"type,omitempty"`
 	Target string `json:"target,omitempty"`
 	Force  bool   `json:"force,omitempty"`
+	Scope  string `json:"scope,omitempty"`
 }
 
 // SetSecretResponse is the response from the agent secret creation endpoint.
@@ -505,9 +506,10 @@ func (c *Client) absoluteURL(path string) string {
 	return strings.TrimSuffix(c.hubURL, "/") + path
 }
 
-// SetSecret stores a project-scoped secret via the Hub API.
-// The value should already be base64-encoded.
-func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target string, force bool) (*SetSecretResponse, error) {
+// SetSecret stores a secret via the Hub API.
+// The value should already be base64-encoded. Scope selects project (default)
+// or user; an empty scope is treated as "project".
+func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, scope string, force bool) (*SetSecretResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
@@ -520,6 +522,7 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target s
 		Type:   secretType,
 		Target: target,
 		Force:  force,
+		Scope:  scope,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -555,7 +558,10 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target s
 		}
 		return &result, nil
 	case http.StatusNoContent:
-		return &SetSecretResponse{Key: key, Scope: "project"}, nil
+		if scope == "" {
+			scope = "project"
+		}
+		return &SetSecretResponse{Key: key, Scope: scope}, nil
 	case http.StatusConflict:
 		return nil, fmt.Errorf("secret %q already exists (use --force to overwrite)", key)
 	default:

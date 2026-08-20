@@ -1420,7 +1420,7 @@ func TestClient_SetSecret_Created(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", false)
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", "", false)
 
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPut, receivedMethod)
@@ -1444,7 +1444,7 @@ func TestClient_SetSecret_NoContent(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", true)
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", true)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -1460,7 +1460,7 @@ func TestClient_SetSecret_Conflict(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", false)
+	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
@@ -1468,7 +1468,7 @@ func TestClient_SetSecret_Conflict(t *testing.T) {
 
 func TestClient_SetSecret_NotConfigured(t *testing.T) {
 	client := &Client{}
-	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", false)
+	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", "", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not configured")
 }
@@ -1549,7 +1549,7 @@ func TestClient_SetSecret_ServerError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", false)
+	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", "", false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")

@@ -24,6 +24,7 @@ var (
 	secretType   string
 	secretTarget string
 	secretForce  bool
+	secretScope  string
 )
 
 var secretCmd = &cobra.Command{
@@ -34,11 +35,12 @@ var secretCmd = &cobra.Command{
 
 var secretSetCmd = &cobra.Command{
 	Use:   "set KEY VALUE",
-	Short: "Store a project-scoped secret via the Hub API",
-	Long: `Store a project-scoped secret in the Hub from within an agent container.
+	Short: "Store a secret via the Hub API",
+	Long: `Store a secret in the Hub from within an agent container.
 
-The secret is scoped to the current agent's project. Subsequent agents in the
-same project will receive this secret automatically.
+By default, the secret is scoped to the current agent's project. Subsequent
+agents in the same project will receive this secret automatically. Use
+--scope=user to store a personal credential visible only to your agents.
 
 If VALUE starts with @, the remainder is treated as a file path. The file
 contents are read and base64-encoded, and --type defaults to "file".
@@ -54,7 +56,10 @@ Examples:
   sciontool secret set MY_CERT @/tmp/cert.pem --type file --target ~/certs/cert.pem
 
   # Overwrite an existing secret
-  sciontool secret set MY_KEY "new-value" --force`,
+  sciontool secret set MY_KEY "new-value" --force
+
+  # Store a user-scoped (personal) secret
+  sciontool secret set MY_TOKEN "tok-123" --scope user`,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		key := args[0]
@@ -66,6 +71,12 @@ Examples:
 		}
 		if strings.ContainsAny(key, "= \t\n") {
 			log.Error("key cannot contain spaces, tabs, newlines, or '='")
+			os.Exit(1)
+		}
+
+		// Validate scope flag.
+		if secretScope != "" && secretScope != "project" && secretScope != "user" {
+			log.Error("--scope must be \"project\" or \"user\"")
 			os.Exit(1)
 		}
 
@@ -127,7 +138,7 @@ Examples:
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretForce)
+		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretScope, secretForce)
 		if err != nil {
 			log.Error("%v", err)
 			os.Exit(1)
@@ -237,4 +248,5 @@ func init() {
 	secretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
 	secretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
 	secretSetCmd.Flags().BoolVar(&secretForce, "force", false, "Overwrite existing secret")
+	secretSetCmd.Flags().StringVar(&secretScope, "scope", "", "Secret scope: project (default) or user")
 }

@@ -110,6 +110,13 @@ export class ScionPageTerminal extends LitElement {
   @state()
   private captureAuthConflicts: string[] | null = null;
 
+  @state()
+  private captureAuthScopeDialogOpen = false;
+
+  /** Remembers the scope chosen in the scope dialog so force-update reuses it. */
+  @state()
+  private captureAuthSelectedScope: 'project' | 'user' = 'project';
+
   // --- Drag-and-drop file upload state ---
   @state() private uploadEnabled = false;
   @state() private uploadDisabledReason = '';
@@ -242,6 +249,10 @@ export class ScionPageTerminal extends LitElement {
     .capture-auth-btn:disabled {
       opacity: 0.5;
       cursor: default;
+    }
+
+    #capture-scope-group {
+      margin-top: 0.75rem;
     }
 
     /* Window switcher toggle group: two rectangular icon buttons */
@@ -1201,12 +1212,12 @@ export class ScionPageTerminal extends LitElement {
 
   private static readonly SECRET_CONFLICT_RE = /secret "([^"]+)" already exists/g;
 
-  private async handleCaptureAuth(force = false): Promise<void> {
+  private async handleCaptureAuth(force = false, scope: 'project' | 'user' = 'project'): Promise<void> {
     if (!this.agent) return;
     this.captureAuthLoading = true;
     this.captureAuthConflicts = null;
     try {
-      const command = ['python3', '/home/scion/.scion/harness/capture_auth.py'];
+      const command = ['python3', '/home/scion/.scion/harness/capture_auth.py', '--scope', scope];
       if (force) command.push('--force');
 
       const response = await apiFetch(`/api/v1/agents/${this.agent.id}/exec`, {
@@ -1286,7 +1297,7 @@ export class ScionPageTerminal extends LitElement {
           slot="footer"
           variant="warning"
           ?loading=${this.captureAuthLoading}
-          @click=${() => void this.handleCaptureAuth(true)}
+          @click=${() => void this.handleCaptureAuth(true, this.captureAuthSelectedScope)}
           >Force Update</sl-button
         >
       </sl-dialog>
@@ -1426,7 +1437,7 @@ export class ScionPageTerminal extends LitElement {
               <button
                 class="capture-auth-btn"
                 ?disabled=${this.captureAuthLoading}
-                @click=${() => this.handleCaptureAuth()}
+                @click=${() => { this.captureAuthScopeDialogOpen = true; }}
                 title="Capture credentials from inside the container"
               >
                 ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
@@ -1488,6 +1499,53 @@ export class ScionPageTerminal extends LitElement {
         </div>
       </div>
       ${this.renderCaptureAuthConflictDialog()}
+      ${this.renderCaptureAuthScopeDialog()}
+    `;
+  }
+
+  private renderCaptureAuthScopeDialog() {
+    if (!this.captureAuthScopeDialogOpen) return nothing;
+    return html`
+      <sl-dialog
+        label="Capture Auth — Choose Scope"
+        open
+        @sl-request-close=${() => {
+          this.captureAuthScopeDialogOpen = false;
+        }}
+      >
+        <p>Where should the captured credentials be stored?</p>
+        <sl-radio-group
+          id="capture-scope-group"
+          .value=${this.captureAuthSelectedScope}
+          @sl-change=${(e: any) => {
+            this.captureAuthSelectedScope = e.target.value;
+          }}
+        >
+          <sl-radio-button value="project"
+            >Project secret (all project agents)</sl-radio-button
+          >
+          <sl-radio-button value="user"
+            >Profile secret (your personal credential)</sl-radio-button
+          >
+        </sl-radio-group>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.captureAuthScopeDialogOpen = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          @click=${() => {
+            this.captureAuthScopeDialogOpen = false;
+            void this.handleCaptureAuth(false, this.captureAuthSelectedScope);
+          }}
+          >Capture</sl-button
+        >
+      </sl-dialog>
     `;
   }
 }

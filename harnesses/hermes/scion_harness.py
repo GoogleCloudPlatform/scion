@@ -1041,9 +1041,15 @@ _CA_EXIT_CONFLICT = 3
 def capture_auth_main(argv: list[str] | None = None) -> int:
     """Portable capture-auth logic. Returns exit code."""
     parser = argparse.ArgumentParser(
-        description="Capture auth credentials and store as project secrets"
+        description="Capture auth credentials and store as secrets"
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing secrets")
+    parser.add_argument(
+        "--scope",
+        choices=["project", "user"],
+        default="project",
+        help="Secret scope: project (default) or user",
+    )
     parser.add_argument(
         "--bundle",
         default=os.path.join(
@@ -1101,7 +1107,7 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
             print(f"capture-auth: {key}: source not found ({source})")
             continue
 
-        ok, err = _capture_one_cred(entry, args.force)
+        ok, err = _capture_one_cred(entry, args.force, args.scope)
         if err == "CONFLICT":
             print(f'CONFLICT: secret "{key}" already exists (use --force to overwrite)')
             conflicts += 1
@@ -1124,7 +1130,7 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
     return _CA_EXIT_OK
 
 
-def _capture_one_cred(entry: dict[str, Any], force: bool) -> tuple[bool, str | None]:
+def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "project") -> tuple[bool, str | None]:
     key = entry.get("key", "")
     source = expand_path(entry.get("source", ""))
     secret_type = entry.get("type", "file")
@@ -1137,7 +1143,8 @@ def _capture_one_cred(entry: dict[str, Any], force: bool) -> tuple[bool, str | N
         return False, None
 
     cmd = ["sciontool", "secret", "set", key, f"@{source}",
-           "--type", secret_type, "--target", target]
+           "--type", secret_type, "--target", target,
+           "--scope", scope]
     if force:
         cmd.append("--force")
 

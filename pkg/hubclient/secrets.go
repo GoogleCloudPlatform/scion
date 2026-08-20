@@ -89,12 +89,13 @@ type SetSecretResponse struct {
 }
 
 // AgentSetSecretRequest is the request for setting a secret via the agent-scoped endpoint.
-// Unlike SetSecretRequest, scope is derived from the agent's JWT — no scope/scopeID needed.
+// Scope defaults to "project" (derived from JWT); set to "user" for personal credentials.
 type AgentSetSecretRequest struct {
 	Value  string `json:"value"`            // Required: base64-encoded secret value
 	Type   string `json:"type,omitempty"`   // Secret type: environment (default), variable, file
 	Target string `json:"target,omitempty"` // Projection target (defaults to key)
 	Force  bool   `json:"force,omitempty"`  // Overwrite existing secret
+	Scope  string `json:"scope,omitempty"`  // "project" (default) or "user"
 }
 
 // AgentSetSecretResponse is the response from the agent-scoped set endpoint.

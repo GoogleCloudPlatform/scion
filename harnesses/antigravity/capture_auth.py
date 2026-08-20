@@ -92,7 +92,7 @@ def _validate_refresh_token(token_raw: str) -> bool:
 _AGY_TOKEN_PATH = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 
 
-def _try_capture_token_file(force: bool) -> int | None:
+def _try_capture_token_file(force: bool, scope: str = "project") -> int | None:
     """Attempt to capture AGY_TOKEN directly from the known disk path.
 
     Returns an exit code on definitive result, or None to continue to keyring.
@@ -111,7 +111,8 @@ def _try_capture_token_file(force: bool) -> int | None:
         print("capture-auth: AGY_TOKEN file does not contain refresh_token", file=sys.stderr)
         return _CA_EXIT_ERROR
     cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{expanded}",
-           "--type", "file", "--target", _AGY_TOKEN_PATH]
+           "--type", "file", "--target", _AGY_TOKEN_PATH,
+           "--scope", scope]
     if force:
         cmd.append("--force")
     try:
@@ -130,6 +131,11 @@ def _try_capture_token_file(force: bool) -> int | None:
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--scope", choices=["project", "user"], default="project")
+    known, _ = parser.parse_known_args()
+
     rc = scion_harness.capture_auth_main()
     if rc == _CA_EXIT_OK:
         return rc
@@ -142,7 +148,7 @@ def main() -> int:
     # Synthesized default: try the well-known AGY_TOKEN path on disk even if
     # capture-auth-config.json didn't list it (e.g. missing config, staging bug).
     force = "--force" in sys.argv
-    disk_rc = _try_capture_token_file(force)
+    disk_rc = _try_capture_token_file(force, known.scope)
     if disk_rc is not None:
         return disk_rc
 
@@ -164,7 +170,8 @@ def main() -> int:
             f.write(token)
         force = "--force" in sys.argv
         cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{tmp_path}",
-               "--type", "file", "--target", target]
+               "--type", "file", "--target", target,
+               "--scope", known.scope]
         if force:
             cmd.append("--force")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
