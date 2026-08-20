@@ -255,6 +255,14 @@ export class ScionPageTerminal extends LitElement {
       margin-top: 0.75rem;
     }
 
+    #capture-scope-group sl-radio {
+      display: block;
+    }
+
+    #capture-scope-group sl-radio:not(:last-of-type) {
+      margin-bottom: 0.5rem;
+    }
+
     /* Window switcher toggle group: two rectangular icon buttons */
     .toggle-group {
       display: inline-flex;
@@ -1521,11 +1529,11 @@ export class ScionPageTerminal extends LitElement {
             this.captureAuthSelectedScope = e.target.value;
           }}
         >
-          <sl-radio-button value="project"
-            >Project secret (all project agents)</sl-radio-button
+          <sl-radio value="project"
+            >Project secret (all project agents)</sl-radio
           >
-          <sl-radio-button value="user"
-            >Profile secret (your personal credential)</sl-radio-button
+          <sl-radio value="user"
+            >Profile secret (your personal credential)</sl-radio
           >
         </sl-radio-group>
         <sl-button
