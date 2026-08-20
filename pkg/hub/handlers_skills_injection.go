@@ -587,13 +587,14 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 			CreatedBy:    userIdent.ID(),
 		})
 	}
-	// Clean up progeny policies for existing entries before the atomic
-	// replace. SetSkillInjections deletes all entries and creates new ones
-	// with new UUIDs, so old policies keyed to old IDs would be orphaned.
+	// Collect old progeny IDs before the replace so we can clean up
+	// their policies after the replace succeeds. Deleting before the
+	// replace risks inconsistent state if the replace fails.
+	var oldProgenyIDs []string
 	if existing, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID()); err == nil {
 		for _, e := range existing {
 			if e.AllowProgeny {
-				s.deleteSkillProgenyPolicy(ctx, e.ID)
+				oldProgenyIDs = append(oldProgenyIDs, e.ID)
 			}
 		}
 	}
@@ -601,6 +602,11 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID(), injections, userIdent.ID()); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Clean up old progeny policies only after the replace succeeded.
+	for _, id := range oldProgenyIDs {
+		s.deleteSkillProgenyPolicy(ctx, id)
 	}
 
 	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())

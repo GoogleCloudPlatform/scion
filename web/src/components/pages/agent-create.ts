@@ -561,7 +561,8 @@ export class ScionPageAgentCreate extends LitElement {
     const user = visible.filter((t) => t.scope === 'user').sort(byName);
     const project = visible.filter((t) => t.scope === 'project').sort(byName);
     const global = visible.filter((t) => t.scope === 'global').sort(byName);
-    return [...user, ...project, ...global];
+    const rest = visible.filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global').sort(byName);
+    return [...user, ...project, ...global, ...rest];
   }
 
   /**

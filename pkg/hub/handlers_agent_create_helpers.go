@@ -518,7 +518,7 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 	// user-scoped skill injections marked allowProgeny whose creator is in
 	// the ancestry chain. These are added at user-scope precedence,
 	// following the same pattern as resolveEnvFromStorage for env vars.
-	if len(agent.Ancestry) > 1 {
+	if agent != nil && len(agent.Ancestry) > 1 {
 		if progenySkills, err := s.store.ListProgenySkillInjections(ctx, agent.Ancestry); err != nil {
 			slog.Warn("mergeInjectedSkills: failed to fetch progeny skill injections", "error", err)
 		} else {
