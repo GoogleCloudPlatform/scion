@@ -287,7 +287,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 	// in this codebase, and the reason a stale broker-scoped secret could
 	// silently shadow a project-scoped one regardless of which was meant
 	// to win.)
-	var scopes []scopeEntry
+	scopes := make([]scopeEntry, 0, 4)
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
 	}
