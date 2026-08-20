@@ -171,10 +171,15 @@ From inside an agent container, use the `sciontool secret` command suite:
     export API_KEY=$(sciontool secret get MY_API_KEY)
     ```
 
-*   **Set a Project Secret**: You can also write/update secrets from inside the container to persist credentials discovered or generated at runtime:
+*   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents):
     ```bash
+    # Set a project-scoped secret (default)
     sciontool secret set NEW_TOKEN "secret-value"
+
+    # Set a user-scoped (personal) secret
+    sciontool secret set MY_PERSONAL_TOKEN "token-xyz" --scope user
     ```
+    *Note: `--scope` accepts `project` (default) or `user`.*
 
 #### Using the Hub API Directly
 Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
@@ -185,7 +190,7 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
-*   **Authorization**: Agents are strictly bounded to their own project's secrets. They cannot access secrets in other projects, user-scoped secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
+*   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (representing the root user of the ancestry chain, i.e., `Ancestry[0]`). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
 *   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Successful and failed retrieval attempts log an audit event (`agent_secret_read`) identifying the calling agent, requested key, and status.
 
 ---

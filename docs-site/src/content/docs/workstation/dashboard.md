@@ -21,6 +21,10 @@ The dashboard features an integrated notification framework with real-time SSE d
 ### Native Web Chat
 When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents and team.
 - **Project-Scoped Spaces & Shared Threads**: Conversations are organized into distinct spaces scoped to specific Projects. Within these spaces, users and agents can collaborate on shared discussion threads.
+- **Project Context Preservation (Dashboard ↔ Chat Toggle)**: When you switch between dashboard and chat modes using the header buttons, the system maintains your active project context so you do not lose your place:
+  - **Dashboard → Chat**: Clicking the **Chat** icon while on a project-scoped dashboard page (e.g., `/projects/:id/...`) takes you straight to that project's chat space (`/chat/space/:id`).
+  - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
+  - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the view defaults back to the top-level dashboard `/`.
 - **Direct Messages (DMs)**: Start 1-on-1 direct messages covering both human-to-human (H2H) and human-to-agent (H2A) communication, consolidated as a single "global pair" thread per pair.
 - **Members Sidebar, Presence & Typing**: A right-hand sidebar displays active project members, showcasing real-time online presence status and typing indicators.
 - **Composer Default-Agent Disambiguation**: When sending messages in spaces with multiple active agents, the composer helps resolve which agent is targeted if no explicit mention is used.
