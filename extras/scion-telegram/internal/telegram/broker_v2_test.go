@@ -745,6 +745,71 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 	assert.Equal(t, "456", deliveredMsg.SenderID)
 }
 
+// TestV2_HandleGroupMessage_SenderIDUsesHubUserID verifies that once a
+// Telegram user is registered (mapping.ScionUserID populated), the outbound
+// StructuredMessage.SenderID carries the Hub user UUID rather than the raw
+// Telegram numeric ID. The Hub's outbound-message reply-affinity lookup
+// (webchat_conversation_context) is keyed by Hub user ID; sending the raw
+// Telegram ID there means a registered user's reply-affinity never matches,
+// and the agent's next reply falls back to whatever channel that Hub user
+// last used elsewhere (e.g. the web dashboard) instead of Telegram.
+func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		ScionUserID:    "hub-user-uuid-alice",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 42,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "@test_bot hi",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 9},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	assert.Equal(t, "user:alice@example.com", deliveredMsg.Sender)
+	assert.Equal(t, "hub-user-uuid-alice", deliveredMsg.SenderID)
+}
+
 func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
