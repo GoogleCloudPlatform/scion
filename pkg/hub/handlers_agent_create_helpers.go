@@ -513,6 +513,30 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			}
 		}
 	}
+
+	// Progeny skill resolution: when the agent has ancestry, include
+	// user-scoped skill injections marked allowProgeny whose creator is in
+	// the ancestry chain. These are added at user-scope precedence,
+	// following the same pattern as resolveEnvFromStorage for env vars.
+	if len(agent.Ancestry) > 1 {
+		if progenySkills, err := s.store.ListProgenySkillInjections(ctx, agent.Ancestry); err != nil {
+			slog.Warn("mergeInjectedSkills: failed to fetch progeny skill injections", "error", err)
+		} else {
+			// Deduplicate against already-included user refs by base URI.
+			existingURIs := make(map[string]bool, len(userRefs))
+			for _, ref := range userRefs {
+				existingURIs[skillBaseURI(ref.URI)] = true
+			}
+			for _, si := range progenySkills {
+				ref := si.ToSkillReference()
+				if !existingURIs[skillBaseURI(ref.URI)] {
+					userRefs = append(userRefs, ref)
+					existingURIs[skillBaseURI(ref.URI)] = true
+				}
+			}
+		}
+	}
+
 	for i := range userRefs {
 		userRefs[i].Scope = "user"
 	}

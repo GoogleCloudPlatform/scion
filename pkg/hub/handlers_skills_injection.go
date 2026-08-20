@@ -272,6 +272,16 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 			return
 		}
 		seenURIs[normalized] = true
+
+		// allowProgeny is only valid on user-scoped skill injections
+		if entry.AllowProgeny {
+			ValidationError(w, "allowProgeny is only supported on user-scoped skill injections", map[string]interface{}{
+				"field": "allowProgeny",
+				"scope": store.SkillInjectionScopeProject,
+				"entry": i,
+			})
+			return
+		}
 	}
 
 	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
@@ -577,6 +587,17 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 			CreatedBy:    userIdent.ID(),
 		})
 	}
+	// Clean up progeny policies for existing entries before the atomic
+	// replace. SetSkillInjections deletes all entries and creates new ones
+	// with new UUIDs, so old policies keyed to old IDs would be orphaned.
+	if existing, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID()); err == nil {
+		for _, e := range existing {
+			if e.AllowProgeny {
+				s.deleteSkillProgenyPolicy(ctx, e.ID)
+			}
+		}
+	}
+
 	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID(), injections, userIdent.ID()); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -799,7 +820,7 @@ func (s *Server) ensureSkillProgenyPolicy(ctx context.Context, si *store.SkillIn
 	if si.AllowProgeny {
 		existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
 		if err != nil {
-			slog.Warn("failed to check for existing skill progeny policy", "skillInjection", si.SkillURI, "error", err)
+			s.envSecretLog.Warn("failed to check for existing skill progeny policy", "skillInjection", si.SkillURI, "error", err)
 			return
 		}
 		if existing.TotalCount > 0 {
@@ -830,7 +851,7 @@ func (s *Server) ensureSkillProgenyPolicy(ctx context.Context, si *store.SkillIn
 			CreatedBy: si.CreatedBy,
 		}
 		if err := s.store.CreatePolicy(ctx, policy); err != nil {
-			slog.Warn("failed to create skill progeny policy", "skillInjection", si.SkillURI, "error", err)
+			s.envSecretLog.Warn("failed to create skill progeny policy", "skillInjection", si.SkillURI, "error", err)
 		}
 	} else {
 		s.deleteSkillProgenyPolicy(ctx, si.ID)
@@ -842,12 +863,12 @@ func (s *Server) deleteSkillProgenyPolicy(ctx context.Context, skillInjectionID 
 	policyName := skillProgenyPolicyName(skillInjectionID)
 	existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
 	if err != nil {
-		slog.Warn("failed to look up skill progeny policy for deletion", "skillInjectionID", skillInjectionID, "error", err)
+		s.envSecretLog.Warn("failed to look up skill progeny policy for deletion", "skillInjectionID", skillInjectionID, "error", err)
 		return
 	}
 	for _, p := range existing.Items {
 		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("failed to delete skill progeny policy", "policyID", p.ID, "error", err)
+			s.envSecretLog.Warn("failed to delete skill progeny policy", "policyID", p.ID, "error", err)
 		}
 	}
 }
