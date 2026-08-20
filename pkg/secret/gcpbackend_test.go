@@ -434,13 +434,14 @@ func TestGCPBackend_Resolve(t *testing.T) {
 		byName[sv.Name] = sv
 	}
 
-	// API_KEY overridden by project
+	// API_KEY: user scope wins over project (runtime_broker < hub < project
+	// < user, lowest first — user is the strongest scope).
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	if apiKey.Value != "grove-api-key" {
-		t.Errorf("expected project API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
+	if apiKey.Value != "user-api-key" {
+		t.Errorf("expected user API_KEY value %q, got %q", "user-api-key", apiKey.Value)
 	}
 
 	// DB_PASS from project
