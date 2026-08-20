@@ -1640,7 +1640,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 			}
 		} else {
 			// Iterate in reverse: resolved is ordered lowest-precedence first
-			// (hub < user < project < runtime_broker), so walking backwards
+			// (runtime_broker < hub < project < user), so walking backwards
 			// lets higher-precedence secrets win.
 			for i := len(resolved) - 1; i >= 0; i-- {
 				sv := resolved[i]
