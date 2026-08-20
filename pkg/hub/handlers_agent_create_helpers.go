@@ -1275,15 +1275,46 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 // for a single auth type (as declared in authMeta) are met. Unlike the broker
 // preflight (which only enforces required: true files), this checks ALL listed
 // files so the hub can determine whether the auth type is viable.
+//
+// When gcpSAAssigned is true and the auth type is GCP-backed (has files with
+// SkippedWhenGCPServiceAccountAssigned), env-var requirements are also treated
+// as satisfied. This is because GCP-backed auth types (e.g. vertex-ai) get
+// their env vars (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) injected at
+// runtime by the broker's resolveAuthEnvOverlay from settings.yaml or GCP
+// metadata — credentials the Hub cannot see at preflight time (#1165).
 func (s *Server) isAuthTypeSatisfied(ctx context.Context, agent *store.Agent, authMeta *config.HarnessAuthMetadata, authType string, gcpSAAssigned bool) (bool, error) {
-	keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
-	for _, group := range keyGroups {
-		found, err := s.hasAnyKey(ctx, agent, group)
-		if err != nil {
-			return false, err
+	if authMeta == nil {
+		return false, nil
+	}
+
+	// Determine whether this is a GCP-backed auth type whose runtime
+	// environment will be provided by the broker/GCP metadata server.
+	gcpRuntime := false
+	if gcpSAAssigned {
+		if t, ok := authMeta.Types[authType]; ok {
+			for _, f := range t.RequiredFiles {
+				if f.SkippedWhenGCPServiceAccountAssigned {
+					gcpRuntime = true
+					break
+				}
+			}
 		}
-		if !found {
-			return false, nil
+	}
+
+	// When gcpRuntime is true, skip the env-var check: the broker's
+	// resolveAuthEnvOverlay and GCP metadata will provide the required
+	// env vars at runtime, but they are invisible to the Hub's storage-only
+	// hasAnyKey check, causing a false NoAuth trigger.
+	if !gcpRuntime {
+		keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
+		for _, group := range keyGroups {
+			found, err := s.hasAnyKey(ctx, agent, group)
+			if err != nil {
+				return false, err
+			}
+			if !found {
+				return false, nil
+			}
 		}
 	}
 
