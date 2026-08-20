@@ -162,6 +162,29 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Implicit default: no recipient specified at all — fall back to the
+	// agent's creator (falling back further to its owner if creator is
+	// unset, e.g. agents created by automation). This is what lets an agent
+	// just call "send this reply back" without threading a recipient
+	// through every message-sending path (assistant-reply hooks, Telegram
+	// relay, etc.).
+	if recipientID == "" && recipient == "" {
+		creatorID := agent.CreatedBy
+		if creatorID == "" {
+			creatorID = agent.OwnerID
+		}
+		if creatorID != "" {
+			if u, err := s.store.GetUser(ctx, creatorID); err == nil {
+				recipientID = u.ID
+				name := u.DisplayName
+				if name == "" {
+					name = u.Email
+				}
+				recipient = "user:" + name
+			}
+		}
+	}
+
 	if recipientID == "" && recipient == "" {
 		ValidationError(w, "recipient is required — specify a user with 'user:<name>' or 'user:<email>'", nil)
 		return

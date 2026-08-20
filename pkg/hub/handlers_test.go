@@ -3024,3 +3024,76 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		t.Errorf("expected 400 for unknown recipient, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestOutboundMessage_ImplicitRecipientDefaultsToCreator verifies that a
+// message sent with no recipient at all (the case hit by the assistant-reply
+// hook and other auto-forwarding paths, which never set Recipient/RecipientID)
+// falls back to the agent's creator instead of rejecting with "recipient is
+// required" — matching the doc comment on handleAgentOutboundMessage.
+func TestOutboundMessage_ImplicitRecipientDefaultsToCreator(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	creator := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "creator@example.com",
+		DisplayName: "Creator",
+	}
+	if err := s.CreateUser(ctx, creator); err != nil {
+		t.Fatal(err)
+	}
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "msg-implicit-project",
+		Slug:       "msg-implicit-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+
+	rb := &store.RuntimeBroker{
+		ID:       tid("broker-msg-implicit"),
+		Name:     "test-broker-implicit",
+		Slug:     "test-broker-implicit",
+		Endpoint: "http://localhost:9801",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := s.CreateRuntimeBroker(ctx, rb); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "sender-implicit",
+		Slug:            "sender-implicit",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: tid("broker-msg-implicit"),
+		Visibility:      store.VisibilityPrivate,
+		CreatedBy:       creator.ID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Msg: "hello with no recipient set",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	agentIdent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}
+	req = req.WithContext(contextWithIdentity(req.Context(), agentIdent))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	if rr.Code != http.StatusOK && rr.Code != http.StatusCreated {
+		t.Fatalf("expected success falling back to agent creator, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
