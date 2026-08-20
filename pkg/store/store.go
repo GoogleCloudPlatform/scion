@@ -694,6 +694,10 @@ type EnvVarStore interface {
 
 	// ListEnvVars returns environment variables matching the filter criteria.
 	ListEnvVars(ctx context.Context, filter EnvVarFilter) ([]EnvVar, error)
+
+	// ListProgenyEnvVars returns user-scoped env vars with allowProgeny=true and
+	// injectionMode="always" whose createdBy is in the given set of ancestor IDs.
+	ListProgenyEnvVars(ctx context.Context, ancestorIDs []string) ([]EnvVar, error)
 }
 
 // EnvVarFilter defines criteria for filtering environment variables.
@@ -1471,6 +1475,10 @@ type SkillInjectionStore interface {
 	// given scope+scopeID. Used during project or user deletion to cascade-clean
 	// rows that have no FK cascade. Returns the number of rows deleted.
 	DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) (int, error)
+
+	// ListProgenySkillInjections returns user-scoped skill injections with
+	// allowProgeny=true whose createdBy is in the given set of ancestor IDs.
+	ListProgenySkillInjections(ctx context.Context, ancestorIDs []string) ([]SkillInjection, error)
 }
 
 // HubSettingStore defines persistence operations for operational hub settings.

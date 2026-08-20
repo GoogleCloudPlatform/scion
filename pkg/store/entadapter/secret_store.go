@@ -346,6 +346,7 @@ func entEnvVarToStore(e *ent.EnvVar) store.EnvVar {
 		Sensitive:     e.Sensitive,
 		InjectionMode: string(e.InjectionMode),
 		Secret:        e.Secret,
+		AllowProgeny:  e.AllowProgeny,
 		Created:       e.Created,
 		Updated:       e.Updated,
 		CreatedBy:     e.CreatedBy,
@@ -378,6 +379,7 @@ func (s *SecretStore) CreateEnvVar(ctx context.Context, envVar *store.EnvVar) er
 		SetSensitive(envVar.Sensitive).
 		SetInjectionMode(entenvvar.InjectionMode(envVar.InjectionMode)).
 		SetSecret(envVar.Secret).
+		SetAllowProgeny(envVar.AllowProgeny).
 		SetCreated(envVar.Created).
 		SetUpdated(envVar.Updated)
 
@@ -429,6 +431,7 @@ func (s *SecretStore) UpdateEnvVar(ctx context.Context, envVar *store.EnvVar) er
 		SetSensitive(envVar.Sensitive).
 		SetInjectionMode(entenvvar.InjectionMode(envVar.InjectionMode)).
 		SetSecret(envVar.Secret).
+		SetAllowProgeny(envVar.AllowProgeny).
 		SetUpdated(envVar.Updated).
 		Save(ctx)
 	if err != nil {
@@ -499,6 +502,33 @@ func (s *SecretStore) DeleteEnvVarsByScope(ctx context.Context, scope, scopeID s
 		return 0, err
 	}
 	return n, nil
+}
+
+// ListProgenyEnvVars returns user-scoped env vars with allowProgeny=true and
+// injectionMode="always" whose createdBy is in the given set of ancestor IDs.
+func (s *SecretStore) ListProgenyEnvVars(ctx context.Context, ancestorIDs []string) ([]store.EnvVar, error) {
+	if len(ancestorIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := s.client.EnvVar.Query().
+		Where(
+			entenvvar.ScopeEQ(store.ScopeUser),
+			entenvvar.AllowProgenyEQ(true),
+			entenvvar.InjectionModeEQ(entenvvar.InjectionModeAlways),
+			entenvvar.CreatedByIn(ancestorIDs...),
+		).
+		Order(entenvvar.ByKey()).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	envVars := make([]store.EnvVar, 0, len(rows))
+	for _, e := range rows {
+		envVars = append(envVars, entEnvVarToStore(e))
+	}
+	return envVars, nil
 }
 
 // ListEnvVars returns environment variables matching the filter, ordered by key.

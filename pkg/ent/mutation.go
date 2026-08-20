@@ -10612,6 +10612,7 @@ type EnvVarMutation struct {
 	sensitive      *bool
 	injection_mode *envvar.InjectionMode
 	secret         *bool
+	allow_progeny  *bool
 	created_by     *string
 	created        *time.Time
 	updated        *time.Time
@@ -11026,6 +11027,42 @@ func (m *EnvVarMutation) ResetSecret() {
 	m.secret = nil
 }
 
+// SetAllowProgeny sets the "allow_progeny" field.
+func (m *EnvVarMutation) SetAllowProgeny(b bool) {
+	m.allow_progeny = &b
+}
+
+// AllowProgeny returns the value of the "allow_progeny" field in the mutation.
+func (m *EnvVarMutation) AllowProgeny() (r bool, exists bool) {
+	v := m.allow_progeny
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAllowProgeny returns the old "allow_progeny" field's value of the EnvVar entity.
+// If the EnvVar object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EnvVarMutation) OldAllowProgeny(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAllowProgeny is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAllowProgeny requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAllowProgeny: %w", err)
+	}
+	return oldValue.AllowProgeny, nil
+}
+
+// ResetAllowProgeny resets all changes to the "allow_progeny" field.
+func (m *EnvVarMutation) ResetAllowProgeny() {
+	m.allow_progeny = nil
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (m *EnvVarMutation) SetCreatedBy(s string) {
 	m.created_by = &s
@@ -11181,7 +11218,7 @@ func (m *EnvVarMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *EnvVarMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
 	if m.key != nil {
 		fields = append(fields, envvar.FieldKey)
 	}
@@ -11205,6 +11242,9 @@ func (m *EnvVarMutation) Fields() []string {
 	}
 	if m.secret != nil {
 		fields = append(fields, envvar.FieldSecret)
+	}
+	if m.allow_progeny != nil {
+		fields = append(fields, envvar.FieldAllowProgeny)
 	}
 	if m.created_by != nil {
 		fields = append(fields, envvar.FieldCreatedBy)
@@ -11239,6 +11279,8 @@ func (m *EnvVarMutation) Field(name string) (ent.Value, bool) {
 		return m.InjectionMode()
 	case envvar.FieldSecret:
 		return m.Secret()
+	case envvar.FieldAllowProgeny:
+		return m.AllowProgeny()
 	case envvar.FieldCreatedBy:
 		return m.CreatedBy()
 	case envvar.FieldCreated:
@@ -11270,6 +11312,8 @@ func (m *EnvVarMutation) OldField(ctx context.Context, name string) (ent.Value, 
 		return m.OldInjectionMode(ctx)
 	case envvar.FieldSecret:
 		return m.OldSecret(ctx)
+	case envvar.FieldAllowProgeny:
+		return m.OldAllowProgeny(ctx)
 	case envvar.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
 	case envvar.FieldCreated:
@@ -11340,6 +11384,13 @@ func (m *EnvVarMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSecret(v)
+		return nil
+	case envvar.FieldAllowProgeny:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAllowProgeny(v)
 		return nil
 	case envvar.FieldCreatedBy:
 		v, ok := value.(string)
@@ -11449,6 +11500,9 @@ func (m *EnvVarMutation) ResetField(name string) error {
 		return nil
 	case envvar.FieldSecret:
 		m.ResetSecret()
+		return nil
+	case envvar.FieldAllowProgeny:
+		m.ResetAllowProgeny()
 		return nil
 	case envvar.FieldCreatedBy:
 		m.ResetCreatedBy()
@@ -39099,6 +39153,7 @@ type SkillInjectionMutation struct {
 	skill_uri     *string
 	skill_as      *string
 	optional      *bool
+	allow_progeny *bool
 	sort_order    *int
 	addsort_order *int
 	created_at    *time.Time
@@ -39406,6 +39461,42 @@ func (m *SkillInjectionMutation) ResetOptional() {
 	m.optional = nil
 }
 
+// SetAllowProgeny sets the "allow_progeny" field.
+func (m *SkillInjectionMutation) SetAllowProgeny(b bool) {
+	m.allow_progeny = &b
+}
+
+// AllowProgeny returns the value of the "allow_progeny" field in the mutation.
+func (m *SkillInjectionMutation) AllowProgeny() (r bool, exists bool) {
+	v := m.allow_progeny
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAllowProgeny returns the old "allow_progeny" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldAllowProgeny(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAllowProgeny is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAllowProgeny requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAllowProgeny: %w", err)
+	}
+	return oldValue.AllowProgeny, nil
+}
+
+// ResetAllowProgeny resets all changes to the "allow_progeny" field.
+func (m *SkillInjectionMutation) ResetAllowProgeny() {
+	m.allow_progeny = nil
+}
+
 // SetSortOrder sets the "sort_order" field.
 func (m *SkillInjectionMutation) SetSortOrder(i int) {
 	m.sort_order = &i
@@ -39581,7 +39672,7 @@ func (m *SkillInjectionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *SkillInjectionMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 9)
 	if m.scope != nil {
 		fields = append(fields, skillinjection.FieldScope)
 	}
@@ -39596,6 +39687,9 @@ func (m *SkillInjectionMutation) Fields() []string {
 	}
 	if m.optional != nil {
 		fields = append(fields, skillinjection.FieldOptional)
+	}
+	if m.allow_progeny != nil {
+		fields = append(fields, skillinjection.FieldAllowProgeny)
 	}
 	if m.sort_order != nil {
 		fields = append(fields, skillinjection.FieldSortOrder)
@@ -39624,6 +39718,8 @@ func (m *SkillInjectionMutation) Field(name string) (ent.Value, bool) {
 		return m.SkillAs()
 	case skillinjection.FieldOptional:
 		return m.Optional()
+	case skillinjection.FieldAllowProgeny:
+		return m.AllowProgeny()
 	case skillinjection.FieldSortOrder:
 		return m.SortOrder()
 	case skillinjection.FieldCreatedAt:
@@ -39649,6 +39745,8 @@ func (m *SkillInjectionMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldSkillAs(ctx)
 	case skillinjection.FieldOptional:
 		return m.OldOptional(ctx)
+	case skillinjection.FieldAllowProgeny:
+		return m.OldAllowProgeny(ctx)
 	case skillinjection.FieldSortOrder:
 		return m.OldSortOrder(ctx)
 	case skillinjection.FieldCreatedAt:
@@ -39698,6 +39796,13 @@ func (m *SkillInjectionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetOptional(v)
+		return nil
+	case skillinjection.FieldAllowProgeny:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAllowProgeny(v)
 		return nil
 	case skillinjection.FieldSortOrder:
 		v, ok := value.(int)
@@ -39813,6 +39918,9 @@ func (m *SkillInjectionMutation) ResetField(name string) error {
 		return nil
 	case skillinjection.FieldOptional:
 		m.ResetOptional()
+		return nil
+	case skillinjection.FieldAllowProgeny:
+		m.ResetAllowProgeny()
 		return nil
 	case skillinjection.FieldSortOrder:
 		m.ResetSortOrder()

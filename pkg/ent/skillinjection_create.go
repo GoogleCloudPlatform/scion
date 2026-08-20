@@ -70,6 +70,20 @@ func (_c *SkillInjectionCreate) SetNillableOptional(v *bool) *SkillInjectionCrea
 	return _c
 }
 
+// SetAllowProgeny sets the "allow_progeny" field.
+func (_c *SkillInjectionCreate) SetAllowProgeny(v bool) *SkillInjectionCreate {
+	_c.mutation.SetAllowProgeny(v)
+	return _c
+}
+
+// SetNillableAllowProgeny sets the "allow_progeny" field if the given value is not nil.
+func (_c *SkillInjectionCreate) SetNillableAllowProgeny(v *bool) *SkillInjectionCreate {
+	if v != nil {
+		_c.SetAllowProgeny(*v)
+	}
+	return _c
+}
+
 // SetSortOrder sets the "sort_order" field.
 func (_c *SkillInjectionCreate) SetSortOrder(v int) *SkillInjectionCreate {
 	_c.mutation.SetSortOrder(v)
@@ -165,6 +179,10 @@ func (_c *SkillInjectionCreate) defaults() {
 		v := skillinjection.DefaultOptional
 		_c.mutation.SetOptional(v)
 	}
+	if _, ok := _c.mutation.AllowProgeny(); !ok {
+		v := skillinjection.DefaultAllowProgeny
+		_c.mutation.SetAllowProgeny(v)
+	}
 	if _, ok := _c.mutation.SortOrder(); !ok {
 		v := skillinjection.DefaultSortOrder
 		_c.mutation.SetSortOrder(v)
@@ -197,6 +215,9 @@ func (_c *SkillInjectionCreate) check() error {
 	}
 	if _, ok := _c.mutation.Optional(); !ok {
 		return &ValidationError{Name: "optional", err: errors.New(`ent: missing required field "SkillInjection.optional"`)}
+	}
+	if _, ok := _c.mutation.AllowProgeny(); !ok {
+		return &ValidationError{Name: "allow_progeny", err: errors.New(`ent: missing required field "SkillInjection.allow_progeny"`)}
 	}
 	if _, ok := _c.mutation.SortOrder(); !ok {
 		return &ValidationError{Name: "sort_order", err: errors.New(`ent: missing required field "SkillInjection.sort_order"`)}
@@ -259,6 +280,10 @@ func (_c *SkillInjectionCreate) createSpec() (*SkillInjection, *sqlgraph.CreateS
 	if value, ok := _c.mutation.Optional(); ok {
 		_spec.SetField(skillinjection.FieldOptional, field.TypeBool, value)
 		_node.Optional = value
+	}
+	if value, ok := _c.mutation.AllowProgeny(); ok {
+		_spec.SetField(skillinjection.FieldAllowProgeny, field.TypeBool, value)
+		_node.AllowProgeny = value
 	}
 	if value, ok := _c.mutation.SortOrder(); ok {
 		_spec.SetField(skillinjection.FieldSortOrder, field.TypeInt, value)
@@ -387,6 +412,18 @@ func (u *SkillInjectionUpsert) SetOptional(v bool) *SkillInjectionUpsert {
 // UpdateOptional sets the "optional" field to the value that was provided on create.
 func (u *SkillInjectionUpsert) UpdateOptional() *SkillInjectionUpsert {
 	u.SetExcluded(skillinjection.FieldOptional)
+	return u
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (u *SkillInjectionUpsert) SetAllowProgeny(v bool) *SkillInjectionUpsert {
+	u.Set(skillinjection.FieldAllowProgeny, v)
+	return u
+}
+
+// UpdateAllowProgeny sets the "allow_progeny" field to the value that was provided on create.
+func (u *SkillInjectionUpsert) UpdateAllowProgeny() *SkillInjectionUpsert {
+	u.SetExcluded(skillinjection.FieldAllowProgeny)
 	return u
 }
 
@@ -551,6 +588,20 @@ func (u *SkillInjectionUpsertOne) SetOptional(v bool) *SkillInjectionUpsertOne {
 func (u *SkillInjectionUpsertOne) UpdateOptional() *SkillInjectionUpsertOne {
 	return u.Update(func(s *SkillInjectionUpsert) {
 		s.UpdateOptional()
+	})
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (u *SkillInjectionUpsertOne) SetAllowProgeny(v bool) *SkillInjectionUpsertOne {
+	return u.Update(func(s *SkillInjectionUpsert) {
+		s.SetAllowProgeny(v)
+	})
+}
+
+// UpdateAllowProgeny sets the "allow_progeny" field to the value that was provided on create.
+func (u *SkillInjectionUpsertOne) UpdateAllowProgeny() *SkillInjectionUpsertOne {
+	return u.Update(func(s *SkillInjectionUpsert) {
+		s.UpdateAllowProgeny()
 	})
 }
 
@@ -888,6 +939,20 @@ func (u *SkillInjectionUpsertBulk) SetOptional(v bool) *SkillInjectionUpsertBulk
 func (u *SkillInjectionUpsertBulk) UpdateOptional() *SkillInjectionUpsertBulk {
 	return u.Update(func(s *SkillInjectionUpsert) {
 		s.UpdateOptional()
+	})
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (u *SkillInjectionUpsertBulk) SetAllowProgeny(v bool) *SkillInjectionUpsertBulk {
+	return u.Update(func(s *SkillInjectionUpsert) {
+		s.SetAllowProgeny(v)
+	})
+}
+
+// UpdateAllowProgeny sets the "allow_progeny" field to the value that was provided on create.
+func (u *SkillInjectionUpsertBulk) UpdateAllowProgeny() *SkillInjectionUpsertBulk {
+	return u.Update(func(s *SkillInjectionUpsert) {
+		s.UpdateAllowProgeny()
 	})
 }
 

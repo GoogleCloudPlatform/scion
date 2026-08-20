@@ -53,6 +53,8 @@ func (EnvVar) Fields() []ent.Field {
 			Default("as_needed"),
 		field.Bool("secret").
 			Default(false),
+		field.Bool("allow_progeny").
+			Default(false),
 		field.String("created_by").
 			Optional(),
 		field.Time("created").

@@ -520,3 +520,103 @@ func TestSkillInjection_AddDoesNotMutateOnFailure(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrAlreadyExists)
 	assert.Equal(t, zeroTime, second.CreatedAt, "CreatedAt must not be mutated when Save fails")
 }
+
+// =============================================================================
+// Progeny skill injection tests
+// =============================================================================
+
+// TestListProgenySkillInjections verifies the transitive progeny-inheritance
+// query: only user-scoped, allow_progeny=true skill injections whose created_by
+// is within the ancestor set are returned. Mirrors TestListProgenySecretsInheritance.
+func TestListProgenySkillInjections(t *testing.T) {
+	s := newTestSkillInjectionStore(t)
+	ctx := context.Background()
+
+	ancestor1 := uuid.NewString()
+	ancestor2 := uuid.NewString()
+	stranger := uuid.NewString()
+
+	// Eligible: user-scoped, allow_progeny=true, created by an ancestor.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		ID: uuid.NewString(), Scope: store.SkillInjectionScopeUser, ScopeID: ancestor1,
+		SkillURI: "skill://org/inherit-1@1.0", AllowProgeny: true, CreatedBy: ancestor1,
+	}))
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		ID: uuid.NewString(), Scope: store.SkillInjectionScopeUser, ScopeID: ancestor2,
+		SkillURI: "skill://org/inherit-2@1.0", AllowProgeny: true, CreatedBy: ancestor2,
+	}))
+
+	// Ineligible: allow_progeny=false.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		ID: uuid.NewString(), Scope: store.SkillInjectionScopeUser, ScopeID: ancestor1,
+		SkillURI: "skill://org/no-progeny@1.0", AllowProgeny: false, CreatedBy: ancestor1,
+	}))
+	// Ineligible: created by a non-ancestor.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		ID: uuid.NewString(), Scope: store.SkillInjectionScopeUser, ScopeID: stranger,
+		SkillURI: "skill://org/stranger@1.0", AllowProgeny: true, CreatedBy: stranger,
+	}))
+	// Ineligible: wrong scope (project), even though allow_progeny + ancestor creator.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		ID: uuid.NewString(), Scope: store.SkillInjectionScopeProject, ScopeID: uuid.NewString(),
+		SkillURI: "skill://org/project-scoped@1.0", AllowProgeny: true, CreatedBy: ancestor1,
+	}))
+
+	got, err := s.ListProgenySkillInjections(ctx, []string{ancestor1, ancestor2})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	uris := map[string]bool{}
+	for _, si := range got {
+		uris[si.SkillURI] = true
+	}
+	assert.True(t, uris["skill://org/inherit-1@1.0"])
+	assert.True(t, uris["skill://org/inherit-2@1.0"])
+}
+
+// TestListProgenySkillInjections_EmptyAncestors verifies that empty/nil
+// ancestor IDs return nil without error.
+func TestListProgenySkillInjections_EmptyAncestors(t *testing.T) {
+	s := newTestSkillInjectionStore(t)
+	ctx := context.Background()
+
+	got, err := s.ListProgenySkillInjections(ctx, nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	got, err = s.ListProgenySkillInjections(ctx, []string{})
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// TestSkillInjection_AllowProgenyRoundTrip verifies that AllowProgeny is
+// correctly persisted and retrieved for user-scoped skill injections.
+func TestSkillInjection_AllowProgenyRoundTrip(t *testing.T) {
+	s := newTestSkillInjectionStore(t)
+	ctx := context.Background()
+
+	userID := uuid.NewString()
+	si := &store.SkillInjection{
+		ID:           uuid.NewString(),
+		Scope:        store.SkillInjectionScopeUser,
+		ScopeID:      userID,
+		SkillURI:     "skill://org/progeny-skill@1.0",
+		AllowProgeny: true,
+		CreatedBy:    userID,
+	}
+	require.NoError(t, s.AddSkillInjection(ctx, si))
+
+	list, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.True(t, list[0].AllowProgeny, "AllowProgeny must be true after round-trip")
+
+	// Update to false.
+	si.AllowProgeny = false
+	require.NoError(t, s.UpdateSkillInjection(ctx, si))
+
+	list, err = s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.False(t, list[0].AllowProgeny, "AllowProgeny must be false after update")
+}

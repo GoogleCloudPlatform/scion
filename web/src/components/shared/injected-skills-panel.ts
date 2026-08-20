@@ -191,6 +191,8 @@ interface SkillRow {
   as: string;
   /** Whether a resolution failure is non-fatal. */
   optional: boolean;
+  /** Allow creator's progeny agents to access (user scope only). */
+  allowProgeny: boolean;
   /** Position for drag-based reorder (project/user only). */
   sortOrder: number;
   /** Enriched skill name (if URI resolves to skill bank). */
@@ -226,6 +228,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
   @state() private dialogUri = '';
   @state() private dialogAs = '';
   @state() private dialogOptional = false;
+  @state() private dialogAllowProgeny = false;
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
   /** When a URI input is transformed to canonical form, holds the preview string. */
@@ -521,6 +524,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
           uri: s.uri,
           as: s.as || '',
           optional: s.optional ?? false,
+          allowProgeny: false,
           sortOrder: i,
           skillName: '',
           skillSlug: '',
@@ -531,6 +535,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
           uri: s.uri,
           as: s.as || '',
           optional: s.optional ?? false,
+          allowProgeny: false,
           sortOrder: i,
           skillName: '',
           skillSlug: '',
@@ -544,6 +549,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
             skillUri: string;
             skillAs?: string;
             optional?: boolean;
+            allowProgeny?: boolean;
             sortOrder?: number;
             skillName?: string;
             skillSlug?: string;
@@ -555,6 +561,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
           uri: e.skillUri,
           as: e.skillAs || '',
           optional: e.optional ?? false,
+          allowProgeny: e.allowProgeny ?? false,
           sortOrder: e.sortOrder ?? 0,
           skillName: e.skillName || '',
           skillSlug: e.skillSlug || '',
@@ -573,17 +580,30 @@ export class ScionInjectedSkillsPanel extends LitElement {
     }
   }
 
-  private async addEntry(uri: string, skillAs: string, optional: boolean): Promise<void> {
+  private async addEntry(
+    uri: string,
+    skillAs: string,
+    optional: boolean,
+    allowProgeny = false
+  ): Promise<void> {
     if (this.scope === 'hub') {
       // For hub: append to user_defined and PUT the full user_defined list
       const userDefined = this.rows.filter((r) => !r.readonly).map((r) => this.rowToSkillRef(r));
       userDefined.push(this.buildSkillRef(uri, skillAs, optional));
       await this.putHubUserDefined(userDefined);
     } else {
+      const body: Record<string, unknown> = {
+        skillUri: uri,
+        skillAs: skillAs || undefined,
+        optional,
+      };
+      if (this.scope === 'user' && allowProgeny) {
+        body.allowProgeny = true;
+      }
       const res = await apiFetch(this.apiBase, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ skillUri: uri, skillAs: skillAs || undefined, optional }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         throw new Error(await extractApiError(res, `Failed to add skill (HTTP ${res.status})`));
@@ -673,6 +693,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
         skillUri: r.uri,
         skillAs: r.as || undefined,
         optional: r.optional,
+        allowProgeny: this.scope === 'user' ? r.allowProgeny : undefined,
         sortOrder: i + 1,
       }));
       const res = await apiFetch(this.apiBase, {
@@ -736,6 +757,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
     this.dialogUri = '';
     this.dialogAs = '';
     this.dialogOptional = false;
+    this.dialogAllowProgeny = false;
     this.dialogLoading = false;
     this.dialogError = null;
     this.dialogTransformed = null;
@@ -842,7 +864,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
     this.dialogLoading = true;
     this.dialogError = null;
     try {
-      await this.addEntry(uri, this.dialogAs.trim(), this.dialogOptional);
+      await this.addEntry(uri, this.dialogAs.trim(), this.dialogOptional, this.dialogAllowProgeny);
       this.closeDialog();
     } catch (err) {
       this.dialogError = err instanceof Error ? err.message : 'Failed to add skill';
@@ -1191,6 +1213,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
               <th>Skill</th>
               <th>Alias (as)</th>
               <th>Optional</th>
+              ${this.scope === 'user' ? html`<th>Progeny</th>` : nothing}
               ${canEdit ? html`<th class="actions-cell"></th>` : nothing}
             </tr>
           </thead>
@@ -1263,6 +1286,13 @@ export class ScionInjectedSkillsPanel extends LitElement {
                 style="color: var(--scion-text-muted, #64748b);"
               ></sl-icon>`}
         </td>
+        ${this.scope === 'user'
+          ? html`<td>
+              ${row.allowProgeny
+                ? html`<sl-icon name="check-lg" title="Progeny can access"></sl-icon>`
+                : '—'}
+            </td>`
+          : nothing}
         ${canEdit
           ? html`
               <td class="actions-cell">
@@ -1474,6 +1504,23 @@ export class ScionInjectedSkillsPanel extends LitElement {
               </span>
             </span>
           </label>
+
+          ${this.scope === 'user'
+            ? html`
+                <sl-switch
+                  ?checked=${this.dialogAllowProgeny}
+                  @sl-change=${(e: Event) => {
+                    this.dialogAllowProgeny = (e.target as HTMLInputElement).checked;
+                  }}
+                >
+                  Allow agent progeny to access
+                </sl-switch>
+                <span class="radio-field-help">
+                  When enabled, agents spawned by your agents (and their descendants) will also
+                  receive this skill.
+                </span>
+              `
+            : nothing}
 
           ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
         </div>

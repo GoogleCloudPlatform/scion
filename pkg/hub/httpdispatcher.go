@@ -1527,6 +1527,27 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		}
 	}
 
+	// Progeny env var resolution: when the agent has ancestry, include
+	// user-scoped env vars marked allowProgeny (with injectionMode=always)
+	// whose creator is in the ancestry chain. These are added at user-scope
+	// precedence — project/broker env vars with the same key will already
+	// have overridden them.
+	if agent != nil && len(agent.Ancestry) > 1 {
+		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("resolveEnvFromStorage: failed to list progeny env vars", "error", err)
+			}
+		} else {
+			for _, v := range progenyVars {
+				if _, exists := result[v.Key]; exists {
+					continue // higher-precedence scope already set this key
+				}
+				result[v.Key] = v.Value
+			}
+		}
+	}
+
 	return result, nil
 }
 

@@ -53,6 +53,7 @@ export class ScionEnvVarList extends LitElement {
   @state() private dialogSensitive = false;
   @state() private dialogSecret = false;
   @state() private dialogInjectionMode: InjectionMode = 'as_needed';
+  @state() private dialogAllowProgeny = false;
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
 
@@ -101,6 +102,7 @@ export class ScionEnvVarList extends LitElement {
     this.dialogSensitive = false;
     this.dialogSecret = false;
     this.dialogInjectionMode = 'as_needed';
+    this.dialogAllowProgeny = false;
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -113,6 +115,7 @@ export class ScionEnvVarList extends LitElement {
     this.dialogSensitive = envVar.sensitive;
     this.dialogSecret = envVar.secret;
     this.dialogInjectionMode = envVar.injectionMode || 'as_needed';
+    this.dialogAllowProgeny = envVar.allowProgeny || false;
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -146,6 +149,10 @@ export class ScionEnvVarList extends LitElement {
         sensitive: this.dialogSensitive,
         secret: this.dialogSecret,
         injectionMode: this.dialogInjectionMode,
+        allowProgeny:
+          this.scope === 'user' && this.dialogInjectionMode === 'always'
+            ? this.dialogAllowProgeny
+            : undefined,
       };
 
       if (this.scope === 'project') {
@@ -325,6 +332,7 @@ export class ScionEnvVarList extends LitElement {
               <th>Value</th>
               <th class="hide-mobile">Description</th>
               <th>Inject</th>
+              ${this.scope === 'user' ? html`<th>Progeny</th>` : nothing}
               <th>Flags</th>
               <th class="hide-mobile">Updated</th>
               <th class="actions-cell"></th>
@@ -355,6 +363,13 @@ export class ScionEnvVarList extends LitElement {
             ? html`<span class="badge inject-as-needed">as needed</span>`
             : html`<span class="badge inject-always">always</span>`}
         </td>
+        ${this.scope === 'user'
+          ? html`<td>
+              ${envVar.allowProgeny
+                ? html`<sl-icon name="check-lg" title="Progeny can access"></sl-icon>`
+                : '—'}
+            </td>`
+          : nothing}
         <td>
           <div class="badges">
             ${envVar.sensitive
@@ -471,6 +486,23 @@ export class ScionEnvVarList extends LitElement {
               "As needed" injects only when the agent configuration requests this value.
             </span>
           </div>
+
+          ${this.scope === 'user' && this.dialogInjectionMode === 'always'
+            ? html`
+                <sl-switch
+                  ?checked=${this.dialogAllowProgeny}
+                  @sl-change=${(e: Event) => {
+                    this.dialogAllowProgeny = (e.target as HTMLInputElement).checked;
+                  }}
+                >
+                  Allow agent progeny to access
+                </sl-switch>
+                <span class="radio-field-help">
+                  When enabled, agents spawned by your agents (and their descendants) will also
+                  receive this variable.
+                </span>
+              `
+            : nothing}
 
           <div class="checkbox-group">
             <label class="checkbox-label">

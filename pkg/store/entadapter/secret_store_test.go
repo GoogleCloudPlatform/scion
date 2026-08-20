@@ -316,6 +316,75 @@ func TestListProgenySecretsEmptyAncestors(t *testing.T) {
 	assert.Nil(t, got)
 }
 
+// TestListProgenyEnvVarsInheritance verifies the transitive progeny-inheritance
+// query for env vars: only user-scoped, allow_progeny=true, injection_mode=always
+// env vars whose created_by is within the ancestor set are returned.
+func TestListProgenyEnvVarsInheritance(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	ancestor1 := uuid.New().String()
+	ancestor2 := uuid.New().String()
+	stranger := uuid.New().String()
+
+	// Eligible: user-scoped, allow_progeny=true, injection_mode=always, created by ancestor.
+	require.NoError(t, ss.CreateEnvVar(ctx, &store.EnvVar{
+		ID: uuid.New().String(), Key: "INHERIT_1", Value: "val1",
+		Scope: store.ScopeUser, ScopeID: ancestor1,
+		InjectionMode: store.InjectionModeAlways, AllowProgeny: true, CreatedBy: ancestor1,
+	}))
+	require.NoError(t, ss.CreateEnvVar(ctx, &store.EnvVar{
+		ID: uuid.New().String(), Key: "INHERIT_2", Value: "val2",
+		Scope: store.ScopeUser, ScopeID: ancestor2,
+		InjectionMode: store.InjectionModeAlways, AllowProgeny: true, CreatedBy: ancestor2,
+	}))
+
+	// Ineligible: allow_progeny=false.
+	require.NoError(t, ss.CreateEnvVar(ctx, &store.EnvVar{
+		ID: uuid.New().String(), Key: "NO_PROGENY", Value: "x",
+		Scope: store.ScopeUser, ScopeID: ancestor1,
+		InjectionMode: store.InjectionModeAlways, AllowProgeny: false, CreatedBy: ancestor1,
+	}))
+	// Ineligible: injection_mode=as_needed (not always).
+	require.NoError(t, ss.CreateEnvVar(ctx, &store.EnvVar{
+		ID: uuid.New().String(), Key: "AS_NEEDED", Value: "x",
+		Scope: store.ScopeUser, ScopeID: ancestor1,
+		InjectionMode: store.InjectionModeAsNeeded, AllowProgeny: true, CreatedBy: ancestor1,
+	}))
+	// Ineligible: created by a non-ancestor.
+	require.NoError(t, ss.CreateEnvVar(ctx, &store.EnvVar{
+		ID: uuid.New().String(), Key: "STRANGER", Value: "x",
+		Scope: store.ScopeUser, ScopeID: stranger,
+		InjectionMode: store.InjectionModeAlways, AllowProgeny: true, CreatedBy: stranger,
+	}))
+	// Ineligible: wrong scope (project), even though allow_progeny + ancestor creator.
+	require.NoError(t, ss.CreateEnvVar(ctx, &store.EnvVar{
+		ID: uuid.New().String(), Key: "PROJ_VAR", Value: "x",
+		Scope: store.ScopeProject, ScopeID: uuid.New().String(),
+		InjectionMode: store.InjectionModeAlways, AllowProgeny: true, CreatedBy: ancestor1,
+	}))
+
+	got, err := ss.ListProgenyEnvVars(ctx, []string{ancestor1, ancestor2})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	keys := map[string]bool{}
+	for _, v := range got {
+		keys[v.Key] = true
+	}
+	assert.True(t, keys["INHERIT_1"])
+	assert.True(t, keys["INHERIT_2"])
+}
+
+func TestListProgenyEnvVarsEmptyAncestors(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+
+	got, err := ss.ListProgenyEnvVars(ctx, nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
 // =============================================================================
 // EnvVar tests
 // =============================================================================
