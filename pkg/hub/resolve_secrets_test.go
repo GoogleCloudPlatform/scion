@@ -50,7 +50,7 @@ func TestResolveSecrets(t *testing.T) {
 		ScopeID:        tid("project-1"),
 		InjectionMode:  store.InjectionModeAlways,
 	}
-	// Project-level override of user API_KEY
+	// Project-level API_KEY (same key as user; user scope wins)
 	projectOverride := &store.Secret{
 		ID:             tid("s3"),
 		Key:            "API_KEY",
