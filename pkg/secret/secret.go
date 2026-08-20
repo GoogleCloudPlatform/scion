@@ -142,7 +142,7 @@ type SecretBackend interface {
 	GetMeta(ctx context.Context, name, scope, scopeID string) (*SecretMeta, error)
 
 	// Resolve collects and merges secrets from all applicable scopes for an agent.
-	// Scopes are resolved in order: user < project < runtime_broker (later overrides earlier).
+	// Scopes are resolved in order, lowest first: runtime_broker < hub < project < user.
 	// The opts parameter is optional; pass nil for the current behavior.
 	// When opts.AgentAncestry is present, user-scoped secrets marked allowProgeny
 	// whose creator appears in the ancestry chain are included in the result.
