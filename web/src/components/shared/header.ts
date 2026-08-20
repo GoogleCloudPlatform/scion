@@ -25,8 +25,41 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { apiFetch } from '../../client/api.js';
 import './notification-tray.js';
 import './inbox-tray.js';
+
+// ---------------------------------------------------------------------------
+// Project-context helpers for the dashboard ↔ chat mode switch.
+//
+// These are pure functions exported for testing — they map URL paths to
+// the project identifier that should carry across the view toggle.
+// ---------------------------------------------------------------------------
+
+/** Extract a project ID from a dashboard-style path (`/projects/:id/…`). */
+export function projectIdFromDashboardPath(path: string): string | null {
+  const m = path.match(/^\/projects\/([^/?#]+)/);
+  // `/projects/new` is the creation form, not a project-scoped page.
+  return m && m[1] !== 'new' ? m[1] : null;
+}
+
+/** Extract a project ID from a legacy chat space path (`/chat/space/:id/…`). */
+export function projectIdFromChatSpacePath(path: string): string | null {
+  const m = path.match(/^\/chat\/space\/([^/?#]+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Extract a project slug from a readable chat path (`/chat/:slug` or
+ * `/chat/:slug/:threadId`). Returns null for space, dm, and bare `/chat`
+ * paths — those are handled by dedicated helpers or have no project context.
+ */
+export function slugFromChatPath(path: string): string | null {
+  if (/^\/chat\/space\//.test(path)) return null;
+  if (/^\/chat\/dm\//.test(path)) return null;
+  const m = path.match(/^\/chat\/([^/?#]+)/);
+  return m ? m[1] : null;
+}
 
 /** URL for the Scion documentation site, opened by the Help button. */
 const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
@@ -382,7 +415,7 @@ export class ScionHeader extends LitElement {
             name="house"
             label="Dashboard"
             class=${isChat ? '' : 'active'}
-            @click=${(): void => this.handleModeSwitch('/')}
+            @click=${() => { this.handleModeSwitch('/'); }}
           ></sl-icon-button>
         </sl-tooltip>
         <sl-tooltip content="Chat">
@@ -390,7 +423,7 @@ export class ScionHeader extends LitElement {
             name="chat-dots"
             label="Chat"
             class=${isChat ? 'active' : ''}
-            @click=${(): void => this.handleModeSwitch('/chat')}
+            @click=${() => { this.handleModeSwitch('/chat'); }}
           ></sl-icon-button>
         </sl-tooltip>
       </div>
@@ -398,17 +431,77 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Navigate to the given mode. Uses the same nav-click event as the sidebar
-   * so the router handles it identically in both the app and chat shells.
+   * Navigate to the given mode, preserving project context when possible.
+   *
+   * Dashboard → Chat:  /projects/:id/… → /chat/space/:id
+   * Chat → Dashboard:  /chat/space/:id/… → /projects/:id
+   *                     /chat/:slug/…     → (resolve slug) → /projects/:id
+   *                     /chat/dm/…        → / (no project context)
+   *
+   * Uses the same nav-click event as the sidebar so the router handles it
+   * identically in both the app and chat shells.
    */
-  private handleModeSwitch(path: string): void {
+  private async handleModeSwitch(targetBase: string): Promise<void> {
+    const currentPath = this.currentPath || window.location.pathname;
+    let target: string;
+
+    if (targetBase === '/chat') {
+      // Dashboard → Chat: carry the project ID into a space URL.
+      const projectId = projectIdFromDashboardPath(currentPath);
+      target = projectId
+        ? `/chat/space/${encodeURIComponent(projectId)}`
+        : '/chat';
+    } else {
+      // Chat → Dashboard: resolve project ID from the chat URL.
+      const projectId = projectIdFromChatSpacePath(currentPath);
+      if (projectId) {
+        target = `/projects/${encodeURIComponent(projectId)}`;
+      } else {
+        const slug = slugFromChatPath(currentPath);
+        if (slug) {
+          const resolvedId = await this.resolveProjectIdBySlug(slug);
+          target = resolvedId
+            ? `/projects/${encodeURIComponent(resolvedId)}`
+            : '/';
+        } else {
+          target = '/';
+        }
+      }
+    }
+
+    // Guard: component may have disconnected during async slug resolution.
+    if (!this.isConnected) return;
+
     this.dispatchEvent(
       new CustomEvent('nav-click', {
-        detail: { path },
+        detail: { path: target },
         bubbles: true,
         composed: true,
       })
     );
+  }
+
+  /**
+   * Look up a project by slug via the projects API, returning the project ID
+   * or an empty string when the slug cannot be resolved.
+   */
+  private async resolveProjectIdBySlug(slug: string): Promise<string> {
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`
+      );
+      if (res.ok) {
+        const data = (await res.json()) as {
+          items?: Array<{ id: string; slug: string }>;
+        };
+        if (data.items && data.items.length > 0) {
+          return data.items[0].id;
+        }
+      }
+    } catch {
+      // Slug resolution is best-effort; fall back to the top-level view.
+    }
+    return '';
   }
 
   private renderUserSection() {
