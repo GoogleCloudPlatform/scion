@@ -223,6 +223,13 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
       description: 'JSON map of Telegram usernames to scion user IDs (v1 migration seeding only)',
       defaultValue: '',
     },
+    {
+      key: 'register_url',
+      label: 'Register URL',
+      description: 'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
+      defaultValue: '',
+      placeholder: 'https://scion.example.com',
+    },
   ],
   discord: [
     {
@@ -238,6 +245,13 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
         'Comma-separated Discord server IDs. Leave empty to register commands globally across all servers the bot joins.',
       defaultValue: '',
       placeholder: 'Global — all servers',
+    },
+    {
+      key: 'register_url',
+      label: 'Register URL',
+      description: 'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
+      defaultValue: '',
+      placeholder: 'https://scion.example.com',
     },
   ],
   slack: [
