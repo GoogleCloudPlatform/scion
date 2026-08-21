@@ -283,6 +283,11 @@ The fallback applies only to **automatic** resolution. If you selected an auth t
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
 present or the agent fails to start with an actionable error.
 
+:::note[Git Credentials and GCP Service Accounts in No-Auth Fallback]
+* **Git Credentials Exemption**: During a no-auth fallback (when LLM credentials are not yet found or captured), Scion previously suppressed all secrets. Now, Git credentials (specifically `GITHUB_TOKEN`) are **exempt from suppression**. Scion will resolve `GITHUB_TOKEN` from project secrets (with a fallback to user-scoped secrets) so that repository cloning in `clone-per-agent` workspaces succeeds even when running in no-auth fallback mode.
+* **GCP Service Account Check**: To prevent false no-auth fallback triggers, Scion skips explicit environment variable checks for GCP-backed auth types when a verified Google Cloud Service Account (SA) is assigned to the agent.
+:::
+
 ## Capturing Credentials from a Running Agent
 
 For harnesses that authenticate through an interactive login (rather than a plain API key), you
@@ -408,6 +413,16 @@ Two diagnostic commands help troubleshoot auth and connectivity:
 When an agent creates sub-agents (progeny), Scion enforces strict controls over which secrets those child agents can access.
 
 By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the project or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain.
+
+### Propagation of User-Scoped Secrets (`--allow-progeny`)
+
+For user-scoped (personal) secrets, you can explicitly configure them to propagate down the agent ancestry chain (progeny) by setting the `--allow-progeny` flag upon creation:
+
+```bash
+scion hub secret set --allow-progeny MY_PERSONAL_TOKEN my-secret-value
+```
+
+When a child agent is created, Scion walks the ancestry chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled, the secret is safely inherited and projected into the descendant agent. Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
 
 ---
 

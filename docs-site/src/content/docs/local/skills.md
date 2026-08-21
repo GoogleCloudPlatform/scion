@@ -334,6 +334,12 @@ scion user skills remove <uuid>
 scion user skills remove skill://scion/global/personal-notes@latest
 ```
 
+#### Progeny Propagation for User Skills
+
+By default, child agents (progeny) do not inherit the user-scoped injected skills of the parent agent's owner. However, you can explicitly configure personal injected skills to propagate down the agent ancestry tree by enabling the **AllowProgeny** setting (available via the Scion Web Dashboard or Hub API).
+
+When enabled, Scion automatically manages an implicit **progeny policy** (`progeny-skill-access:<id>`) on the Hub. If a progeny agent is spawned, Scion walks its ancestor tree; if the personal skill's creator is in that tree and has granted progeny access, the descendant agent inherits the skill injection.
+
 ### Batch-Adding Injected Skills via the Web UI
 
 In addition to managing injected skills via the CLI, the Scion Web Dashboard allows configuring **Injected Skills** for a project, user profile, or globally on the Hub. To simplify adding multiple skills at once, Scion provides a **directory-discovery** workflow:
