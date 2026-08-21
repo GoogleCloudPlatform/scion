@@ -214,18 +214,6 @@ func (f *bypassAgentsFixture) token(t *testing.T, scopes ...AgentTokenScope) str
 	return tok
 }
 
-// tokenFor mints a JWT for an arbitrary agent with the given scopes.
-// ScopeProjectRead is always included (same rationale as token).
-func (f *bypassAgentsFixture) tokenFor(t *testing.T, agent *store.Agent, scopes ...AgentTokenScope) string {
-	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(agent.ID, agent.ProjectID, allScopes, nil)
-	require.NoError(t, err)
-	return tok
-}
-
 // asAgent issues a request carrying the calling agent's token.
 func (f *bypassAgentsFixture) asAgent(t *testing.T, method, path string, body interface{}, scopes ...AgentTokenScope) *httptest.ResponseRecorder {
 	t.Helper()
