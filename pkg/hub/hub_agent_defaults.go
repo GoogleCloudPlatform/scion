@@ -140,7 +140,8 @@ func applyHubAgentDefaults(ac *store.AgentAppliedConfig, d opsettings.AgentDefau
 		ac.Model = d.DefaultModel
 	}
 	if ac.ThinkingLevel == nil && d.DefaultThinkingLevel != nil {
-		ac.ThinkingLevel = d.DefaultThinkingLevel
+		v := *d.DefaultThinkingLevel
+		ac.ThinkingLevel = &v
 	}
 	return hcChanged
 }
