@@ -83,6 +83,23 @@ jobs:
       - name: Check Compatibility Literals
         run: make compat-literals
 
+      - name: Check Authorization Guards
+        run: |
+          # Invoked directly rather than via `make check-authz-guards`: GNU make
+          # reports its own failure code (always 2), which would collapse the
+          # script's exit 1 (violations found) and exit 2 (nothing was analysed)
+          # into one indistinguishable result. Those mean opposite things.
+          set +e
+          ./hack/check-authz-guards.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Authorization guards::Authorization-bypass guard patterns found (see ptone/scion#591). The file:line: function list is in the step log above." ;;
+            *) echo "::error title=Authorization guards NOT checked::check-authz-guards could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a guard failure." ;;
+          esac
+          exit "$rc"
+
       - name: Run Tests
         run: make test-fast
 

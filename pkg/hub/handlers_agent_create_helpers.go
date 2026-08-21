@@ -1100,8 +1100,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 // This is the "same project" test for agent-initiated dispatch. A broker is not
 // owned by a project — the association is the project_providers link — so an
 // agent's project can only be compared against a broker via this lookup. It is a
-// shared helper rather than an inlined query so that canDispatchToBroker and
-// checkBrokerDispatchAccess (handlers_runtime_brokers.go) cannot drift on it.
+// shared helper rather than an inlined query so that callers of
+// canDispatchToBroker cannot drift on the definition.
 func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID string) bool {
 	if brokerID == "" || projectID == "" {
 		return false
@@ -1129,8 +1129,10 @@ func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID st
 // them with "unknown identity type"; the nil branch this replaced was the only
 // thing admitting them, and it admitted everyone (#591).
 //
-// This function and checkBrokerDispatchAccess (handlers_runtime_brokers.go) are one
-// decision written twice and must stay structurally identical.
+// checkBrokerDispatchAccess (handlers_runtime_brokers.go) is the response-writing
+// wrapper around this function. It delegates rather than restating the rule: the two
+// were previously written twice, and the copy drifted into a fail-open (#591). Do not
+// reintroduce a second transcription — add response behaviour to the wrapper instead.
 func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeBroker) bool {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
