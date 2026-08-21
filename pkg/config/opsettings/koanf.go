@@ -211,7 +211,8 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 	doc := make(map[string]interface{})
 	fields := []string{"default_template", "default_harness_config", "default_max_turns",
 		"default_max_model_calls", "default_max_duration", "default_resources",
-		"default_model", "default_thinking_level"}
+		"default_model", "default_thinking_level",
+		"default_max_agent_role", "default_agent_role"}
 	for _, f := range fields {
 		if k.Exists(f) {
 			doc[f] = k.Get(f)
