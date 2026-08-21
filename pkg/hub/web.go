@@ -638,6 +638,14 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		}
 
 		if accessToken == "" {
+			// Browser-navigated request to a proxy route with no session:
+			// redirect to login instead of letting the Hub return a raw JSON 401.
+			if isBrowserRequest(r) && isProxyRoute(r.URL.Path) {
+				session.Values[sessKeyReturnTo] = r.URL.RequestURI()
+				_ = session.Save(r, w)
+				http.Redirect(w, r, "/auth/login", http.StatusFound)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1357,6 +1365,14 @@ func isRootLevelStaticFile(path string) bool {
 func isBrowserRequest(r *http.Request) bool {
 	accept := r.Header.Get("Accept")
 	return strings.Contains(accept, "text/html")
+}
+
+// isProxyRoute returns true for agent port proxy routes that may be
+// opened as direct browser navigation rather than through the SPA.
+func isProxyRoute(path string) bool {
+	// Match /api/v1/agents/{id}/ports/{port}/proxy or .../proxy/...
+	parts := strings.Split(strings.TrimPrefix(path, "/api/v1/agents/"), "/")
+	return len(parts) >= 4 && parts[1] == "ports" && (parts[3] == "proxy" || strings.HasPrefix(parts[3], "proxy/"))
 }
 
 // devAuthMiddleware auto-populates the session with the dev user identity
