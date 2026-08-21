@@ -105,15 +105,16 @@ func resourceSpecEqual(a, b *api.ResourceSpec) bool {
 // exactly two call sites — the agent-create path and the scheduler-dispatch
 // path — and each sits strictly between those two functions.
 //
-// Only default_harness_config is handled here. default_template joins the
-// template ladder further up each path, because it has to be in place before
-// the template is resolved. The other four agent_defaults fields
-// (default_max_turns, default_max_model_calls, default_max_duration,
-// default_resources) deliberately do NOT belong here: writing them into
-// AppliedConfig/InlineConfig would send them to the broker as top-of-chain and
-// let a hub-wide floor override a template's explicit value — the inversion
-// this workstream exists to remove (design §3.2.1, rejected alternative A5).
-// They travel by a separate low-rank channel and are applied broker-side.
+// Only default_harness_config and default_model are handled here.
+// default_template joins the template ladder further up each path, because it
+// has to be in place before the template is resolved. The other four
+// agent_defaults fields (default_max_turns, default_max_model_calls,
+// default_max_duration, default_resources) deliberately do NOT belong here:
+// writing them into AppliedConfig/InlineConfig would send them to the broker
+// as top-of-chain and let a hub-wide floor override a template's explicit
+// value — the inversion this workstream exists to remove (design §3.2.1,
+// rejected alternative A5). They travel by a separate low-rank channel and
+// are applied broker-side.
 //
 // ACCEPTED CONSEQUENCE, so the next reader does not file it as a bug: a
 // harness config resolved here reaches the broker as a CLIFlag-rank value and
@@ -125,11 +126,16 @@ func applyHubAgentDefaults(ac *store.AgentAppliedConfig, d opsettings.AgentDefau
 	if ac == nil {
 		return false
 	}
+	changed := false
 	if ac.HarnessConfig == "" && d.DefaultHarnessConfig != "" {
 		ac.HarnessConfig = d.DefaultHarnessConfig
-		return true
+		changed = true
 	}
-	return false
+	if ac.Model == "" && d.DefaultModel != "" {
+		ac.Model = d.DefaultModel
+		changed = true
+	}
+	return changed
 }
 
 // warnHubDefaultTemplateUnusable logs the degradation described in
