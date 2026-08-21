@@ -1147,6 +1147,51 @@ func TestSessionToBearerMiddleware_ProxyWithSessionNoRedirect(t *testing.T) {
 		"should inject Bearer token, got %q", capturedAuthHeader)
 }
 
+func TestSessionToBearerMiddleware_SessionErrorRedirect(t *testing.T) {
+	// When sessionStore.Get fails (e.g. corrupted/expired cookie), a browser
+	// request to a proxy route should still redirect to /auth/login instead of
+	// passing through to the Hub with a raw JSON 401.
+	const secret1 = "secret-one-for-signing-0123456789abcdef"
+	const secret2 = "secret-two-different-key-abcdef0123456789"
+
+	// Create a WebServer with secret1, seed a session, and grab the cookie.
+	wsOld := newTestWebServer(t, WebServerConfig{SessionSecret: secret1})
+	reqSetup := httptest.NewRequest(http.MethodGet, "/", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := wsOld.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	sess.Values[sessKeyUserID] = "user_corrupt"
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies, "setup must produce a session cookie")
+
+	// Create a NEW WebServer with a different secret — the cookie from secret1
+	// will fail signature verification in sessionStore.Get.
+	ws := newTestWebServer(t, WebServerConfig{SessionSecret: secret2})
+
+	hubCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/agent123/ports/8080/proxy/index.html", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	for _, c := range cookies {
+		req.AddCookie(c) // cookie signed with secret1, server uses secret2
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusFound, resp.StatusCode, "should redirect browser to login even when session is corrupt")
+	assert.Equal(t, "/auth/login", resp.Header.Get("Location"), "redirect target should be /auth/login")
+	assert.False(t, hubCalled, "Hub handler should not be invoked for redirected requests")
+}
+
 func TestIsProxyRoute(t *testing.T) {
 	tests := []struct {
 		path string

@@ -613,9 +613,9 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 
 		session, err := ws.sessionStore.Get(r, webSessionName)
 		if err != nil {
-			// No valid session — let the Hub's own auth return 401.
-			next.ServeHTTP(w, r)
-			return
+			// Create a fresh session so the redirect logic below can
+			// handle browser proxy requests instead of returning a raw 401.
+			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
@@ -1370,13 +1370,13 @@ func isBrowserRequest(r *http.Request) bool {
 // isProxyRoute returns true for agent port proxy routes that may be
 // opened as direct browser navigation rather than through the SPA.
 func isProxyRoute(path string) bool {
-	// Match /api/v1/agents/{id}/ports/{port}/proxy or .../proxy/...
+	// Match /api/v1/agents/{id}/ports/{port}/proxy[/...]
 	const prefix = "/api/v1/agents/"
 	if !strings.HasPrefix(path, prefix) {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
-	return len(parts) >= 4 && parts[1] == "ports" && (parts[3] == "proxy" || strings.HasPrefix(parts[3], "proxy/"))
+	return len(parts) >= 4 && parts[1] == "ports" && parts[3] == "proxy"
 }
 
 // devAuthMiddleware auto-populates the session with the dev user identity
