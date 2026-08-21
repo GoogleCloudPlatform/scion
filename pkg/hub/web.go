@@ -1371,7 +1371,11 @@ func isBrowserRequest(r *http.Request) bool {
 // opened as direct browser navigation rather than through the SPA.
 func isProxyRoute(path string) bool {
 	// Match /api/v1/agents/{id}/ports/{port}/proxy or .../proxy/...
-	parts := strings.Split(strings.TrimPrefix(path, "/api/v1/agents/"), "/")
+	const prefix = "/api/v1/agents/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
 	return len(parts) >= 4 && parts[1] == "ports" && (parts[3] == "proxy" || strings.HasPrefix(parts[3], "proxy/"))
 }
 
