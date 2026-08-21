@@ -222,7 +222,13 @@ When you reference a template by bare name, Scion searches in this order and use
 3. **Project** templates (`.scion/templates/`).
 4. **Global** templates (`~/.scion/templates/`).
 
-When connected to a Hub, templates can also resolve from the Hub (project scope, then global scope). If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search.
+When connected to a Hub, templates can also resolve from the Hub across three scopes: **User** (personal templates), **Project** (project-level templates), and **Global** (hub-wide templates). If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search.
+
+In the Web Dashboard's **New Agent** creation form, templates are automatically clustered and ordered by scope in the dropdown:
+```text
+User Templates  >  Project Templates  >  Global Templates
+```
+Visual separators clearly segment these categories, ensuring your personal, customized templates are always at the top of the dropdown for fast access.
 
 ## The `scion templates` CLI
 

@@ -22,11 +22,16 @@ Scion distinguishes between regular environment variables and secure secrets:
 
 Both variables and secrets can be scoped to different levels. Scion resolves these hierarchically when an agent starts:
 
-1.  **User Scope**: Personal secrets for a specific user. Applied to all agents owned by that user.
-2.  **Project Scope**: Project-level secrets. Available to all agents running in a specific Project.
-3.  **Broker Scope**: Infrastructure-level secrets. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
+1.  **User Scope** (Highest Priority): Personal secrets or variables for a specific user. Applied to all agents owned by that user.
+2.  **Project Scope**: Project-level secrets or variables. Available to all agents running in a specific Project.
+3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators.
+4.  **Broker Scope** (Lowest Priority): Infrastructure-level secrets or variables. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
 
-**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. Broker scope has the highest priority, followed by Project, then User, then Hub. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
+**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. The precedence order is:
+```text
+runtime_broker  <  hub  <  project  <  user
+```
+Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
 ---
 ## Injection Modes
@@ -45,6 +50,24 @@ scion hub env set --project --always LOG_LEVEL=debug
 # Set a secret to be always injected for a user
 scion hub secret set --always MY_GLOBAL_TOKEN secret-value
 ```
+
+### Propagation to Descendant Agents (Progeny)
+
+When an agent creates child/sub-agents (referred to as **progeny**), they do not inherit the parent agent's user-scoped configuration or secrets by default. This preserves a strict security and least-privilege boundary across agent ancestry chains.
+
+However, you can explicitly configure user-scoped environment variables or secrets to propagate down the progeny tree by using the `--allow-progeny` flag.
+
+* **User-Scoped Secrets**: Can be marked for progeny propagation at any time.
+  ```bash
+  scion hub secret set --allow-progeny MY_PERSONAL_TOKEN token-value
+  ```
+* **User-Scoped Environment Variables**: Can only be marked for progeny propagation if their injection mode is set to `always`.
+  ```bash
+  scion hub env set --always --allow-progeny PERSONAL_ENV=value
+  ```
+
+#### How it Works Under the Hood
+Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When a child agent resolves its configuration, Scion walks the ancestor chain of the calling agent container. If the configuration creator is part of that ancestry tree and has enabled progeny permission, the descendant agent safely inherits the setting or secret.
 
 ---
 

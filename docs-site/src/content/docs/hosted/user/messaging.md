@@ -200,6 +200,10 @@ When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message agent:<name>` to reply with the answer.
 * **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to `input-needed` notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send an explicit `instruction` instead.
 
+:::tip[Project-Scoped Message Isolation]
+When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.
+:::
+
 ### 3. Subscription Management and Agent Self-Service
 
 * **Automatic Subscription**: The `--notify` flag on `scion start` is **deprecated**. When you start a sub-agent, Scion automatically registers your subscription via creation ancestry.
