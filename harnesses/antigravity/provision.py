@@ -31,7 +31,7 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 
 PROVISION_VERSION = "2026-07-09T01:00:00Z"
 
-FLASH_MODEL = "Gemini 3.6 Flash (Medium)"
+FLASH_MODEL = "Gemini 3.7 Flash (Medium)"
 PRO_MODEL = "Gemini 3.1 Pro (Low)"
 
 

@@ -32,7 +32,7 @@ env_template:
 
 model_aliases:
   small: "Gemini 3.1 Flash Lite"
-  medium: "Gemini 3.6 Flash (Medium)"
+  medium: "Gemini 3.7 Flash (Medium)"
   large: "Gemini 3.1 Pro (Low)"
   extra-large: "Gemini 3.1 Pro (Low)"
 
