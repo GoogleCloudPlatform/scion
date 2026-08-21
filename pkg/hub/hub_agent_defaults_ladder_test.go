@@ -151,6 +151,105 @@ func TestApplyHubAgentDefaults_HarnessConfig(t *testing.T) {
 	}
 }
 
+// TestApplyHubAgentDefaults_Model is the table the design asks for.
+// Analogous to TestApplyHubAgentDefaults_HarnessConfig: the hub operational
+// DefaultModel fills ac.Model only when no higher tier has set it.
+func TestApplyHubAgentDefaults_Model(t *testing.T) {
+	const hubDefault = "medium"
+
+	tests := []struct {
+		name      string
+		incumbent string
+		want      string
+	}{
+		{
+			name:      "LosesToRequest",
+			incumbent: "large",
+			want:      "large",
+		},
+		{
+			name:      "LosesToProjectAnnotation",
+			incumbent: "small",
+			want:      "small",
+		},
+		{
+			name:      "LosesToTemplate",
+			incumbent: "opus",
+			want:      "opus",
+		},
+		{
+			name:      "AppliesWhenEmpty",
+			incumbent: "",
+			want:      hubDefault,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ac := &store.AgentAppliedConfig{Model: tt.incumbent}
+			applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+				DefaultModel: hubDefault,
+			})
+			assert.Equal(t, tt.want, ac.Model)
+			assert.False(t, applied,
+				"the return value tracks harness-config provenance only; model must not affect it")
+		})
+	}
+}
+
+// TestApplyHubAgentDefaults_ModelEmptyDefault verifies that an empty hub
+// DefaultModel leaves ac.Model untouched.
+func TestApplyHubAgentDefaults_ModelEmptyDefault(t *testing.T) {
+	ac := &store.AgentAppliedConfig{}
+	applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{})
+	assert.Empty(t, ac.Model)
+	assert.False(t, applied)
+}
+
+// TestApplyHubAgentDefaults_ThinkingLevel verifies the only-if-nil guard for
+// DefaultThinkingLevel.
+func TestApplyHubAgentDefaults_ThinkingLevel(t *testing.T) {
+	hubLevel := 3
+
+	t.Run("AppliesWhenNil", func(t *testing.T) {
+		ac := &store.AgentAppliedConfig{}
+		applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+			DefaultThinkingLevel: &hubLevel,
+		})
+		require.NotNil(t, ac.ThinkingLevel)
+		assert.Equal(t, 3, *ac.ThinkingLevel)
+	})
+
+	t.Run("LosesToPreSet", func(t *testing.T) {
+		existing := 5
+		ac := &store.AgentAppliedConfig{ThinkingLevel: &existing}
+		applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+			DefaultThinkingLevel: &hubLevel,
+		})
+		require.NotNil(t, ac.ThinkingLevel)
+		assert.Equal(t, 5, *ac.ThinkingLevel)
+	})
+
+	t.Run("NilDefaultDoesNothing", func(t *testing.T) {
+		ac := &store.AgentAppliedConfig{}
+		applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{})
+		assert.Nil(t, ac.ThinkingLevel)
+	})
+}
+
+// TestApplyHubAgentDefaults_ModelDoesNotAffectHCProvenance verifies that
+// applying only DefaultModel (no DefaultHarnessConfig) returns false, so
+// callers do not set withHubDefaultHarnessConfig context spuriously.
+func TestApplyHubAgentDefaults_ModelDoesNotAffectHCProvenance(t *testing.T) {
+	ac := &store.AgentAppliedConfig{}
+	applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+		DefaultModel: "medium",
+	})
+	assert.Equal(t, "medium", ac.Model)
+	assert.False(t, applied,
+		"model-only application must not signal harness-config provenance")
+}
+
 // TestApplyHubAgentDefaults_IgnoresTheFourLimitFields is the A5 guard at unit
 // level. The four limit/resource fields must not be stamped hub-side: doing so
 // would send them to the broker as top-of-chain and let a hub-wide floor
