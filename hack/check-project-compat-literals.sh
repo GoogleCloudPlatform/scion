@@ -182,6 +182,11 @@ allowed_paths=(
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
   "^pkg/config/settings_v1.go$"
+  "^pkg/config/shared_dirs.go$"
+  "^pkg/hub/authzop/catalog.go$"
+  "^pkg/hub/route_authz_manifest.go$" # Route-authz manifest lists /api/v1/groves/* as registered routes (#598)
+  "^pkg/hub/route_metadata.go$"
+  "^pkg/hub/server.go$"
   # Accepts the legacy "grove" template-list scope query value and maps it to
   # "project" before it drives the scope switch or the store filter.
   "^pkg/hub/template_handlers.go$"
