@@ -113,3 +113,73 @@ func TestMigrateBackfillsEmptyAgentRolesToFull(t *testing.T) {
 	assert.Empty(t, gotFutureEmptyRole.AppliedConfig.AgentRole)
 	assert.Equal(t, "created after one-shot backfill", gotFutureEmptyRole.AppliedConfig.Task)
 }
+
+func TestMigrateBackfillsProjectMembersGroupSystemMarkers(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+
+	project := &store.Project{
+		ID:      uuid.NewString(),
+		Name:    "testproj",
+		Slug:    "testproj",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, project))
+
+	legacyMembersGroup := &store.Group{
+		ID:        uuid.NewString(),
+		Name:      "Test Project Members",
+		Slug:      "project:testproj:members",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: project.ID,
+	}
+	require.NoError(t, cs.CreateGroup(ctx, legacyMembersGroup))
+
+	suspiciousGroup := &store.Group{
+		ID:        uuid.NewString(),
+		Name:      "Suspicious Members",
+		Slug:      "project:suspicious:members",
+		GroupType: store.GroupTypeExplicit,
+	}
+	require.NoError(t, cs.CreateGroup(ctx, suspiciousGroup))
+
+	mismatchedGroup := &store.Group{
+		ID:        uuid.NewString(),
+		Name:      "Mismatched Members",
+		Slug:      "project:not-testproj:members",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: project.ID,
+	}
+	require.NoError(t, cs.CreateGroup(ctx, mismatchedGroup))
+
+	require.NoError(t, cs.Migrate(ctx))
+
+	gotLegacy, err := cs.GetGroup(ctx, legacyMembersGroup.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "true", gotLegacy.Annotations["scion.io/system-project-members-group"])
+
+	gotSuspicious, err := cs.GetGroup(ctx, suspiciousGroup.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, gotSuspicious.Annotations, "scion.io/system-project-members-group")
+
+	gotMismatched, err := cs.GetGroup(ctx, mismatchedGroup.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, gotMismatched.Annotations, "scion.io/system-project-members-group")
+
+	futureLegacyMembersGroup := &store.Group{
+		ID:        uuid.NewString(),
+		Name:      "Future Legacy Members",
+		Slug:      "project:future:members",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: project.ID,
+	}
+	require.NoError(t, cs.CreateGroup(ctx, futureLegacyMembersGroup))
+
+	require.NoError(t, cs.Migrate(ctx))
+
+	gotFuture, err := cs.GetGroup(ctx, futureLegacyMembersGroup.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, gotFuture.Annotations, "scion.io/system-project-members-group")
+}
