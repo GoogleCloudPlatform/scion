@@ -635,30 +635,25 @@ func projectIDForResource(r Resource) string {
 }
 
 // isProjectOwnerOrAdmin reports whether the user is recorded with role=owner
-// or role=admin in any explicit group that belongs to the project (typically
-// the "project:<slug>:members" group). These users get the same access as the
-// project's creator-owner.
+// or role=admin in the canonical project members group. These users get the
+// same access as the project's creator-owner.
 func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
 	if userID == "" || projectID == "" {
 		return false
 	}
-	groups, err := a.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID: projectID,
-		GroupType: store.GroupTypeExplicit,
-	}, store.ListOptions{Limit: 10})
-	if err != nil || len(groups.Items) == 0 {
+	project, err := a.store.GetProject(ctx, projectID)
+	if err != nil {
 		return false
 	}
-	for _, g := range groups.Items {
-		membership, err := a.store.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, userID)
-		if err != nil {
-			continue
-		}
-		if membership.Role == store.GroupMemberRoleOwner || membership.Role == store.GroupMemberRoleAdmin {
-			return true
-		}
+	group, err := a.store.GetGroupBySlug(ctx, projectMembersGroupSlug(project.Slug))
+	if err != nil || group.ProjectID != projectID {
+		return false
 	}
-	return false
+	membership, err := a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	if err != nil {
+		return false
+	}
+	return membership.Role == store.GroupMemberRoleOwner || membership.Role == store.GroupMemberRoleAdmin
 }
 
 // hubMembersSlug is the slug of the seeded hub-members group. It is the same

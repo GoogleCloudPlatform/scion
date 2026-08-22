@@ -547,6 +547,19 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	s.events.PublishChatTopicEvent(ctx, project.ID, "created", *topic)
 }
 
+const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
+
+func projectMembersGroupSlug(projectSlug string) string {
+	return "project:" + projectSlug + ":members"
+}
+
+func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
+	return group != nil &&
+		group.ProjectID == projectID &&
+		group.Annotations != nil &&
+		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
+}
+
 // createProjectMembersGroupAndPolicy creates an explicit members group for a project
 // and a policy allowing members to create agents. Best-effort; failures are logged.
 // If the group already exists (e.g., project was deleted and recreated with the same
@@ -555,7 +568,7 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 // (e.g. the user who linked the project). It is safe to pass the same value as
 // project.CreatedBy — duplicate additions are handled gracefully.
 func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project *store.Project, callerUserID ...string) {
-	membersSlug := "project:" + project.Slug + ":members"
+	membersSlug := projectMembersGroupSlug(project.Slug)
 
 	s.projectsLogger().Debug("ensuring project members group",
 		"project_id", project.ID, "slug", project.Slug, "membersSlug", membersSlug)
@@ -569,6 +582,9 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		ProjectID: project.ID,
 		OwnerID:   project.OwnerID,
 		CreatedBy: project.CreatedBy,
+		Annotations: map[string]string{
+			systemProjectMembersGroupAnnotation: "true",
+		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
 	if createErr != nil && errors.Is(createErr, store.ErrInvalidInput) && membersGroup.OwnerID != "" {
@@ -593,14 +609,15 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 				"project_id", project.ID, "slug", membersSlug, "error", lookupErr.Error())
 			return
 		}
+		if !isSystemProjectMembersGroup(existing, project.ID) {
+			s.projectsLogger().Warn("refusing to adopt colliding project members group",
+				"project_id", project.ID, "slug", membersSlug, "group", existing.ID)
+			return
+		}
 		membersGroup = existing
 		// Update the project ID association or owner in case they changed (recreated project
 		// or backfill for groups created before OwnerID was set).
 		needsUpdate := false
-		if membersGroup.ProjectID != project.ID {
-			membersGroup.ProjectID = project.ID
-			needsUpdate = true
-		}
 		if membersGroup.OwnerID == "" && project.OwnerID != "" {
 			membersGroup.OwnerID = project.OwnerID
 			needsUpdate = true

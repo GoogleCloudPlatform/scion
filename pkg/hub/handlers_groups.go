@@ -159,6 +159,10 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.authorize(w, r, Resource{Type: "group"}, ActionCreate) {
+		return
+	}
+
 	// Validate and default GroupType
 	groupType := req.GroupType
 	if groupType == "" {
@@ -176,6 +180,10 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	slug := req.Slug
 	if slug == "" {
 		slug = api.Slugify(req.Name)
+	}
+	if strings.HasPrefix(slug, "project:") {
+		ValidationError(w, "the 'project:' slug prefix is reserved for system use", nil)
+		return
 	}
 
 	ownerID := req.OwnerID
