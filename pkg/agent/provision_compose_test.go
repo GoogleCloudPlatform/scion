@@ -515,14 +515,14 @@ func TestComposition_FullInitProjectFlow(t *testing.T) {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// Verify harness was resolved from claude harness-config
-	if cfg.Harness != "claude" {
-		t.Errorf("expected harness 'claude', got %q", cfg.Harness)
+	// Verify harness was resolved from antigravity harness-config
+	if cfg.Harness != "antigravity" {
+		t.Errorf("expected harness 'antigravity', got %q", cfg.Harness)
 	}
 
 	// Verify harness-config name is set
-	if cfg.HarnessConfig != "claude" {
-		t.Errorf("expected HarnessConfig 'claude', got %q", cfg.HarnessConfig)
+	if cfg.HarnessConfig != "antigravity" {
+		t.Errorf("expected HarnessConfig 'antigravity', got %q", cfg.HarnessConfig)
 	}
 
 	// Verify agent home exists
