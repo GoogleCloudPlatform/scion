@@ -2852,7 +2852,7 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
 			evt.CreatedBy, evt.ProjectID, decision.Reason)
 	}
-	return false, nil
+	return true, nil
 }
 
 // dispatchAgentEventHandler returns an EventHandler that creates and starts

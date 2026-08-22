@@ -1481,6 +1481,32 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 	}
 }
 
+func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
+	ms := newMockStore()
+	ms.users["admin-user"] = &store.User{
+		ID:          "admin-user",
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+		Role:        "admin",
+	}
+
+	srv := newEventHandlerTestServer(ms)
+	srv.authzService = NewAuthzService(ms, slog.Default())
+
+	allowed, err := srv.authorizeScheduledAgentCreate(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-admin-user",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		CreatedBy: "admin-user",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected user authorization success to return allowed=true")
+	}
+}
+
 func TestDispatchAgentEventHandler_EmptyCreatorDenied(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
