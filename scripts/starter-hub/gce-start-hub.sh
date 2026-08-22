@@ -17,7 +17,7 @@
 #
 # Usage: scripts/starter-hub/gce-start-hub.sh [--full] [--reset-db] [--branch <branch>]
 #
-#   Default (fast): push → pull → build → restart → health check
+#   Default (fast): pull → build → restart → health check
 #   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
 #   --reset-db:     Deletes the hub database before starting (works in both modes)
 #   --branch <b>:   Checkout and build from a specific branch (default: current branch)
@@ -103,20 +103,11 @@ fi
 
 # Compute total steps based on mode
 if $FULL_DEPLOY; then
-    TOTAL_STEPS=4  # push, upload, remote-session, remote-health
+    TOTAL_STEPS=3  # upload, remote-session, remote-health
     echo "=== Full Deploy: Scion Hub on ${INSTANCE_NAME} ==="
 else
-    TOTAL_STEPS=3  # push, remote-session, remote-health
+    TOTAL_STEPS=2  # remote-session, remote-health
     echo "=== Fast Deploy: Scion Hub on ${INSTANCE_NAME} ==="
-fi
-
-# --- Step: Push ---
-
-step "Pushing to origin..."
-if [[ -n "$BRANCH" ]]; then
-    git push origin "$BRANCH"
-else
-    git push origin main
 fi
 
 # --- Step: Upload config files (full mode only) ---
@@ -137,14 +128,8 @@ if $FULL_DEPLOY; then
     fi
 
     # settings.yaml
-    if [[ "${ENABLE_GKE}" == "true" ]]; then
-        DEFAULT_RUNTIME="kubernetes"
-    else
-        DEFAULT_RUNTIME="docker"
-    fi
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
-default_runtime: ${DEFAULT_RUNTIME}
 server:
   mode: production
 telemetry:
@@ -276,7 +261,7 @@ if $FULL_DEPLOY; then
     fi
     if [ ! -d /usr/local/go ]; then
         echo "  -> Installing Go..."
-        curl -L https://go.dev/dl/go1.23.0.linux-amd64.tar.gz -o /tmp/go.tar.gz
+        curl -L https://go.dev/dl/go1.26.1.linux-amd64.tar.gz -o /tmp/go.tar.gz
         sudo tar -C /usr/local -xzf /tmp/go.tar.gz
         sudo ln -sf /usr/local/go/bin/go /usr/bin/go
         sudo ln -sf /usr/local/go/bin/gofmt /usr/bin/gofmt
