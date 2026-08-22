@@ -64,7 +64,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeProjectSecretRead,
 		}
 	case "":
-		return ScopesForRole(AgentRoleFull)
+		return ScopesForRole(AgentRoleNone)
 	default:
 		return ScopesForRole(AgentRoleNone)
 	}
@@ -83,7 +83,7 @@ func roleOrdinal(r AgentRole) int {
 	case AgentRoleFull:
 		return 3
 	case "":
-		return 3 // default to full for legacy/unspecified roles
+		return 0 // fail-closed for missing roles
 	default:
 		return 0 // fail-closed for unknown/invalid roles
 	}

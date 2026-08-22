@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -155,6 +156,169 @@ func TestAuthz_ProjectOwnerBypass_AppliesToProjectMembersGroup(t *testing.T) {
 	decision := srv.authzService.CheckAccess(ctx, user, groupResource(membersGroup), ActionAddMember)
 	assert.True(t, decision.Allowed, "non-creator project owner should be allowed to add members; reason=%q", decision.Reason)
 	assert.Equal(t, "project owner/admin", decision.Reason)
+}
+
+func TestAuthz_ProjectOwnerBypass_IgnoresNonCanonicalExplicitProjectGroups(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	outsider := &store.User{
+		ID:          tid("user-noncanonical-owner"),
+		Email:       "noncanonical-owner@test.com",
+		DisplayName: "Noncanonical Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, outsider))
+	ensureHubMembership(ctx, s, outsider.ID)
+
+	extraGroup := &store.Group{
+		ID:        tid("group-noncanonical-owner"),
+		Name:      "Noncanonical Project Group",
+		Slug:      "noncanonical-project-group",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: project.ID,
+	}
+	require.NoError(t, s.CreateGroup(ctx, extraGroup))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    extraGroup.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   outsider.ID,
+		Role:       store.GroupMemberRoleOwner,
+	}))
+
+	user := NewAuthenticatedUser(outsider.ID, outsider.Email, outsider.DisplayName, "member", "api")
+	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
+	assert.False(t, decision.Allowed, "owner of arbitrary project-scoped group must not become project owner; reason=%q", decision.Reason)
+}
+
+func TestAuthz_ProjectOwnerBypass_CanonicalLookupIgnoresListLimit(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-after-many-groups"), "Bob Many Groups", store.GroupMemberRoleOwner)
+	for i := 0; i < 12; i++ {
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{
+			ID:        tid("group-project-extra-" + strconv.Itoa(i)),
+			Name:      "Extra Project Group " + strconv.Itoa(i),
+			Slug:      "extra-project-group-" + strconv.Itoa(i),
+			GroupType: store.GroupTypeExplicit,
+			ProjectID: project.ID,
+		}))
+	}
+
+	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
+	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
+	assert.True(t, decision.Allowed, "canonical project members group must be found even with more than 10 explicit groups; reason=%q", decision.Reason)
+	assert.Equal(t, "project owner/admin", decision.Reason)
+}
+
+func TestProjectMembersGroup_SlugSquatDoesNotGrantFutureProjectOwnership(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	attacker := &store.User{
+		ID:          tid("user-slug-squat-attacker"),
+		Email:       "slug-squat-attacker@test.com",
+		DisplayName: "Slug Squat Attacker",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	creator := &store.User{
+		ID:          tid("user-slug-squat-creator"),
+		Email:       "slug-squat-creator@test.com",
+		DisplayName: "Slug Squat Creator",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, attacker))
+	require.NoError(t, s.CreateUser(ctx, creator))
+	ensureHubMembership(ctx, s, attacker.ID)
+	ensureHubMembership(ctx, s, creator.ID)
+
+	squatted := &store.Group{
+		ID:        tid("group-slug-squat-members"),
+		Name:      "Squatted Members",
+		Slug:      "project:slug-squat-project:members",
+		GroupType: store.GroupTypeExplicit,
+		OwnerID:   attacker.ID,
+		CreatedBy: attacker.ID,
+	}
+	require.NoError(t, s.CreateGroup(ctx, squatted))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    squatted.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   attacker.ID,
+		Role:       store.GroupMemberRoleOwner,
+	}))
+
+	project := &store.Project{
+		ID:        tid("project-slug-squat"),
+		Name:      "Slug Squat Project",
+		Slug:      "slug-squat-project",
+		OwnerID:   creator.ID,
+		CreatedBy: creator.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	got, err := s.GetGroup(ctx, squatted.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ProjectID, "slug collision must not attach a user-created group to the new project")
+
+	user := NewAuthenticatedUser(attacker.ID, attacker.Email, attacker.DisplayName, "member", "api")
+	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
+	assert.False(t, decision.Allowed, "slug squatter must not become owner of a later project; reason=%q", decision.Reason)
+}
+
+func TestProjectMembersGroup_AllowsExistingSystemGroupForSameProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	creator := &store.User{
+		ID:          tid("user-system-group-creator"),
+		Email:       "system-group-creator@test.com",
+		DisplayName: "System Group Creator",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, creator))
+	ensureHubMembership(ctx, s, creator.ID)
+
+	project := &store.Project{
+		ID:        tid("project-system-group"),
+		Name:      "System Group Project",
+		Slug:      "system-group-project",
+		OwnerID:   creator.ID,
+		CreatedBy: creator.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	membersGroup := &store.Group{
+		ID:        tid("group-existing-system-members"),
+		Name:      "System Group Project Members",
+		Slug:      projectMembersGroupSlug(project.Slug),
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: project.ID,
+		Annotations: map[string]string{
+			systemProjectMembersGroupAnnotation: "true",
+		},
+	}
+	require.NoError(t, s.CreateGroup(ctx, membersGroup))
+
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	membership, err := s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, creator.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GroupMemberRoleOwner, membership.Role)
 }
 
 // =============================================================================

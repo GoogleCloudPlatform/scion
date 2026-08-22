@@ -541,6 +541,10 @@ func TestRequireAdmin_IdentityKinds(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "scoped admin user access token is forbidden", identity: NewScopedUserIdentity(authzHelperAdmin(), "project-1", []string{"project:read"}),
+			wantOK: false, wantStatus: http.StatusForbidden, wantPrincipalType: "user",
+		},
+		{
 			name: "dev-auth identity is treated as a user", identity: NewDevUser(DevUserConfig{Username: "dev"}),
 			wantOK: true,
 		},
@@ -615,6 +619,7 @@ func TestRequireAdmin_DenialReasons(t *testing.T) {
 	}{
 		{"non-user caller", authzHelperAgent(authzHelperProjectA), "non-user identity"},
 		{"non-admin user", authzHelperMember(), "not an admin"},
+		{"scoped admin user access token", NewScopedUserIdentity(authzHelperAdmin(), "project-1", []string{"project:read"}), "scoped user access token"},
 	}
 
 	for _, tc := range tests {
@@ -631,6 +636,140 @@ func TestRequireAdmin_DenialReasons(t *testing.T) {
 			}
 			if found["reason"] != tc.wantReason {
 				t.Errorf("denial log reason = %v, want %q", found["reason"], tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestRequireAdmin_ScopedAdminForbiddenAtAllRoleOnlyGates(t *testing.T) {
+	srv, _ := testServer(t)
+	scopedAdmin := NewScopedUserIdentity(authzHelperAdmin(), "project-1", []string{"project:read", "agent:manage"})
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{
+			name:    "policy collection list",
+			method:  http.MethodGet,
+			path:    "/api/v1/policies",
+			handler: srv.handlePolicies,
+		},
+		{
+			name:    "policy collection create",
+			method:  http.MethodPost,
+			path:    "/api/v1/policies",
+			body:    `{"name":"deny-uat","scopeType":"hub","actions":["read"],"effect":"allow"}`,
+			handler: srv.handlePolicies,
+		},
+		{
+			name:    "policy detail get",
+			method:  http.MethodGet,
+			path:    "/api/v1/policies/policy-1",
+			handler: srv.handlePolicyRoutes,
+		},
+		{
+			name:    "policy detail update",
+			method:  http.MethodPatch,
+			path:    "/api/v1/policies/policy-1",
+			body:    `{"name":"updated"}`,
+			handler: srv.handlePolicyRoutes,
+		},
+		{
+			name:    "policy detail delete",
+			method:  http.MethodDelete,
+			path:    "/api/v1/policies/policy-1",
+			handler: srv.handlePolicyRoutes,
+		},
+		{
+			name:    "policy bindings list",
+			method:  http.MethodGet,
+			path:    "/api/v1/policies/policy-1/bindings",
+			handler: srv.handlePolicyRoutes,
+		},
+		{
+			name:    "policy bindings create",
+			method:  http.MethodPost,
+			path:    "/api/v1/policies/policy-1/bindings",
+			body:    `{"principalType":"user","principalId":"user-1"}`,
+			handler: srv.handlePolicyRoutes,
+		},
+		{
+			name:    "policy binding delete",
+			method:  http.MethodDelete,
+			path:    "/api/v1/policies/policy-1/bindings/user/user-1",
+			handler: srv.handlePolicyRoutes,
+		},
+		{
+			name:    "skill registry list",
+			method:  http.MethodGet,
+			path:    "/api/v1/skill-registries",
+			handler: srv.handleSkillRegistries,
+		},
+		{
+			name:    "skill registry create",
+			method:  http.MethodPost,
+			path:    "/api/v1/skill-registries",
+			body:    `{"name":"reg","endpoint":"https://registry.example.com"}`,
+			handler: srv.handleSkillRegistries,
+		},
+		{
+			name:    "skill registry get",
+			method:  http.MethodGet,
+			path:    "/api/v1/skill-registries/reg",
+			handler: srv.handleSkillRegistryByID,
+		},
+		{
+			name:    "skill registry update",
+			method:  http.MethodPatch,
+			path:    "/api/v1/skill-registries/reg",
+			body:    `{"status":"disabled"}`,
+			handler: srv.handleSkillRegistryByID,
+		},
+		{
+			name:    "skill registry delete",
+			method:  http.MethodDelete,
+			path:    "/api/v1/skill-registries/reg",
+			handler: srv.handleSkillRegistryByID,
+		},
+		{
+			name:    "skill registry pin",
+			method:  http.MethodPost,
+			path:    "/api/v1/skill-registries/reg/pin",
+			body:    `{"uri":"skill://reg/core/test@1.0","hash":"sha256:abc123"}`,
+			handler: srv.handleSkillRegistryByID,
+		},
+		{
+			name:    "skill registry pins list",
+			method:  http.MethodGet,
+			path:    "/api/v1/skill-registries/reg/pins",
+			handler: srv.handleSkillRegistryByID,
+		},
+		{
+			name:    "skill registry unpin",
+			method:  http.MethodPost,
+			path:    "/api/v1/skill-registries/reg/unpin",
+			body:    `{"uri":"skill://reg/core/test@1.0"}`,
+			handler: srv.handleSkillRegistryByID,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req = req.WithContext(contextWithIdentity(req.Context(), scopedAdmin))
+
+			tc.handler(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusForbidden, rec.Body.String())
 			}
 		})
 	}

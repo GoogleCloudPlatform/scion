@@ -17,6 +17,8 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -25,10 +27,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	entgroup "github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+const emptyAgentRoleBackfillMarkerSection = "migration_empty_agent_roles_backfilled"
+const projectMembersGroupMarkerBackfillSection = "backfill_project_group_markers_done"
+const systemProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -211,6 +218,13 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := c.BackfillEmptyAgentRoles(ctx); err != nil {
+		return fmt.Errorf("empty agent role backfill: %w", err)
+	}
+	if err := c.BackfillProjectMembersGroupMarkers(ctx); err != nil {
+		return fmt.Errorf("project members group marker backfill: %w", err)
+	}
+
 	// Migrate AllowListEntry records to User(status=invited) records.
 	// Runs after schema migration (which adds the "invited" status enum value)
 	// so the new status is available. Idempotent — safe to run on every startup.
@@ -225,6 +239,123 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 	return c.SeedMaintenanceOperations(ctx)
+}
+
+// BackfillEmptyAgentRoles preserves access for pre-role agents before missing
+// roles start resolving to the least-privileged role at runtime.
+func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, emptyAgentRoleBackfillMarkerSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	agents, err := c.client.Agent.Query().All(ctx)
+	if err != nil {
+		return err
+	}
+
+	var updated int
+	for _, a := range agents {
+		cfg := &store.AgentAppliedConfig{}
+		if a.AppliedConfig != "" {
+			parsed, err := parseAppliedConfig(a.AppliedConfig)
+			if err != nil {
+				return fmt.Errorf("parse applied_config for agent %s: %w", a.ID, err)
+			}
+			if parsed != nil {
+				cfg = parsed
+			}
+		}
+		if cfg.AgentRole != "" {
+			continue
+		}
+		cfg.AgentRole = "full"
+		if err := c.client.Agent.UpdateOneID(a.ID).
+			SetAppliedConfig(marshalAppliedConfig(cfg)).
+			Exec(ctx); err != nil {
+			return err
+		}
+		updated++
+	}
+	if updated > 0 {
+		slog.Info("backfilled empty agent roles before role default change", "rows_updated", updated)
+	}
+	_, err = c.UpsertHubSetting(ctx, emptyAgentRoleBackfillMarkerSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// BackfillProjectMembersGroupMarkers marks legitimate pre-upgrade project
+// members groups so project registration can safely reuse them.
+func (c *CompositeStore) BackfillProjectMembersGroupMarkers(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, projectMembersGroupMarkerBackfillSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	groups, err := c.client.Group.Query().
+		Where(
+			entgroup.SlugHasPrefix("project:"),
+			entgroup.SlugHasSuffix(":members"),
+		).
+		All(ctx)
+	if err != nil {
+		return err
+	}
+
+	var updated, skipped int
+	for _, g := range groups {
+		if g.ProjectID == nil {
+			skipped++
+			slog.Warn("skipping unowned project members group marker backfill",
+				"group", g.ID, "slug", g.Slug)
+			continue
+		}
+		project, err := c.GetProject(ctx, g.ProjectID.String())
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				skipped++
+				slog.Warn("skipping project members group marker backfill for missing project",
+					"group", g.ID, "slug", g.Slug, "project_id", g.ProjectID.String())
+				continue
+			}
+			return err
+		}
+		if expectedSlug := "project:" + project.Slug + ":members"; g.Slug != expectedSlug {
+			skipped++
+			slog.Warn("skipping mismatched project members group marker backfill",
+				"group", g.ID, "slug", g.Slug, "project_id", project.ID, "expected_slug", expectedSlug)
+			continue
+		}
+		if g.Annotations[systemProjectMembersGroupAnnotation] == "true" {
+			continue
+		}
+		annotations := make(map[string]string, len(g.Annotations)+1)
+		for k, v := range g.Annotations {
+			annotations[k] = v
+		}
+		annotations[systemProjectMembersGroupAnnotation] = "true"
+		if err := c.client.Group.UpdateOneID(g.ID).
+			SetAnnotations(annotations).
+			Exec(ctx); err != nil {
+			return err
+		}
+		updated++
+	}
+	slog.Info("backfilled project members group system markers",
+		"rows_updated", updated, "rows_skipped", skipped)
+
+	_, err = c.UpsertHubSetting(ctx, projectMembersGroupMarkerBackfillSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
 }
 
 // DB returns the underlying *sql.DB, or nil if the client is not backed by a

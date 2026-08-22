@@ -285,6 +285,14 @@ func (m *mockAuthzStore) ListGroups(_ context.Context, _ store.GroupFilter, _ st
 	return &store.ListResult[store.Group]{}, nil
 }
 
+func (m *mockAuthzStore) GetProject(_ context.Context, _ string) (*store.Project, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
+	return nil, store.ErrNotFound
+}
+
 func (m *mockAuthzStore) GetGroupMembership(_ context.Context, _, _ string, _ string) (*store.GroupMember, error) {
 	return nil, store.ErrNotFound
 }

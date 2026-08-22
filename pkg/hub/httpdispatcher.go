@@ -206,13 +206,11 @@ func (d *HTTPAgentDispatcher) SetTokenGenerator(gen AgentTokenGenerator) {
 // sites to keep role/scope computation in a single place.
 func agentRoleAndScopes(agent *store.Agent) (AgentRole, []AgentTokenScope) {
 	if agent == nil {
-		return AgentRoleFull, nil
+		return AgentRoleNone, nil
 	}
-	// Default to full for pre-role agents. This matches the design decision
-	// that null/unset agent role resolves to full (see ScopesForRole and
-	// roleOrdinal). Baseline would deny create/lifecycle/secret scopes that
-	// standing agents (coordinators, leads) need.
-	role := AgentRoleFull
+	// Missing role data is treated as least-privileged. Existing pre-role
+	// agents are backfilled to an explicit full role during store migration.
+	role := AgentRoleNone
 	if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
 		role = AgentRole(agent.AppliedConfig.AgentRole)
 	}
