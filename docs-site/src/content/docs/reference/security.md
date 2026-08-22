@@ -99,6 +99,16 @@ Key security attributes of the GCP IAM check include:
 - **Auditing**: Every service account assignment check—both allowed and denied—generates a permanent audit log entry detailing the principal, target service account, and Policy Troubleshooter decision.
 - **Hub-Scoped SAs**: Real hub-scoped service accounts can be assigned across projects. However, to prevent privilege bypasses, hub-scoped assignments are immediately rejected if `gcp_iam_check_mode` is not set to `"enforce"`.
 
+### 3.4 Fail-Closed API Authorization and Resource Isolation
+
+To guarantee that no API endpoints or handlers can be accessed without explicit authorization, the Scion Hub enforces a strict **fail-closed** authorization design:
+
+- **Explicit Fail-Closed Handlers (`s.authorize()`)**: All API handlers route through fail-closed authorization checks (`s.authorize()`). This eliminates legacy fail-open bypass vectors (such as functions relying on `GetUserIdentityFromContext` which could return `nil` for agent or broker callers and silently bypass authorization). Under the fail-closed model, any context lacking a valid user identity, agent token, or broker credentials is automatically denied.
+- **Fail-Closed Dispatch Access**: The `checkBrokerDispatchAccess` guard is strictly fail-closed, ensuring that no agent execution can be triggered on a runtime broker unless dispatch permissions have been verified.
+- **Role Boundary Enforcement (`addGroupMember`)**: Non-user callers (such as automated agents or system services) are strictly capped at the plain `member` role when executing `addGroupMember` operations, preventing elevation of privileges across organizational boundaries.
+- **Strict Isolation Ordering (404-before-403)**: To prevent unauthorized users or agents from discovering the existence of sensitive resources via API probe responses, Scion enforces strict **resource isolation ordering**. If a caller requests a resource they are not authorized to view, the Hub performs resource existence checks and tenant bounds validation first. This ensures the Hub responds with a `404 Not Found` rather than a `403 Forbidden` if the resource does not exist or belongs to another tenant/project, preventing side-channel resource enumeration.
+- **Regression Checks in CI**: To prevent future authorization regressions, an automated `authz-guard` check is wired into the CI pipeline (via a dedicated Makefile target and GitHub Actions step) that statically analyzes and validates that all API handlers are protected by appropriate authorization helpers.
+
 ## 4. Secret Management
 
 Scion provides a typed, scope-aware secret management system. Secret values are never stored in plaintext in the Hub database. For a user-facing guide, see [Secret Management](/scion/hosted/user/secrets/).

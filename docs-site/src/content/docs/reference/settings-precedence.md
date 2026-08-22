@@ -792,6 +792,11 @@ is a follow-up, not current behaviour.
 **Before:** A project's `scion.io/default-thinking-level` annotation reached the agent's environment, but was not written to `scion-agent.json` because `applyProjectDefaults` did not stamp it into `AppliedConfig`. This made it invisible on both `scion agent config` and the web configure form. Additionally, any thinking level supplied via the override position (e.g., `--config`, API agent creation, or the web configure form) was silently dropped by `MergeScionConfig`.
 **After:** Both bugs are resolved. The default thinking level from project settings is now correctly stamped into `AppliedConfig` (persisted in `scion-agent.json` and visible in the UI), and `MergeScionConfig` correctly preserves and merges the `ThinkingLevel` from override-position configurations.
 
+#### `Changed in this release` — Hub default model and thinking level applied to agents
+
+**Before:** During file-to-DB configuration seeding, the Hub silently dropped `default_model`, `default_thinking_level`, `default_max_agent_role`, and `default_agent_role` settings, failing to import them into the `hub_settings` database. Furthermore, the Hub's `applyHubAgentDefaults` logic did not actually stamp `DefaultModel` and `DefaultThinkingLevel` onto newly provisioned agents.
+**After:** Both gaps are resolved. The Hub's `extractAgentDefaults` parser now correctly extracts and seeds `default_model`, `default_thinking_level`, `default_max_agent_role`, and `default_agent_role` from configuration files into the settings database without dropping fields. During agent provisioning, `applyHubAgentDefaults` successfully stamps the global `DefaultModel` and `DefaultThinkingLevel` onto agents (using an only-if-empty guard to protect custom configurations from being overwritten).
+
 ---
 
 ## Design notes
