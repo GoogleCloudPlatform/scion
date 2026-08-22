@@ -1488,6 +1488,7 @@ func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 		Email:       "admin@example.com",
 		DisplayName: "Admin User",
 		Role:        "admin",
+		Status:      store.UserStatusActive,
 	}
 
 	srv := newEventHandlerTestServer(ms)
@@ -1504,6 +1505,39 @@ func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 	}
 	if !allowed {
 		t.Fatal("expected user authorization success to return allowed=true")
+	}
+}
+
+func TestDispatchAgentEventHandler_SuspendedUserCreatorDenied(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	ms.users["admin-user"] = &store.User{
+		ID:          "admin-user",
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+		Role:        store.UserRoleAdmin,
+		Status:      store.UserStatusSuspended,
+	}
+
+	srv := newEventHandlerTestServer(ms)
+	srv.authzService = NewAuthzService(ms, slog.Default())
+	handler := srv.dispatchAgentEventHandler()
+
+	err := handler(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-suspended-user",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"new-worker"}`,
+		CreatedBy: "admin-user",
+	})
+	if err == nil {
+		t.Fatal("expected suspended user creator to be denied at fire time")
+	}
+	if !strings.Contains(err.Error(), "status suspended") {
+		t.Fatalf("expected suspended status error, got: %v", err)
+	}
+	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
+		t.Fatal("suspended user creator must not create a scheduled agent")
 	}
 }
 

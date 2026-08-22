@@ -2839,6 +2839,10 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		}
 		return false, fmt.Errorf("failed to resolve scheduled dispatch creator user %q: %w", evt.CreatedBy, err)
 	}
+	if user.Status != store.UserStatusActive {
+		return false, fmt.Errorf("scheduled dispatch creator user %q has status %s; cannot authorize",
+			evt.CreatedBy, user.Status)
+	}
 	if s.authzService == nil {
 		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 	}
