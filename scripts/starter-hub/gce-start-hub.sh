@@ -199,7 +199,7 @@ Environment=\"SCION_SERVER_BASE_URL=https://${HUB_DOMAIN}\"
 StandardOutput=journal
 StandardError=journal
 ExecStartPre=/usr/bin/env
-ExecStart=%s --global server start --foreground --production --debug --enable-hub%s --enable-web --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --session-secret \${SESSION_SECRET} --auto-provide
+ExecStart=%s --global server start --foreground --production --debug --enable-hub%s --enable-web --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 Restart=always
 RestartSec=5
 
