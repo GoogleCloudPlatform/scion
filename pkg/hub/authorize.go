@@ -285,3 +285,12 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 	}
 	return user, true
 }
+
+func (s *Server) requireAdminHandler(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.requireAdmin(w, r); !ok {
+			return
+		}
+		next(w, r)
+	}
+}

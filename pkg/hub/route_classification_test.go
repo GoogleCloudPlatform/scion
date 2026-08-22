@@ -15,10 +15,16 @@
 package hub
 
 import (
+	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 )
 
 var routePermissionClassifications = map[string]string{
@@ -209,4 +215,64 @@ func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {
 	if len(stale) > 0 {
 		t.Fatalf("permission classifications for unregistered routes: %v", stale)
 	}
+}
+
+func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
+	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux()}
+	srv.registerRoutes()
+
+	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")
+	scopedAdmin := NewScopedUserIdentity(admin, "project-1", []string{"agent:create", "project:read", "policy:manage"})
+
+	routes := make([]string, 0)
+	for route, classification := range routePermissionClassifications {
+		if strings.HasPrefix(classification, "hub-admin:") {
+			routes = append(routes, route)
+		}
+	}
+	sort.Strings(routes)
+
+	for _, route := range routes {
+		t.Run(route, func(t *testing.T) {
+			method, path, body := scopedAdminUATRouteRequest(route)
+			ctx, cancel := context.WithTimeout(contextWithIdentity(context.Background(), scopedAdmin), 200*time.Millisecond)
+			defer cancel()
+			req := httptest.NewRequest(method, path, body)
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("scoped admin UAT to %s %s returned %d, want 403: %s", method, path, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
+	method := http.MethodGet
+	path := route
+	body := ""
+
+	switch route {
+	case "/api/v1/admin/users/invite", "/api/v1/admin/users/invite/bulk",
+		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
+		"/api/v1/admin/maintenance/restart", "/api/v1/github-app/installations/discover",
+		"/api/v1/github-app/sync-permissions":
+		method = http.MethodPost
+	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults":
+		method = http.MethodPut
+		body = "{}"
+	case "/api/v1/hub/settings/injected-skills":
+		method = http.MethodPut
+		body = `{"user_defined":[]}`
+	}
+
+	if strings.HasSuffix(path, "/") {
+		path += "scoped-admin-uat-test"
+	}
+
+	return method, path, bytes.NewReader([]byte(body))
 }

@@ -738,13 +738,8 @@ func (s *Server) getHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	user := GetUserIdentityFromContext(ctx)
-	if user == nil {
-		Unauthorized(w)
-		return
-	}
-	if user.Role() != "admin" {
-		Forbidden(w)
+	user, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 
