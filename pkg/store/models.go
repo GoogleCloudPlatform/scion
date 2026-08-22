@@ -1283,7 +1283,16 @@ type Policy struct {
 
 	// Ownership
 	CreatedBy string `json:"createdBy,omitempty"`
+
+	// Origin tracks how the policy was created.
+	// "" (empty) = user-created (default), "seeded" = created by startup seeder.
+	Origin string `json:"origin,omitempty"`
 }
+
+// PolicyOrigin constants
+const (
+	PolicyOriginSeeded = "seeded"
+)
 
 // DelegatedFromCondition specifies a delegation source for policy matching.
 // When set on a policy, the policy applies to agents whose creator matches.

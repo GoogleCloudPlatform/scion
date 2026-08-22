@@ -46,6 +46,8 @@ const (
 	FieldUpdated = "updated"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
+	// FieldOrigin holds the string denoting the origin field in the database.
+	FieldOrigin = "origin"
 	// EdgeBindings holds the string denoting the bindings edge name in mutations.
 	EdgeBindings = "bindings"
 	// Table holds the table name of the accesspolicy in the database.
@@ -77,6 +79,7 @@ var Columns = []string{
 	FieldCreated,
 	FieldUpdated,
 	FieldCreatedBy,
+	FieldOrigin,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -104,6 +107,8 @@ var (
 	DefaultUpdated func() time.Time
 	// UpdateDefaultUpdated holds the default value on update for the "updated" field.
 	UpdateDefaultUpdated func() time.Time
+	// DefaultOrigin holds the default value on creation for the "origin" field.
+	DefaultOrigin string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -216,6 +221,11 @@ func ByUpdated(opts ...sql.OrderTermOption) OrderOption {
 // ByCreatedBy orders the results by the created_by field.
 func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreatedBy, opts...).ToFunc()
+}
+
+// ByOrigin orders the results by the origin field.
+func ByOrigin(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOrigin, opts...).ToFunc()
 }
 
 // ByBindingsCount orders the results by bindings count.

@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -403,9 +405,32 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 
 	ctx := r.Context()
 
+	// Look up the policy before deleting so we can record a tombstone for
+	// seeded policies.
+	policy, err := s.store.GetPolicy(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
 	if err := s.store.DeletePolicy(ctx, id); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// If this was a seeded policy, record a tombstone so the startup seeder
+	// does not silently recreate it on the next restart.
+	if policy.Origin == store.PolicyOriginSeeded {
+		key := seedPolicyTombstoneKey(policy.Name)
+		if _, upsertErr := s.store.UpsertHubSetting(
+			ctx, key, json.RawMessage(`"true"`), "system", -1, "managed",
+		); upsertErr != nil {
+			slog.Warn("failed to record seed-policy deletion tombstone",
+				"policy", policy.Name, "error", upsertErr)
+		} else {
+			slog.Warn("seeded policy deleted; it will not be recreated on restart",
+				"policy", policy.Name)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

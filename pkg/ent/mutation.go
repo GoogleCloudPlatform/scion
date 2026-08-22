@@ -142,6 +142,7 @@ type AccessPolicyMutation struct {
 	created         *time.Time
 	updated         *time.Time
 	created_by      *string
+	origin          *string
 	clearedFields   map[string]struct{}
 	bindings        map[uuid.UUID]struct{}
 	removedbindings map[uuid.UUID]struct{}
@@ -922,6 +923,55 @@ func (m *AccessPolicyMutation) ResetCreatedBy() {
 	delete(m.clearedFields, accesspolicy.FieldCreatedBy)
 }
 
+// SetOrigin sets the "origin" field.
+func (m *AccessPolicyMutation) SetOrigin(s string) {
+	m.origin = &s
+}
+
+// Origin returns the value of the "origin" field in the mutation.
+func (m *AccessPolicyMutation) Origin() (r string, exists bool) {
+	v := m.origin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOrigin returns the old "origin" field's value of the AccessPolicy entity.
+// If the AccessPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessPolicyMutation) OldOrigin(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOrigin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOrigin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOrigin: %w", err)
+	}
+	return oldValue.Origin, nil
+}
+
+// ClearOrigin clears the value of the "origin" field.
+func (m *AccessPolicyMutation) ClearOrigin() {
+	m.origin = nil
+	m.clearedFields[accesspolicy.FieldOrigin] = struct{}{}
+}
+
+// OriginCleared returns if the "origin" field was cleared in this mutation.
+func (m *AccessPolicyMutation) OriginCleared() bool {
+	_, ok := m.clearedFields[accesspolicy.FieldOrigin]
+	return ok
+}
+
+// ResetOrigin resets all changes to the "origin" field.
+func (m *AccessPolicyMutation) ResetOrigin() {
+	m.origin = nil
+	delete(m.clearedFields, accesspolicy.FieldOrigin)
+}
+
 // AddBindingIDs adds the "bindings" edge to the PolicyBinding entity by ids.
 func (m *AccessPolicyMutation) AddBindingIDs(ids ...uuid.UUID) {
 	if m.bindings == nil {
@@ -1010,7 +1060,7 @@ func (m *AccessPolicyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccessPolicyMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.name != nil {
 		fields = append(fields, accesspolicy.FieldName)
 	}
@@ -1056,6 +1106,9 @@ func (m *AccessPolicyMutation) Fields() []string {
 	if m.created_by != nil {
 		fields = append(fields, accesspolicy.FieldCreatedBy)
 	}
+	if m.origin != nil {
+		fields = append(fields, accesspolicy.FieldOrigin)
+	}
 	return fields
 }
 
@@ -1094,6 +1147,8 @@ func (m *AccessPolicyMutation) Field(name string) (ent.Value, bool) {
 		return m.Updated()
 	case accesspolicy.FieldCreatedBy:
 		return m.CreatedBy()
+	case accesspolicy.FieldOrigin:
+		return m.Origin()
 	}
 	return nil, false
 }
@@ -1133,6 +1188,8 @@ func (m *AccessPolicyMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldUpdated(ctx)
 	case accesspolicy.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
+	case accesspolicy.FieldOrigin:
+		return m.OldOrigin(ctx)
 	}
 	return nil, fmt.Errorf("unknown AccessPolicy field %s", name)
 }
@@ -1247,6 +1304,13 @@ func (m *AccessPolicyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCreatedBy(v)
 		return nil
+	case accesspolicy.FieldOrigin:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOrigin(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AccessPolicy field %s", name)
 }
@@ -1313,6 +1377,9 @@ func (m *AccessPolicyMutation) ClearedFields() []string {
 	if m.FieldCleared(accesspolicy.FieldCreatedBy) {
 		fields = append(fields, accesspolicy.FieldCreatedBy)
 	}
+	if m.FieldCleared(accesspolicy.FieldOrigin) {
+		fields = append(fields, accesspolicy.FieldOrigin)
+	}
 	return fields
 }
 
@@ -1347,6 +1414,9 @@ func (m *AccessPolicyMutation) ClearField(name string) error {
 		return nil
 	case accesspolicy.FieldCreatedBy:
 		m.ClearCreatedBy()
+		return nil
+	case accesspolicy.FieldOrigin:
+		m.ClearOrigin()
 		return nil
 	}
 	return fmt.Errorf("unknown AccessPolicy nullable field %s", name)
@@ -1400,6 +1470,9 @@ func (m *AccessPolicyMutation) ResetField(name string) error {
 		return nil
 	case accesspolicy.FieldCreatedBy:
 		m.ResetCreatedBy()
+		return nil
+	case accesspolicy.FieldOrigin:
+		m.ResetOrigin()
 		return nil
 	}
 	return fmt.Errorf("unknown AccessPolicy field %s", name)

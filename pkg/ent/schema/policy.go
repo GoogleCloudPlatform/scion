@@ -69,6 +69,9 @@ func (AccessPolicy) Fields() []ent.Field {
 			UpdateDefault(time.Now),
 		field.String("created_by").
 			Optional(),
+		field.String("origin").
+			Optional().
+			Default(""),
 	}
 }
 

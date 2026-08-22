@@ -54,6 +54,7 @@ func entPolicyToStore(p *ent.AccessPolicy) *store.Policy {
 		Created:      p.Created,
 		Updated:      p.Updated,
 		CreatedBy:    p.CreatedBy,
+		Origin:       p.Origin,
 	}
 	if p.Conditions != nil {
 		sp.Conditions = entConditionsToStore(p.Conditions)
@@ -142,6 +143,9 @@ func (s *PolicyStore) CreatePolicy(ctx context.Context, p *store.Policy) error {
 	if p.CreatedBy != "" {
 		create.SetCreatedBy(p.CreatedBy)
 	}
+	if p.Origin != "" {
+		create.SetOrigin(p.Origin)
+	}
 
 	created, err := create.Save(ctx)
 	if err != nil {
@@ -213,6 +217,9 @@ func (s *PolicyStore) UpdatePolicy(ctx context.Context, p *store.Policy) error {
 	}
 	if p.CreatedBy != "" {
 		update.SetCreatedBy(p.CreatedBy)
+	}
+	if p.Origin != "" {
+		update.SetOrigin(p.Origin)
 	}
 
 	updated, err := update.Save(ctx)

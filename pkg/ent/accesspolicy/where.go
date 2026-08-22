@@ -101,6 +101,11 @@ func CreatedBy(v string) predicate.AccessPolicy {
 	return predicate.AccessPolicy(sql.FieldEQ(FieldCreatedBy, v))
 }
 
+// Origin applies equality check predicate on the "origin" field. It's identical to OriginEQ.
+func Origin(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldEQ(FieldOrigin, v))
+}
+
 // NameEQ applies the EQ predicate on the "name" field.
 func NameEQ(v string) predicate.AccessPolicy {
 	return predicate.AccessPolicy(sql.FieldEQ(FieldName, v))
@@ -719,6 +724,81 @@ func CreatedByEqualFold(v string) predicate.AccessPolicy {
 // CreatedByContainsFold applies the ContainsFold predicate on the "created_by" field.
 func CreatedByContainsFold(v string) predicate.AccessPolicy {
 	return predicate.AccessPolicy(sql.FieldContainsFold(FieldCreatedBy, v))
+}
+
+// OriginEQ applies the EQ predicate on the "origin" field.
+func OriginEQ(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldEQ(FieldOrigin, v))
+}
+
+// OriginNEQ applies the NEQ predicate on the "origin" field.
+func OriginNEQ(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldNEQ(FieldOrigin, v))
+}
+
+// OriginIn applies the In predicate on the "origin" field.
+func OriginIn(vs ...string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldIn(FieldOrigin, vs...))
+}
+
+// OriginNotIn applies the NotIn predicate on the "origin" field.
+func OriginNotIn(vs ...string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldNotIn(FieldOrigin, vs...))
+}
+
+// OriginGT applies the GT predicate on the "origin" field.
+func OriginGT(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldGT(FieldOrigin, v))
+}
+
+// OriginGTE applies the GTE predicate on the "origin" field.
+func OriginGTE(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldGTE(FieldOrigin, v))
+}
+
+// OriginLT applies the LT predicate on the "origin" field.
+func OriginLT(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldLT(FieldOrigin, v))
+}
+
+// OriginLTE applies the LTE predicate on the "origin" field.
+func OriginLTE(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldLTE(FieldOrigin, v))
+}
+
+// OriginContains applies the Contains predicate on the "origin" field.
+func OriginContains(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldContains(FieldOrigin, v))
+}
+
+// OriginHasPrefix applies the HasPrefix predicate on the "origin" field.
+func OriginHasPrefix(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldHasPrefix(FieldOrigin, v))
+}
+
+// OriginHasSuffix applies the HasSuffix predicate on the "origin" field.
+func OriginHasSuffix(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldHasSuffix(FieldOrigin, v))
+}
+
+// OriginIsNil applies the IsNil predicate on the "origin" field.
+func OriginIsNil() predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldIsNull(FieldOrigin))
+}
+
+// OriginNotNil applies the NotNil predicate on the "origin" field.
+func OriginNotNil() predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldNotNull(FieldOrigin))
+}
+
+// OriginEqualFold applies the EqualFold predicate on the "origin" field.
+func OriginEqualFold(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldEqualFold(FieldOrigin, v))
+}
+
+// OriginContainsFold applies the ContainsFold predicate on the "origin" field.
+func OriginContainsFold(v string) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldContainsFold(FieldOrigin, v))
 }
 
 // HasBindings applies the HasEdge predicate on the "bindings" edge.

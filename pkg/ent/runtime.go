@@ -86,6 +86,10 @@ func init() {
 	accesspolicy.DefaultUpdated = accesspolicyDescUpdated.Default.(func() time.Time)
 	// accesspolicy.UpdateDefaultUpdated holds the default value on update for the updated field.
 	accesspolicy.UpdateDefaultUpdated = accesspolicyDescUpdated.UpdateDefault.(func() time.Time)
+	// accesspolicyDescOrigin is the schema descriptor for origin field.
+	accesspolicyDescOrigin := accesspolicyFields[16].Descriptor()
+	// accesspolicy.DefaultOrigin holds the default value on creation for the origin field.
+	accesspolicy.DefaultOrigin = accesspolicyDescOrigin.Default.(string)
 	// accesspolicyDescID is the schema descriptor for id field.
 	accesspolicyDescID := accesspolicyFields[0].Descriptor()
 	// accesspolicy.DefaultID holds the default value on creation for the id field.
