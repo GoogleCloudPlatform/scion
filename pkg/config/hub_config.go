@@ -906,7 +906,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		},
 	}
 
-	if err := k.Unmarshal("", config); err != nil {
+	if err := unmarshalWithUnusedKeyCheck(k, config, "server config"); err != nil {
 		return nil, err
 	}
 

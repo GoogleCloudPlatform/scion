@@ -17,6 +17,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -24,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	mapstructure "github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -200,7 +202,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		Profiles:  make(map[string]ProfileConfig),
 	}
 
-	if err := k.Unmarshal("", settings); err != nil {
+	if err := unmarshalWithUnusedKeyCheck(k, settings, "settings"); err != nil {
 		return nil, err
 	}
 
@@ -222,7 +224,7 @@ func LoadSettingsFromDir(dir string) (*Settings, error) {
 		Harnesses: make(map[string]HarnessConfig),
 		Profiles:  make(map[string]ProfileConfig),
 	}
-	if err := k.Unmarshal("", settings); err != nil {
+	if err := unmarshalWithUnusedKeyCheck(k, settings, "settings"); err != nil {
 		return nil, err
 	}
 	return settings, nil
@@ -345,6 +347,32 @@ func SettingsFileExists(dir string) bool {
 // ScionAgentConfigExists checks if a scion-agent config file exists (YAML or JSON)
 func ScionAgentConfigExists(dir string) bool {
 	return GetScionAgentConfigPath(dir) != ""
+}
+
+// unmarshalWithUnusedKeyCheck unmarshals the koanf instance into the target struct
+// and logs a warning for any config keys that do not map to struct fields.
+// It uses mapstructure's Metadata to collect unused keys without causing a hard error.
+// The label parameter identifies the config source in warning messages (e.g. "settings", "server config").
+func unmarshalWithUnusedKeyCheck(k *koanf.Koanf, target interface{}, label string) error {
+	var md mapstructure.Metadata
+	conf := koanf.UnmarshalConf{
+		DecoderConfig: &mapstructure.DecoderConfig{
+			DecodeHook: mapstructure.ComposeDecodeHookFunc(
+				mapstructure.StringToTimeDurationHookFunc(),
+			),
+			Metadata:         &md,
+			WeaklyTypedInput: true,
+			Squash:           true,
+		},
+	}
+	if err := k.UnmarshalWithConf("", target, conf); err != nil {
+		return err
+	}
+	if len(md.Unused) > 0 {
+		slog.Warn(label+" file contains unrecognized keys (these will be ignored)",
+			"keys", md.Unused)
+	}
+	return nil
 }
 
 // warnIfInRepoHasGlobalKeys emits a warning if an in-repo settings file contains
