@@ -52,19 +52,24 @@ if [[ -z "$candidates" ]]; then
   exit 0
 fi
 
-# Allowlist — anchor on file path. Each entry has a mandatory comment.
+# Allowlist — anchor on file path + env var name. Each entry has a mandatory
+# comment. Anchoring on the specific variable means a NEW os.Setenv of a
+# different token in the same file will still be caught.
 allowed_paths=(
-  # Dev server credential injection — sets tokens for the local dev loop.
-  "^cmd/server_foreground.go:"
+  # Dev server credential injection — sets SCION_DEV_TOKEN for the local dev loop.
+  "^cmd/server_foreground.go:.*SCION_DEV_TOKEN"
+
+  # Dev server credential injection — sets SCION_AUTH_TOKEN for the local dev loop.
+  "^cmd/server_foreground.go:.*SCION_AUTH_TOKEN"
 
   # Credential helper — refreshes GITHUB_TOKEN for gh CLI subprocess calls.
-  "^cmd/sciontool/commands/credential_helper.go:"
+  "^cmd/sciontool/commands/credential_helper.go:.*GITHUB_TOKEN"
 
   # GH CLI wrapper — injects GH_TOKEN before exec'ing gh.
-  "^cmd/sciontool/commands/gh_wrapper.go:"
+  "^cmd/sciontool/commands/gh_wrapper.go:.*GH_TOKEN"
 
   # Hub client — refreshes GITHUB_TOKEN for API calls.
-  "^pkg/sciontool/hub/client.go:"
+  "^pkg/sciontool/hub/client.go:.*GITHUB_TOKEN"
 )
 
 allowlist="$(printf '%s\n' "${allowed_paths[@]}" | paste -sd '|' -)"
