@@ -134,7 +134,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/injected-skills/": "authenticated", // User injected skill by ID
 
 	// ── Hub-scoped injected skills ─────────────────────────────────────
-	"/api/v1/hub/settings/injected-skills": "authenticated", // Hub injected skills
+	"/api/v1/hub/settings/injected-skills": "authenticated", // GET: authenticated (any user), PUT: admin (role check in handler)
 
 	// ── Broker registration ────────────────────────────────────────────
 	"/api/v1/brokers":      "authenticated", // List/register brokers — requires session
