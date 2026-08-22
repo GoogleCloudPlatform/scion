@@ -15,8 +15,8 @@ Conventions for scripts in `hack/check-*.sh`. Reference implementations:
 | 4 | COULD NOT ANALYSE: no candidate files matched (wrong cwd, empty checkout). |
 
 For security-grade checks, 3 and 4 must fail the build — a run that examined
-nothing must not look like a clean pass. Formatting-grade checks exit 0 on
-missing tools instead of 3 (see Severity Levels below).
+nothing must not look like a clean pass. Formatting-grade checks may exit 0
+for both 3 (missing tool) and 4 (no candidates) — see Severity Levels below.
 
 ## Severity Levels
 
@@ -65,22 +65,25 @@ echo "check-name: analysed ${sha}, ..." >&2
 Recommended order for new check scripts:
 
 ```
-1. Header comment  — what it checks, why, exit codes, severity level
+1. Header comment   — what it checks, why, exit codes, severity level
 2. set -euo pipefail
-3. Dependency check — exit 3 (security) or exit 0 (formatting) if tool missing
-4. Pre-filter       — find candidate files (exit 4 if none, or exit 0 for formatting)
-5. Classify/scan    — run the actual analysis
-6. Allowlist filter — remove known-good entries
-7. Report           — print violations to stderr, print summary
-8. Exit             — exit 1 if violations remain, exit 0 otherwise
+3. cd to repo root  — cd "$(dirname "$0")/.."
+4. Dependency check — exit 3 (security) or exit 0 (formatting) if tool missing
+5. Pre-filter       — find candidate files (exit 4 if none, or exit 0 for formatting)
+6. Classify/scan    — run the actual analysis
+7. Allowlist filter — remove known-good entries
+8. Report           — print violations to stderr, print summary
+9. Exit             — exit 1 if violations remain, exit 0 otherwise
 ```
 
 ## CI Integration
 
 - Each check gets its **own CI workflow step** with a distinct `::error title=`
   annotation. This keeps failures individually identifiable in the GitHub UI.
-- CI steps invoke scripts **directly** (`./hack/check-foo.sh`), not via make,
-  to preserve the script's exit code (see exit code 2 above).
+- CI steps that need exit-code preservation (security-grade checks) invoke
+  scripts **directly** (`./hack/check-foo.sh`), not via make (see exit code 2
+  above). Formatting-grade checks may use `make` when the flattened exit code
+  is acceptable.
 - The `make check-custom` target exists for **local development convenience** —
   it runs all custom checks in one command but flattens exit codes to 2.
 - Individual `make` targets (e.g. `make check-authz-guards`) remain available
