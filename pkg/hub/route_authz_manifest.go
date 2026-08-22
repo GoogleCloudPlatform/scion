@@ -14,9 +14,11 @@
 
 package hub
 
-// RouteAuthzManifest declares the authorization posture for every route
-// registered in registerRoutes(). The check-route-authz-manifest.sh script
-// verifies that every route in registerRoutes() appears here.
+// routeAuthzManifest declares the authorization posture for every route
+// registered in registerRoutes(). This variable is a lint-only artifact: it
+// is not referenced at runtime by any Go code. Its sole consumer is
+// hack/check-route-authz-manifest.sh, which lexically extracts the keys and
+// compares them against the route registrations in server.go.
 //
 // Authorization postures:
 //

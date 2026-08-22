@@ -60,12 +60,10 @@ MANIFEST
   manifest_file="$fixture_dir/manifest.go"
 
   # Extract registered routes from fixture server.go
-  registered=$(grep -oP 's\.mux\.(HandleFunc|Handle)\(\s*"([^"]+)"' "$server_file" \
-    | sed 's/s\.mux\.\(HandleFunc\|Handle\)(\s*"//;s/"$//' | sort -u)
+  registered=$(sed -n 's/.*s\.mux\.\(HandleFunc\|Handle\)(\s*"\([^"]*\)".*/\2/p' "$server_file" | sort -u)
 
   # Extract manifest routes from fixture manifest.go
-  manifested=$(grep -oP '^\t"([^"]+)"' "$manifest_file" \
-    | sed 's/^\t"//;s/"$//' | sort -u)
+  manifested=$(sed -n 's/^	"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
 
   # Compute missing (in registered but not manifest) and stale (in manifest but not registered)
   missing=$(comm -23 <(echo "$registered") <(echo "$manifested"))
@@ -110,8 +108,8 @@ provenance() {
   fi
 }
 
-# Dependency check — grep is always available, no exotic tools needed.
-# (This script uses only grep, sed, sort, comm — all POSIX.)
+# Dependency check — no exotic tools needed.
+# (This script uses only sed, sort, comm, wc — all POSIX.)
 
 server_file="pkg/hub/server.go"
 manifest_file="pkg/hub/route_authz_manifest.go"
@@ -133,8 +131,7 @@ fi
 # ── Extract registered routes from server.go ────────────────────────────────
 # Matches both s.mux.HandleFunc("path", ...) and s.mux.Handle("path", ...)
 # including method-scoped patterns like "GET /path".
-registered=$(grep -oP 's\.mux\.(HandleFunc|Handle)\(\s*"([^"]+)"' "$server_file" \
-  | sed 's/s\.mux\.\(HandleFunc\|Handle\)(\s*"//;s/"$//' | sort -u)
+registered=$(sed -n 's/.*s\.mux\.\(HandleFunc\|Handle\)(\s*"\([^"]*\)".*/\2/p' "$server_file" | sort -u)
 
 if [[ -z "$registered" ]]; then
   msg="check-route-authz-manifest: analysed $(provenance) — no routes found in $server_file, NOTHING WAS ANALYSED"
@@ -147,8 +144,7 @@ route_count=$(echo "$registered" | wc -l)
 
 # ── Extract manifest entries from route_authz_manifest.go ───────────────────
 # Matches lines like:   "/healthz": "public", // comment
-manifested=$(grep -oP '^\t"([^"]+)"' "$manifest_file" \
-  | sed 's/^\t"//;s/"$//' | sort -u)
+manifested=$(sed -n 's/^	"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
 
 if [[ -z "$manifested" ]]; then
   msg="check-route-authz-manifest: analysed $(provenance) — no manifest entries found in $manifest_file, NOTHING WAS ANALYSED"
