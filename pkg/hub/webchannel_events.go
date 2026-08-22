@@ -52,3 +52,13 @@ type ChatMessageDeletedEvent struct {
 	MessageID       string `json:"messageId"`
 	DeletedAt       string `json:"deletedAt"`
 }
+
+// DMPromotedEvent is published on user.<id>.chat.dm.promoted when a DM
+// is promoted to a space thread. The DM participant's client should close
+// the DM view and optionally navigate to the new thread.
+type DMPromotedEvent struct {
+	// OldConversationKey is the DM key that was promoted.
+	OldConversationKey string `json:"oldConversationKey"`
+	// NewTopic is the created thread.
+	NewTopic WebChatTopic `json:"newTopic"`
+}

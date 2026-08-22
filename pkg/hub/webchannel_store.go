@@ -204,6 +204,33 @@ type WebChatStore interface {
 	// UpdateMessageContent updates the content of a message in the Ent
 	// messages table. This is used for edit operations.
 	UpdateMessageContent(ctx context.Context, messageID, content string) error
+
+	// --- DM-to-Space Promotion methods ---
+
+	// PromoteDM atomically promotes a DM conversation into a space thread.
+	// It creates the topic, re-keys messages and read state, and deletes
+	// the DM registry rows — all within a single database transaction.
+	// Returns the created topic with MessageCount populated.
+	PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error)
+
+	// UpdateThreadID re-keys all messages from oldThreadID to newThreadID.
+	// Returns the number of rows affected.
+	UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error)
+
+	// DeleteDM removes all webchat_dm rows for the given conversation key.
+	DeleteDM(ctx context.Context, conversationKey string) error
+
+	// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
+	// Uses UPDATE rather than DELETE+INSERT to preserve pinned/muted flags.
+	MigrateReadState(ctx context.Context, oldKey, newKey string) error
+
+	// CountPendingMessages returns the number of messages with dispatch_state='pending'
+	// for the given thread_id. Used to check for in-flight agent dispatches before promotion.
+	CountPendingMessages(ctx context.Context, threadID string) (int, error)
+
+	// CountMessages returns the number of messages for the given thread_id.
+	// Used for idempotency checks during DM promotion.
+	CountMessages(ctx context.Context, threadID string) (int, error)
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
@@ -250,7 +277,8 @@ type WebChatTopic struct {
 	CreatedAt      time.Time  `json:"createdAt"`
 	LastMessageID  string     `json:"lastMessageId,omitempty"`
 	LastActivityAt time.Time  `json:"lastActivityAt"`
-	DeletedAt      *time.Time `json:"deletedAt,omitempty"` // nil = not deleted
+	DeletedAt      *time.Time `json:"deletedAt,omitempty"`    // nil = not deleted
+	MessageCount   int        `json:"messageCount,omitempty"` // populated by PromoteDM
 }
 
 // TopicUpdate carries optional updates for a topic.
@@ -1221,6 +1249,9 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.seedFromWave1(); err != nil {
 		return fmt.Errorf("wave-1 seed: %w", err)
 	}
+	if err := s.addThreadIDIndex(); err != nil {
+		return fmt.Errorf("thread_id index: %w", err)
+	}
 	return nil
 }
 
@@ -1733,6 +1764,149 @@ func (s *sqliteWebChatStore) UpdateMessageContent(ctx context.Context, messageID
 		return fmt.Errorf("webchat store: message %s not found", messageID)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// DM-to-Space Promotion methods (SQLite)
+// ---------------------------------------------------------------------------
+
+// UpdateThreadID re-keys all messages from oldThreadID to newThreadID.
+func (s *sqliteWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error) {
+	const query = `UPDATE messages SET thread_id = ? WHERE thread_id = ?`
+	res, err := s.db.ExecContext(ctx, query, newThreadID, oldThreadID)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: update thread_id: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// DeleteDM removes all webchat_dm rows for the given conversation key.
+func (s *sqliteWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
+	const query = `DELETE FROM webchat_dm WHERE conversation_key = ?`
+	_, err := s.db.ExecContext(ctx, query, conversationKey)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	return nil
+}
+
+// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
+func (s *sqliteWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKey string) error {
+	const query = `UPDATE webchat_read_state SET conversation_key = ? WHERE conversation_key = ?`
+	_, err := s.db.ExecContext(ctx, query, newKey, oldKey)
+	if err != nil {
+		return fmt.Errorf("webchat store: migrate read state: %w", err)
+	}
+	return nil
+}
+
+// PromoteDM atomically promotes a DM conversation into a space thread.
+func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Step 1: Create topic
+	isGeneral := 0
+	if topic.IsGeneral {
+		isGeneral = 1
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent,
+		 created_by, created_at, last_activity_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		topic.ID, topic.ProjectID, topic.Name, isGeneral,
+		nullableString(topic.DefaultAgent), topic.CreatedBy,
+		topic.CreatedAt.UTC().Format(time.RFC3339Nano),
+		topic.LastActivityAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: create topic in promote: %w", err)
+	}
+
+	// Step 2: Re-key all messages
+	res, err := tx.ExecContext(ctx,
+		`UPDATE messages SET thread_id = ? WHERE thread_id = ?`,
+		topic.ID, dmKey)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
+	}
+
+	// Step 3: Migrate read state
+	_, err = tx.ExecContext(ctx,
+		`UPDATE webchat_read_state SET conversation_key = ? WHERE conversation_key = ?`,
+		topic.ID, dmKey)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: migrate read state in promote: %w", err)
+	}
+
+	// Step 4: Delete DM registry
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM webchat_dm WHERE conversation_key = ?`,
+		dmKey)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: delete DM in promote: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("webchat store: commit promote tx: %w", err)
+	}
+
+	// Populate topic with the message count for the response
+	n, _ := res.RowsAffected()
+	topic.MessageCount = int(n)
+	return &topic, nil
+}
+
+// CountPendingMessages returns the number of messages with dispatch_state='pending'
+// for the given thread_id.
+func (s *sqliteWebChatStore) CountPendingMessages(ctx context.Context, threadID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND dispatch_state = 'pending'`,
+		threadID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: count pending messages: %w", err)
+	}
+	return count, nil
+}
+
+// CountMessages returns the number of messages for the given thread_id.
+func (s *sqliteWebChatStore) CountMessages(ctx context.Context, threadID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE thread_id = ?`,
+		threadID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: count messages: %w", err)
+	}
+	return count, nil
+}
+
+// addThreadIDIndex creates an index on messages.thread_id for query performance.
+func (s *sqliteWebChatStore) addThreadIDIndex() error {
+	done, err := s.migrationCompleted("thread_id_index")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
+	var tableExists int
+	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
+	if err != nil || tableExists == 0 {
+		return s.markMigrationCompleted("thread_id_index")
+	}
+
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id)`)
+	if err != nil {
+		return fmt.Errorf("create thread_id index: %w", err)
+	}
+	return s.markMigrationCompleted("thread_id_index")
 }
 
 // truncateSnippet truncates content to maxLen runes for display.
