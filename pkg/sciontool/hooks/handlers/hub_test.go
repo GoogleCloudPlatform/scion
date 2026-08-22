@@ -6,13 +6,16 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
@@ -632,7 +635,7 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 		}
 	})
 
-	t.Run("truncates assistant text exceeding 64KB", func(t *testing.T) {
+	t.Run("truncates assistant text to the hub message limit", func(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
 
@@ -666,12 +669,7 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 			t.Fatal("Expected handler to be created")
 		}
 
-		// Create a 100KB string (well over the 64KB limit).
-		bigText := string(make([]byte, 100*1024))
-		for i := range []byte(bigText) {
-			_ = i // filled with zeros, but the length is what matters
-		}
-		bigText = strings.Repeat("A", 100*1024)
+		bigText := strings.Repeat("A", messages.MaxMessageLength*4)
 
 		err := handler.Handle(&hooks.Event{
 			Name: hooks.EventAgentEnd,
@@ -684,12 +682,73 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 
-		maxLen := 64*1024 + len("\n[truncated]")
-		if len(outboundMsg) > maxLen {
-			t.Errorf("Expected outbound msg to be at most %d bytes, got %d", maxLen, len(outboundMsg))
+		// Runes, not bytes: this is the unit the hub rejects on.
+		if got := utf8.RuneCountInString(outboundMsg); got > messages.MaxMessageLength {
+			t.Errorf("Expected outbound msg to be at most %d runes, got %d", messages.MaxMessageLength, got)
 		}
-		if !strings.HasSuffix(outboundMsg, "\n[truncated]") {
-			t.Error("Expected truncated message to end with '\\n[truncated]'")
+		if !strings.Contains(outboundMsg, "[truncated,") {
+			t.Error("Expected the truncated message to carry a marker saying how much went")
+		}
+	})
+}
+
+func TestTruncateAssistantText(t *testing.T) {
+	const marker = "[truncated,"
+
+	t.Run("text at or under the limit is untouched", func(t *testing.T) {
+		for _, n := range []int{0, 1, messages.MaxMessageLength - 1, messages.MaxMessageLength} {
+			// Multi-byte: with ASCII, bytes and runes agree and a byte-counting
+			// implementation passes unnoticed.
+			in := strings.Repeat("\u3042", n)
+			if got := truncateAssistantText(in); got != in {
+				t.Errorf("%d runes was modified", n)
+			}
+		}
+	})
+
+	// Non-uniform input: a homogeneous repeat cannot tell head-truncation from
+	// tail-truncation.
+	t.Run("keeps the START of the reply", func(t *testing.T) {
+		in := "OPENING-SENTINEL" + strings.Repeat("x", messages.MaxMessageLength*2) + "CLOSING-SENTINEL"
+		got := truncateAssistantText(in)
+
+		if !strings.HasPrefix(got, "OPENING-SENTINEL") {
+			t.Error("the opening of the reply was discarded")
+		}
+		if strings.Contains(got, "CLOSING-SENTINEL") {
+			t.Error("kept the end of the reply instead of the start")
+		}
+		if body := got[:strings.LastIndex(got, "\n"+marker)]; !strings.HasPrefix(in, body) {
+			t.Error("the kept text is not a prefix of the input")
+		}
+	})
+
+	t.Run("result always fits the hub limit", func(t *testing.T) {
+		for _, in := range []string{
+			strings.Repeat("a", messages.MaxMessageLength+1),
+			strings.Repeat("\u3042", messages.MaxMessageLength+1),
+			strings.Repeat("a", messages.MaxMessageLength*10),
+			"\xff\xfe" + strings.Repeat("b", messages.MaxMessageLength+1),
+		} {
+			got := truncateAssistantText(in)
+			if n := utf8.RuneCountInString(got); n > messages.MaxMessageLength {
+				t.Errorf("%d runes exceeds the hub limit of %d", n, messages.MaxMessageLength)
+			}
+			if !strings.Contains(got, marker) {
+				t.Error("a truncated reply carries no marker")
+			}
+		}
+	})
+
+	t.Run("the marker reports how much went", func(t *testing.T) {
+		over := 500
+		got := truncateAssistantText(strings.Repeat("a", messages.MaxMessageLength+over))
+		var dropped int
+		if _, err := fmt.Sscanf(got[strings.LastIndex(got, marker):], "[truncated, %d characters omitted]", &dropped); err != nil {
+			t.Fatalf("marker is not parseable: %v", err)
+		}
+		if dropped < over {
+			t.Errorf("marker says %d dropped, but at least %d were", dropped, over)
 		}
 	})
 }
