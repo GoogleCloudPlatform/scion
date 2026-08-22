@@ -18,6 +18,7 @@ package secret
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1166,5 +1167,123 @@ func TestLocalBackend_NoEncryptionKeyFallback(t *testing.T) {
 	}
 	if rawValue != plaintext {
 		t.Errorf("without encryption key, value should be stored as plaintext; got %q", rawValue)
+	}
+}
+
+// ============================================================================
+// Ciphertext-Leak Prevention Tests
+// ============================================================================
+
+// TestLocalBackend_DecryptStoreSecret_NilKeyEncryptedValue verifies that
+// decryptStoreSecret returns an error (not raw ciphertext) when the encryption
+// key is nil but the stored value has the enc:v1: prefix.
+func TestLocalBackend_DecryptStoreSecret_NilKeyEncryptedValue(t *testing.T) {
+	s := createTestStore(t)
+	backend := NewLocalBackend(s, "test-hub-id", "") // nil encryption key
+	ctx := context.Background()
+
+	// Seed a secret with an enc:v1:-prefixed value directly into the store,
+	// simulating a value that was encrypted by a previous deployment that
+	// had an encryption key configured.
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("enc-no-key-1"),
+		Key:            "ENCRYPTED_SECRET",
+		EncryptedValue: "enc:v1:AAAAAAAAAAAAAAAAAAAAAA==",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "ENCRYPTED_SECRET",
+		Scope:          store.ScopeUser,
+		ScopeID:        "user-1",
+	})
+
+	_, err := backend.Get(ctx, "ENCRYPTED_SECRET", ScopeUser, "user-1")
+	if err == nil {
+		t.Fatal("expected error when encryption key is nil but value is encrypted; got nil")
+	}
+	if !strings.Contains(err.Error(), "no encryption key is configured") {
+		t.Errorf("expected error about missing encryption key, got: %v", err)
+	}
+}
+
+// TestLocalBackend_DecryptStoreSecret_NilKeyPlaintextValue verifies that
+// decryptStoreSecret still returns plaintext values when the encryption key
+// is nil (legacy/dev mode).
+func TestLocalBackend_DecryptStoreSecret_NilKeyPlaintextValue(t *testing.T) {
+	s := createTestStore(t)
+	backend := NewLocalBackend(s, "test-hub-id", "") // nil encryption key
+	ctx := context.Background()
+
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("plain-no-key-1"),
+		Key:            "PLAIN_SECRET",
+		EncryptedValue: "my-plaintext-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "PLAIN_SECRET",
+		Scope:          store.ScopeUser,
+		ScopeID:        "user-1",
+	})
+
+	sv, err := backend.Get(ctx, "PLAIN_SECRET", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("expected no error for plaintext value with nil key, got: %v", err)
+	}
+	if sv.Value != "my-plaintext-value" {
+		t.Errorf("expected %q, got %q", "my-plaintext-value", sv.Value)
+	}
+}
+
+// TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue verifies that
+// decryptRawValue returns an error (not raw ciphertext) when the encryption
+// key is nil but the value has the enc:v1: prefix.
+func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
+	s := createTestStore(t)
+	backend := NewLocalBackend(s, "test-hub-id", "") // nil encryption key
+
+	encrypted := "enc:v1:AAAAAAAAAAAAAAAAAAAAAA=="
+	value, err := backend.decryptRawValue(encrypted)
+	if err == nil {
+		t.Fatal("expected error when encryption key is nil but value is encrypted; got nil")
+	}
+	if value != "" {
+		t.Errorf("expected empty string on error, got %q", value)
+	}
+	if !strings.Contains(err.Error(), "no encryption key is configured") {
+		t.Errorf("expected error about missing encryption key, got: %v", err)
+	}
+
+	// Also verify via Resolve: encrypted values should be skipped, not leaked.
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("resolve-enc-no-key"),
+		Key:            "LEAKED_SECRET",
+		EncryptedValue: encrypted,
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "LEAKED_SECRET",
+		Scope:          store.ScopeUser,
+		ScopeID:        "user-1",
+	})
+
+	ctx := context.Background()
+	resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	for _, sv := range resolved {
+		if sv.Name == "LEAKED_SECRET" {
+			t.Error("encrypted secret should not appear in resolved secrets when encryption key is nil")
+		}
+	}
+}
+
+// TestLocalBackend_DecryptRawValue_NilKeyPlaintextValue verifies that
+// decryptRawValue still returns plaintext values when the encryption key
+// is nil (legacy path).
+func TestLocalBackend_DecryptRawValue_NilKeyPlaintextValue(t *testing.T) {
+	backend := &LocalBackend{encryptionKey: nil}
+
+	value, err := backend.decryptRawValue("plain-legacy-value")
+	if err != nil {
+		t.Fatalf("expected no error for plaintext value with nil key, got: %v", err)
+	}
+	if value != "plain-legacy-value" {
+		t.Errorf("expected %q, got %q", "plain-legacy-value", value)
 	}
 }

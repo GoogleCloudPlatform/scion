@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -161,7 +162,12 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if err != nil {
 				continue
 			}
-			value := b.decryptRawValue(rawValue)
+			value, err := b.decryptRawValue(rawValue)
+			if err != nil {
+				slog.Warn("skipping secret: decryption not possible",
+					"key", s.Key, "error", err)
+				continue
+			}
 
 			secretType := s.SecretType
 			if secretType == "" {
@@ -225,7 +231,12 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if err != nil {
 				continue
 			}
-			value := b.decryptRawValue(rawValue)
+			value, err := b.decryptRawValue(rawValue)
+			if err != nil {
+				slog.Warn("skipping progeny secret: decryption not possible",
+					"key", s.Key, "error", err)
+				continue
+			}
 
 			secretType := s.SecretType
 			if secretType == "" {
@@ -340,6 +351,11 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 			return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
 		}
 		value = plaintext
+	} else if strings.HasPrefix(s.EncryptedValue, encryptedPrefix) {
+		// The stored value is encrypted but no encryption key is configured.
+		// Returning the raw ciphertext would leak an indistinguishable blob
+		// that the caller would treat as a real secret value.
+		return nil, fmt.Errorf("secret %q is encrypted but no encryption key is configured", s.Key)
 	}
 	return &SecretWithValue{
 		SecretMeta: *fromStoreSecretMeta(s),
@@ -353,15 +369,20 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 // receive an encrypted blob as a secret value; a missing value is safer than
 // indistinguishable garbage. This is used in Resolve where individual
 // decryption failures should not abort the entire resolution.
-func (b *LocalBackend) decryptRawValue(raw string) string {
+func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
 	if b.encryptionKey == nil {
-		return raw
+		if strings.HasPrefix(raw, encryptedPrefix) {
+			// The stored value is encrypted but no encryption key is
+			// configured. Return an error instead of leaking ciphertext.
+			return "", fmt.Errorf("value is encrypted but no encryption key is configured")
+		}
+		return raw, nil // legacy plaintext
 	}
 	plaintext, _, err := decryptValue(raw, b.encryptionKey)
 	if err != nil {
 		slog.Warn("failed to decrypt secret value, returning empty",
 			"error", err)
-		return ""
+		return "", nil
 	}
-	return plaintext
+	return plaintext, nil
 }
