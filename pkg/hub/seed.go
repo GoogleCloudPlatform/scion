@@ -302,8 +302,8 @@ func hasSeedPolicyTombstone(ctx context.Context, s store.Store, policyName strin
 // if a policy with the same name already exists or if a deletion tombstone
 // is present.
 func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *store.Policy) {
-	// Check if policy already exists by name
-	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policy.Name}, store.ListOptions{Limit: 1})
+	// Check if policy already exists by name+scope.
+	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policy.Name, ScopeType: policy.ScopeType}, store.ListOptions{Limit: 1})
 	if err != nil {
 		slog.Warn("failed to check for existing policy", "name", policy.Name, "error", err)
 		return
@@ -352,7 +352,7 @@ func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *stor
 // This ensures existing deployments get the marker on upgrade.
 func backfillSeededPolicyOrigin(ctx context.Context, s store.Store, seededNames []string) {
 	for _, name := range seededNames {
-		existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
+		existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name, ScopeType: "hub"}, store.ListOptions{Limit: 1})
 		if err != nil || len(existing.Items) == 0 {
 			continue
 		}
