@@ -17,6 +17,8 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -29,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+const emptyAgentRoleBackfillMarkerSection = "migration_empty_agent_roles_backfilled"
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -234,6 +238,12 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 // BackfillEmptyAgentRoles preserves access for pre-role agents before missing
 // roles start resolving to the least-privileged role at runtime.
 func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, emptyAgentRoleBackfillMarkerSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
 	agents, err := c.client.Agent.Query().All(ctx)
 	if err != nil {
 		return err
@@ -265,7 +275,12 @@ func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
 	if updated > 0 {
 		slog.Info("backfilled empty agent roles before role default change", "rows_updated", updated)
 	}
-	return nil
+	_, err = c.UpsertHubSetting(ctx, emptyAgentRoleBackfillMarkerSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
 }
 
 // DB returns the underlying *sql.DB, or nil if the client is not backed by a

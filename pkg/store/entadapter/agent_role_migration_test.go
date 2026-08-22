@@ -92,4 +92,24 @@ func TestMigrateBackfillsEmptyAgentRolesToFull(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, gotExplicitRole.AppliedConfig)
 	assert.Equal(t, "readonly", gotExplicitRole.AppliedConfig.AgentRole)
+
+	futureEmptyRole := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "future-empty-role",
+		Name:      "future-empty-role",
+		ProjectID: project.ID,
+		Phase:     "created",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Task: "created after one-shot backfill",
+		},
+	}
+	require.NoError(t, cs.CreateAgent(ctx, futureEmptyRole))
+
+	require.NoError(t, cs.Migrate(ctx))
+
+	gotFutureEmptyRole, err := cs.GetAgent(ctx, futureEmptyRole.ID)
+	require.NoError(t, err)
+	require.NotNil(t, gotFutureEmptyRole.AppliedConfig)
+	assert.Empty(t, gotFutureEmptyRole.AppliedConfig.AgentRole)
+	assert.Equal(t, "created after one-shot backfill", gotFutureEmptyRole.AppliedConfig.Task)
 }

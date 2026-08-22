@@ -2868,8 +2868,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("dispatch_agent payload: agentName is required")
 		}
 
-		agentAuthored, err := s.authorizeScheduledAgentCreate(ctx, evt)
-		if err != nil {
+		if _, err := s.authorizeScheduledAgentCreate(ctx, evt); err != nil {
 			return err
 		}
 
@@ -2931,9 +2930,10 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Build applied config with task
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
-		if agentAuthored || evt.CreatedBy == "" {
-			agent.AppliedConfig.AgentRole = string(AgentRoleNone)
-		}
+		// Scheduled dispatch has no modeled delegation context yet. Persist the
+		// lowest explicit role for every scheduled child so migration/backfill
+		// code can never reinterpret it as a legacy empty-role agent.
+		agent.AppliedConfig.AgentRole = string(AgentRoleNone)
 		if payload.Task != "" {
 			agent.AppliedConfig.Task = payload.Task
 		}
