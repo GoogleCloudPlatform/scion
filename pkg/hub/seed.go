@@ -286,9 +286,16 @@ func seedPolicyTombstoneKey(policyName string) string {
 
 // hasSeedPolicyTombstone returns true if a tombstone hub setting exists for the
 // given seeded policy name, indicating it was intentionally deleted.
-func hasSeedPolicyTombstone(ctx context.Context, s store.Store, policyName string) bool {
+// It returns an error for transient store failures so the caller can fail-closed.
+func hasSeedPolicyTombstone(ctx context.Context, s store.Store, policyName string) (bool, error) {
 	_, err := s.GetHubSetting(ctx, seedPolicyTombstoneKey(policyName))
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
 }
 
 // seedPolicy creates a policy and binds it to the given group, skipping
@@ -307,7 +314,13 @@ func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *stor
 
 	// Check for deletion tombstone — an operator intentionally deleted this
 	// seeded policy and it should not be recreated.
-	if hasSeedPolicyTombstone(ctx, s, policy.Name) {
+	hasTombstone, err := hasSeedPolicyTombstone(ctx, s, policy.Name)
+	if err != nil {
+		slog.Warn("failed to check tombstone; skipping recreation as precaution",
+			"name", policy.Name, "error", err)
+		return // fail-closed
+	}
+	if hasTombstone {
 		slog.Info("seeded policy was intentionally deleted; skipping recreation",
 			"name", policy.Name)
 		return

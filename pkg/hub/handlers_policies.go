@@ -428,7 +428,7 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 			slog.Warn("failed to record seed-policy deletion tombstone",
 				"policy", policy.Name, "error", upsertErr)
 		} else {
-			slog.Warn("seeded policy deleted; it will not be recreated on restart",
+			slog.Info("seeded policy deleted; it will not be recreated on restart",
 				"policy", policy.Name)
 		}
 	}
