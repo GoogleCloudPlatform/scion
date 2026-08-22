@@ -22,6 +22,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entharnessconfig "github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	enttemplate "github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -278,8 +279,8 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 			enttemplate.ProjectIDEQ(filter.ScopeID),
 		))
 	case filter.ProjectID != "" && filter.Scope == "":
-		// Project-without-scope: return global plus this project's templates.
-		query.Where(enttemplate.Or(
+		// Project-without-scope: return global + project + user-scoped templates.
+		scopePredicates := []predicate.Template{
 			enttemplate.ScopeEQ(store.TemplateScopeGlobal),
 			enttemplate.And(
 				enttemplate.ScopeEQ(store.TemplateScopeProject),
@@ -288,7 +289,17 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 					enttemplate.ProjectIDEQ(filter.ProjectID),
 				),
 			),
-		))
+		}
+		// Include user-scoped templates when UserID is provided.
+		if filter.UserID != "" {
+			scopePredicates = append(scopePredicates,
+				enttemplate.And(
+					enttemplate.ScopeEQ(store.TemplateScopeUser),
+					enttemplate.ScopeIDEQ(filter.UserID),
+				),
+			)
+		}
+		query.Where(enttemplate.Or(scopePredicates...))
 	case filter.ProjectID != "":
 		query.Where(enttemplate.Or(
 			enttemplate.ScopeIDEQ(filter.ProjectID),

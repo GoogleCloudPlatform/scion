@@ -187,6 +187,24 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		filter.Status = store.TemplateStatusActive
 	}
 
+	// When listing without explicit scope, include user-scoped templates
+	// for the authenticated user in the resolution results.
+	switch filter.Scope {
+	case "":
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			filter.UserID = userIdent.ID()
+		}
+	case store.TemplateScopeUser:
+		// When listing user-scoped templates, always force ScopeID to the
+		// authenticated user's ID to prevent cross-user template enumeration.
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			Unauthorized(w)
+			return
+		}
+		filter.ScopeID = userIdent.ID()
+	}
+
 	limit := 50
 	if l := query.Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
@@ -255,10 +273,18 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		scopeID = req.ProjectID
 	}
 
-	// Generate slug from request or name
+	// Generate slug from request or name — always sanitize caller-supplied
+	// slugs through Slugify to prevent path-traversal via crafted values.
 	slug := req.Slug
+	if slug != "" {
+		slug = api.Slugify(slug)
+	}
 	if slug == "" {
 		slug = api.Slugify(req.Name)
+	}
+	if slug == "" {
+		BadRequest(w, "invalid slug: name cannot be slugified")
+		return
 	}
 
 	// Create template record
@@ -283,6 +309,20 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	}
 	if template.Visibility == "" {
 		template.Visibility = store.VisibilityPrivate
+	}
+
+	// For user-scoped templates, always set the owner and scope ID from the
+	// authenticated user. ScopeID is forced unconditionally to prevent callers
+	// from injecting another user's ID.
+	if template.Scope == store.TemplateScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			Unauthorized(w)
+			return
+		}
+		template.OwnerID = userIdent.ID()
+		template.CreatedBy = userIdent.ID()
+		template.ScopeID = userIdent.ID()
 	}
 
 	// If no files provided, keep the template in 'pending' status so it
@@ -538,6 +578,16 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			}
 		} else {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+	case store.TemplateScopeUser:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if existing.OwnerID != userIdent.ID() && existing.ScopeID != userIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only delete your own user-scoped templates", nil)
 			return
 		}
 	}
@@ -823,6 +873,19 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+	case store.TemplateScopeUser:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		// User scope: scopeID must match the authenticated user
+		if scopeID == "" {
+			scopeID = userIdent.ID()
+		} else if scopeID != userIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone templates into your own user scope", nil)
+			return
+		}
 	}
 
 	// Create new template based on source
@@ -848,6 +911,14 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 	if clone.Visibility == "" {
 		clone.Visibility = source.Visibility
+	}
+
+	// For user-scoped clones, set the owner from the authenticated user
+	if clone.Scope == store.TemplateScopeUser {
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			clone.OwnerID = userIdent.ID()
+			clone.CreatedBy = userIdent.ID()
+		}
 	}
 
 	// Generate storage path for the clone

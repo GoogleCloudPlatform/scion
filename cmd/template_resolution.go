@@ -183,6 +183,25 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 		}
 	}
 
+	// Check user scope
+	userOpts := &hubclient.ListTemplatesOptions{
+		Name:   name,
+		Scope:  "user",
+		Status: "active",
+	}
+
+	userResp, err := hubCtx.Client.Templates().List(listCtx, userOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range userResp.Templates {
+		t := &userResp.Templates[i]
+		if t.Name == name || t.Slug == name {
+			return t, nil
+		}
+	}
+
 	// Check global scope
 	globalOpts := &hubclient.ListTemplatesOptions{
 		Name:   name,
@@ -580,6 +599,7 @@ func formatTemplateNotFoundError(name, projectPath string) error {
 	if projectPath != "" {
 		locations = append(locations, "  - Hub (project scope) - not found")
 	}
+	locations = append(locations, "  - Hub (user scope) - not found")
 	locations = append(locations, "  - Hub (global) - not found")
 
 	// Check local locations

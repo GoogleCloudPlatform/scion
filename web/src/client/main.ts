@@ -388,6 +388,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-skills.js'),
   },
   {
+    pattern: /^\/profile\/templates$/,
+    tag: 'scion-page-profile-templates',
+    load: () => import('../components/pages/profile-templates.js'),
+  },
+  {
     pattern: /^\/profile$/,
     tag: 'scion-page-profile-env-vars',
     load: () => import('../components/pages/profile-env-vars.js'),
@@ -514,6 +519,7 @@ const PROFILE_ROUTES = new Set([
   'scion-page-profile-teams',
   'scion-page-profile-discord',
   'scion-page-profile-skills',
+  'scion-page-profile-templates',
 ]);
 
 /**
