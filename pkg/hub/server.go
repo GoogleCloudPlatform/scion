@@ -2813,7 +2813,7 @@ type DispatchAgentEventPayload struct {
 
 func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.ScheduledEvent) (bool, error) {
 	if evt.CreatedBy == "" {
-		return false, nil
+		return false, fmt.Errorf("dispatch_agent event has no creator; cannot authorize at fire time")
 	}
 
 	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {

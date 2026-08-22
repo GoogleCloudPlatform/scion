@@ -344,6 +344,16 @@ func newMockStore() *mockScheduledEventStore {
 	}
 }
 
+func seedFullRoleDispatchCreator(ms *mockScheduledEventStore, projectID string) string {
+	creatorID := "creator-agent"
+	ms.agents[creatorID] = &store.Agent{
+		ID:            creatorID,
+		ProjectID:     projectID,
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+	}
+	return creatorID
+}
+
 func (m *mockScheduledEventStore) CreateScheduledEvent(_ context.Context, event *store.ScheduledEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1337,6 +1347,7 @@ func TestDispatchAgentEventHandler_MissingAgentName(t *testing.T) {
 
 func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 	ms := newMockStore()
+	creatorID := seedFullRoleDispatchCreator(ms, "nonexistent-project")
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
 
@@ -1346,6 +1357,7 @@ func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 		ProjectID: "nonexistent-project",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
+		CreatedBy: creatorID,
 	}
 
 	err := handler(ctx, evt)
@@ -1360,6 +1372,7 @@ func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 	ms.agents["existing-1"] = &store.Agent{
 		ID:        "existing-1",
 		Slug:      "worker-1",
@@ -1377,6 +1390,7 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
+		CreatedBy: creatorID,
 	}
 
 	err := handler(ctx, evt)
@@ -1467,6 +1481,30 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 	}
 }
 
+func TestDispatchAgentEventHandler_EmptyCreatorDenied(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+
+	srv := newEventHandlerTestServer(ms)
+	handler := srv.dispatchAgentEventHandler()
+
+	err := handler(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-empty-creator",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"new-worker"}`,
+	})
+	if err == nil {
+		t.Fatal("expected empty creator to be denied at fire time")
+	}
+	if !strings.Contains(err.Error(), "no creator") {
+		t.Fatalf("expected no creator error, got: %v", err)
+	}
+	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
+		t.Fatal("empty creator must not create a scheduled agent")
+	}
+}
+
 // resolvingTemplateStore is mockScheduledEventStore with the one change that
 // used to detonate it: a template getter that actually returns a template.
 // Everything else is inherited.
@@ -1505,6 +1543,7 @@ func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _
 func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	handler := srv.dispatchAgentEventHandler()
@@ -1514,6 +1553,7 @@ func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) 
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"tmpl-worker","template":"my-tmpl","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	}
 
 	err := handler(context.Background(), evt)
