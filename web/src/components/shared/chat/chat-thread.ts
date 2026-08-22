@@ -2377,12 +2377,16 @@ export class ScionChatThread extends LitElement {
 
     try {
       const res = await apiFetch(`${downloadUrl}?format=json`);
+      // Staleness guard: user closed dialog or clicked a different file link.
+      if (this.filePreview?.containerPath !== containerPath) return;
       if (!res.ok) {
         const errMsg = await extractApiError(res, `HTTP ${res.status}`);
         this.filePreview = { ...this.filePreview, status: 'error', error: errMsg };
         return;
       }
       const data = (await res.json()) as { content: string; size: number };
+      // Staleness guard: user navigated away while parsing response.
+      if (this.filePreview?.containerPath !== containerPath) return;
       if (data.size > PATH_PREVIEW_MAX) {
         // Too large for inline preview, show download-only.
         this.filePreview = {
@@ -2398,6 +2402,8 @@ export class ScionChatThread extends LitElement {
         content: data.content,
       };
     } catch (err) {
+      // Staleness guard: user navigated away while request was in-flight.
+      if (this.filePreview?.containerPath !== containerPath) return;
       this.filePreview = {
         ...this.filePreview,
         status: 'error',
