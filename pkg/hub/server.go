@@ -2934,6 +2934,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// lowest explicit role for every scheduled child so migration/backfill
 		// code can never reinterpret it as a legacy empty-role agent.
 		agent.AppliedConfig.AgentRole = string(AgentRoleNone)
+		agent.AppliedConfig.NoAuth = true
 		if payload.Task != "" {
 			agent.AppliedConfig.Task = payload.Task
 		}

@@ -18,9 +18,11 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +45,20 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
 	require.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
+	require.True(t, child.AppliedConfig.NoAuth)
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "secret-data"},
+			{SecretMeta: secret.SecretMeta{Name: "API_KEY", SecretType: "environment", Target: "API_KEY"}, Value: "key-value"},
+		},
+	})
+	req, err := dispatcher.buildCreateRequest(ctx, child, "TestScheduledNoAuth")
+	require.NoError(t, err)
+	require.True(t, req.NoAuth)
+	require.Empty(t, req.ResolvedSecrets)
+	require.NotContains(t, req.ResolvedEnv, "API_KEY")
 
 	require.NoError(t, s.Migrate(ctx))
 
@@ -50,4 +66,5 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
 	require.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
+	require.True(t, child.AppliedConfig.NoAuth)
 }
