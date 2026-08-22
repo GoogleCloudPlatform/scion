@@ -289,7 +289,7 @@ func TestCreateSubAgent_ParentRoleLogged(t *testing.T) {
 }
 
 func TestCreateSubAgent_EmptyRoleParentDenied(t *testing.T) {
-	_, s, _, project := setupAgentRoleTest(t)
+	srv, s, _, project := setupAgentRoleTest(t)
 	ctx := context.Background()
 
 	// Create a parent agent with no AgentRole set in AppliedConfig. Migration
@@ -304,12 +304,18 @@ func TestCreateSubAgent_EmptyRoleParentDenied(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, parent))
 
-	stored, err := s.GetAgent(ctx, parent.ID)
-	require.NoError(t, err)
-	role, additionalScopes := agentRoleAndScopes(stored)
-	assert.Equal(t, AgentRoleNone, role)
-	assert.Empty(t, additionalScopes)
-	assert.NotContains(t, ScopesForRole(role), ScopeAgentCreate)
+	rec := doAgentCallerRequest(t, srv, parent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-empty-role-parent-full",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"empty-role parent requesting full sub-agent should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "parent agent role")
+
+	_, ok := getStoredAgentRole(t, s, project.ID, "child-empty-role-parent-full")
+	assert.False(t, ok, "forbidden request should not persist a child agent")
 }
 
 func TestCreateSubAgent_NoEscalationEnforced(t *testing.T) {
