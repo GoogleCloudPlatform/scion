@@ -1004,6 +1004,216 @@ func TestSessionToBearerMiddleware_SigningKeyRotation(t *testing.T) {
 		"session cookie should be cleared (MaxAge=-1) after signing key rotation")
 }
 
+func TestSessionToBearerMiddleware_ProxyRedirect(t *testing.T) {
+	// Browser request (Accept: text/html) to a proxy route without a session
+	// should be redirected to /auth/login instead of passing through to the
+	// Hub API (which would return a raw JSON 401).
+	ws := newTestWebServer(t, WebServerConfig{})
+
+	hubCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/agent123/ports/8080/proxy/index.html?foo=bar", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusFound, resp.StatusCode, "should redirect browser to login")
+	assert.Equal(t, "/auth/login", resp.Header.Get("Location"), "redirect target should be /auth/login")
+	assert.False(t, hubCalled, "Hub handler should not be invoked for redirected requests")
+
+	// Verify returnTo was saved in the session (preserving path + query).
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == webSessionName {
+			sessionCookie = c
+			break
+		}
+	}
+	require.NotNil(t, sessionCookie, "session cookie must be set with returnTo")
+	// Read back the session to verify the returnTo value.
+	reqCheck := httptest.NewRequest("GET", "/", nil)
+	reqCheck.AddCookie(sessionCookie)
+	sess, err := ws.sessionStore.Get(reqCheck, webSessionName)
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/agents/agent123/ports/8080/proxy/index.html?foo=bar",
+		sess.Values[sessKeyReturnTo], "returnTo should preserve full request URI")
+}
+
+func TestSessionToBearerMiddleware_ProxyNoRedirectForAPIRequest(t *testing.T) {
+	// API request (Accept: application/json) to a proxy route without a
+	// session should pass through to the Hub — no redirect.
+	ws := newTestWebServer(t, WebServerConfig{})
+
+	hubCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/agent123/ports/8080/proxy/data", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Result().StatusCode, "API request should pass through")
+	assert.True(t, hubCalled, "Hub handler should be invoked for API requests")
+}
+
+func TestSessionToBearerMiddleware_NonProxyNoRedirect(t *testing.T) {
+	// Browser request to a non-proxy /api/v1/ route without a session
+	// should pass through — no redirect.
+	ws := newTestWebServer(t, WebServerConfig{})
+
+	hubCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Result().StatusCode, "non-proxy route should pass through")
+	assert.True(t, hubCalled, "Hub handler should be invoked for non-proxy routes")
+}
+
+func TestSessionToBearerMiddleware_ProxyWithSessionNoRedirect(t *testing.T) {
+	// Browser request to a proxy route WITH a valid session should pass
+	// through with the Bearer token injected — no redirect.
+	const secret = "test-session-secret-for-proxy-redirect-1234567890abcdef"
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: secret,
+	})
+
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+
+	var capturedAuthHeader string
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	// Pre-seed a session with user identity and a valid Hub token.
+	tok, _, err := tokenSvc.GenerateAccessToken("user_proxy_123", "proxy@example.com", "Proxy User", "user", ClientTypeWeb)
+	require.NoError(t, err)
+
+	reqSetup := httptest.NewRequest(http.MethodGet, "/", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	sess.Values[sessKeyUserID] = "user_proxy_123"
+	sess.Values[sessKeyUserEmail] = "proxy@example.com"
+	sess.Values[sessKeyUserName] = "Proxy User"
+	sess.Values[sessKeyUserRole] = "user"
+	sess.Values[sessKeyHubAccessToken] = tok
+	sess.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Hour).UnixMilli()
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies, "setup must produce a session cookie")
+
+	// Make a browser request to a proxy route with the session cookie.
+	req := httptest.NewRequest("GET", "/api/v1/agents/agent123/ports/8080/proxy/", nil)
+	req.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Result().StatusCode,
+		"authenticated browser request to proxy route should pass through")
+	assert.True(t, strings.HasPrefix(capturedAuthHeader, "Bearer "),
+		"should inject Bearer token, got %q", capturedAuthHeader)
+}
+
+func TestSessionToBearerMiddleware_SessionErrorRedirect(t *testing.T) {
+	// When sessionStore.Get fails (e.g. corrupted/expired cookie), a browser
+	// request to a proxy route should still redirect to /auth/login instead of
+	// passing through to the Hub with a raw JSON 401.
+	const secret1 = "secret-one-for-signing-0123456789abcdef"
+	const secret2 = "secret-two-different-key-abcdef0123456789"
+
+	// Create a WebServer with secret1, seed a session, and grab the cookie.
+	wsOld := newTestWebServer(t, WebServerConfig{SessionSecret: secret1})
+	reqSetup := httptest.NewRequest(http.MethodGet, "/", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := wsOld.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	sess.Values[sessKeyUserID] = "user_corrupt"
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies, "setup must produce a session cookie")
+
+	// Create a NEW WebServer with a different secret — the cookie from secret1
+	// will fail signature verification in sessionStore.Get.
+	ws := newTestWebServer(t, WebServerConfig{SessionSecret: secret2})
+
+	hubCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/api/v1/agents/agent123/ports/8080/proxy/index.html", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	for _, c := range cookies {
+		req.AddCookie(c) // cookie signed with secret1, server uses secret2
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusFound, resp.StatusCode, "should redirect browser to login even when session is corrupt")
+	assert.Equal(t, "/auth/login", resp.Header.Get("Location"), "redirect target should be /auth/login")
+	assert.False(t, hubCalled, "Hub handler should not be invoked for redirected requests")
+}
+
+func TestIsProxyRoute(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/api/v1/agents/abc/ports/8080/proxy", true},
+		{"/api/v1/agents/abc/ports/8080/proxy/", true},
+		{"/api/v1/agents/abc/ports/8080/proxy/index.html", true},
+		{"/api/v1/agents/abc/ports/8080/proxy/deep/path", true},
+		{"/api/v1/agents/abc/ports/8080/status", false},
+		{"/api/v1/projects", false},
+		{"/api/v1/agents/abc/ports/8080", false},
+		{"/api/v1/agents/abc/status", false},
+		{"/healthz", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			assert.Equal(t, tt.want, isProxyRoute(tt.path), "isProxyRoute(%q)", tt.path)
+		})
+	}
+}
+
 func TestDevAuth_AutoLogin(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
