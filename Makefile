@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -88,6 +88,10 @@ compat-literals:
 # apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
 check-authz-guards:
 	@./hack/check-authz-guards.sh
+
+## check-setenv-guard: Flag silenced os.Setenv of security-sensitive env vars
+check-setenv-guard:
+	@./hack/check-setenv-guard.sh
 
 ## check-conversation-upsert-guard: Verify UpsertConversationByExternalRef is only called from pkg/messaging and pkg/store
 check-conversation-upsert-guard:
@@ -187,7 +191,7 @@ tidy-extras:
 	echo "All extras modules tidied."
 
 ## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
-ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog test-fast build
+ci: fmt-check lint compat-literals check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog test-fast build
 	@echo ""
 	@echo "CI passed."
 
