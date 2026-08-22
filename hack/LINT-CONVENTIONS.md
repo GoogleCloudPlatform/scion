@@ -14,8 +14,9 @@ Conventions for scripts in `hack/check-*.sh`. Reference implementations:
 | 3 | COULD NOT ANALYSE: required tool missing (e.g. `rg` not installed). |
 | 4 | COULD NOT ANALYSE: no candidate files matched (wrong cwd, empty checkout). |
 
-Both 3 and 4 must fail the build — a run that examined nothing must not look
-like a clean pass.
+For security-grade checks, 3 and 4 must fail the build — a run that examined
+nothing must not look like a clean pass. Formatting-grade checks exit 0 on
+missing tools instead of 3 (see Severity Levels below).
 
 ## Severity Levels
 
@@ -31,8 +32,10 @@ Choose the level at script creation time and document it in the script header.
 - Anchor entries on **stable identifiers**: file path + function/symbol name.
   Never use line numbers — they shift on every edit.
 - Every entry **must have a comment** explaining why the exception exists.
-- Use the format from `check-authz-guards.sh`: shell array of regex patterns,
-  one per line, grouped by category with section comments.
+- Use a shell array of regex patterns, one per line, grouped by category with
+  section comments. See `check-project-compat-literals.sh` for a populated
+  example, and `check-authz-guards.sh` for the anchoring guidance (file +
+  function, not line numbers).
 
 ## Self-Test
 
@@ -40,15 +43,21 @@ Choose the level at script creation time and document it in the script header.
   exercises every classifier verdict (clean, violation, each edge case).
 - **Formatting-grade** rules **SHOULD** implement `--self-test` where practical.
 
-Keep fixtures in `hack/testdata/` alongside the script.
+Fixtures can be inline heredocs written to a temp file (the current approach in
+`check-authz-guards.sh`) or standalone files in `hack/testdata/`.
 
 ## Provenance Reporting
 
-Print the git tree SHA at the start of output so stale-checkout results are
-identifiable:
+Print the commit SHA at the start of output so stale-checkout results are
+identifiable. Append `-dirty` when the working tree has uncommitted changes
+(see the `provenance()` function in `check-authz-guards.sh`):
 
 ```bash
-echo "tree: $(git rev-parse HEAD:)" >&2
+sha="$(git rev-parse --short HEAD)"
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  sha="${sha}-dirty"
+fi
+echo "check-name: analysed ${sha}, ..." >&2
 ```
 
 ## Script Structure
