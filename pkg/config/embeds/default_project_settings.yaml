@@ -27,6 +27,10 @@ schema_version: "1"
 # Env: SCION_ACTIVE_PROFILE
 active_profile: local
 
+# Default harness-config for new agents
+# Env: SCION_DEFAULT_HARNESS_CONFIG
+default_harness_config: antigravity
+
 # CLI behavior settings
 cli:
   autohelp: true
