@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1210,8 +1209,8 @@ phantom_key: value
 	assert.Contains(t, logged, "foo_bar", "expected warning to list foo_bar")
 	assert.Contains(t, logged, "phantom_key", "expected warning to list phantom_key")
 	// Known keys should NOT appear in the warning
-	assert.True(t, !strings.Contains(logged, "active_profile"),
+	assert.NotContains(t, logged, "active_profile",
 		"known key active_profile should not appear in warning")
-	assert.True(t, !strings.Contains(logged, "default_template"),
+	assert.NotContains(t, logged, "default_template",
 		"known key default_template should not appear in warning")
 }
