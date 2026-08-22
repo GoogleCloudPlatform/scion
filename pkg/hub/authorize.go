@@ -261,6 +261,11 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 		Unauthorized(w)
 		return nil, false
 	}
+	if _, scoped := identity.(*ScopedUserIdentity); scoped {
+		logAuthzDenial(r, identity, resource, ActionManage, "scoped user access token")
+		Forbidden(w)
+		return nil, false
+	}
 
 	// The assertion, rather than a switch on Type(), is deliberate: the question
 	// this helper asks is "can this caller answer Role()". It admits both "user"
