@@ -28,7 +28,7 @@ import (
 // ErrNoSecretBackend is returned when a secret operation is attempted but no
 // secret backend has been initialized (e.g., the hub was started without a
 // database or secret storage). Handlers translate this to HTTP 501.
-var ErrNoSecretBackend = errors.New("secret storage requires a configured secrets backend; set SCION_SERVER_SECRETS_BACKEND=gcpsm")
+var ErrNoSecretBackend = errors.New("no secret backend is configured; set SCION_SERVER_SECRETS_BACKEND to \"local\" or \"gcpsm\"")
 
 // PermissionError indicates that a secret backend operation failed due to
 // insufficient permissions (e.g., the Hub service account lacks a required

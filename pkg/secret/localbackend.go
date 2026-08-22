@@ -348,18 +348,20 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 }
 
 // decryptRawValue decrypts a raw encrypted value string. If decryption fails
-// (e.g. legacy plaintext), the value is returned as-is with a warning logged.
-// This is used in Resolve where individual decryption failures should not
-// abort the entire resolution.
+// (e.g. corrupted ciphertext or key mismatch after rotation), an empty string
+// is returned and a warning is logged. Returning "" ensures agents never
+// receive an encrypted blob as a secret value; a missing value is safer than
+// indistinguishable garbage. This is used in Resolve where individual
+// decryption failures should not abort the entire resolution.
 func (b *LocalBackend) decryptRawValue(raw string) string {
 	if b.encryptionKey == nil {
 		return raw
 	}
 	plaintext, _, err := decryptValue(raw, b.encryptionKey)
 	if err != nil {
-		slog.Warn("failed to decrypt secret value, returning raw",
+		slog.Warn("failed to decrypt secret value, returning empty",
 			"error", err)
-		return raw
+		return ""
 	}
 	return plaintext
 }
