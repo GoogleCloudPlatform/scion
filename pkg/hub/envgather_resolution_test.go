@@ -113,7 +113,7 @@ func TestResolution_SecretUserScope(t *testing.T) {
 	}
 
 	// Store a secret via the local backend
-	backend := secret.NewLocalBackend(memStore, "test-hub-id")
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
 	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
 		Name:          "SECRET_KEY",
 		Value:         "secret-key-value",
@@ -253,7 +253,7 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	backend := secret.NewLocalBackend(memStore, "test-hub-id")
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
 
 	// Simulate the --secret flow: first store as plain env var, then promote
 	// to secret (which deletes the plain env var).

@@ -171,7 +171,7 @@ func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Resolve secrets as if dispatching an agent — signing keys must not appear.
-	backend := secret.NewLocalBackend(s, "test-hub-resolve")
+	backend := secret.NewLocalBackend(s, "test-hub-resolve", "test-secret")
 	resolved, err := backend.Resolve(context.Background(), "", "", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
@@ -358,7 +358,7 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 	legacyScopeID := "hub"
 
 	// Set up a LocalBackend as the secret backend with the new hub ID.
-	backend := secret.NewLocalBackend(s, newHubID)
+	backend := secret.NewLocalBackend(s, newHubID, "test-secret")
 
 	// Seed a legacy key under the old scope ID in both the store and backend.
 	legacyKey := make([]byte, 32)
@@ -433,7 +433,7 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 	}
 
 	hubID := "test-backend-hub"
-	backend := secret.NewLocalBackend(s, hubID)
+	backend := secret.NewLocalBackend(s, hubID, "test-secret")
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = hubID
@@ -515,7 +515,7 @@ func TestServer_SigningKeySyncFromStoreToBackend(t *testing.T) {
 	key1 := srv1.userTokenService.config.SigningKey
 
 	// Run 2: Secret backend configured — keys should sync from SQLite to backend
-	backend := secret.NewLocalBackend(s, hubID)
+	backend := secret.NewLocalBackend(s, hubID, "test-secret")
 	cfg.SecretBackend = backend
 	srv2, err := New(cfg, s)
 	if err != nil {
@@ -622,7 +622,7 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 	}
 
 	hubID := "test-backup-hub"
-	backend := secret.NewLocalBackend(s, hubID)
+	backend := secret.NewLocalBackend(s, hubID, "test-secret")
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = hubID
@@ -1045,7 +1045,7 @@ func TestServer_SigningKeyBackupPreservesSecretRef(t *testing.T) {
 	}
 
 	hubID := "test-ref-hub"
-	backend := secret.NewLocalBackend(s, hubID)
+	backend := secret.NewLocalBackend(s, hubID, "test-secret")
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = hubID

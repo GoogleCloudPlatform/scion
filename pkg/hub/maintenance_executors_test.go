@@ -40,7 +40,7 @@ func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
 	}
 
 	// Use a local backend (not GCP) — migration should fail.
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 
 	executor := &SecretMigrationExecutor{
 		store:         s,

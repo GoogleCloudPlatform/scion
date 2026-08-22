@@ -38,7 +38,7 @@ func createTestStore(t *testing.T) store.SecretStore {
 func createTestBackend(t *testing.T) (*LocalBackend, store.SecretStore) {
 	t.Helper()
 	s := createTestStore(t)
-	return NewLocalBackend(s, "test-hub-id"), s
+	return NewLocalBackend(s, "test-hub-id", "test-shared-secret"), s
 }
 
 // seedSecret inserts a secret directly into the store for testing read operations.
@@ -1043,5 +1043,128 @@ func TestLocalBackend_SetProgeny_AllowProgenyPersists(t *testing.T) {
 	}
 	if meta2.AllowProgeny {
 		t.Error("expected AllowProgeny=false after update")
+	}
+}
+
+// ============================================================================
+// Encryption Tests
+// ============================================================================
+
+// TestLocalBackend_EncryptionAtRest verifies that values stored via Set() are
+// actually encrypted in the database (not stored as plaintext).
+func TestLocalBackend_EncryptionAtRest(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	plaintext := "super-secret-api-key"
+	_, _, err := backend.Set(ctx, &SetSecretInput{
+		Name:       "ENCRYPTED_KEY",
+		Value:      plaintext,
+		SecretType: TypeEnvironment,
+		Scope:      ScopeUser,
+		ScopeID:    "user-1",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Read the raw value from the store (bypassing decryption)
+	rawValue, err := s.GetSecretValue(ctx, "ENCRYPTED_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("GetSecretValue failed: %v", err)
+	}
+
+	// The raw stored value must NOT be the plaintext
+	if rawValue == plaintext {
+		t.Error("stored value must not be plaintext — encryption is not happening")
+	}
+
+	// It should have the encrypted prefix
+	if len(rawValue) < 7 || rawValue[:7] != "enc:v1:" {
+		t.Errorf("stored value should have enc:v1: prefix, got %q", rawValue[:min(20, len(rawValue))])
+	}
+
+	// Reading back through the backend should return the original plaintext
+	sv, err := backend.Get(ctx, "ENCRYPTED_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if sv.Value != plaintext {
+		t.Errorf("expected decrypted value %q, got %q", plaintext, sv.Value)
+	}
+}
+
+// TestLocalBackend_LegacyPlaintextMigration verifies that secrets stored as
+// plaintext (without the enc:v1: prefix) are still readable. This ensures
+// backward compatibility during migration.
+func TestLocalBackend_LegacyPlaintextMigration(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+
+	// Seed a legacy plaintext secret directly into the store
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("legacy-1"),
+		Key:            "LEGACY_KEY",
+		EncryptedValue: "legacy-plaintext-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "LEGACY_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        "user-1",
+	})
+
+	// Get should return the plaintext value (legacy compatibility)
+	sv, err := backend.Get(ctx, "LEGACY_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if sv.Value != "legacy-plaintext-value" {
+		t.Errorf("expected %q, got %q", "legacy-plaintext-value", sv.Value)
+	}
+
+	// Resolve should also return the plaintext value
+	resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	found := false
+	for _, r := range resolved {
+		if r.Name == "LEGACY_KEY" {
+			found = true
+			if r.Value != "legacy-plaintext-value" {
+				t.Errorf("Resolve: expected %q, got %q", "legacy-plaintext-value", r.Value)
+			}
+		}
+	}
+	if !found {
+		t.Error("LEGACY_KEY not found in resolved secrets")
+	}
+}
+
+// TestLocalBackend_NoEncryptionKeyFallback verifies that when no shared secret
+// is provided, the backend stores values as plaintext (dev/testing mode).
+func TestLocalBackend_NoEncryptionKeyFallback(t *testing.T) {
+	s := createTestStore(t)
+	backend := NewLocalBackend(s, "test-hub-id", "") // empty secret = no encryption
+	ctx := context.Background()
+
+	plaintext := "unencrypted-value"
+	_, _, err := backend.Set(ctx, &SetSecretInput{
+		Name:       "PLAIN_KEY",
+		Value:      plaintext,
+		SecretType: TypeEnvironment,
+		Scope:      ScopeUser,
+		ScopeID:    "user-1",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Without an encryption key, the value should be stored as plaintext
+	rawValue, err := s.GetSecretValue(ctx, "PLAIN_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("GetSecretValue failed: %v", err)
+	}
+	if rawValue != plaintext {
+		t.Errorf("without encryption key, value should be stored as plaintext; got %q", rawValue)
 	}
 }
