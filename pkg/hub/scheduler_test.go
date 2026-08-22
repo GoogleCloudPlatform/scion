@@ -332,6 +332,7 @@ type mockScheduledEventStore struct {
 	events      map[string]*store.ScheduledEvent
 	agents      map[string]*store.Agent
 	projects    map[string]*store.Project
+	users       map[string]*store.User
 }
 
 func newMockStore() *mockScheduledEventStore {
@@ -339,6 +340,7 @@ func newMockStore() *mockScheduledEventStore {
 		events:   make(map[string]*store.ScheduledEvent),
 		agents:   make(map[string]*store.Agent),
 		projects: make(map[string]*store.Project),
+		users:    make(map[string]*store.User),
 	}
 }
 
@@ -443,6 +445,16 @@ func (m *mockScheduledEventStore) GetAgent(_ context.Context, id string) (*store
 	defer m.mu.Unlock()
 	if a, ok := m.agents[id]; ok {
 		cp := *a
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u, ok := m.users[id]; ok {
+		cp := *u
 		return &cp, nil
 	}
 	return nil, store.ErrNotFound
@@ -1379,6 +1391,11 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	ms.agents["creator-agent"] = &store.Agent{
+		ID:            "creator-agent",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+	}
 
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
@@ -1389,6 +1406,7 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker","template":"my-tmpl","task":"Do the thing"}`,
+		CreatedBy: "creator-agent",
 	}
 
 	// Should succeed — agent is created but not dispatched (no dispatcher)
@@ -1408,11 +1426,44 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 			if a.AppliedConfig == nil || a.AppliedConfig.Task != "Do the thing" {
 				t.Errorf("expected task 'Do the thing' in applied config")
 			}
+			if a.AppliedConfig.AgentRole != string(AgentRoleNone) {
+				t.Errorf("expected scheduled agent role %q, got %q", AgentRoleNone, a.AppliedConfig.AgentRole)
+			}
 			break
 		}
 	}
 	if !found {
 		t.Error("agent was not created in the store")
+	}
+}
+
+func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	ms.agents["readonly-creator"] = &store.Agent{
+		ID:            "readonly-creator",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleReadOnly)},
+	}
+
+	srv := newEventHandlerTestServer(ms)
+	handler := srv.dispatchAgentEventHandler()
+
+	err := handler(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-readonly-creator",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"new-worker"}`,
+		CreatedBy: "readonly-creator",
+	})
+	if err == nil {
+		t.Fatal("expected readonly creator to be denied at fire time")
+	}
+	if !strings.Contains(err.Error(), string(ScopeAgentCreate)) {
+		t.Fatalf("expected missing agent:create error, got: %v", err)
+	}
+	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
+		t.Fatal("readonly creator must not create a scheduled agent")
 	}
 }
 

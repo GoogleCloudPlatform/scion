@@ -165,6 +165,9 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
+	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
+		return
+	}
 
 	// Validate cron expression using standard 5-field parser
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -317,6 +320,14 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	var req UpdateScheduleRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if req.EventType != "" && req.EventType != "message" && req.EventType != "dispatch_agent" {
+		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
+		return
+	}
+	if (schedule.EventType == "dispatch_agent" || req.EventType == "dispatch_agent") &&
+		!s.authorizeAgentCreate(w, r, projectID) {
 		return
 	}
 

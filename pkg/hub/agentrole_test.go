@@ -72,11 +72,10 @@ func TestScopesForRole_InvalidDefault(t *testing.T) {
 	assert.Nil(t, scopes)
 }
 
-func TestScopesForRole_EmptyStringDefaultsToFull(t *testing.T) {
-	// Empty string (legacy agents with no stored role) defaults to full scopes
+func TestScopesForRole_EmptyStringDefaultsToNone(t *testing.T) {
+	// Empty string (missing stored role) fails closed to no scopes.
 	scopes := ScopesForRole(AgentRole(""))
-	fullScopes := ScopesForRole(AgentRoleFull)
-	assert.Equal(t, fullScopes, scopes)
+	assert.Nil(t, scopes)
 }
 
 func TestValidAgentRole(t *testing.T) {
@@ -108,6 +107,10 @@ func TestCompareRoles(t *testing.T) {
 	// Reverse comparisons are positive
 	assert.Greater(t, CompareRoles(AgentRoleFull, AgentRoleNone), 0)
 	assert.Greater(t, CompareRoles(AgentRoleBaseline, AgentRoleReadOnly), 0)
+
+	// Missing role data is least-privileged.
+	assert.Equal(t, 0, CompareRoles(AgentRole(""), AgentRoleNone))
+	assert.Less(t, CompareRoles(AgentRole(""), AgentRoleReadOnly), 0)
 }
 
 func TestMinRole(t *testing.T) {

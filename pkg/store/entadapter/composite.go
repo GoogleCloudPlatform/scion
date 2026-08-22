@@ -211,6 +211,10 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := c.BackfillEmptyAgentRoles(ctx); err != nil {
+		return fmt.Errorf("empty agent role backfill: %w", err)
+	}
+
 	// Migrate AllowListEntry records to User(status=invited) records.
 	// Runs after schema migration (which adds the "invited" status enum value)
 	// so the new status is available. Idempotent — safe to run on every startup.
@@ -225,6 +229,43 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 	return c.SeedMaintenanceOperations(ctx)
+}
+
+// BackfillEmptyAgentRoles preserves access for pre-role agents before missing
+// roles start resolving to the least-privileged role at runtime.
+func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
+	agents, err := c.client.Agent.Query().All(ctx)
+	if err != nil {
+		return err
+	}
+
+	var updated int
+	for _, a := range agents {
+		cfg := &store.AgentAppliedConfig{}
+		if a.AppliedConfig != "" {
+			parsed, err := parseAppliedConfig(a.AppliedConfig)
+			if err != nil {
+				return fmt.Errorf("parse applied_config for agent %s: %w", a.ID, err)
+			}
+			if parsed != nil {
+				cfg = parsed
+			}
+		}
+		if cfg.AgentRole != "" {
+			continue
+		}
+		cfg.AgentRole = "full"
+		if err := c.client.Agent.UpdateOneID(a.ID).
+			SetAppliedConfig(marshalAppliedConfig(cfg)).
+			Exec(ctx); err != nil {
+			return err
+		}
+		updated++
+	}
+	if updated > 0 {
+		slog.Info("backfilled empty agent roles before role default change", "rows_updated", updated)
+	}
+	return nil
 }
 
 // DB returns the underlying *sql.DB, or nil if the client is not backed by a

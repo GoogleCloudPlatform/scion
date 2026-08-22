@@ -2811,6 +2811,50 @@ type DispatchAgentEventPayload struct {
 	Branch    string `json:"branch,omitempty"`
 }
 
+func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.ScheduledEvent) (bool, error) {
+	if evt.CreatedBy == "" {
+		return false, nil
+	}
+
+	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
+		if creator.ProjectID != evt.ProjectID {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is not in project %q", evt.CreatedBy, evt.ProjectID)
+		}
+		role, additionalScopes := agentRoleAndScopes(creator)
+		scopes := append(ScopesForRole(role), additionalScopes...)
+		for _, scope := range scopes {
+			if scope == ScopeAgentCreate {
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("failed to resolve scheduled dispatch creator agent %q: %w", evt.CreatedBy, err)
+	}
+
+	user, err := s.store.GetUser(ctx, evt.CreatedBy)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("scheduled dispatch creator %q was not found", evt.CreatedBy)
+		}
+		return false, fmt.Errorf("failed to resolve scheduled dispatch creator user %q: %w", evt.CreatedBy, err)
+	}
+	if s.authzService == nil {
+		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
+	}
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
+	decision := s.authzService.CheckAccess(ctx, identity, Resource{
+		Type:       "agent",
+		ParentType: "project",
+		ParentID:   evt.ProjectID,
+	}, ActionCreate)
+	if !decision.Allowed {
+		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
+			evt.CreatedBy, evt.ProjectID, decision.Reason)
+	}
+	return false, nil
+}
+
 // dispatchAgentEventHandler returns an EventHandler that creates and starts
 // an agent in the project via the AgentDispatcher.
 func (s *Server) dispatchAgentEventHandler() EventHandler {
@@ -2822,6 +2866,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		if payload.AgentName == "" {
 			return fmt.Errorf("dispatch_agent payload: agentName is required")
+		}
+
+		agentAuthored, err := s.authorizeScheduledAgentCreate(ctx, evt)
+		if err != nil {
+			return err
 		}
 
 		// Log staleness for late fires
@@ -2882,6 +2931,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Build applied config with task
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
+		if agentAuthored || evt.CreatedBy == "" {
+			agent.AppliedConfig.AgentRole = string(AgentRoleNone)
+		}
 		if payload.Task != "" {
 			agent.AppliedConfig.Task = payload.Task
 		}
