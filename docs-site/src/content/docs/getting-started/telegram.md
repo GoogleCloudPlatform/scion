@@ -102,7 +102,9 @@ entirely from the browser — no config files to edit.
 4. In the **Secrets** section, find **Bot Token** (marked **Required**) and paste the token
    from Step 1. There is an optional **Webhook Secret** field — leave it blank for a typical
    workstation setup (see the note on inbound mode below).
-5. In the **Configuration** section, leave **Inbound Mode** set to its default, `poll`.
+5. In the **Configuration** section:
+   - Leave **Inbound Mode** set to its default, `poll`.
+   - **Registration URL** (`register_url`): (Optional) Enter a public-facing URL (e.g., `https://scion.example.com`) used for user-facing registration links. If left empty, it defaults to the internal `hub_url`. This is useful when the Hub is behind an authentication proxy, or when mobile devices or external users need to register.
 
    :::tip[Poll vs. webhook on a workstation]
    `poll` (long-polling) is the right choice for Workstation mode: your local Hub reaches
@@ -298,6 +300,7 @@ won't reach it. Options:
 - Run `/register` from **Telegram Desktop on the same machine** as your workstation server and
   tap the button there.
 - Or open **Profile → Telegram** in your local browser and enter the 6-character code manually.
+- Alternatively, if you configured a public-facing **Registration URL** (`register_url`) in the Integration Settings, the bot will generate links targeting that public address instead.
 
 ### "Code expired" or "code not found"
 
