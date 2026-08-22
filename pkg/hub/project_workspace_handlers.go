@@ -489,6 +489,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 	}
 
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	disposition := "attachment"
 	if r.URL.Query().Get("view") == "true" {
 		disposition = "inline"
