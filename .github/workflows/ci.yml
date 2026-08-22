@@ -120,6 +120,19 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Route Authorization Manifest
+        run: |
+          set +e
+          ./hack/check-route-authz-manifest.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Route authorization manifest::Routes found without declared authorization posture (see ptone/scion#598)" ;;
+            *) echo "::error title=Route authorization manifest NOT checked::check-route-authz-manifest could not run (exit $rc)" ;;
+          esac
+          exit "$rc"
+
       - name: Run Tests
         run: make test-fast
 
