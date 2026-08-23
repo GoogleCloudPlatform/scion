@@ -2909,6 +2909,7 @@ export class ScionPageChat extends LitElement {
   private async executePromote(): Promise<void> {
     const conv = this.v2Conversation;
     if (!conv) return;
+    const conversationKey = conv.conversationKey;
     this.promoteLoading = true;
     try {
       const res = await apiFetch(
@@ -2947,6 +2948,9 @@ export class ScionPageChat extends LitElement {
         name: string;
         defaultAgent?: string;
       };
+
+      // Guard: SSE dm.promoted may have already navigated us away
+      if (this.v2Conversation?.conversationKey !== conversationKey) return;
 
       // Close dialog and navigate to the new thread
       this.promoteDialogOpen = false;

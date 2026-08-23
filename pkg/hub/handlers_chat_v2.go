@@ -58,6 +58,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -2210,7 +2211,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Validate thread name
-	if len(body.Name) > 100 {
+	if utf8.RuneCountInString(body.Name) > 100 {
 		ValidationError(w, "thread name must be 100 characters or less", nil)
 		return
 	}
@@ -2297,7 +2298,8 @@ func titleCase(slug string) string {
 	words := strings.Fields(slug)
 	for i, w := range words {
 		if len(w) > 0 {
-			words[i] = strings.ToUpper(w[:1]) + w[1:]
+			r, size := utf8.DecodeRuneInString(w)
+			words[i] = string(unicode.ToUpper(r)) + w[size:]
 		}
 	}
 	return strings.Join(words, " ")
