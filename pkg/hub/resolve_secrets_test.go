@@ -89,7 +89,7 @@ func TestResolveSecrets(t *testing.T) {
 	}
 
 	// Create dispatcher with local backend (reads work, writes are blocked)
-	backend := secret.NewLocalBackend(memStore, "test-hub-id")
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetSecretBackend(backend)
@@ -207,7 +207,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 	}
 
 	// Create dispatcher with local backend
-	backend := secret.NewLocalBackend(memStore, "test-hub-id")
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetSecretBackend(backend)
@@ -259,7 +259,7 @@ func TestResolveSecrets_NoOwner(t *testing.T) {
 	memStore := createTestStore(t)
 	ctx := context.Background()
 
-	backend := secret.NewLocalBackend(memStore, "test-hub-id")
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetSecretBackend(backend)
@@ -344,7 +344,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		}
 	}
 
-	backend := secret.NewLocalBackend(memStore, "test-hub-id")
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetSecretBackend(backend)

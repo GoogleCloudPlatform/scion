@@ -16,21 +16,37 @@ package secret
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // LocalBackend implements SecretBackend using the local store.SecretStore.
-// Values are stored directly in the Hub database.
+// Values are encrypted at rest using AES-256-GCM before being written to
+// the Hub database. The encryption key is derived from the deployment-wide
+// shared signing secret via deriveLocalEncryptionKey.
 type LocalBackend struct {
-	store store.SecretStore
-	hubID string
+	store         store.SecretStore
+	hubID         string
+	encryptionKey []byte // 32-byte AES-256 key; nil disables encryption (legacy/dev)
 }
 
 // NewLocalBackend creates a LocalBackend wrapping the given SecretStore.
-func NewLocalBackend(s store.SecretStore, hubID string) *LocalBackend {
-	return &LocalBackend{store: s, hubID: hubID}
+// The sharedSecret parameter is the deployment-wide signing secret used to
+// derive the AES-256 encryption key for at-rest encryption. When empty,
+// encryption is disabled and values are stored as plaintext (with a warning).
+func NewLocalBackend(s store.SecretStore, hubID, sharedSecret string) *LocalBackend {
+	var key []byte
+	if sharedSecret != "" {
+		key = deriveLocalEncryptionKey(sharedSecret)
+	} else {
+		slog.Warn("local secret backend: no shared signing secret configured; " +
+			"secret values will be stored WITHOUT encryption")
+	}
+	return &LocalBackend{store: s, hubID: hubID, encryptionKey: key}
 }
 
 // HubID returns the hub instance ID used for hub-scoped secret namespacing.
@@ -43,11 +59,22 @@ func (b *LocalBackend) Get(ctx context.Context, name, scope, scopeID string) (*S
 	if err != nil {
 		return nil, err
 	}
-	return fromStoreSecretWithValue(s), nil
+	return b.decryptStoreSecret(s)
 }
 
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
 	s := toStoreSecret(input)
+
+	// Encrypt the value before persisting. When no encryption key is
+	// configured the plaintext is stored as-is (legacy/dev mode).
+	if b.encryptionKey != nil {
+		encrypted, err := encryptValue(s.EncryptedValue, b.encryptionKey)
+		if err != nil {
+			return false, nil, fmt.Errorf("encrypting secret value: %w", err)
+		}
+		s.EncryptedValue = encrypted
+	}
+
 	created, err := b.store.UpsertSecret(ctx, s)
 	if err != nil {
 		return false, nil, err
@@ -131,8 +158,14 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 				continue
 			}
 
-			value, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
+			rawValue, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
 			if err != nil {
+				continue
+			}
+			value, err := b.decryptRawValue(rawValue)
+			if err != nil {
+				slog.Warn("skipping secret: decryption not possible",
+					"key", s.Key, "error", err)
 				continue
 			}
 
@@ -194,8 +227,14 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 				continue
 			}
 
-			value, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
+			rawValue, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
 			if err != nil {
+				continue
+			}
+			value, err := b.decryptRawValue(rawValue)
+			if err != nil {
+				slog.Warn("skipping progeny secret: decryption not possible",
+					"key", s.Key, "error", err)
 				continue
 			}
 
@@ -238,7 +277,9 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 	return DeduplicateByTarget(result), nil
 }
 
-// toStoreSecret converts a SetSecretInput to a store.Secret.
+// toStoreSecret converts a SetSecretInput to a store.Secret. The returned
+// Secret's EncryptedValue initially holds the plaintext; the caller (Set)
+// is responsible for encrypting it before persisting.
 func toStoreSecret(input *SetSecretInput) *store.Secret {
 	secretType := input.SecretType
 	if secretType == "" {
@@ -299,10 +340,49 @@ func fromStoreSecretMeta(s *store.Secret) *SecretMeta {
 	}
 }
 
-// fromStoreSecretWithValue converts a store.Secret (with EncryptedValue) to SecretWithValue.
-func fromStoreSecretWithValue(s *store.Secret) *SecretWithValue {
+// decryptStoreSecret converts a store.Secret to SecretWithValue, decrypting
+// the EncryptedValue if an encryption key is configured. Legacy plaintext
+// values (those without the enc:v1: prefix) are returned as-is.
+func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, error) {
+	value := s.EncryptedValue
+	if b.encryptionKey != nil {
+		plaintext, _, err := decryptValue(s.EncryptedValue, b.encryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
+		}
+		value = plaintext
+	} else if strings.HasPrefix(s.EncryptedValue, encryptedPrefix) {
+		// The stored value is encrypted but no encryption key is configured.
+		// Returning the raw ciphertext would leak an indistinguishable blob
+		// that the caller would treat as a real secret value.
+		return nil, fmt.Errorf("secret %q is encrypted but no encryption key is configured", s.Key)
+	}
 	return &SecretWithValue{
 		SecretMeta: *fromStoreSecretMeta(s),
-		Value:      s.EncryptedValue,
+		Value:      value,
+	}, nil
+}
+
+// decryptRawValue decrypts a raw encrypted value string. If decryption fails
+// (e.g. corrupted ciphertext or key mismatch after rotation), an empty string
+// is returned and a warning is logged. Returning "" ensures agents never
+// receive an encrypted blob as a secret value; a missing value is safer than
+// indistinguishable garbage. This is used in Resolve where individual
+// decryption failures should not abort the entire resolution.
+func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
+	if b.encryptionKey == nil {
+		if strings.HasPrefix(raw, encryptedPrefix) {
+			// The stored value is encrypted but no encryption key is
+			// configured. Return an error instead of leaking ciphertext.
+			return "", fmt.Errorf("value is encrypted but no encryption key is configured")
+		}
+		return raw, nil // legacy plaintext
 	}
+	plaintext, _, err := decryptValue(raw, b.encryptionKey)
+	if err != nil {
+		slog.Warn("failed to decrypt secret value, returning empty",
+			"error", err)
+		return "", nil
+	}
+	return plaintext, nil
 }

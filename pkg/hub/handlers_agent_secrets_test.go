@@ -32,7 +32,7 @@ import (
 func setupAgentSecretTest(t *testing.T) (*Server, store.Store, string, string, string) {
 	t.Helper()
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	projectID := tid("project-agent-secret")
@@ -155,7 +155,7 @@ func TestAgentSecrets_ForceOverwrite(t *testing.T) {
 
 func TestAgentSecrets_NoAuth(t *testing.T) {
 	srv, _ := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id", "test-secret"))
 
 	body := AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("value")),
@@ -169,7 +169,7 @@ func TestAgentSecrets_NoAuth(t *testing.T) {
 
 func TestAgentSecrets_UserTokenRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id", "test-secret"))
 
 	body := AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("value")),

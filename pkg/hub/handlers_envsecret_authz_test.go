@@ -464,7 +464,7 @@ func TestEnvVar_BrokerScope_AdminAccess(t *testing.T) {
 
 func TestSecret_UserScope_AdminAccess(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/secrets?scope=user", nil)
 	if rec.Code != http.StatusOK {
@@ -484,7 +484,7 @@ func TestSecret_UserScope_AdminAccess(t *testing.T) {
 
 func TestSecret_UserScope_AdminDoesNotSeeOtherUserSecrets(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a member user and store a secret scoped to them.
@@ -525,7 +525,7 @@ func TestSecret_UserScope_AdminDoesNotSeeOtherUserSecrets(t *testing.T) {
 
 func TestSecret_UserScope_MemberAccess(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	member := &store.User{
@@ -553,7 +553,7 @@ func TestSecret_UserScope_MemberAccess(t *testing.T) {
 
 func TestSecret_UserScope_Unauthenticated(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/secrets?scope=user", nil)
 	if rec.Code != http.StatusUnauthorized {
@@ -563,7 +563,7 @@ func TestSecret_UserScope_Unauthenticated(t *testing.T) {
 
 func TestSecret_UserScope_WriteAuthWorks(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	// Verify that an authenticated user passes auth checks for secret writes.
 	// The LocalBackend supports Set (stores plaintext in SQLite), so expect 200.
@@ -589,7 +589,7 @@ func TestSecret_UserScope_WriteAuthWorks(t *testing.T) {
 
 func TestSecret_ProjectScope_OwnerAccess(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -616,7 +616,7 @@ func TestSecret_ProjectScope_OwnerAccess(t *testing.T) {
 
 func TestSecret_ProjectScope_NonOwnerDenied(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	nonOwner := &store.User{
@@ -643,7 +643,7 @@ func TestSecret_ProjectScope_NonOwnerDenied(t *testing.T) {
 
 func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -676,7 +676,7 @@ func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 
 func TestSecret_ProjectScope_AgentWriteDenied(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -777,7 +777,7 @@ func TestEnvVar_SecretPromotion_NoBackend_Returns501(t *testing.T) {
 
 func TestEnvVar_SecretPromotion_LocalBackend_Succeeds(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	// LocalBackend.Set() now works — promotion should succeed with 200
 	body := SetEnvVarRequest{
@@ -792,7 +792,7 @@ func TestEnvVar_SecretPromotion_LocalBackend_Succeeds(t *testing.T) {
 
 func TestEnvVar_UnifiedList_MergesSecrets(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a plain env var
@@ -855,7 +855,7 @@ func TestEnvVar_UnifiedList_MergesSecrets(t *testing.T) {
 
 func TestEnvVar_UnifiedList_Deduplication(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a plain env var with key "DUPED_KEY"
@@ -903,7 +903,7 @@ func TestEnvVar_UnifiedList_Deduplication(t *testing.T) {
 
 func TestEnvVar_FallbackGet_FromSecretBackend(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a secret (no plain env var)
@@ -944,7 +944,7 @@ func TestEnvVar_FallbackGet_FromSecretBackend(t *testing.T) {
 
 func TestEnvVar_FallbackDelete_FromSecretBackend(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a secret (no plain env var)
@@ -975,7 +975,7 @@ func TestEnvVar_FallbackDelete_FromSecretBackend(t *testing.T) {
 
 func TestEnvVar_StaleCleanup_PlainEnvVarRemovedOnPromotion(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a plain env var
@@ -1008,7 +1008,7 @@ func TestEnvVar_StaleCleanup_PlainEnvVarRemovedOnPromotion(t *testing.T) {
 
 func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	// Create a secret with type "variable" (not "environment")
@@ -1042,7 +1042,7 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 
 func TestEnvVar_ProjectScope_SecretPromotion_Succeeds(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -1062,7 +1062,7 @@ func TestEnvVar_ProjectScope_SecretPromotion_Succeeds(t *testing.T) {
 
 func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -1122,7 +1122,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 
 func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -1159,7 +1159,7 @@ func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 
 func TestEnvVar_ProjectScope_FallbackDelete(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -1386,7 +1386,7 @@ func TestEnvVar_HubScope_Unauthenticated(t *testing.T) {
 
 func TestSecret_HubScope_AdminCanSetAndGet(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	// Admin should be able to set hub-scoped secrets
 	body := SetSecretRequest{Value: "aHViLXNlY3JldC12YWw=", Description: "Hub-wide secret", Scope: "hub"}
@@ -1404,7 +1404,7 @@ func TestSecret_HubScope_AdminCanSetAndGet(t *testing.T) {
 
 func TestSecret_HubScope_MemberReadForbidden(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	member := &store.User{
@@ -1431,7 +1431,7 @@ func TestSecret_HubScope_MemberReadForbidden(t *testing.T) {
 
 func TestSecret_HubScope_MemberWriteForbidden(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	member := &store.User{

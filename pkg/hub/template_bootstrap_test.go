@@ -1166,7 +1166,7 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 		Scope:      secret.ScopeProject,
 		ScopeID:    projectID,
 	}
-	srv.SetSecretBackend(secret.NewLocalBackend(s, ""))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
 	sb := srv.GetSecretBackend()
 	if sb == nil {
 		t.Fatal("secret backend is nil")
@@ -1286,7 +1286,7 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	}
 
 	// Save GITHUB_TOKEN secret via local secret backend.
-	srv.SetSecretBackend(secret.NewLocalBackend(s, ""))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
 	if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
 		Name:       "GITHUB_TOKEN",
 		Value:      "my-secret-token-12345",

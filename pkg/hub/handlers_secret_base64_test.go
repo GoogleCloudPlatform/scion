@@ -68,7 +68,7 @@ func checkJSONError(t *testing.T, body string) {
 // TestSetSecret_ValidBase64_Works confirms backward-compatible base64 path works.
 func TestSetSecret_ValidBase64_Works(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	body := SetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("my-plain-value")),
@@ -83,7 +83,7 @@ func TestSetSecret_ValidBase64_Works(t *testing.T) {
 // explicit encoding="raw", values that fail base64 decode are rejected.
 func TestSetSecret_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	body := SetSecretRequest{
 		// Raw text with characters that make it invalid base64.
@@ -102,7 +102,7 @@ func TestSetSecret_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 // the caller wants literal storage they must set Encoding:"raw".
 func TestSetSecret_ValidBase64LookingValue_DefaultEncoding_Decoded(t *testing.T) {
 	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -127,7 +127,7 @@ func TestSetSecret_ValidBase64LookingValue_DefaultEncoding_Decoded(t *testing.T)
 // the value byte-for-byte, including text that happens to be valid base64.
 func TestSetSecret_RawEncoding_StoresLiteralValue(t *testing.T) {
 	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -155,7 +155,7 @@ func TestSetSecret_RawEncoding_StoresLiteralValue(t *testing.T) {
 // arbitrary special-character strings without any encoding/decoding.
 func TestSetSecret_RawEncoding_SpecialCharsLiteral(t *testing.T) {
 	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -181,7 +181,7 @@ func TestSetSecret_RawEncoding_SpecialCharsLiteral(t *testing.T) {
 // validation still produces structured JSON regardless of encoding.
 func TestSetSecret_PathTraversal_ReturnsJSONError(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	body := SetSecretRequest{
 		Value:  base64.StdEncoding.EncodeToString([]byte("data")),
@@ -200,7 +200,7 @@ func TestSetSecret_PathTraversal_ReturnsJSONError(t *testing.T) {
 // an oversized value.
 func TestSetSecret_SizeLimit_ReturnsJSONError(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	body := SetSecretRequest{
 		Value:    strings.Repeat("x", 64*1024+1),
@@ -248,7 +248,7 @@ func TestAgentSecrets_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 
 func TestAgentSecrets_RawEncoding_StoresLiteralValue(t *testing.T) {
 	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -274,7 +274,7 @@ func TestAgentSecrets_RawEncoding_StoresLiteralValue(t *testing.T) {
 
 func TestAgentSecrets_RawEncoding_SpecialCharsLiteral(t *testing.T) {
 	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -337,7 +337,7 @@ func TestAgentSecrets_SizeLimit_ReturnsJSONError(t *testing.T) {
 func setupProjectSecretTest(t *testing.T) (*Server, string) {
 	t.Helper()
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	projectID := tid("proj-secret-b64")
@@ -384,7 +384,7 @@ func TestProjectSecretByKey_InvalidBase64_DefaultEncoding_Returns400(t *testing.
 
 func TestProjectSecretByKey_RawEncoding_StoresLiteralValue(t *testing.T) {
 	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -458,7 +458,7 @@ func TestProjectSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 func setupBrokerSecretTest(t *testing.T) (*Server, string) {
 	t.Helper()
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	brokerID := tid("broker-secret-b64")
@@ -505,7 +505,7 @@ func TestBrokerSecretByKey_InvalidBase64_DefaultEncoding_Returns400(t *testing.T
 
 func TestBrokerSecretByKey_RawEncoding_StoresLiteralValue(t *testing.T) {
 	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
 
@@ -582,7 +582,7 @@ func TestBrokerSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 // strict base64.
 func TestSetSecret_UnrecognizedEncoding_Returns400(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 
 	body := SetSecretRequest{
 		Value:    base64.StdEncoding.EncodeToString([]byte("value")),

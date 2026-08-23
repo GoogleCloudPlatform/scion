@@ -39,7 +39,7 @@ import (
 func setupAgentSecretGetTest(t *testing.T) (*Server, store.Store, string, string, string) {
 	t.Helper()
 	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
 	projectID := tid("project-agent-get-secret")
@@ -157,7 +157,7 @@ func TestAgentGetSecret_AgentIDMismatch(t *testing.T) {
 
 func TestAgentGetSecret_NoAuth(t *testing.T) {
 	srv, _ := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id", "test-secret"))
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet,
 		"/api/v1/agents/some-agent/secrets/MY_KEY", nil)
@@ -168,7 +168,7 @@ func TestAgentGetSecret_NoAuth(t *testing.T) {
 
 func TestAgentGetSecret_UserTokenRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id", "test-secret"))
 
 	// Using dev token (user auth) should be rejected — agent-only endpoint.
 	rec := doRequest(t, srv, http.MethodGet,
@@ -325,7 +325,7 @@ func TestAgentListSecrets_Empty(t *testing.T) {
 
 func TestAgentListSecrets_NoAuth(t *testing.T) {
 	srv, _ := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id"))
+	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id", "test-secret"))
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet,
 		"/api/v1/agents/some-agent/secrets", nil)

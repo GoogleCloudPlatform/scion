@@ -25,12 +25,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// Secret holds the schema definition for the Secret entity, mapping the legacy
+// Secret holds the schema definition for the Secret entity, mapping the
 // SQLite `secrets` table. Secrets are polymorphically scoped (hub/user/project/
 // runtime_broker) via (scope, scope_id), so no FK edges are declared.
 //
-// encrypted_value stores the encrypted secret payload as TEXT (base64), not a
-// BLOB, and is marked Sensitive so it is never logged or serialized.
+// encrypted_value stores the AES-256-GCM encrypted secret payload (prefixed
+// with "enc:v1:" and base64-encoded). The local backend encrypts on write and
+// decrypts on read; the GCP Secret Manager backend stores only a reference
+// here. The field is marked Sensitive so it is never logged or serialized.
 type Secret struct {
 	ent.Schema
 }

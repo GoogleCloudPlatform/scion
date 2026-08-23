@@ -1591,9 +1591,22 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			if legacyScopeID == hubID {
 				continue
 			}
-			val, legacyErr := s.store.GetSecretValue(ctx, keyName, store.ScopeHub, legacyScopeID)
-			if legacyErr != nil {
-				continue
+			// When a secret backend is configured, read through it so that
+			// encrypted-at-rest values are decrypted transparently. Fall
+			// back to the raw store for configurations without a backend.
+			var val string
+			if hasSecretBackend {
+				sv, getErr := s.secretBackend.Get(ctx, keyName, store.ScopeHub, legacyScopeID)
+				if getErr == nil {
+					val = sv.Value
+				}
+			}
+			if val == "" {
+				rawVal, legacyErr := s.store.GetSecretValue(ctx, keyName, store.ScopeHub, legacyScopeID)
+				if legacyErr != nil {
+					continue
+				}
+				val = rawVal
 			}
 			slog.Info("Loaded signing key from legacy scope ID, will migrate", "key", keyName, "legacyScopeID", legacyScopeID)
 			key, decErr := base64.StdEncoding.DecodeString(val)

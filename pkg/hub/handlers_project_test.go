@@ -1840,7 +1840,7 @@ func TestResolveCloneToken_FallsBackToCreatorUserToken(t *testing.T) {
 		ScopeID:        "creator-user-1",
 	}))
 
-	backend := secret.NewLocalBackend(st, "test-hub-id")
+	backend := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(backend)
 
 	project := &store.Project{
@@ -1876,7 +1876,7 @@ func TestResolveCloneToken_PrefersProjectTokenOverUserToken(t *testing.T) {
 		ScopeID:        "creator-user-2",
 	}))
 
-	backend := secret.NewLocalBackend(st, "test-hub-id")
+	backend := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(backend)
 
 	project := &store.Project{

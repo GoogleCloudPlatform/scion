@@ -54,7 +54,7 @@ func TestBuildEnvGatherResponse_HubScopeSecretWarning(t *testing.T) {
 	}
 
 	// Set up the local secret backend so the cross-check can query it
-	backend := secret.NewLocalBackend(st, "test-hub-id")
+	backend := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(backend)
 
 	agent := &store.Agent{

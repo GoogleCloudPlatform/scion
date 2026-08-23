@@ -116,7 +116,7 @@ func skillDiscoverProject(t *testing.T, srv *Server, s store.Store, suffix, toke
 		t.Fatalf("failed to create project: %v", err)
 	}
 	if token != "" {
-		srv.SetSecretBackend(secret.NewLocalBackend(s, ""))
+		srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
 		if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
 			Name: "GITHUB_TOKEN", Value: token, SecretType: secret.TypeEnvironment,
 			Scope: secret.ScopeProject, ScopeID: projectID,
@@ -985,7 +985,7 @@ func TestHandleSkillsDiscoverDirectory_AgentOmitsProjectID(t *testing.T) {
 	srv, projectID, token := setupSkillDiscoverAgent(t, "noprojid",
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentCreate})
 
-	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, ""))
+	srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "", "test-secret"))
 	if _, _, err := srv.GetSecretBackend().Set(context.Background(), &secret.SetSecretInput{
 		Name: "GITHUB_TOKEN", Value: "agent-project-token", SecretType: secret.TypeEnvironment,
 		Scope: secret.ScopeProject, ScopeID: projectID,
