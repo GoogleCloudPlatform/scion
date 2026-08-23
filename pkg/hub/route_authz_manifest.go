@@ -38,6 +38,7 @@ package hub
 //  3. Run make check-route-authz-manifest to verify.
 //
 // See hack/LINT-CONVENTIONS.md and ptone/scion#598.
+//nolint:unused // Lint-only artifact: consumed by hack/check-route-authz-manifest.sh, not Go code.
 var routeAuthzManifest = map[string]string{
 	// ── Health and metrics ──────────────────────────────────────────────
 	"/healthz": "public",        // No auth — health check
