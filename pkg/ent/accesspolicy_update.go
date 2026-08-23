@@ -243,6 +243,26 @@ func (_u *AccessPolicyUpdate) ClearCreatedBy() *AccessPolicyUpdate {
 	return _u
 }
 
+// SetOrigin sets the "origin" field.
+func (_u *AccessPolicyUpdate) SetOrigin(v string) *AccessPolicyUpdate {
+	_u.mutation.SetOrigin(v)
+	return _u
+}
+
+// SetNillableOrigin sets the "origin" field if the given value is not nil.
+func (_u *AccessPolicyUpdate) SetNillableOrigin(v *string) *AccessPolicyUpdate {
+	if v != nil {
+		_u.SetOrigin(*v)
+	}
+	return _u
+}
+
+// ClearOrigin clears the value of the "origin" field.
+func (_u *AccessPolicyUpdate) ClearOrigin() *AccessPolicyUpdate {
+	_u.mutation.ClearOrigin()
+	return _u
+}
+
 // AddBindingIDs adds the "bindings" edge to the PolicyBinding entity by IDs.
 func (_u *AccessPolicyUpdate) AddBindingIDs(ids ...uuid.UUID) *AccessPolicyUpdate {
 	_u.mutation.AddBindingIDs(ids...)
@@ -427,6 +447,12 @@ func (_u *AccessPolicyUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(accesspolicy.FieldCreatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.Origin(); ok {
+		_spec.SetField(accesspolicy.FieldOrigin, field.TypeString, value)
+	}
+	if _u.mutation.OriginCleared() {
+		_spec.ClearField(accesspolicy.FieldOrigin, field.TypeString)
 	}
 	if _u.mutation.BindingsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -704,6 +730,26 @@ func (_u *AccessPolicyUpdateOne) ClearCreatedBy() *AccessPolicyUpdateOne {
 	return _u
 }
 
+// SetOrigin sets the "origin" field.
+func (_u *AccessPolicyUpdateOne) SetOrigin(v string) *AccessPolicyUpdateOne {
+	_u.mutation.SetOrigin(v)
+	return _u
+}
+
+// SetNillableOrigin sets the "origin" field if the given value is not nil.
+func (_u *AccessPolicyUpdateOne) SetNillableOrigin(v *string) *AccessPolicyUpdateOne {
+	if v != nil {
+		_u.SetOrigin(*v)
+	}
+	return _u
+}
+
+// ClearOrigin clears the value of the "origin" field.
+func (_u *AccessPolicyUpdateOne) ClearOrigin() *AccessPolicyUpdateOne {
+	_u.mutation.ClearOrigin()
+	return _u
+}
+
 // AddBindingIDs adds the "bindings" edge to the PolicyBinding entity by IDs.
 func (_u *AccessPolicyUpdateOne) AddBindingIDs(ids ...uuid.UUID) *AccessPolicyUpdateOne {
 	_u.mutation.AddBindingIDs(ids...)
@@ -918,6 +964,12 @@ func (_u *AccessPolicyUpdateOne) sqlSave(ctx context.Context) (_node *AccessPoli
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(accesspolicy.FieldCreatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.Origin(); ok {
+		_spec.SetField(accesspolicy.FieldOrigin, field.TypeString, value)
+	}
+	if _u.mutation.OriginCleared() {
+		_spec.ClearField(accesspolicy.FieldOrigin, field.TypeString)
 	}
 	if _u.mutation.BindingsCleared() {
 		edge := &sqlgraph.EdgeSpec{

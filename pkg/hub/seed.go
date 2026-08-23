@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -69,6 +70,13 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		ResourceType: "project",
 		Actions:      []string{"create"},
 		Effect:       "allow",
+	})
+
+	// Backfill Origin="seeded" on any existing seeded policies that predate
+	// the Origin field.
+	backfillSeededPolicyOrigin(ctx, s, []string{
+		"hub-member-read-all",
+		"hub-member-create-projects",
 	})
 
 	// The human half of the svc-accnt service-account assign baseline is
@@ -270,11 +278,32 @@ func backfillProjectAssignPolicies(ctx context.Context, s store.Store) {
 	}
 }
 
+// seedPolicyTombstoneKey returns the hub-setting key used to record that a
+// seeded policy was intentionally deleted by an operator.
+func seedPolicyTombstoneKey(policyName string) string {
+	return fmt.Sprintf("seed.policy.deleted.%s", policyName)
+}
+
+// hasSeedPolicyTombstone returns true if a tombstone hub setting exists for the
+// given seeded policy name, indicating it was intentionally deleted.
+// It returns an error for transient store failures so the caller can fail-closed.
+func hasSeedPolicyTombstone(ctx context.Context, s store.Store, policyName string) (bool, error) {
+	_, err := s.GetHubSetting(ctx, seedPolicyTombstoneKey(policyName))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
 // seedPolicy creates a policy and binds it to the given group, skipping
-// if a policy with the same name already exists.
+// if a policy with the same name already exists or if a deletion tombstone
+// is present.
 func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *store.Policy) {
-	// Check if policy already exists by name
-	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policy.Name}, store.ListOptions{Limit: 1})
+	// Check if policy already exists by name+scope.
+	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policy.Name, ScopeType: policy.ScopeType}, store.ListOptions{Limit: 1})
 	if err != nil {
 		slog.Warn("failed to check for existing policy", "name", policy.Name, "error", err)
 		return
@@ -282,6 +311,23 @@ func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *stor
 	if existing.TotalCount > 0 {
 		return
 	}
+
+	// Check for deletion tombstone — an operator intentionally deleted this
+	// seeded policy and it should not be recreated.
+	hasTombstone, err := hasSeedPolicyTombstone(ctx, s, policy.Name)
+	if err != nil {
+		slog.Warn("failed to check tombstone; skipping recreation as precaution",
+			"name", policy.Name, "error", err)
+		return // fail-closed
+	}
+	if hasTombstone {
+		slog.Info("seeded policy was intentionally deleted; skipping recreation",
+			"name", policy.Name)
+		return
+	}
+
+	// Mark as seeded so the delete handler can record a tombstone.
+	policy.Origin = store.PolicyOriginSeeded
 
 	if err := s.CreatePolicy(ctx, policy); err != nil {
 		slog.Warn("failed to create seed policy", "name", policy.Name, "error", err)
@@ -298,6 +344,28 @@ func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *stor
 	if err := s.AddPolicyBinding(ctx, binding); err != nil {
 		slog.Warn("failed to bind seed policy to hub-members group",
 			"policy", policy.Name, "error", err)
+	}
+}
+
+// backfillSeededPolicyOrigin marks existing seeded policies with
+// Origin="seeded" if they were created before the Origin field existed.
+// This ensures existing deployments get the marker on upgrade.
+func backfillSeededPolicyOrigin(ctx context.Context, s store.Store, seededNames []string) {
+	for _, name := range seededNames {
+		existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name, ScopeType: "hub"}, store.ListOptions{Limit: 1})
+		if err != nil || len(existing.Items) == 0 {
+			continue
+		}
+		p := &existing.Items[0]
+		if p.Origin == "" {
+			p.Origin = store.PolicyOriginSeeded
+			if err := s.UpdatePolicy(ctx, p); err != nil {
+				slog.Warn("failed to backfill seeded policy origin",
+					"name", name, "error", err)
+			} else {
+				slog.Info("backfilled seeded policy origin", "name", name, "id", p.ID)
+			}
+		}
 	}
 }
 

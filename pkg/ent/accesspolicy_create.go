@@ -172,6 +172,20 @@ func (_c *AccessPolicyCreate) SetNillableCreatedBy(v *string) *AccessPolicyCreat
 	return _c
 }
 
+// SetOrigin sets the "origin" field.
+func (_c *AccessPolicyCreate) SetOrigin(v string) *AccessPolicyCreate {
+	_c.mutation.SetOrigin(v)
+	return _c
+}
+
+// SetNillableOrigin sets the "origin" field if the given value is not nil.
+func (_c *AccessPolicyCreate) SetNillableOrigin(v *string) *AccessPolicyCreate {
+	if v != nil {
+		_c.SetOrigin(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AccessPolicyCreate) SetID(v uuid.UUID) *AccessPolicyCreate {
 	_c.mutation.SetID(v)
@@ -251,6 +265,10 @@ func (_c *AccessPolicyCreate) defaults() {
 	if _, ok := _c.mutation.Updated(); !ok {
 		v := accesspolicy.DefaultUpdated()
 		_c.mutation.SetUpdated(v)
+	}
+	if _, ok := _c.mutation.Origin(); !ok {
+		v := accesspolicy.DefaultOrigin
+		_c.mutation.SetOrigin(v)
 	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := accesspolicy.DefaultID()
@@ -399,6 +417,10 @@ func (_c *AccessPolicyCreate) createSpec() (*AccessPolicy, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(accesspolicy.FieldCreatedBy, field.TypeString, value)
 		_node.CreatedBy = value
+	}
+	if value, ok := _c.mutation.Origin(); ok {
+		_spec.SetField(accesspolicy.FieldOrigin, field.TypeString, value)
+		_node.Origin = value
 	}
 	if nodes := _c.mutation.BindingsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -681,6 +703,24 @@ func (u *AccessPolicyUpsert) UpdateCreatedBy() *AccessPolicyUpsert {
 // ClearCreatedBy clears the value of the "created_by" field.
 func (u *AccessPolicyUpsert) ClearCreatedBy() *AccessPolicyUpsert {
 	u.SetNull(accesspolicy.FieldCreatedBy)
+	return u
+}
+
+// SetOrigin sets the "origin" field.
+func (u *AccessPolicyUpsert) SetOrigin(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldOrigin, v)
+	return u
+}
+
+// UpdateOrigin sets the "origin" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateOrigin() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldOrigin)
+	return u
+}
+
+// ClearOrigin clears the value of the "origin" field.
+func (u *AccessPolicyUpsert) ClearOrigin() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldOrigin)
 	return u
 }
 
@@ -984,6 +1024,27 @@ func (u *AccessPolicyUpsertOne) UpdateCreatedBy() *AccessPolicyUpsertOne {
 func (u *AccessPolicyUpsertOne) ClearCreatedBy() *AccessPolicyUpsertOne {
 	return u.Update(func(s *AccessPolicyUpsert) {
 		s.ClearCreatedBy()
+	})
+}
+
+// SetOrigin sets the "origin" field.
+func (u *AccessPolicyUpsertOne) SetOrigin(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetOrigin(v)
+	})
+}
+
+// UpdateOrigin sets the "origin" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateOrigin() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateOrigin()
+	})
+}
+
+// ClearOrigin clears the value of the "origin" field.
+func (u *AccessPolicyUpsertOne) ClearOrigin() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearOrigin()
 	})
 }
 
@@ -1454,6 +1515,27 @@ func (u *AccessPolicyUpsertBulk) UpdateCreatedBy() *AccessPolicyUpsertBulk {
 func (u *AccessPolicyUpsertBulk) ClearCreatedBy() *AccessPolicyUpsertBulk {
 	return u.Update(func(s *AccessPolicyUpsert) {
 		s.ClearCreatedBy()
+	})
+}
+
+// SetOrigin sets the "origin" field.
+func (u *AccessPolicyUpsertBulk) SetOrigin(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetOrigin(v)
+	})
+}
+
+// UpdateOrigin sets the "origin" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateOrigin() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateOrigin()
+	})
+}
+
+// ClearOrigin clears the value of the "origin" field.
+func (u *AccessPolicyUpsertBulk) ClearOrigin() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearOrigin()
 	})
 }
 

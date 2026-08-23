@@ -27,6 +27,7 @@ var (
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "origin", Type: field.TypeString, Nullable: true, Default: ""},
 	}
 	// AccessPoliciesTable holds the schema information for the "access_policies" table.
 	AccessPoliciesTable = &schema.Table{

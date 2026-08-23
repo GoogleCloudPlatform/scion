@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -403,9 +405,43 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 
 	ctx := r.Context()
 
-	if err := s.store.DeletePolicy(ctx, id); err != nil {
+	// Look up the policy before deleting so we can record a tombstone for
+	// seeded policies.
+	policy, err := s.store.GetPolicy(ctx, id)
+	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Write tombstone BEFORE deleting the policy — fail-closed. If the
+	// tombstone write fails we abort so the policy is never silently
+	// recreated on restart due to a missing tombstone.
+	if policy.Origin == store.PolicyOriginSeeded {
+		key := seedPolicyTombstoneKey(policy.Name)
+		if _, upsertErr := s.store.UpsertHubSetting(
+			ctx, key, json.RawMessage(`"true"`), "system", -1, "managed",
+		); upsertErr != nil {
+			slog.Error("cannot record seed-policy tombstone; aborting delete to prevent silent recreation",
+				"policy", policy.Name, "error", upsertErr)
+			writeError(w, http.StatusInternalServerError, "", "failed to record deletion tombstone", nil)
+			return
+		}
+	}
+
+	if err := s.store.DeletePolicy(ctx, id); err != nil {
+		// Best-effort: clean up the tombstone we just wrote so an
+		// un-deleted policy does not appear tombstoned.
+		if policy.Origin == store.PolicyOriginSeeded {
+			key := seedPolicyTombstoneKey(policy.Name)
+			_ = s.store.DeleteHubSetting(ctx, key)
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if policy.Origin == store.PolicyOriginSeeded {
+		slog.Info("seeded policy deleted; it will not be recreated on restart",
+			"policy", policy.Name)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

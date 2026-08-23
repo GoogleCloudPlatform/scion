@@ -50,6 +50,8 @@ type AccessPolicy struct {
 	Updated time.Time `json:"updated,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Origin holds the value of the "origin" field.
+	Origin string `json:"origin,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AccessPolicyQuery when eager-loading is set.
 	Edges        AccessPolicyEdges `json:"edges"`
@@ -83,7 +85,7 @@ func (*AccessPolicy) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case accesspolicy.FieldPriority:
 			values[i] = new(sql.NullInt64)
-		case accesspolicy.FieldName, accesspolicy.FieldDescription, accesspolicy.FieldScopeType, accesspolicy.FieldScopeID, accesspolicy.FieldResourceType, accesspolicy.FieldResourceID, accesspolicy.FieldEffect, accesspolicy.FieldCreatedBy:
+		case accesspolicy.FieldName, accesspolicy.FieldDescription, accesspolicy.FieldScopeType, accesspolicy.FieldScopeID, accesspolicy.FieldResourceType, accesspolicy.FieldResourceID, accesspolicy.FieldEffect, accesspolicy.FieldCreatedBy, accesspolicy.FieldOrigin:
 			values[i] = new(sql.NullString)
 		case accesspolicy.FieldCreated, accesspolicy.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -208,6 +210,12 @@ func (_m *AccessPolicy) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.CreatedBy = value.String
 			}
+		case accesspolicy.FieldOrigin:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field origin", values[i])
+			} else if value.Valid {
+				_m.Origin = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -293,6 +301,9 @@ func (_m *AccessPolicy) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)
+	builder.WriteString(", ")
+	builder.WriteString("origin=")
+	builder.WriteString(_m.Origin)
 	builder.WriteByte(')')
 	return builder.String()
 }
