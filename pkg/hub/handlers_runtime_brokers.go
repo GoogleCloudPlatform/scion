@@ -339,12 +339,8 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Enforce authorization: only the broker owner or admins can update
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionUpdate)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
+	if !s.authorize(w, r, brokerResource(broker), ActionUpdate) {
+		return
 	}
 
 	var updates struct {
@@ -399,14 +395,16 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Enforce authorization: only the broker owner or admins can delete
+	if !s.authorize(w, r, brokerResource(broker), ActionDelete) {
+		return
+	}
+
+	// Attribution for the audit events below. Read from the full identity rather
+	// than the user identity: a caller that is not a user now has to pass the
+	// check above rather than skip it, so the event should name whoever it was.
 	var actorID string
-	if user := GetUserIdentityFromContext(ctx); user != nil {
-		actorID = user.ID()
-		decision := s.authzService.CheckAccess(ctx, user, brokerResource(broker), ActionDelete)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
+	if ident := GetIdentityFromContext(ctx); ident != nil {
+		actorID = ident.ID()
 	}
 
 	brokerName := broker.Name
@@ -442,28 +440,25 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// checkBrokerDispatchAccess verifies that the current user has dispatch permission
-// on the given broker. Returns true if access is granted. If denied, it writes a
-// 403 response and returns false. If the broker cannot be found, it writes an error
-// and returns false.
+// checkBrokerDispatchAccess verifies that the caller has dispatch permission on
+// the given broker. Returns true if access is granted. If denied, it writes a
+// 403 response and returns false. If the broker cannot be found, it writes an
+// error and returns false.
+//
+// The decision is canDispatchToBroker's, called rather than restated: the two
+// were "one decision written twice" and this is the copy that drifted. It opened
+// with `if userIdent == nil { return true }` — read as "broker-to-broker, allow",
+// but GetUserIdentityFromContext also returns nil for an agent caller and for no
+// caller at all, so it handed dispatch to every agent regardless of scope or
+// project, and to anything unauthenticated that reached it (ptone/scion#591).
+// Delegating leaves one place where the rule can change.
 func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseWriter, brokerID string) bool {
-	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil {
-		// No user identity (e.g. broker-to-broker) — allow
-		return true
-	}
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker
-	// server's default broker) and are dispatchable by any authenticated user.
-	if broker.AutoProvide {
-		return true
-	}
-	decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionDispatch)
-	if !decision.Allowed {
+	if !s.canDispatchToBroker(ctx, broker) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to create agents on this broker", nil)
 		return false

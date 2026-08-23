@@ -90,6 +90,11 @@ func Secret(v bool) predicate.EnvVar {
 	return predicate.EnvVar(sql.FieldEQ(FieldSecret, v))
 }
 
+// AllowProgeny applies equality check predicate on the "allow_progeny" field. It's identical to AllowProgenyEQ.
+func AllowProgeny(v bool) predicate.EnvVar {
+	return predicate.EnvVar(sql.FieldEQ(FieldAllowProgeny, v))
+}
+
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
 func CreatedBy(v string) predicate.EnvVar {
 	return predicate.EnvVar(sql.FieldEQ(FieldCreatedBy, v))
@@ -478,6 +483,16 @@ func SecretEQ(v bool) predicate.EnvVar {
 // SecretNEQ applies the NEQ predicate on the "secret" field.
 func SecretNEQ(v bool) predicate.EnvVar {
 	return predicate.EnvVar(sql.FieldNEQ(FieldSecret, v))
+}
+
+// AllowProgenyEQ applies the EQ predicate on the "allow_progeny" field.
+func AllowProgenyEQ(v bool) predicate.EnvVar {
+	return predicate.EnvVar(sql.FieldEQ(FieldAllowProgeny, v))
+}
+
+// AllowProgenyNEQ applies the NEQ predicate on the "allow_progeny" field.
+func AllowProgenyNEQ(v bool) predicate.EnvVar {
+	return predicate.EnvVar(sql.FieldNEQ(FieldAllowProgeny, v))
 }
 
 // CreatedByEQ applies the EQ predicate on the "created_by" field.

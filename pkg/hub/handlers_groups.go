@@ -159,6 +159,10 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.authorize(w, r, Resource{Type: "group"}, ActionCreate) {
+		return
+	}
+
 	// Validate and default GroupType
 	groupType := req.GroupType
 	if groupType == "" {
@@ -176,6 +180,10 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	slug := req.Slug
 	if slug == "" {
 		slug = api.Slugify(req.Name)
+	}
+	if strings.HasPrefix(slug, "project:") {
+		ValidationError(w, "the 'project:' slug prefix is reserved for system use", nil)
+		return
 	}
 
 	ownerID := req.OwnerID
@@ -323,12 +331,8 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	// Enforce authorization: only group owner or admins can update
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionUpdate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, groupResource(group), ActionUpdate) {
+		return
 	}
 
 	var req UpdateGroupRequest
@@ -384,12 +388,8 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	// Enforce authorization: only group owner or admins can delete
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, groupResource(group), ActionDelete) {
+		return
 	}
 
 	if group.GroupType == store.GroupTypeProjectAgents {
@@ -492,12 +492,8 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	groupID := group.ID
 
 	// Enforce authorization: only group owner or admins can add members
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionAddMember)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, groupResource(group), ActionAddMember) {
+		return
 	}
 
 	var req AddGroupMemberRequest
@@ -528,7 +524,21 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 
 	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
 	// Platform admins and group resource owners bypass the role-hierarchy check.
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+	//
+	// The hierarchy is defined over user membership in the group, so it cannot be
+	// evaluated for an agent or broker caller — which is why the pre-#591 form of
+	// this guard let those callers grant any role at all. Such a caller reaches
+	// this point only through an explicit addMember policy, and is held to adding
+	// plain members: escalating someone to admin or owner requires a caller whose
+	// own standing in the group can be checked.
+	userIdent, isUserCaller := GetIdentityFromContext(ctx).(UserIdentity)
+	if !isUserCaller {
+		if req.Role != store.GroupMemberRoleMember {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Only group owners can add owners or admins", nil)
+			return
+		}
+	} else {
 		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
 		isPlatformAdmin := userIdent.Role() == "admin"
 		if !isResourceOwner && !isPlatformAdmin {
@@ -717,12 +727,8 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 	ctx := r.Context()
 
 	// Enforce authorization: only group owner or admins can remove members
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groupResource(group), ActionRemoveMember)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return
-		}
+	if !s.authorize(w, r, groupResource(group), ActionRemoveMember) {
+		return
 	}
 
 	// Prevent removing the last owner of a group

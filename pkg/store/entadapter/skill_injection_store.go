@@ -39,15 +39,16 @@ func NewSkillInjectionStore(client *ent.Client) *SkillInjectionStore {
 // entSkillInjectionToStore converts an ent.SkillInjection to a store.SkillInjection.
 func entSkillInjectionToStore(e *ent.SkillInjection) store.SkillInjection {
 	return store.SkillInjection{
-		ID:        e.ID.String(),
-		Scope:     string(e.Scope), // convert enum to string
-		ScopeID:   e.ScopeID,
-		SkillURI:  e.SkillURI,
-		SkillAs:   e.SkillAs,
-		Optional:  e.Optional,
-		SortOrder: e.SortOrder,
-		CreatedAt: e.CreatedAt,
-		CreatedBy: e.CreatedBy,
+		ID:           e.ID.String(),
+		Scope:        string(e.Scope), // convert enum to string
+		ScopeID:      e.ScopeID,
+		SkillURI:     e.SkillURI,
+		SkillAs:      e.SkillAs,
+		Optional:     e.Optional,
+		AllowProgeny: e.AllowProgeny,
+		SortOrder:    e.SortOrder,
+		CreatedAt:    e.CreatedAt,
+		CreatedBy:    e.CreatedBy,
 	}
 }
 
@@ -98,6 +99,7 @@ func (s *SkillInjectionStore) AddSkillInjection(ctx context.Context, si *store.S
 		SetSkillURI(si.SkillURI).
 		SetNillableSkillAs(nullableString(si.SkillAs)).
 		SetOptional(si.Optional).
+		SetAllowProgeny(si.AllowProgeny).
 		SetSortOrder(si.SortOrder).
 		SetCreatedAt(createdAt).
 		SetNillableCreatedBy(nullableString(si.CreatedBy)).
@@ -124,6 +126,7 @@ func (s *SkillInjectionStore) UpdateSkillInjection(ctx context.Context, si *stor
 	update := s.client.SkillInjection.UpdateOneID(uid).
 		SetSkillURI(si.SkillURI).
 		SetOptional(si.Optional).
+		SetAllowProgeny(si.AllowProgeny).
 		SetSortOrder(si.SortOrder)
 
 	if si.SkillAs != "" {
@@ -187,6 +190,7 @@ func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, sco
 				SetSkillURI(entry.SkillURI).
 				SetNillableSkillAs(nullableString(entry.SkillAs)).
 				SetOptional(entry.Optional).
+				SetAllowProgeny(entry.AllowProgeny).
 				SetSortOrder(entry.SortOrder).
 				SetCreatedAt(now).
 				SetNillableCreatedBy(nullableString(createdBy)))
@@ -194,6 +198,32 @@ func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, sco
 
 		return mapError(tx.SkillInjection.CreateBulk(builders...).Exec(ctx))
 	})
+}
+
+// ListProgenySkillInjections returns user-scoped skill injections with
+// allowProgeny=true whose createdBy is in the given set of ancestor IDs.
+func (s *SkillInjectionStore) ListProgenySkillInjections(ctx context.Context, ancestorIDs []string) ([]store.SkillInjection, error) {
+	if len(ancestorIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := s.client.SkillInjection.Query().
+		Where(
+			entskillinjection.ScopeEQ(entskillinjection.ScopeUser),
+			entskillinjection.AllowProgenyEQ(true),
+			entskillinjection.CreatedByIn(ancestorIDs...),
+		).
+		Order(entskillinjection.BySortOrder(entsql.OrderAsc())).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]store.SkillInjection, 0, len(rows))
+	for _, e := range rows {
+		result = append(result, entSkillInjectionToStore(e))
+	}
+	return result, nil
 }
 
 // DeleteSkillInjectionsByScope removes all skill injection entries for the given

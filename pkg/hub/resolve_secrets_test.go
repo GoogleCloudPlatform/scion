@@ -50,7 +50,7 @@ func TestResolveSecrets(t *testing.T) {
 		ScopeID:        tid("project-1"),
 		InjectionMode:  store.InjectionModeAlways,
 	}
-	// Project-level override of user API_KEY
+	// Project-level API_KEY (same key as user; user scope wins)
 	projectOverride := &store.Secret{
 		ID:             tid("s3"),
 		Key:            "API_KEY",
@@ -112,16 +112,17 @@ func TestResolveSecrets(t *testing.T) {
 		byName[rs.Name] = rs
 	}
 
-	// API_KEY should be overridden by project scope
+	// API_KEY: user is the strongest scope (runtime_broker < hub < project
+	// < user), so the user-scoped value wins over the project-scoped one.
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	if apiKey.Value != "project-api-key" {
-		t.Errorf("expected API_KEY value from project scope %q, got %q", "project-api-key", apiKey.Value)
+	if apiKey.Value != "user-api-key" {
+		t.Errorf("expected API_KEY value from user scope %q, got %q", "user-api-key", apiKey.Value)
 	}
-	if apiKey.Source != store.ScopeProject {
-		t.Errorf("expected API_KEY source %q, got %q", store.ScopeProject, apiKey.Source)
+	if apiKey.Source != store.ScopeUser {
+		t.Errorf("expected API_KEY source %q, got %q", store.ScopeUser, apiKey.Source)
 	}
 
 	// DB_PASS should come from project scope
@@ -228,16 +229,16 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		byName[rs.Name] = rs
 	}
 
-	// API_KEY should be overridden by project scope
+	// API_KEY: user is the strongest scope, so it wins over project.
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	if apiKey.Value != "project-api-key" {
-		t.Errorf("expected API_KEY value %q, got %q", "project-api-key", apiKey.Value)
+	if apiKey.Value != "user-api-key" {
+		t.Errorf("expected API_KEY value %q, got %q", "user-api-key", apiKey.Value)
 	}
-	if apiKey.Source != store.ScopeProject {
-		t.Errorf("expected API_KEY source %q, got %q", store.ScopeProject, apiKey.Source)
+	if apiKey.Source != store.ScopeUser {
+		t.Errorf("expected API_KEY source %q, got %q", store.ScopeUser, apiKey.Source)
 	}
 
 	// DB_PASS target should be preserved

@@ -22,11 +22,16 @@ Scion distinguishes between regular environment variables and secure secrets:
 
 Both variables and secrets can be scoped to different levels. Scion resolves these hierarchically when an agent starts:
 
-1.  **User Scope**: Personal secrets for a specific user. Applied to all agents owned by that user.
-2.  **Project Scope**: Project-level secrets. Available to all agents running in a specific Project.
-3.  **Broker Scope**: Infrastructure-level secrets. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
+1.  **User Scope** (Highest Priority): Personal secrets or variables for a specific user. Applied to all agents owned by that user.
+2.  **Project Scope**: Project-level secrets or variables. Available to all agents running in a specific Project.
+3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators.
+4.  **Broker Scope** (Lowest Priority): Infrastructure-level secrets or variables. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
 
-**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. Broker scope has the highest priority, followed by Project, then User, then Hub. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
+**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. The precedence order is:
+```text
+runtime_broker  <  hub  <  project  <  user
+```
+Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
 ---
 ## Injection Modes
@@ -45,6 +50,24 @@ scion hub env set --project --always LOG_LEVEL=debug
 # Set a secret to be always injected for a user
 scion hub secret set --always MY_GLOBAL_TOKEN secret-value
 ```
+
+### Propagation to Descendant Agents (Progeny)
+
+When an agent creates child/sub-agents (referred to as **progeny**), they do not inherit the parent agent's user-scoped configuration or secrets by default. This preserves a strict security and least-privilege boundary across agent ancestry chains.
+
+However, you can explicitly configure user-scoped environment variables or secrets to propagate down the progeny tree by using the `--allow-progeny` flag.
+
+* **User-Scoped Secrets**: Can be marked for progeny propagation at any time.
+  ```bash
+  scion hub secret set --allow-progeny MY_PERSONAL_TOKEN token-value
+  ```
+* **User-Scoped Environment Variables**: Can only be marked for progeny propagation if their injection mode is set to `always`.
+  ```bash
+  scion hub env set --always --allow-progeny PERSONAL_ENV=value
+  ```
+
+#### How it Works Under the Hood
+Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When a child agent resolves its configuration, Scion walks the ancestor chain of the calling agent container. If the configuration creator is part of that ancestry tree and has enabled progeny permission, the descendant agent safely inherits the setting or secret.
 
 ---
 
@@ -171,10 +194,15 @@ From inside an agent container, use the `sciontool secret` command suite:
     export API_KEY=$(sciontool secret get MY_API_KEY)
     ```
 
-*   **Set a Project Secret**: You can also write/update secrets from inside the container to persist credentials discovered or generated at runtime:
+*   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents):
     ```bash
+    # Set a project-scoped secret (default)
     sciontool secret set NEW_TOKEN "secret-value"
+
+    # Set a user-scoped (personal) secret
+    sciontool secret set MY_PERSONAL_TOKEN "token-xyz" --scope user
     ```
+    *Note: `--scope` accepts `project` (default) or `user`.*
 
 #### Using the Hub API Directly
 Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
@@ -185,7 +213,7 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
-*   **Authorization**: Agents are strictly bounded to their own project's secrets. They cannot access secrets in other projects, user-scoped secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
+*   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (the user who originally started the agent chain). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
 *   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Successful and failed retrieval attempts log an audit event (`agent_secret_read`) identifying the calling agent, requested key, and status.
 
 ---

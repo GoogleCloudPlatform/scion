@@ -356,3 +356,110 @@ describe('scion-chat-message attachment previews', () => {
     expect(preview?.querySelector('.preview-placeholder.error')?.textContent).toContain('404');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Path-link entity patterns (#1148)
+// ---------------------------------------------------------------------------
+
+describe('scion-chat-message path links', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function pathLinks(el: ScionChatMessage): HTMLElement[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.md-content .path-link') ?? []);
+  }
+
+  it('renders /workspace/... paths as clickable path links', async () => {
+    const el = await mount('check /workspace/src/main.go for details');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/workspace/src/main.go');
+    expect(links[0].textContent).toBe('/workspace/src/main.go');
+    expect(links[0].classList.contains('entity-link')).toBe(true);
+    expect(links[0].classList.contains('path-link')).toBe(true);
+  });
+
+  it('renders /scion-volumes/... paths as clickable path links', async () => {
+    const el = await mount('see /scion-volumes/scratchpad/reports/summary.md');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/scion-volumes/scratchpad/reports/summary.md');
+  });
+
+  it('renders /workspace/.scion-volumes/... paths as clickable path links', async () => {
+    const el = await mount('read /workspace/.scion-volumes/data/output.json');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/workspace/.scion-volumes/data/output.json');
+  });
+
+  it('matches paths without file extensions (directories)', async () => {
+    const el = await mount('look in /workspace/src/components for the code');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/workspace/src/components');
+  });
+
+  it('stops at spaces (paths with spaces are not linkable)', async () => {
+    // Spaces are ambiguous in prose — the regex stops at whitespace.
+    const el = await mount('see /workspace/my-file.txt here');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/workspace/my-file.txt');
+  });
+
+  it('does not match arbitrary absolute paths like /etc/passwd', async () => {
+    const el = await mount('file at /etc/passwd is dangerous');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('does not match relative paths', async () => {
+    const el = await mount('look at src/main.go for the code');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('leaves path links inside fenced code blocks as literal text', async () => {
+    const el = await mount('run:\n```\ncat /workspace/src/main.go\n```\nthen check /workspace/README.md');
+    const links = pathLinks(el);
+
+    // Only the one outside the fence should be linked.
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/workspace/README.md');
+  });
+
+  it('emits a composed path-link-click event when a path link is clicked', async () => {
+    const el = await mount('see /workspace/src/main.go');
+    const seen: string[] = [];
+    document.addEventListener('path-link-click', (e) => {
+      seen.push((e as CustomEvent<{ path: string }>).detail.path);
+    });
+
+    const link = pathLinks(el)[0];
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(seen).toEqual(['/workspace/src/main.go']);
+  });
+
+  it('renders multiple path links in the same message', async () => {
+    const el = await mount('compare /workspace/a.ts and /scion-volumes/data/b.ts');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(2);
+    expect(links[0].dataset.filePath).toBe('/workspace/a.ts');
+    expect(links[1].dataset.filePath).toBe('/scion-volumes/data/b.ts');
+  });
+});

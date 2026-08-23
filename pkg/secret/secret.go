@@ -142,7 +142,7 @@ type SecretBackend interface {
 	GetMeta(ctx context.Context, name, scope, scopeID string) (*SecretMeta, error)
 
 	// Resolve collects and merges secrets from all applicable scopes for an agent.
-	// Scopes are resolved in order: user < project < runtime_broker (later overrides earlier).
+	// Scopes are resolved in order, lowest first: runtime_broker < hub < project < user.
 	// The opts parameter is optional; pass nil for the current behavior.
 	// When opts.AgentAncestry is present, user-scoped secrets marked allowProgeny
 	// whose creator appears in the ancestry chain are included in the result.
@@ -154,15 +154,24 @@ type SecretBackend interface {
 
 // scopePrecedence returns a numeric rank for the given scope string.
 // Higher values indicate higher precedence. Unknown scopes get 0.
+//
+// Order must match envScopePrecedence in pkg/hub/httpdispatcher.go and the
+// scope ordering in LocalBackend.Resolve / GCPBackend.Resolve: runtime_broker
+// is the most infrastructural and least specific scope, so it is the
+// weakest, not an override nobody can escape. (This function previously
+// ranked runtime_broker highest — the opposite of every other
+// precedence-ordered resolver in this codebase — which let a stale
+// broker-scoped secret silently shadow a project- or user-scoped one for
+// any target two differently-named secrets happened to share.)
 func scopePrecedence(scope string) int {
 	switch scope {
-	case ScopeHub:
+	case ScopeRuntimeBroker:
 		return 1
-	case ScopeUser:
+	case ScopeHub:
 		return 2
 	case ScopeProject:
 		return 3
-	case ScopeRuntimeBroker:
+	case ScopeUser:
 		return 4
 	default:
 		return 0

@@ -291,6 +291,136 @@ func TestMergeInjectedSkills_TemplateWinsVersionConflict(t *testing.T) {
 }
 
 // =============================================================================
+// mergeInjectedSkills progeny resolution tests
+// =============================================================================
+
+// TestMergeInjectedSkills_ProgenySkillResolution verifies that progeny agents
+// (agents with ancestry) receive user-scoped skill injections marked
+// AllowProgeny=true from their ancestor chain.
+func TestMergeInjectedSkills_ProgenySkillResolution(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ancestorID := tid("merge-ancestor-1")
+	childID := tid("merge-child-1")
+
+	// Add a user-scoped skill with AllowProgeny=true for the ancestor.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		Scope:        store.SkillInjectionScopeUser,
+		ScopeID:      ancestorID,
+		SkillURI:     "scion://inherited-tool@1.0",
+		AllowProgeny: true,
+		CreatedBy:    ancestorID,
+	}))
+
+	// Add a skill WITHOUT AllowProgeny (should NOT be inherited).
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		Scope:        store.SkillInjectionScopeUser,
+		ScopeID:      ancestorID,
+		SkillURI:     "scion://private-tool@1.0",
+		AllowProgeny: false,
+		CreatedBy:    ancestorID,
+	}))
+
+	// Create a progeny agent (has ancestry including the ancestor).
+	agent := &store.Agent{
+		ID:            childID,
+		OwnerID:       childID, // Different from ancestor
+		Ancestry:      []string{childID, ancestorID},
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	srv.mergeInjectedSkills(ctx, agent, nil)
+
+	require.NotNil(t, agent.AppliedConfig.InlineConfig)
+	uris := extractSkillURIs(agent.AppliedConfig.InlineConfig.Skills)
+	assert.Contains(t, uris, "scion://inherited-tool@1.0",
+		"progeny agent must receive AllowProgeny=true skills from ancestors")
+	assert.NotContains(t, uris, "scion://private-tool@1.0",
+		"progeny agent must not receive AllowProgeny=false skills")
+}
+
+// TestMergeInjectedSkills_NoProgenyForDirectOwner verifies that ancestry-based
+// resolution does not fire when the agent has no ancestry (single-element or nil).
+func TestMergeInjectedSkills_NoProgenyForDirectOwner(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("merge-direct-owner")
+
+	// Add a user-scoped skill with AllowProgeny=true.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		Scope:        store.SkillInjectionScopeUser,
+		ScopeID:      userID,
+		SkillURI:     "scion://owner-tool@1.0",
+		AllowProgeny: true,
+		CreatedBy:    userID,
+	}))
+
+	// Agent with no ancestry — skill is fetched directly via OwnerID, not via progeny.
+	agent := &store.Agent{
+		ID:            tid("merge-agent-direct"),
+		OwnerID:       userID,
+		Ancestry:      []string{userID}, // Single element = direct owner
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	srv.mergeInjectedSkills(ctx, agent, nil)
+
+	require.NotNil(t, agent.AppliedConfig.InlineConfig)
+	uris := extractSkillURIs(agent.AppliedConfig.InlineConfig.Skills)
+	assert.Contains(t, uris, "scion://owner-tool@1.0",
+		"direct owner's skills must be included via user scope")
+}
+
+// TestMergeInjectedSkills_ProgenyDeduplication verifies that progeny skills
+// don't create duplicates when the same skill URI is already in the user refs.
+func TestMergeInjectedSkills_ProgenyDeduplication(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ancestorID := tid("merge-ancestor-dedup")
+	childID := tid("merge-child-dedup")
+
+	// Ancestor has the skill.
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		Scope:        store.SkillInjectionScopeUser,
+		ScopeID:      ancestorID,
+		SkillURI:     "scion://shared-skill@1.0",
+		AllowProgeny: true,
+		CreatedBy:    ancestorID,
+	}))
+
+	// Child also has the same skill (direct owner scope).
+	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
+		Scope:        store.SkillInjectionScopeUser,
+		ScopeID:      childID,
+		SkillURI:     "scion://shared-skill@1.0",
+		AllowProgeny: false,
+		CreatedBy:    childID,
+	}))
+
+	agent := &store.Agent{
+		ID:            tid("merge-agent-dedup"),
+		OwnerID:       childID,
+		Ancestry:      []string{childID, ancestorID},
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	srv.mergeInjectedSkills(ctx, agent, nil)
+
+	require.NotNil(t, agent.AppliedConfig.InlineConfig)
+	// Count how many times the base URI appears — should be exactly 1.
+	count := 0
+	for _, ref := range agent.AppliedConfig.InlineConfig.Skills {
+		if skillBaseURI(ref.URI) == "scion://shared-skill" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "duplicate base URI must be deduplicated")
+}
+
+// =============================================================================
 // mergeSkillRefs unit tests
 // =============================================================================
 

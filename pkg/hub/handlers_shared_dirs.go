@@ -45,17 +45,21 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 
 	switch r.Method {
 	case http.MethodGet:
-		// Read access check
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "project",
-				ID:      project.ID,
-				OwnerID: project.OwnerID,
-			}, ActionRead)
-			if !decision.Allowed {
-				Forbidden(w)
+		// Project isolation runs before the authorization check so a cross-project
+		// agent caller keeps its 404 and is not told the project exists.
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if project.ID != agentIdent.ProjectID() {
+				NotFound(w, "Project")
 				return
 			}
+		}
+		// Read access check
+		if !s.authorize(w, r, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionRead) {
+			return
 		}
 
 		dirs := project.SharedDirs

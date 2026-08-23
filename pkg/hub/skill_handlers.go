@@ -1553,15 +1553,22 @@ func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string)
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		return agentIdent.ProjectID() == projectID
 	}
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		if s.authzService == nil {
-			return false
-		}
-		return s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type: "skill", ParentType: "project", ParentID: projectID,
-		}, ActionRead).Allowed
+	// Last arm, and the only one left: anything that is not a broker or an agent
+	// must be a user holding read on the project's skills. The nil test is
+	// written as an explicit deny rather than as a guard around the CheckAccess
+	// call, because a guarded call is the #591 shape — there the deny is implied
+	// by the absence of an else, and an edit that adds code after the block
+	// silently turns it into an allow.
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		return false
 	}
-	return false
+	if s.authzService == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, userIdent, Resource{
+		Type: "skill", ParentType: "project", ParentID: projectID,
+	}, ActionRead).Allowed
 }
 
 // resolveGitHubToken determines the GitHub token scope and mints a token if needed.

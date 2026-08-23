@@ -168,13 +168,12 @@ const ENTITY_PATTERNS: EntityPattern[] = [
       return `commit <a class="entity-link" href="/commits/${encodeURIComponent(sha)}" title="View commit ${sha}">${sha}</a>`;
     },
   },
-  // File paths: workspace-absolute or relative paths with extensions
+  // File paths: /workspace/... and /scion-volumes/... container paths
   {
-    regex: /(?:\/workspace\/|(?:^|(?<=\s)))([a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+\.[a-zA-Z]{1,10})\b/g,
+    regex: /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
     linkBuilder: (m) => {
-      const full = m[0];
-      const path = full.startsWith('/workspace/') ? full.slice('/workspace/'.length) : full.trimStart();
-      return `<a class="entity-link" href="/files/${encodeURIComponent(path)}" title="Open ${full.trim()}">${full}</a>`;
+      const path = m[0];
+      return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
     },
   },
 ];
@@ -197,8 +196,8 @@ function styleEntityLinksInText(text: string): string {
     const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g';
     const re = new RegExp(pattern.regex.source, flags);
     let m: RegExpExecArray | null;
+    let prevIndex = 0;
     while ((m = re.exec(text)) !== null) {
-      const prevIndex = re.lastIndex;
       replacements.push({
         start: m.index,
         end: m.index + m[0].length,
@@ -207,6 +206,7 @@ function styleEntityLinksInText(text: string): string {
       // Safety: if lastIndex did not advance (e.g. zero-length match or
       // missing global flag), break to avoid an infinite loop.
       if (re.lastIndex === prevIndex) break;
+      prevIndex = re.lastIndex;
     }
   }
 
@@ -1299,6 +1299,18 @@ export class ScionChatMessage extends LitElement {
       color: var(--sl-color-primary-700, #1d4ed8);
     }
 
+    /* ---- Clickable file-path links (#1148) ---- */
+    .md-content .path-link {
+      color: var(--sl-color-primary-600, #2563eb);
+      cursor: pointer;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+    }
+
+    .md-content .path-link:hover {
+      text-decoration-style: solid;
+    }
+
     /* ---- Rich output: diff blocks (#1060) ---- */
     .diff-block {
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
@@ -1746,6 +1758,42 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
+  /**
+   * Unified click handler for .md-content: delegates to mention or path-link
+   * handlers based on the click target.
+   */
+  private handleContentClick(e: MouseEvent): void {
+    // Check for path-link click first (more specific selector).
+    const pathTarget = (e.target as HTMLElement | null)?.closest('.path-link[data-file-path]');
+    if (pathTarget) {
+      this.handlePathLinkClick(e, pathTarget as HTMLElement);
+      return;
+    }
+    // Fall through to mention click handling.
+    this.handleMentionClick(e);
+  }
+
+  /**
+   * Clicking a file-path link dispatches a composed `path-link-click` event
+   * carrying the container path. The chat thread catches it, resolves the
+   * project context, and opens a file viewer.
+   */
+  private handlePathLinkClick(e: MouseEvent, target: HTMLElement): void {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const filePath = target.dataset.filePath;
+    if (!filePath) return;
+
+    this.dispatchEvent(
+      new CustomEvent('path-link-click', {
+        bubbles: true,
+        composed: true,
+        detail: { path: filePath },
+      })
+    );
+  }
+
   // ---- Phase-3: Action bar and event helpers ----
 
   /** Render the hover action bar with contextual actions. */
@@ -2018,7 +2066,7 @@ export class ScionChatMessage extends LitElement {
     }
     return html`<div
       class="md-content"
-      @click=${this.handleMentionClick}
+      @click=${this.handleContentClick}
       .innerHTML=${this.renderedHtml}
     ></div>`;
   }

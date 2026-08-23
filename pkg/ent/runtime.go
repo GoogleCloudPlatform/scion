@@ -320,12 +320,16 @@ func init() {
 	envvarDescSecret := envvarFields[8].Descriptor()
 	// envvar.DefaultSecret holds the default value on creation for the secret field.
 	envvar.DefaultSecret = envvarDescSecret.Default.(bool)
+	// envvarDescAllowProgeny is the schema descriptor for allow_progeny field.
+	envvarDescAllowProgeny := envvarFields[9].Descriptor()
+	// envvar.DefaultAllowProgeny holds the default value on creation for the allow_progeny field.
+	envvar.DefaultAllowProgeny = envvarDescAllowProgeny.Default.(bool)
 	// envvarDescCreated is the schema descriptor for created field.
-	envvarDescCreated := envvarFields[10].Descriptor()
+	envvarDescCreated := envvarFields[11].Descriptor()
 	// envvar.DefaultCreated holds the default value on creation for the created field.
 	envvar.DefaultCreated = envvarDescCreated.Default.(func() time.Time)
 	// envvarDescUpdated is the schema descriptor for updated field.
-	envvarDescUpdated := envvarFields[11].Descriptor()
+	envvarDescUpdated := envvarFields[12].Descriptor()
 	// envvar.DefaultUpdated holds the default value on creation for the updated field.
 	envvar.DefaultUpdated = envvarDescUpdated.Default.(func() time.Time)
 	// envvar.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -1148,12 +1152,16 @@ func init() {
 	skillinjectionDescOptional := skillinjectionFields[5].Descriptor()
 	// skillinjection.DefaultOptional holds the default value on creation for the optional field.
 	skillinjection.DefaultOptional = skillinjectionDescOptional.Default.(bool)
+	// skillinjectionDescAllowProgeny is the schema descriptor for allow_progeny field.
+	skillinjectionDescAllowProgeny := skillinjectionFields[6].Descriptor()
+	// skillinjection.DefaultAllowProgeny holds the default value on creation for the allow_progeny field.
+	skillinjection.DefaultAllowProgeny = skillinjectionDescAllowProgeny.Default.(bool)
 	// skillinjectionDescSortOrder is the schema descriptor for sort_order field.
-	skillinjectionDescSortOrder := skillinjectionFields[6].Descriptor()
+	skillinjectionDescSortOrder := skillinjectionFields[7].Descriptor()
 	// skillinjection.DefaultSortOrder holds the default value on creation for the sort_order field.
 	skillinjection.DefaultSortOrder = skillinjectionDescSortOrder.Default.(int)
 	// skillinjectionDescCreatedAt is the schema descriptor for created_at field.
-	skillinjectionDescCreatedAt := skillinjectionFields[7].Descriptor()
+	skillinjectionDescCreatedAt := skillinjectionFields[8].Descriptor()
 	// skillinjection.DefaultCreatedAt holds the default value on creation for the created_at field.
 	skillinjection.DefaultCreatedAt = skillinjectionDescCreatedAt.Default.(func() time.Time)
 	// skillinjectionDescID is the schema descriptor for id field.

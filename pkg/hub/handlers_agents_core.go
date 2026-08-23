@@ -577,7 +577,6 @@ func (s *Server) createAgentInProject(
 
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		// Agent caller: read parent agent's stored role for no-escalation ceiling.
-		parentRole = AgentRoleFull
 		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 		if err != nil {
 			// Fail-closed: default to baseline on lookup failure so that
@@ -585,8 +584,8 @@ func (s *Server) createAgentInProject(
 			parentRole = AgentRoleBaseline
 			slog.Warn("Failed to read parent agent for role ceiling",
 				"parent_agent_id", agentIdent.ID(), "error", err)
-		} else if creatorAgent.AppliedConfig != nil && creatorAgent.AppliedConfig.AgentRole != "" {
-			parentRole = AgentRole(creatorAgent.AppliedConfig.AgentRole)
+		} else {
+			parentRole, _ = agentRoleAndScopes(creatorAgent)
 		}
 
 		// Validate stored parentRole to guard against corrupted data.

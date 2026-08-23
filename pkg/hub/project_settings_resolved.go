@@ -351,10 +351,13 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
+	// Project isolation runs before the authorization check so a cross-project
+	// agent caller keeps its 404 and is not told the project exists.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if project.ID != agentIdent.ProjectID() {
+			NotFound(w, "Project")
+			return
+		}
 	}
 
 	// Same authorization as GET /settings: ActionRead on the project.
@@ -362,16 +365,12 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 	// owner see that hub defaults exist. Only the existence of an
 	// agent_defaults entry is exposed, never a hub value and never any other
 	// part of the server configuration.
-	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionRead)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
+	if !s.authorize(w, r, Resource{
+		Type:    "project",
+		ID:      project.ID,
+		OwnerID: project.OwnerID,
+	}, ActionRead) {
+		return
 	}
 
 	writeJSON(w, http.StatusOK, s.resolvedProjectSettings(project))

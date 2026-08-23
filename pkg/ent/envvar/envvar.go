@@ -31,6 +31,8 @@ const (
 	FieldInjectionMode = "injection_mode"
 	// FieldSecret holds the string denoting the secret field in the database.
 	FieldSecret = "secret"
+	// FieldAllowProgeny holds the string denoting the allow_progeny field in the database.
+	FieldAllowProgeny = "allow_progeny"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -52,6 +54,7 @@ var Columns = []string{
 	FieldSensitive,
 	FieldInjectionMode,
 	FieldSecret,
+	FieldAllowProgeny,
 	FieldCreatedBy,
 	FieldCreated,
 	FieldUpdated,
@@ -76,6 +79,8 @@ var (
 	DefaultSensitive bool
 	// DefaultSecret holds the default value on creation for the "secret" field.
 	DefaultSecret bool
+	// DefaultAllowProgeny holds the default value on creation for the "allow_progeny" field.
+	DefaultAllowProgeny bool
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -158,6 +163,11 @@ func ByInjectionMode(opts ...sql.OrderTermOption) OrderOption {
 // BySecret orders the results by the secret field.
 func BySecret(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSecret, opts...).ToFunc()
+}
+
+// ByAllowProgeny orders the results by the allow_progeny field.
+func ByAllowProgeny(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAllowProgeny, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.

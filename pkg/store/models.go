@@ -1107,6 +1107,7 @@ type EnvVar struct {
 	Sensitive     bool   `json:"sensitive,omitempty"`     // If true, value is masked in responses
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: "as_needed")
 	Secret        bool   `json:"secret,omitempty"`        // If true, value is encrypted and never returned
+	AllowProgeny  bool   `json:"allowProgeny,omitempty"`  // Progeny access opt-in (user scope, always mode only)
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -2246,15 +2247,16 @@ const (
 
 // SkillInjection is one entry in a project's or user's injected-skills list.
 type SkillInjection struct {
-	ID        string    `json:"id"`
-	Scope     string    `json:"scope"`
-	ScopeID   string    `json:"scopeId"`
-	SkillURI  string    `json:"skillUri"`
-	SkillAs   string    `json:"skillAs,omitempty"`
-	Optional  bool      `json:"optional"`
-	SortOrder int       `json:"sortOrder"`
-	CreatedAt time.Time `json:"createdAt"`
-	CreatedBy string    `json:"createdBy,omitempty"`
+	ID           string    `json:"id"`
+	Scope        string    `json:"scope"`
+	ScopeID      string    `json:"scopeId"`
+	SkillURI     string    `json:"skillUri"`
+	SkillAs      string    `json:"skillAs,omitempty"`
+	Optional     bool      `json:"optional"`
+	AllowProgeny bool      `json:"allowProgeny,omitempty"` // Progeny access opt-in (user scope only)
+	SortOrder    int       `json:"sortOrder"`
+	CreatedAt    time.Time `json:"createdAt"`
+	CreatedBy    string    `json:"createdBy,omitempty"`
 }
 
 // ToSkillReference converts to the api.SkillReference wire type used by the provisioner.

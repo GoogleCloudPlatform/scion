@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -44,6 +46,21 @@ func setupScheduleTest(t *testing.T) (*Server, store.Store, string) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	return srv, s, project.ID
+}
+
+func doScheduleAgentRequest(t *testing.T, srv *Server, identity Identity, projectID, schedulePath, method string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, "/api/v1/projects/"+projectID+"/schedules/"+schedulePath, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	if identity != nil {
+		req = req.WithContext(contextWithIdentity(req.Context(), identity))
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleSchedules(rec, req, projectID, schedulePath)
+	return rec
 }
 
 func TestSchedule_Create(t *testing.T) {
@@ -71,6 +88,45 @@ func TestSchedule_Create(t *testing.T) {
 	assert.Equal(t, store.ScheduleStatusActive, sched.Status)
 	assert.NotNil(t, sched.NextRunAt)
 	assert.NotEmpty(t, sched.Payload)
+}
+
+func TestSchedule_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T) {
+	srv, _, projectID := setupScheduleTest(t)
+
+	req := CreateScheduleRequest{
+		Name:      "spawn-worker",
+		CronExpr:  "0 * * * *",
+		EventType: "dispatch_agent",
+		AgentName: "scheduled-worker",
+	}
+
+	rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, "", http.MethodPost, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), string(ScopeAgentCreate))
+
+	rec = doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, "", http.MethodPost, req)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+func TestSchedule_UpdateToDispatchAgentRequiresAgentCreateScope(t *testing.T) {
+	srv, _, projectID := setupScheduleTest(t)
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
+		CreateScheduleRequest{
+			Name:      "message-first",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			AgentName: "worker",
+			Message:   "ping",
+		})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&sched))
+
+	rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, sched.ID, http.MethodPatch,
+		UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"scheduled-worker"}`})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), string(ScopeAgentCreate))
 }
 
 func TestSchedule_CreateInvalidCron(t *testing.T) {

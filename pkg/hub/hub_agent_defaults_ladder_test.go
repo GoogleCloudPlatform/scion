@@ -151,6 +151,105 @@ func TestApplyHubAgentDefaults_HarnessConfig(t *testing.T) {
 	}
 }
 
+// TestApplyHubAgentDefaults_Model is the table the design asks for.
+// Analogous to TestApplyHubAgentDefaults_HarnessConfig: the hub operational
+// DefaultModel fills ac.Model only when no higher tier has set it.
+func TestApplyHubAgentDefaults_Model(t *testing.T) {
+	const hubDefault = "medium"
+
+	tests := []struct {
+		name      string
+		incumbent string
+		want      string
+	}{
+		{
+			name:      "LosesToRequest",
+			incumbent: "large",
+			want:      "large",
+		},
+		{
+			name:      "LosesToProjectAnnotation",
+			incumbent: "small",
+			want:      "small",
+		},
+		{
+			name:      "LosesToTemplate",
+			incumbent: "opus",
+			want:      "opus",
+		},
+		{
+			name:      "AppliesWhenEmpty",
+			incumbent: "",
+			want:      hubDefault,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ac := &store.AgentAppliedConfig{Model: tt.incumbent}
+			applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+				DefaultModel: hubDefault,
+			})
+			assert.Equal(t, tt.want, ac.Model)
+			assert.False(t, applied,
+				"the return value tracks harness-config provenance only; model must not affect it")
+		})
+	}
+}
+
+// TestApplyHubAgentDefaults_ModelEmptyDefault verifies that an empty hub
+// DefaultModel leaves ac.Model untouched.
+func TestApplyHubAgentDefaults_ModelEmptyDefault(t *testing.T) {
+	ac := &store.AgentAppliedConfig{}
+	applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{})
+	assert.Empty(t, ac.Model)
+	assert.False(t, applied)
+}
+
+// TestApplyHubAgentDefaults_ThinkingLevel verifies the only-if-nil guard for
+// DefaultThinkingLevel.
+func TestApplyHubAgentDefaults_ThinkingLevel(t *testing.T) {
+	hubLevel := 3
+
+	t.Run("AppliesWhenNil", func(t *testing.T) {
+		ac := &store.AgentAppliedConfig{}
+		applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+			DefaultThinkingLevel: &hubLevel,
+		})
+		require.NotNil(t, ac.ThinkingLevel)
+		assert.Equal(t, 3, *ac.ThinkingLevel)
+	})
+
+	t.Run("LosesToPreSet", func(t *testing.T) {
+		existing := 5
+		ac := &store.AgentAppliedConfig{ThinkingLevel: &existing}
+		applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+			DefaultThinkingLevel: &hubLevel,
+		})
+		require.NotNil(t, ac.ThinkingLevel)
+		assert.Equal(t, 5, *ac.ThinkingLevel)
+	})
+
+	t.Run("NilDefaultDoesNothing", func(t *testing.T) {
+		ac := &store.AgentAppliedConfig{}
+		applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{})
+		assert.Nil(t, ac.ThinkingLevel)
+	})
+}
+
+// TestApplyHubAgentDefaults_ModelDoesNotAffectHCProvenance verifies that
+// applying only DefaultModel (no DefaultHarnessConfig) returns false, so
+// callers do not set withHubDefaultHarnessConfig context spuriously.
+func TestApplyHubAgentDefaults_ModelDoesNotAffectHCProvenance(t *testing.T) {
+	ac := &store.AgentAppliedConfig{}
+	applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+		DefaultModel: "medium",
+	})
+	assert.Equal(t, "medium", ac.Model)
+	assert.False(t, applied,
+		"model-only application must not signal harness-config provenance")
+}
+
 // TestApplyHubAgentDefaults_IgnoresTheFourLimitFields is the A5 guard at unit
 // level. The four limit/resource fields must not be stamped hub-side: doing so
 // would send them to the broker as top-of-chain and let a hub-wide floor
@@ -693,6 +792,7 @@ func TestCreateAgent_FileMode_NoHubDefaultRungFires(t *testing.T) {
 func TestDispatchAgentEventHandler_HubDefaultTemplate_MissingTemplate_DoesNotFail(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(ms)
 	logs := captureHarnessLogs(srv)
@@ -703,6 +803,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_MissingTemplate_DoesNotFai
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-ghost","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -723,6 +824,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_MissingTemplate_DoesNotFai
 func TestDispatchAgentEventHandler_PayloadTemplate_Missing_KeepsName(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(ms)
 	logs := captureHarnessLogs(srv)
@@ -733,6 +835,7 @@ func TestDispatchAgentEventHandler_PayloadTemplate_Missing_KeepsName(t *testing.
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-payload-ghost","template":"payload-tmpl","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -766,6 +869,7 @@ func (s *erroringSchedulerStore) GetTemplate(context.Context, string) (*store.Te
 func TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(&erroringSchedulerStore{
 		mockScheduledEventStore: ms,
@@ -779,6 +883,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName(t *te
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-store-error","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -797,6 +902,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName(t *te
 func TestDispatchAgentEventHandler_HubDefaultTemplate_Applies(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
@@ -806,6 +912,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_Applies(t *testing.T) {
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-tmpl","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -824,6 +931,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 	t.Run("LosesToPayload", func(t *testing.T) {
 		ms := newMockStore()
 		ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+		creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 		srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
@@ -832,6 +940,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 			ProjectID: "project-1",
 			EventType: "dispatch_agent",
 			Payload:   `{"agentName":"sched-rank-payload","template":"payload-tmpl"}`,
+			CreatedBy: creatorID,
 		})
 		require.NoError(t, err)
 
@@ -847,6 +956,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 			Name:        "test-project",
 			Annotations: map[string]string{projectSettingDefaultTemplate: "annotation-tmpl"},
 		}
+		creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 		srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
@@ -855,6 +965,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 			ProjectID: "project-1",
 			EventType: "dispatch_agent",
 			Payload:   `{"agentName":"sched-rank-annotation"}`,
+			CreatedBy: creatorID,
 		})
 		require.NoError(t, err)
 
@@ -899,6 +1010,7 @@ func (r *resolvingHarnessConfigStore) GetHarnessConfigBySlug(_ context.Context, 
 func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
@@ -908,6 +1020,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies(t *testing.T)
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-hc","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -942,6 +1055,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotat
 		Name:        "test-project",
 		Annotations: map[string]string{projectSettingDefaultHarnessConfig: "project-hc-y"},
 	}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc-x"})
@@ -951,6 +1065,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotat
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-annotation-beats-hub"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -968,6 +1083,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotat
 func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
@@ -977,6 +1093,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate(t *te
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-hc-tmpl","template":"payload-tmpl"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 
@@ -992,6 +1109,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate(t *te
 func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(ms)
 	require.Equal(t, opsettings.AgentDefaultsSettings{}, srv.hubAgentDefaults(),
@@ -1002,6 +1120,7 @@ func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) 
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-file-mode","task":"Do the thing"}`,
+		CreatedBy: creatorID,
 	})
 	require.NoError(t, err)
 

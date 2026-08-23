@@ -56,6 +56,7 @@ With Workstation mode running (`scion server start`), configure the Discord plug
    - **Bot Token**: Paste the token copied from Step 1.
    - **Application ID**: Paste the Application ID copied from Step 1.
    - **Allowed Guild IDs**: (Optional) Enter a comma-separated list of Discord server IDs (also known as Guild IDs) to enable instant slash command registration.
+   - **Registration URL** (`register_url`): (Optional) A public-facing URL (e.g., `https://scion.example.com`) used for user-facing registration links. If left empty, it defaults to the internal `hub_url`. This is useful when the Hub is behind an authentication proxy, or when mobile devices or external users need to register.
 
 #### Finding a Discord Guild ID
 To find your server's ID:

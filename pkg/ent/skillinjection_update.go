@@ -103,6 +103,20 @@ func (_u *SkillInjectionUpdate) SetNillableOptional(v *bool) *SkillInjectionUpda
 	return _u
 }
 
+// SetAllowProgeny sets the "allow_progeny" field.
+func (_u *SkillInjectionUpdate) SetAllowProgeny(v bool) *SkillInjectionUpdate {
+	_u.mutation.SetAllowProgeny(v)
+	return _u
+}
+
+// SetNillableAllowProgeny sets the "allow_progeny" field if the given value is not nil.
+func (_u *SkillInjectionUpdate) SetNillableAllowProgeny(v *bool) *SkillInjectionUpdate {
+	if v != nil {
+		_u.SetAllowProgeny(*v)
+	}
+	return _u
+}
+
 // SetSortOrder sets the "sort_order" field.
 func (_u *SkillInjectionUpdate) SetSortOrder(v int) *SkillInjectionUpdate {
 	_u.mutation.ResetSortOrder()
@@ -216,6 +230,9 @@ func (_u *SkillInjectionUpdate) sqlSave(ctx context.Context) (_node int, err err
 	if value, ok := _u.mutation.Optional(); ok {
 		_spec.SetField(skillinjection.FieldOptional, field.TypeBool, value)
 	}
+	if value, ok := _u.mutation.AllowProgeny(); ok {
+		_spec.SetField(skillinjection.FieldAllowProgeny, field.TypeBool, value)
+	}
 	if value, ok := _u.mutation.SortOrder(); ok {
 		_spec.SetField(skillinjection.FieldSortOrder, field.TypeInt, value)
 	}
@@ -320,6 +337,20 @@ func (_u *SkillInjectionUpdateOne) SetOptional(v bool) *SkillInjectionUpdateOne 
 func (_u *SkillInjectionUpdateOne) SetNillableOptional(v *bool) *SkillInjectionUpdateOne {
 	if v != nil {
 		_u.SetOptional(*v)
+	}
+	return _u
+}
+
+// SetAllowProgeny sets the "allow_progeny" field.
+func (_u *SkillInjectionUpdateOne) SetAllowProgeny(v bool) *SkillInjectionUpdateOne {
+	_u.mutation.SetAllowProgeny(v)
+	return _u
+}
+
+// SetNillableAllowProgeny sets the "allow_progeny" field if the given value is not nil.
+func (_u *SkillInjectionUpdateOne) SetNillableAllowProgeny(v *bool) *SkillInjectionUpdateOne {
+	if v != nil {
+		_u.SetAllowProgeny(*v)
 	}
 	return _u
 }
@@ -466,6 +497,9 @@ func (_u *SkillInjectionUpdateOne) sqlSave(ctx context.Context) (_node *SkillInj
 	}
 	if value, ok := _u.mutation.Optional(); ok {
 		_spec.SetField(skillinjection.FieldOptional, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.AllowProgeny(); ok {
+		_spec.SetField(skillinjection.FieldAllowProgeny, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.SortOrder(); ok {
 		_spec.SetField(skillinjection.FieldSortOrder, field.TypeInt, value)

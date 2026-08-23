@@ -513,6 +513,30 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			}
 		}
 	}
+
+	// Progeny skill resolution: when the agent has ancestry, include
+	// user-scoped skill injections marked allowProgeny whose creator is in
+	// the ancestry chain. These are added at user-scope precedence,
+	// following the same pattern as resolveEnvFromStorage for env vars.
+	if agent != nil && len(agent.Ancestry) > 1 {
+		if progenySkills, err := s.store.ListProgenySkillInjections(ctx, agent.Ancestry); err != nil {
+			slog.Warn("mergeInjectedSkills: failed to fetch progeny skill injections", "error", err)
+		} else {
+			// Deduplicate against already-included user refs by base URI.
+			existingURIs := make(map[string]bool, len(userRefs))
+			for _, ref := range userRefs {
+				existingURIs[skillBaseURI(ref.URI)] = true
+			}
+			for _, si := range progenySkills {
+				ref := si.ToSkillReference()
+				if !existingURIs[skillBaseURI(ref.URI)] {
+					userRefs = append(userRefs, ref)
+					existingURIs[skillBaseURI(ref.URI)] = true
+				}
+			}
+		}
+	}
+
 	for i := range userRefs {
 		userRefs[i].Scope = "user"
 	}
@@ -1076,8 +1100,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 // This is the "same project" test for agent-initiated dispatch. A broker is not
 // owned by a project — the association is the project_providers link — so an
 // agent's project can only be compared against a broker via this lookup. It is a
-// shared helper rather than an inlined query so that canDispatchToBroker and
-// checkBrokerDispatchAccess (handlers_runtime_brokers.go) cannot drift on it.
+// shared helper rather than an inlined query so that callers of
+// canDispatchToBroker cannot drift on the definition.
 func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID string) bool {
 	if brokerID == "" || projectID == "" {
 		return false
@@ -1105,8 +1129,10 @@ func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID st
 // them with "unknown identity type"; the nil branch this replaced was the only
 // thing admitting them, and it admitted everyone (#591).
 //
-// This function and checkBrokerDispatchAccess (handlers_runtime_brokers.go) are one
-// decision written twice and must stay structurally identical.
+// checkBrokerDispatchAccess (handlers_runtime_brokers.go) is the response-writing
+// wrapper around this function. It delegates rather than restating the rule: the two
+// were previously written twice, and the copy drifted into a fail-open (#591). Do not
+// reintroduce a second transcription — add response behaviour to the wrapper instead.
 func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeBroker) bool {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -1251,15 +1277,46 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 // for a single auth type (as declared in authMeta) are met. Unlike the broker
 // preflight (which only enforces required: true files), this checks ALL listed
 // files so the hub can determine whether the auth type is viable.
+//
+// When gcpSAAssigned is true and the auth type is GCP-backed (has files with
+// SkippedWhenGCPServiceAccountAssigned), env-var requirements are also treated
+// as satisfied. This is because GCP-backed auth types (e.g. vertex-ai) get
+// their env vars (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) injected at
+// runtime by the broker's resolveAuthEnvOverlay from settings.yaml or GCP
+// metadata — credentials the Hub cannot see at preflight time (#1165).
 func (s *Server) isAuthTypeSatisfied(ctx context.Context, agent *store.Agent, authMeta *config.HarnessAuthMetadata, authType string, gcpSAAssigned bool) (bool, error) {
-	keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
-	for _, group := range keyGroups {
-		found, err := s.hasAnyKey(ctx, agent, group)
-		if err != nil {
-			return false, err
+	if authMeta == nil {
+		return false, nil
+	}
+
+	// Determine whether this is a GCP-backed auth type whose runtime
+	// environment will be provided by the broker/GCP metadata server.
+	gcpRuntime := false
+	if gcpSAAssigned {
+		if t, ok := authMeta.Types[authType]; ok {
+			for _, f := range t.RequiredFiles {
+				if f.SkippedWhenGCPServiceAccountAssigned {
+					gcpRuntime = true
+					break
+				}
+			}
 		}
-		if !found {
-			return false, nil
+	}
+
+	// When gcpRuntime is true, skip the env-var check: the broker's
+	// resolveAuthEnvOverlay and GCP metadata will provide the required
+	// env vars at runtime, but they are invisible to the Hub's storage-only
+	// hasAnyKey check, causing a false NoAuth trigger.
+	if !gcpRuntime {
+		keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
+		for _, group := range keyGroups {
+			found, err := s.hasAnyKey(ctx, agent, group)
+			if err != nil {
+				return false, err
+			}
+			if !found {
+				return false, nil
+			}
 		}
 	}
 

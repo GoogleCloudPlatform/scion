@@ -175,6 +175,46 @@ func TestGroupCreateValidation(t *testing.T) {
 	}
 }
 
+func TestGroupCreateAuthz_NonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("user_group_create_denied"),
+		Email:       "group-create-denied@example.com",
+		DisplayName: "Group Create Denied",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	ensureHubMembership(ctx, s, member.ID)
+
+	body := CreateGroupRequest{
+		Name: "Unauthorized Group",
+		Slug: "unauthorized-group",
+	}
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/groups", body)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected status 403 for unauthorized group create, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGroupCreateRejectsReservedProjectSlugPrefix(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := CreateGroupRequest{
+		Name: "Squatted Project Members",
+		Slug: "project:future-project:members",
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for reserved project slug prefix, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGroupGet(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

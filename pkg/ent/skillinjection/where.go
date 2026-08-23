@@ -75,6 +75,11 @@ func Optional(v bool) predicate.SkillInjection {
 	return predicate.SkillInjection(sql.FieldEQ(FieldOptional, v))
 }
 
+// AllowProgeny applies equality check predicate on the "allow_progeny" field. It's identical to AllowProgenyEQ.
+func AllowProgeny(v bool) predicate.SkillInjection {
+	return predicate.SkillInjection(sql.FieldEQ(FieldAllowProgeny, v))
+}
+
 // SortOrder applies equality check predicate on the "sort_order" field. It's identical to SortOrderEQ.
 func SortOrder(v int) predicate.SkillInjection {
 	return predicate.SkillInjection(sql.FieldEQ(FieldSortOrder, v))
@@ -323,6 +328,16 @@ func OptionalEQ(v bool) predicate.SkillInjection {
 // OptionalNEQ applies the NEQ predicate on the "optional" field.
 func OptionalNEQ(v bool) predicate.SkillInjection {
 	return predicate.SkillInjection(sql.FieldNEQ(FieldOptional, v))
+}
+
+// AllowProgenyEQ applies the EQ predicate on the "allow_progeny" field.
+func AllowProgenyEQ(v bool) predicate.SkillInjection {
+	return predicate.SkillInjection(sql.FieldEQ(FieldAllowProgeny, v))
+}
+
+// AllowProgenyNEQ applies the NEQ predicate on the "allow_progeny" field.
+func AllowProgenyNEQ(v bool) predicate.SkillInjection {
+	return predicate.SkillInjection(sql.FieldNEQ(FieldAllowProgeny, v))
 }
 
 // SortOrderEQ applies the EQ predicate on the "sort_order" field.

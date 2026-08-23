@@ -121,6 +121,9 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
+	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
+		return
+	}
 
 	// Validate fire time: exactly one of FireAt or FireIn must be provided
 	if req.FireAt == "" && req.FireIn == "" {

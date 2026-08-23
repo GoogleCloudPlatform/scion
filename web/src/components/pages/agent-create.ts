@@ -558,9 +558,11 @@ export class ScionPageAgentCreate extends LitElement {
     const byName = (a: Template, b: Template) =>
       (a.displayName || a.name).localeCompare(b.displayName || b.name);
 
+    const user = visible.filter((t) => t.scope === 'user').sort(byName);
     const project = visible.filter((t) => t.scope === 'project').sort(byName);
-    const rest = visible.filter((t) => t.scope !== 'project').sort(byName);
-    return [...project, ...rest];
+    const global = visible.filter((t) => t.scope === 'global').sort(byName);
+    const rest = visible.filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global').sort(byName);
+    return [...user, ...project, ...global, ...rest];
   }
 
   /**
@@ -1149,7 +1151,11 @@ export class ScionPageAgentCreate extends LitElement {
               html`<sl-option value=${t.id}
                 >${t.displayName || t.name}${t.scope === 'project'
                   ? ' (project)'
-                  : ''}${t.description ? ` - ${t.description}` : ''}</sl-option
+                  : t.scope === 'user'
+                    ? ' (user)'
+                    : t.scope === 'global'
+                      ? ' (global)'
+                      : ''}${t.description ? ` - ${t.description}` : ''}</sl-option
               >`
           )}
         </sl-select>

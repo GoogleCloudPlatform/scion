@@ -581,6 +581,15 @@ func TestCreateAgent_RequestProfileBeatsProjectActiveProfile(t *testing.T) {
 func runDispatchAgentEvent(t *testing.T, srv *Server, s store.Store, projectID, agentName, template string) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
+	if _, err := s.GetUser(ctx, DevUserID); err != nil {
+		require.ErrorIs(t, err, store.ErrNotFound)
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID:          DevUserID,
+			Email:       "dev@localhost",
+			DisplayName: "Dev User",
+			Role:        store.UserRoleAdmin,
+		}))
+	}
 
 	payload, err := json.Marshal(DispatchAgentEventPayload{
 		AgentName: agentName,
@@ -595,6 +604,7 @@ func runDispatchAgentEvent(t *testing.T, srv *Server, s store.Store, projectID, 
 		ProjectID: projectID,
 		EventType: "dispatch_agent",
 		Payload:   string(payload),
+		CreatedBy: DevUserID,
 	}))
 
 	agent, err := s.GetAgentBySlug(ctx, projectID, agentName)

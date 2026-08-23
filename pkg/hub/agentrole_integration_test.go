@@ -288,12 +288,13 @@ func TestCreateSubAgent_ParentRoleLogged(t *testing.T) {
 	}
 }
 
-func TestCreateSubAgent_LegacyParent(t *testing.T) {
+func TestCreateSubAgent_EmptyRoleParentDenied(t *testing.T) {
 	srv, s, _, project := setupAgentRoleTest(t)
 	ctx := context.Background()
 
-	// Create a legacy parent agent with no AgentRole set in AppliedConfig.
-	legacyParent := &store.Agent{
+	// Create a parent agent with no AgentRole set in AppliedConfig. Migration
+	// backfills existing rows to full; new missing role data fails closed.
+	parent := &store.Agent{
 		ID:            tid("parent-legacy"),
 		Slug:          "parent-legacy",
 		Name:          "parent-legacy",
@@ -301,23 +302,20 @@ func TestCreateSubAgent_LegacyParent(t *testing.T) {
 		Phase:         "running",
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
-	require.NoError(t, s.CreateAgent(ctx, legacyParent))
+	require.NoError(t, s.CreateAgent(ctx, parent))
 
-	// Agent creates a sub-agent without specifying a role.
-	rec := doAgentCallerRequest(t, srv, legacyParent.ID, project.ID, CreateAgentRequest{
-		Name:      "child-legacy-parent",
+	rec := doAgentCallerRequest(t, srv, parent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-empty-role-parent-full",
 		ProjectID: project.ID,
+		AgentRole: "full",
 	})
 
-	if rec.Code == http.StatusForbidden {
-		t.Fatalf("sub-agent creation should not be forbidden: %s", rec.Body.String())
-	}
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"empty-role parent requesting full sub-agent should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "parent agent role")
 
-	// Legacy parent defaults to full, so child should get full.
-	if role, ok := getStoredAgentRole(t, s, project.ID, "child-legacy-parent"); ok {
-		assert.Equal(t, "full", role,
-			"child of legacy parent (no stored role) should get full")
-	}
+	_, ok := getStoredAgentRole(t, s, project.ID, "child-empty-role-parent-full")
+	assert.False(t, ok, "forbidden request should not persist a child agent")
 }
 
 func TestCreateSubAgent_NoEscalationEnforced(t *testing.T) {
@@ -453,6 +451,18 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 		"agent:lifecycle from template scopes should NOT appear in baseline token")
 	assert.False(t, claims.HasScope(ScopeProjectSecretRead),
 		"secret:read from template scopes should NOT appear in baseline token")
+}
+
+func TestAgentRoleAndScopes_EmptyRoleDefaultsToNone(t *testing.T) {
+	role, additionalScopes := agentRoleAndScopes(&store.Agent{
+		ID:            tid("agent-empty-role"),
+		ProjectID:     tid("project-empty-role"),
+		AppliedConfig: &store.AgentAppliedConfig{},
+	})
+
+	assert.Equal(t, AgentRoleNone, role)
+	assert.Empty(t, additionalScopes)
+	assert.Nil(t, ScopesForRole(role))
 }
 
 // TestTemplateHubAccessScopes_EmptyDoesNotWarn verifies that a template with
@@ -802,12 +812,14 @@ func TestGetAgent_IncludesAgentRoleFull(t *testing.T) {
 		"GET response should include agentRole=full in appliedConfig")
 }
 
-func TestCreateSubAgent_LegacyParent_DefaultsToFull(t *testing.T) {
-	srv, s, project := setupFullMaxProject(t)
+func TestCreateSubAgent_EmptyRoleParentCannotEscalate(t *testing.T) {
+	_, s, project := setupFullMaxProject(t)
 	ctx := context.Background()
 
-	// Legacy agent: AppliedConfig exists but has no AgentRole set.
-	legacy := &store.Agent{
+	// Migration backfills existing role-less agents before this runtime default
+	// changes. A role-less agent row that reaches authorization still fails
+	// closed and cannot create a full child.
+	parent := &store.Agent{
 		ID:            tid("f2p2-legacy-parent"),
 		Slug:          "f2p2-legacy-parent",
 		Name:          "f2p2-legacy-parent",
@@ -815,22 +827,14 @@ func TestCreateSubAgent_LegacyParent_DefaultsToFull(t *testing.T) {
 		Phase:         "running",
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
-	require.NoError(t, s.CreateAgent(ctx, legacy))
+	require.NoError(t, s.CreateAgent(ctx, parent))
 
-	// Legacy parent defaults to full ceiling, so requesting full should succeed.
-	rec := doAgentCallerRequest(t, srv, legacy.ID, project.ID, CreateAgentRequest{
-		Name:      "child-legacy-full",
-		ProjectID: project.ID,
-		AgentRole: "full",
-	})
-
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"legacy parent (no stored role → full) should allow full sub-agent; got: %s", rec.Body.String())
-
-	if role, ok := getStoredAgentRole(t, s, project.ID, "child-legacy-full"); ok {
-		assert.Equal(t, "full", role,
-			"child of legacy parent should get full")
-	}
+	stored, err := s.GetAgent(ctx, parent.ID)
+	require.NoError(t, err)
+	role, additionalScopes := agentRoleAndScopes(stored)
+	assert.Equal(t, AgentRoleNone, role)
+	assert.Empty(t, additionalScopes)
+	assert.NotContains(t, ScopesForRole(role), ScopeAgentCreate)
 }
 
 func TestCreateAgent_ProjectMaxBaseline_CapsFullToBaseline(t *testing.T) {

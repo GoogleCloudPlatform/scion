@@ -206,13 +206,11 @@ func (d *HTTPAgentDispatcher) SetTokenGenerator(gen AgentTokenGenerator) {
 // sites to keep role/scope computation in a single place.
 func agentRoleAndScopes(agent *store.Agent) (AgentRole, []AgentTokenScope) {
 	if agent == nil {
-		return AgentRoleFull, nil
+		return AgentRoleNone, nil
 	}
-	// Default to full for pre-role agents. This matches the design decision
-	// that null/unset agent role resolves to full (see ScopesForRole and
-	// roleOrdinal). Baseline would deny create/lifecycle/secret scopes that
-	// standing agents (coordinators, leads) need.
-	role := AgentRoleFull
+	// Missing role data is treated as least-privileged. Existing pre-role
+	// agents are backfilled to an explicit full role during store migration.
+	role := AgentRoleNone
 	if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
 		role = AgentRole(agent.AppliedConfig.AgentRole)
 	}
@@ -592,12 +590,56 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	}
 
 	// Propagate no-auth intent from the agent's applied config.
+	// NoAuth suppresses LLM-auth secrets (API keys, credential files) but must
+	// NOT suppress git-related credentials (GITHUB_TOKEN) which are needed for
+	// repository clone/pull operations regardless of LLM auth status.
 	noAuth := agent.AppliedConfig != nil && agent.AppliedConfig.NoAuth
 	if noAuth {
 		req.NoAuth = true
 		req.ResolvedSecrets = nil
 		if d.debug {
 			d.log.Debug("NoAuth enabled: skipping secret resolution", "agent_id", agent.ID)
+		}
+
+		// Exempt git credentials from NoAuth suppression. GITHUB_TOKEN is
+		// stored in the project secrets table but is unrelated to LLM auth —
+		// it enables repository clone/pull in clone-per-agent workspaces.
+		// Without this, NoAuth blanket-suppresses all secrets including
+		// GITHUB_TOKEN, causing git clone failures (#1165).
+		if agent.ProjectID != "" && d.secretBackend != nil {
+			ghSecret, err := d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, agent.ProjectID)
+			if err != nil {
+				if d.debug {
+					d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from project secrets",
+						"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
+				}
+			} else if ghSecret != nil && ghSecret.Value != "" {
+				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+				if d.debug {
+					d.log.Debug("NoAuth: resolved GITHUB_TOKEN from project secrets for git operations",
+						"agent_id", agent.ID, "project_id", agent.ProjectID)
+				}
+			}
+
+			// Fall back to the creating user's profile-level GITHUB_TOKEN,
+			// mirroring the cascade in resolveCloneToken. Users who store
+			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
+			// would otherwise still hit the NoAuth suppression bug (#1165).
+			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
+				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
+				if err != nil {
+					if d.debug {
+						d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from user secrets",
+							"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
+					}
+				} else if ghSecret != nil && ghSecret.Value != "" {
+					req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+					if d.debug {
+						d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
+							"agent_id", agent.ID, "owner_id", agent.OwnerID)
+					}
+				}
+			}
 		}
 	}
 
@@ -1527,6 +1569,27 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		}
 	}
 
+	// Progeny env var resolution: when the agent has ancestry, include
+	// user-scoped env vars marked allowProgeny (with injectionMode=always)
+	// whose creator is in the ancestry chain. These are added at user-scope
+	// precedence — project/broker env vars with the same key will already
+	// have overridden them.
+	if agent != nil && len(agent.Ancestry) > 1 {
+		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("resolveEnvFromStorage: failed to list progeny env vars", "error", err)
+			}
+		} else {
+			for _, v := range progenyVars {
+				if _, exists := result[v.Key]; exists {
+					continue // higher-precedence scope already set this key
+				}
+				result[v.Key] = v.Value
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -1640,7 +1703,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 			}
 		} else {
 			// Iterate in reverse: resolved is ordered lowest-precedence first
-			// (hub < user < project < runtime_broker), so walking backwards
+			// (runtime_broker < hub < project < user), so walking backwards
 			// lets higher-precedence secrets win.
 			for i := len(resolved) - 1; i >= 0; i-- {
 				sv := resolved[i]
@@ -2535,27 +2598,10 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 // resolveSecrets queries secrets from all applicable scopes and merges them
 // into a flat list. Higher scopes override lower:
 //
-//	hub  <  user  <  project  <  runtime_broker
+//	runtime_broker  <  hub  <  project  <  user
 //
-// 🔴 SECRETS AND ENV VARS DO NOT USE THE SAME ORDER. Compare
-// envScopePrecedence above: env vars rank runtime_broker LOWEST and user
-// HIGHEST; secrets rank them the other way round, on both axes.
-//
-// DO NOT READ THIS COMMENT AS DOCUMENTING A DESIGNED DIFFERENCE. NOBODY HAS
-// ESTABLISHED THAT THE DIVERGENCE IS INTENTIONAL. It is FILED, as issue #624,
-// and open. What this comment records is only what the code does today: the
-// secret order is implemented independently in pkg/secret (both backends build
-// the scope list in this order and merge last-wins, and scopePrecedence ranks
-// it numerically). So editing this comment to match the env one would make it
-// describe code that does not exist — the divergence has to be closed in
-// pkg/secret, under #624, or not at all.
-//
-// Phase 10 widened the gap rather than creating it: demoting runtime_broker for
-// env vars added the second axis. That makes the pull toward "harmonising" the
-// two stronger, and it is exactly the change that must not be made here.
-//
-// The hub rung was missing from this comment before Phase 10; both backends
-// have always queried it as the lowest scope.
+// This matches envScopePrecedence (see above). The divergence previously
+// tracked in issue #624 was corrected in PR #1227.
 func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
 	if d.secretBackend == nil {
 		if d.debug {

@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -48,6 +50,21 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 	return srv, s, project.ID
 }
 
+func doScheduledEventAgentRequest(t *testing.T, srv *Server, identity Identity, projectID string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	if identity != nil {
+		req = req.WithContext(contextWithIdentity(req.Context(), identity))
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleScheduledEvents(rec, req, projectID, "")
+	return rec
+}
+
 func TestScheduledEvent_Create(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
 
@@ -73,6 +90,23 @@ func TestScheduledEvent_Create(t *testing.T) {
 	// Verify the fire time is approximately 30 minutes from now
 	expectedFireAt := time.Now().Add(30 * time.Minute)
 	assert.WithinDuration(t, expectedFireAt, evt.FireAt, 5*time.Second)
+}
+
+func TestScheduledEvent_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T) {
+	srv, _, projectID := setupScheduledEventTest(t)
+
+	req := CreateScheduledEventRequest{
+		EventType: "dispatch_agent",
+		FireIn:    "30m",
+		AgentName: "scheduled-worker",
+	}
+
+	rec := doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), string(ScopeAgentCreate))
+
+	rec = doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, req)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
 func TestScheduledEvent_CreateWithFireAt(t *testing.T) {

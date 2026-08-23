@@ -6891,11 +6891,11 @@ type (
 		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
 		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
 		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		MaintenanceOperation, MaintenanceOperationRun, Message, NonceCache, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
-		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
+		MaintenanceOperation, MaintenanceOperationRun, Message, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RuntimeBroker,
+		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
+		SkillVersion, SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AgentSessionMetrics, AllowListEntry, ApiKey,
@@ -6903,10 +6903,11 @@ type (
 		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
 		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
 		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		MaintenanceOperation, MaintenanceOperationRun, Message, NonceCache, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
-		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
+		MaintenanceOperation, MaintenanceOperationRun, Message, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RuntimeBroker,
+		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
+		SkillVersion, SubscriptionTemplate, Template, User,
+		UserAccessToken []ent.Interceptor
 	}
 )

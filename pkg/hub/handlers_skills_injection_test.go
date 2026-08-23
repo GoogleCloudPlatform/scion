@@ -1333,3 +1333,170 @@ func TestSetHubInjectedSkills_CorruptBlobReturns500(t *testing.T) {
 	assert.Equal(t, corruptBlob, storedValue,
 		"corrupt stored blob must not be overwritten by the failed PUT")
 }
+
+// =============================================================================
+// AllowProgeny validation tests
+// =============================================================================
+
+// TestAddProjectInjectedSkill_AllowProgenyRejected verifies that POSTing a
+// project-scoped skill injection with AllowProgeny=true returns a validation error.
+func TestAddProjectInjectedSkill_AllowProgenyRejected(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	body := api.SkillInjectionEntry{
+		SkillURI:     "skill://scion/progeny-skill@1.0",
+		AllowProgeny: true,
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/injected-skills", body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"project-scoped POST with allowProgeny=true must return 400")
+
+	// Nothing should have been stored.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "no entry must be stored when allowProgeny validation fails")
+}
+
+// TestSetProjectInjectedSkills_AllowProgenyRejected verifies that PUTting a
+// project-scoped skill injection list with any AllowProgeny=true entry returns
+// a validation error. This covers the N-3 fix.
+func TestSetProjectInjectedSkills_AllowProgenyRejected(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "skill://scion/valid-skill@1.0"},
+			{SkillURI: "skill://scion/progeny-skill@1.0", AllowProgeny: true},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", newList)
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"project-scoped PUT with allowProgeny=true must return 400")
+
+	// Nothing should have been stored.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "no entry must be stored when allowProgeny validation fails")
+}
+
+// =============================================================================
+// Progeny policy lifecycle tests
+// =============================================================================
+
+// TestAddUserInjectedSkill_AllowProgenyCreatesPolicy verifies that adding a
+// user-scoped skill injection with AllowProgeny=true creates an implicit
+// progeny policy.
+func TestAddUserInjectedSkill_AllowProgenyCreatesPolicy(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	body := api.SkillInjectionEntry{
+		SkillURI:     "skill://scion/progeny-skill@1.0",
+		AllowProgeny: true,
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/users/me/injected-skills", body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var entry api.SkillInjectionEntry
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
+	require.NotEmpty(t, entry.ID)
+
+	// Verify the progeny policy was created.
+	policyName := "progeny-skill-access:" + entry.ID
+	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 1, policies.TotalCount, "progeny policy must be created for AllowProgeny=true skill")
+}
+
+// TestRemoveUserInjectedSkill_AllowProgenyDeletesPolicy verifies that removing
+// a user-scoped skill injection with AllowProgeny=true cleans up the progeny policy.
+func TestRemoveUserInjectedSkill_AllowProgenyDeletesPolicy(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Add a skill with AllowProgeny=true.
+	body := api.SkillInjectionEntry{
+		SkillURI:     "skill://scion/removable-progeny-skill@1.0",
+		AllowProgeny: true,
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/users/me/injected-skills", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var entry api.SkillInjectionEntry
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
+	entryID := entry.ID
+
+	// Verify policy exists.
+	policyName := "progeny-skill-access:" + entryID
+	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, 1, policies.TotalCount, "policy must exist before delete")
+
+	// Delete the skill injection.
+	rec = doRequestAsUser(t, srv, alice, http.MethodDelete,
+		"/api/v1/users/me/injected-skills/"+entryID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Verify the progeny policy was cleaned up.
+	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 0, policies.TotalCount, "progeny policy must be deleted when skill is removed")
+}
+
+// TestSetUserInjectedSkills_BulkReplaceCleansPolicies verifies that a bulk
+// PUT on user-scope injected skills cleans up old progeny policies (R-2 fix).
+func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Add a skill with AllowProgeny=true via POST.
+	body := api.SkillInjectionEntry{
+		SkillURI:     "skill://scion/old-progeny-skill@1.0",
+		AllowProgeny: true,
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/users/me/injected-skills", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var entry api.SkillInjectionEntry
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
+	oldID := entry.ID
+	oldPolicyName := "progeny-skill-access:" + oldID
+
+	// Verify old policy exists.
+	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, 1, policies.TotalCount, "old policy must exist before bulk replace")
+
+	// Bulk replace with a new list (new skill with AllowProgeny=true).
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "skill://scion/new-progeny-skill@2.0", AllowProgeny: true},
+		},
+	}
+	rec = doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/users/me/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Old policy must be cleaned up (not orphaned).
+	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 0, policies.TotalCount,
+		"old progeny policy must be cleaned up after bulk replace (R-2 fix)")
+
+	// New entry should have its own policy.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 1)
+	newPolicyName := "progeny-skill-access:" + sis[0].ID
+	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: newPolicyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 1, policies.TotalCount,
+		"new entry with AllowProgeny=true must have its own progeny policy")
+}

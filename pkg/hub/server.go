@@ -2811,6 +2811,54 @@ type DispatchAgentEventPayload struct {
 	Branch    string `json:"branch,omitempty"`
 }
 
+func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.ScheduledEvent) (bool, error) {
+	if evt.CreatedBy == "" {
+		return false, fmt.Errorf("dispatch_agent event has no creator; cannot authorize at fire time")
+	}
+
+	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
+		if creator.ProjectID != evt.ProjectID {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is not in project %q", evt.CreatedBy, evt.ProjectID)
+		}
+		role, additionalScopes := agentRoleAndScopes(creator)
+		scopes := append(ScopesForRole(role), additionalScopes...)
+		for _, scope := range scopes {
+			if scope == ScopeAgentCreate {
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("failed to resolve scheduled dispatch creator agent %q: %w", evt.CreatedBy, err)
+	}
+
+	user, err := s.store.GetUser(ctx, evt.CreatedBy)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("scheduled dispatch creator %q was not found", evt.CreatedBy)
+		}
+		return false, fmt.Errorf("failed to resolve scheduled dispatch creator user %q: %w", evt.CreatedBy, err)
+	}
+	if user.Status != store.UserStatusActive {
+		return false, fmt.Errorf("scheduled dispatch creator user %q has status %s; cannot authorize",
+			evt.CreatedBy, user.Status)
+	}
+	if s.authzService == nil {
+		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
+	}
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
+	decision := s.authzService.CheckAccess(ctx, identity, Resource{
+		Type:       "agent",
+		ParentType: "project",
+		ParentID:   evt.ProjectID,
+	}, ActionCreate)
+	if !decision.Allowed {
+		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
+			evt.CreatedBy, evt.ProjectID, decision.Reason)
+	}
+	return true, nil
+}
+
 // dispatchAgentEventHandler returns an EventHandler that creates and starts
 // an agent in the project via the AgentDispatcher.
 func (s *Server) dispatchAgentEventHandler() EventHandler {
@@ -2822,6 +2870,10 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		if payload.AgentName == "" {
 			return fmt.Errorf("dispatch_agent payload: agentName is required")
+		}
+
+		if _, err := s.authorizeScheduledAgentCreate(ctx, evt); err != nil {
+			return err
 		}
 
 		// Log staleness for late fires
@@ -2882,6 +2934,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Build applied config with task
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
+		// Scheduled dispatch has no modeled delegation context yet. Persist the
+		// lowest explicit role for every scheduled child so migration/backfill
+		// code can never reinterpret it as a legacy empty-role agent.
+		agent.AppliedConfig.AgentRole = string(AgentRoleNone)
+		agent.AppliedConfig.NoAuth = true
 		if payload.Task != "" {
 			agent.AppliedConfig.Task = payload.Task
 		}
@@ -3489,8 +3546,8 @@ func (s *Server) registerRoutes() {
 	// Groups and Policies (Hub Permissions System)
 	s.mux.HandleFunc("/api/v1/groups", s.handleGroups)
 	s.mux.HandleFunc("/api/v1/groups/", s.handleGroupRoutes)
-	s.mux.HandleFunc("/api/v1/policies", s.handlePolicies)
-	s.mux.HandleFunc("/api/v1/policies/", s.handlePolicyRoutes)
+	s.mux.HandleFunc("/api/v1/policies", s.requireAdminHandler(s.handlePolicies))
+	s.mux.HandleFunc("/api/v1/policies/", s.requireAdminHandler(s.handlePolicyRoutes))
 
 	// Principal resolution endpoints (Phase 4)
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.handleMyGroups)
@@ -3519,36 +3576,36 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/broker/projects", s.handleBrokerProjects)
 
 	// Admin system endpoints
-	s.mux.HandleFunc("/api/v1/admin/maintenance", s.handleAdminMaintenance)
-	s.mux.HandleFunc("/api/v1/admin/maintenance/operations", s.handleAdminMaintenanceOps)
-	s.mux.HandleFunc("/api/v1/admin/maintenance/operations/", s.handleAdminMaintenanceOps)
-	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations)
-	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates)
-	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.handleAdminRestart)
-	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
-	s.mux.HandleFunc("/api/v1/admin/allow-list", s.handleAdminAllowList)
-	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
-	s.mux.HandleFunc("/api/v1/admin/users/invite/bulk", s.handleAdminUserInviteBulk)
-	s.mux.HandleFunc("/api/v1/admin/users/invite", s.handleAdminUserInvite)
-	s.mux.HandleFunc("/api/v1/admin/invites", s.handleAdminInvites)
-	s.mux.HandleFunc("/api/v1/admin/invites/", s.handleAdminInviteByID)
-	s.mux.HandleFunc("/api/v1/admin/server-config/schema", s.handleAdminServerConfigSchema)
-	s.mux.HandleFunc("/api/v1/admin/server-config/sections/", s.handleAdminServerConfigSectionReset)
-	s.mux.HandleFunc("/api/v1/admin/server-config", s.handleAdminServerConfig)
-	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults)
-	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll)
-	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)
-	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks)
-	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID)
-	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.handleAdminValidateResources)
-	s.mux.HandleFunc("/api/v1/admin/integrations", s.handleAdminIntegrations)
-	s.mux.HandleFunc("/api/v1/admin/integrations/teams/manifest", s.handleTeamsManifestDownload)
-	s.mux.HandleFunc("/api/v1/admin/integrations/", s.handleAdminIntegrationByName)
-	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs/stream", s.handleDiagnosticsLogsStream)
-	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs", s.handleDiagnosticsLogs)
-	s.mux.HandleFunc("/api/v1/admin/health/summary", s.handleHealthSummary)
-	s.mux.HandleFunc("/api/v1/metrics/", s.handleMetricsDashboard)
-	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard) // legacy backward-compat
+	s.mux.HandleFunc("/api/v1/admin/maintenance", s.requireAdminHandler(s.handleAdminMaintenance))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/operations", s.requireAdminHandler(s.handleAdminMaintenanceOps))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/operations/", s.requireAdminHandler(s.handleAdminMaintenanceOps))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.requireAdminHandler(s.handleAdminMaintenanceMigrations))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.requireAdminHandler(s.handleCheckForUpdates))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.requireAdminHandler(s.handleAdminRestart))
+	s.mux.HandleFunc("/api/v1/admin/scheduler", s.requireAdminHandler(s.handleAdminScheduler))
+	s.mux.HandleFunc("/api/v1/admin/allow-list", s.requireAdminHandler(s.handleAdminAllowList))
+	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.requireAdminHandler(s.handleAdminAllowListByEmail))
+	s.mux.HandleFunc("/api/v1/admin/users/invite/bulk", s.requireAdminHandler(s.handleAdminUserInviteBulk))
+	s.mux.HandleFunc("/api/v1/admin/users/invite", s.requireAdminHandler(s.handleAdminUserInvite))
+	s.mux.HandleFunc("/api/v1/admin/invites", s.requireAdminHandler(s.handleAdminInvites))
+	s.mux.HandleFunc("/api/v1/admin/invites/", s.requireAdminHandler(s.handleAdminInviteByID))
+	s.mux.HandleFunc("/api/v1/admin/server-config/schema", s.requireAdminHandler(s.handleAdminServerConfigSchema))
+	s.mux.HandleFunc("/api/v1/admin/server-config/sections/", s.requireAdminHandler(s.handleAdminServerConfigSectionReset))
+	s.mux.HandleFunc("/api/v1/admin/server-config", s.requireAdminHandler(s.handleAdminServerConfig))
+	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.requireAdminHandler(s.handleAdminProjectDefaults))
+	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.requireAdminHandler(s.handleAdminResetAuthAll))
+	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.requireAdminHandler(s.handleAdminGCPQuota))
+	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.requireAdminHandler(s.handleAdminLifecycleHooks))
+	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.requireAdminHandler(s.handleAdminLifecycleHookByID))
+	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.requireAdminHandler(s.handleAdminValidateResources))
+	s.mux.HandleFunc("/api/v1/admin/integrations", s.requireAdminHandler(s.handleAdminIntegrations))
+	s.mux.HandleFunc("/api/v1/admin/integrations/teams/manifest", s.requireAdminHandler(s.handleTeamsManifestDownload))
+	s.mux.HandleFunc("/api/v1/admin/integrations/", s.requireAdminHandler(s.handleAdminIntegrationByName))
+	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs/stream", s.requireAdminHandler(s.handleDiagnosticsLogsStream))
+	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs", s.requireAdminHandler(s.handleDiagnosticsLogs))
+	s.mux.HandleFunc("/api/v1/admin/health/summary", s.requireAdminHandler(s.handleHealthSummary))
+	s.mux.HandleFunc("/api/v1/metrics/", s.requireAdminHandler(s.handleMetricsDashboard))
+	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.requireAdminHandler(s.handleAdminMetricsDashboard)) // legacy backward-compat
 
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.handleNotifications)
@@ -3595,11 +3652,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/settings/public", s.handlePublicSettings)
 
 	// GitHub App integration endpoints
-	s.mux.HandleFunc("/api/v1/github-app", s.handleGitHubApp)
-	s.mux.HandleFunc("/api/v1/github-app/installations", s.handleGitHubAppInstallations)
-	s.mux.HandleFunc("/api/v1/github-app/installations/", s.handleGitHubAppInstallations)
-	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.handleGitHubAppDiscover)
-	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions)
+	s.mux.HandleFunc("/api/v1/github-app", s.requireAdminHandler(s.handleGitHubApp))
+	s.mux.HandleFunc("/api/v1/github-app/installations", s.requireAdminHandler(s.handleGitHubAppInstallations))
+	s.mux.HandleFunc("/api/v1/github-app/installations/", s.requireAdminHandler(s.handleGitHubAppInstallations))
+	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.requireAdminHandler(s.handleGitHubAppDiscover))
+	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.requireAdminHandler(s.handleGitHubAppSyncPermissions))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.handleTelegramLink)

@@ -691,11 +691,12 @@ type SkillReference struct {
 
 // SkillInjectionEntry is the API representation of one injected-skills list entry.
 type SkillInjectionEntry struct {
-	ID        string `json:"id,omitempty"` // set on read, not required on write
-	SkillURI  string `json:"skillUri"`
-	SkillAs   string `json:"skillAs,omitempty"`
-	Optional  bool   `json:"optional,omitempty"`
-	SortOrder int    `json:"sortOrder,omitempty"`
+	ID           string `json:"id,omitempty"` // set on read, not required on write
+	SkillURI     string `json:"skillUri"`
+	SkillAs      string `json:"skillAs,omitempty"`
+	Optional     bool   `json:"optional,omitempty"`
+	AllowProgeny bool   `json:"allowProgeny,omitempty"` // Allow creator's progeny agents to access (user scope only)
+	SortOrder    int    `json:"sortOrder,omitempty"`
 	// Enriched fields (populated when URI maps to a known skill bank entry):
 	SkillName string `json:"skillName,omitempty"`
 	SkillSlug string `json:"skillSlug,omitempty"`
