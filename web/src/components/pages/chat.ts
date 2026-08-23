@@ -236,6 +236,7 @@ export class ScionPageChat extends LitElement {
   private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
   private _onScopeChanged = this._handleScopeChanged.bind(this);
   private _onReadStateUpdated = this._handleReadStateUpdated.bind(this);
+  private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
   /** Map from project slug → project ID for deep-link resolution. */
@@ -258,6 +259,12 @@ export class ScionPageChat extends LitElement {
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
   @state() private v2SearchLoaded = false;
+  /** Whether the promote-to-thread confirmation dialog is open. */
+  @state() private promoteDialogOpen = false;
+  /** Thread name entered in the promote dialog. */
+  @state() private promoteThreadName = '';
+  /** Whether the promote API call is in flight. */
+  @state() private promoteLoading = false;
   /** Presence heartbeat interval timer. */
   private _presenceInterval: ReturnType<typeof setInterval> | null = null;
   /** Tracked project IDs for presence heartbeat. */
@@ -678,6 +685,7 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
       stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
       stateManager.removeEventListener('scope-changed', this._onScopeChanged);
+      stateManager.removeEventListener('chat-dm-promoted', this._onDMPromoted);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
       this.removeEventListener('read-state-updated', this._onReadStateUpdated);
       this.stopPresenceHeartbeat();
@@ -889,6 +897,7 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('chat-typing-received', this._onChatTyping);
     stateManager.addEventListener('agents-updated', this._onAgentsUpdated);
     stateManager.addEventListener('scope-changed', this._onScopeChanged);
+    stateManager.addEventListener('chat-dm-promoted', this._onDMPromoted);
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
@@ -1466,6 +1475,49 @@ export class ScionPageChat extends LitElement {
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
     if (rail) void rail.reload();
+  }
+
+  /**
+   * Handle a `dm.promoted` SSE event. If the currently-viewed DM was promoted
+   * (possibly from another tab), navigate to the new thread and remove the DM
+   * from the switcher cache.
+   */
+  private handleDMPromoted(e: Event): void {
+    const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
+    const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
+    const oldConversationKey = eventData?.oldConversationKey as string | undefined;
+    const newTopic = eventData?.newTopic as {
+      id: string;
+      projectId: string;
+      name: string;
+      defaultAgent?: string;
+    } | undefined;
+    if (!oldConversationKey || !newTopic) return;
+
+    // If we're currently viewing the promoted DM, navigate to the new thread
+    if (this.v2Conversation?.conversationKey === oldConversationKey) {
+      this.navigateToPromotedThread(newTopic);
+      this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
+    }
+
+    // Remove the DM from the switcher cache
+    this.removeSwitcherConversation(oldConversationKey);
+
+    // Reload the space rail so the new thread appears
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    if (rail) void rail.reload();
+  }
+
+  /**
+   * Remove a conversation from the cached switcher list (e.g. after DM
+   * promotion). The next Cmd+K load will fetch fresh data from the server.
+   */
+  private removeSwitcherConversation(conversationKey: string): void {
+    this.v2SwitcherConversations = this.v2SwitcherConversations.filter(
+      (c) => c.conversationKey !== conversationKey
+    );
   }
 
   private handleThreadSelect(e: CustomEvent): void {
@@ -2743,6 +2795,17 @@ export class ScionPageChat extends LitElement {
                 : nothing}
             `}
         <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+          ${conv.isDM && conv.peerKind === 'agent'
+            ? html`
+                <sl-tooltip content="Promote to thread">
+                  <sl-icon-button
+                    name="box-arrow-up-right"
+                    label="Promote to thread"
+                    @click=${() => void this.openPromoteDialog()}
+                  ></sl-icon-button>
+                </sl-tooltip>
+              `
+            : nothing}
           ${conv.isDM ? this.renderDMMuteButton(conv) : nothing}
           <sl-tooltip content="Search messages">
             <sl-icon-button
@@ -2779,7 +2842,191 @@ export class ScionPageChat extends LitElement {
               @default-agent-changed=${this.handleDefaultAgentChanged}
             ></scion-chat-thread>
           `}
+      ${this.renderPromoteDialog()}
     `;
+  }
+
+  /**
+   * Render the promote-to-thread confirmation dialog. Displayed inline when
+   * the user clicks the promote button on an agent DM header.
+   */
+  private renderPromoteDialog() {
+    if (!this.promoteDialogOpen || !this.v2Conversation) return nothing;
+    const conv = this.v2Conversation;
+    return html`
+      <sl-dialog
+        label="Promote DM to Thread"
+        ?open=${this.promoteDialogOpen}
+        @sl-after-hide=${() => {
+          this.promoteDialogOpen = false;
+        }}
+      >
+        <p>
+          This will move your conversation with
+          <strong>${conv.peerName}</strong> into a shared thread visible to all
+          members of <strong>${conv.projectSlug}</strong>. This cannot be undone.
+        </p>
+        <sl-input
+          label="Thread name"
+          value=${this.promoteThreadName}
+          @sl-input=${(e: Event) => {
+            this.promoteThreadName = (e.target as HTMLInputElement).value;
+          }}
+          maxlength="100"
+          required
+        ></sl-input>
+        <div slot="footer">
+          <sl-button
+            @click=${() => {
+              this.promoteDialogOpen = false;
+            }}
+            >Cancel</sl-button
+          >
+          <sl-button
+            variant="danger"
+            ?loading=${this.promoteLoading}
+            ?disabled=${!this.promoteThreadName.trim()}
+            @click=${() => void this.executePromote()}
+            >Promote</sl-button
+          >
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  /** Open the promote dialog, pre-filling the thread name with the peer name. */
+  private openPromoteDialog(): void {
+    const conv = this.v2Conversation;
+    if (!conv || !conv.isDM || conv.peerKind !== 'agent') return;
+    this.promoteThreadName = conv.peerName || '';
+    this.promoteDialogOpen = true;
+  }
+
+  /**
+   * Execute the DM-to-thread promotion: POST to the promote endpoint, then
+   * navigate to the newly created thread on success.
+   */
+  private async executePromote(): Promise<void> {
+    const conv = this.v2Conversation;
+    if (!conv) return;
+    const conversationKey = conv.conversationKey;
+    this.promoteLoading = true;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(conv.conversationKey)}/promote`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: this.promoteThreadName }),
+        }
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          code?: string;
+        };
+        if (res.status === 409) {
+          const msg =
+            body.code === 'IN_FLIGHT_MESSAGES'
+              ? 'Agent is still responding. Try again in a few seconds.'
+              : body.code === 'NAME_CONFLICT'
+                ? 'A thread with that name already exists.'
+                : body.error || 'Conflict — please try again.';
+          this.showPromoteToast(msg, 'warning');
+        } else {
+          this.showPromoteToast(
+            body.error || `Promotion failed (${res.status})`,
+            'danger'
+          );
+        }
+        return;
+      }
+
+      const topic = (await res.json()) as {
+        id: string;
+        projectId: string;
+        name: string;
+        defaultAgent?: string;
+      };
+
+      // Guard: SSE dm.promoted may have already navigated us away
+      if (this.v2Conversation?.conversationKey !== conversationKey) return;
+
+      // Close dialog and navigate to the new thread
+      this.promoteDialogOpen = false;
+      this.navigateToPromotedThread(topic);
+      this.showPromoteToast(
+        `Conversation promoted to #${topic.name}`,
+        'success'
+      );
+
+      // Remove the old DM from the switcher cache
+      this.removeSwitcherConversation(conv.conversationKey);
+    } finally {
+      this.promoteLoading = false;
+    }
+  }
+
+  /**
+   * Navigate to a newly promoted thread, updating conversation state and URL.
+   */
+  private navigateToPromotedThread(topic: {
+    id: string;
+    projectId: string;
+    name: string;
+    defaultAgent?: string;
+  }): void {
+    const slug = this._projectIdToSlug.get(topic.projectId) || '';
+    this.v2Conversation = {
+      conversationKey: topic.id,
+      projectId: topic.projectId,
+      projectSlug: slug,
+      threadName: topic.name,
+      defaultAgent: topic.defaultAgent || '',
+      isDM: false,
+      peerName: '',
+      peerId: '',
+      peerKind: 'user',
+    };
+    this.classList.add('thread-open');
+    this.mobilePanel = 'center';
+
+    // Update URL
+    const base = import.meta.env.BASE_URL;
+    let threadPath: string;
+    if (slug) {
+      threadPath = `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topic.id)}`;
+    } else {
+      threadPath = `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
+    }
+    const browserPath =
+      base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
+    window.history.pushState({}, '', browserPath);
+
+    dispatchPageTitle(this, `#${topic.name}`, 'Chat');
+    void this.loadV2Members(topic.projectId);
+
+    // Reload the space rail so the new thread appears
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    if (rail) void rail.reload();
+  }
+
+  /** Show a toast notification for promote results. */
+  private showPromoteToast(
+    message: string,
+    variant: 'success' | 'warning' | 'danger' = 'success'
+  ): void {
+    // Use the Shoelace alert/toast pattern if available, else console
+    const alert = Object.assign(document.createElement('sl-alert'), {
+      variant,
+      closable: true,
+      duration: 4000,
+      innerHTML: `<sl-icon name="${variant === 'success' ? 'check-circle' : variant === 'warning' ? 'exclamation-triangle' : 'exclamation-circle'}" slot="icon"></sl-icon>${message}`,
+    });
+    document.body.appendChild(alert);
+    void (alert as unknown as { toast(): Promise<void> }).toast();
   }
 
   /** Open the search panel, lazy-loading the component if needed. */

@@ -69,6 +69,10 @@ type EventPublisher interface {
 	// PublishChatMessageDeleted publishes a message-deleted event so SSE
 	// subscribers can show the "[deleted]" placeholder in real time.
 	PublishChatMessageDeleted(ctx context.Context, projectID, conversationKey string, evt ChatMessageDeletedEvent)
+	// PublishDMPromotedEvent publishes a DM-promoted event to each user
+	// participant of the DM on user.<id>.chat.dm.promoted so the client
+	// can close the DM view and navigate to the new thread.
+	PublishDMPromotedEvent(ctx context.Context, dmKey string, topic WebChatTopic)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -107,8 +111,9 @@ func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, 
 }
 func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
 }
-func (noopEventPublisher) PublishRaw(_ string, _ interface{}) {}
-func (noopEventPublisher) Close()                             {}
+func (noopEventPublisher) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {}
+func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                 {}
+func (noopEventPublisher) Close()                                                             {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -831,6 +836,18 @@ func (p *eventBuilder) PublishChatMessageDeleted(_ context.Context, projectID, c
 		}
 	} else if projectID != "" {
 		p.sink("project."+projectID+".chat.message.deleted", evt)
+	}
+}
+
+// PublishDMPromotedEvent publishes a DM-promoted event to each user participant
+// of the DM on user.<id>.chat.dm.promoted.
+func (p *eventBuilder) PublishDMPromotedEvent(_ context.Context, dmKey string, topic WebChatTopic) {
+	evt := DMPromotedEvent{
+		OldConversationKey: dmKey,
+		NewTopic:           topic,
+	}
+	for _, userID := range dmUserParticipants(dmKey) {
+		p.sink("user."+userID+".chat.dm.promoted", evt)
 	}
 }
 

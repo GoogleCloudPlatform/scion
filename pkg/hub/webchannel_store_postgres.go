@@ -900,6 +900,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.seedFromWave1(); err != nil {
 		return fmt.Errorf("wave-1 seed: %w", err)
 	}
+	if err := s.addThreadIDIndex(); err != nil {
+		return fmt.Errorf("thread_id index: %w", err)
+	}
 	return nil
 }
 
@@ -1298,4 +1301,146 @@ func (s *pgWebChatStore) UpdateMessageContent(ctx context.Context, messageID, co
 		return fmt.Errorf("webchat store: message %s not found", messageID)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// DM-to-Space Promotion methods (Postgres)
+// ---------------------------------------------------------------------------
+
+// UpdateThreadID re-keys all messages from oldThreadID to newThreadID.
+func (s *pgWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error) {
+	const query = `UPDATE messages SET thread_id = $1 WHERE thread_id = $2`
+	res, err := s.db.ExecContext(ctx, query, newThreadID, oldThreadID)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: update thread_id: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// DeleteDM removes all webchat_dm rows for the given conversation key.
+func (s *pgWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
+	const query = `DELETE FROM webchat_dm WHERE conversation_key = $1`
+	_, err := s.db.ExecContext(ctx, query, conversationKey)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	return nil
+}
+
+// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
+func (s *pgWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKey string) error {
+	const query = `UPDATE webchat_read_state SET conversation_key = $1 WHERE conversation_key = $2`
+	_, err := s.db.ExecContext(ctx, query, newKey, oldKey)
+	if err != nil {
+		return fmt.Errorf("webchat store: migrate read state: %w", err)
+	}
+	return nil
+}
+
+// PromoteDM atomically promotes a DM conversation into a space thread.
+func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Step 1: Create topic
+	var defaultAgent interface{}
+	if topic.DefaultAgent != "" {
+		defaultAgent = topic.DefaultAgent
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent,
+		 created_by, created_at, last_activity_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		topic.ID, topic.ProjectID, topic.Name, topic.IsGeneral,
+		defaultAgent, topic.CreatedBy,
+		topic.CreatedAt, topic.LastActivityAt)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: create topic in promote: %w", err)
+	}
+
+	// Step 2: Re-key all messages
+	res, err := tx.ExecContext(ctx,
+		`UPDATE messages SET thread_id = $1 WHERE thread_id = $2`,
+		topic.ID, dmKey)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
+	}
+
+	// Step 3: Migrate read state
+	_, err = tx.ExecContext(ctx,
+		`UPDATE webchat_read_state SET conversation_key = $1 WHERE conversation_key = $2`,
+		topic.ID, dmKey)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: migrate read state in promote: %w", err)
+	}
+
+	// Step 4: Delete DM registry
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM webchat_dm WHERE conversation_key = $1`,
+		dmKey)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: delete DM in promote: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("webchat store: commit promote tx: %w", err)
+	}
+
+	// Populate topic with the message count for the response
+	n, _ := res.RowsAffected()
+	topic.MessageCount = int(n)
+	return &topic, nil
+}
+
+// CountPendingMessages returns the number of messages with dispatch_state='pending'
+// for the given thread_id.
+func (s *pgWebChatStore) CountPendingMessages(ctx context.Context, threadID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE thread_id = $1 AND dispatch_state = 'pending'`,
+		threadID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: count pending messages: %w", err)
+	}
+	return count, nil
+}
+
+// CountMessages returns the number of messages for the given thread_id.
+func (s *pgWebChatStore) CountMessages(ctx context.Context, threadID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE thread_id = $1`,
+		threadID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: count messages: %w", err)
+	}
+	return count, nil
+}
+
+// addThreadIDIndex creates an index on messages.thread_id for query performance.
+func (s *pgWebChatStore) addThreadIDIndex() error {
+	done, err := s.migrationCompleted("thread_id_index")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// Check if the messages table exists.
+	var tableExists bool
+	err = s.db.QueryRow("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'messages')").Scan(&tableExists)
+	if err != nil || !tableExists {
+		return s.markMigrationCompleted("thread_id_index")
+	}
+
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id)`)
+	if err != nil {
+		return fmt.Errorf("create thread_id index: %w", err)
+	}
+	return s.markMigrationCompleted("thread_id_index")
 }

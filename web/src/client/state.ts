@@ -70,7 +70,8 @@ export type StateEventType =
   | 'chat-typing-received'
   | 'chat-read-state-updated'
   | 'chat-message-edited'
-  | 'chat-message-deleted';
+  | 'chat-message-deleted'
+  | 'chat-dm-promoted';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -303,7 +304,9 @@ export class StateManager extends EventTarget {
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
-      if (parts[3] === 'typing') {
+      if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'promoted') {
+        this.notifyWithData('chat-dm-promoted', data);
+      } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {
         // A DM peer advanced their read watermark — drives the "seen" tick.

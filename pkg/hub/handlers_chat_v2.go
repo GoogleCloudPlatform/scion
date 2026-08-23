@@ -58,6 +58,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -262,6 +263,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationMute(w, r, key)
 	case "pin":
 		s.handleConversationPin(w, r, key)
+	case "promote":
+		s.handleConversationPromote(w, r, key)
 	default:
 		http.NotFound(w, r)
 	}
@@ -2106,6 +2109,200 @@ func (s *Server) handleConversationPin(w http.ResponseWriter, r *http.Request, k
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"pinned": *body.Pinned})
+}
+
+// promoteResponse is the JSON response body for a successful DM promotion.
+type promoteResponse struct {
+	WebChatTopic
+	PromotedFrom string `json:"promotedFrom"`
+	MessageCount int    `json:"messageCount"`
+}
+
+// handleConversationPromote handles POST /api/v1/chat/conversations/{key}/promote.
+// It promotes an agent DM conversation into a shared space thread, preserving
+// all message history in place.
+func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	// 1. Auth: extract user
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	// 2. Validate: must be a DM key
+	if !strings.HasPrefix(key, "dm:") {
+		writeError(w, http.StatusUnprocessableEntity, "NOT_A_DM",
+			"only DM conversations can be promoted", nil)
+		return
+	}
+
+	// 3. Validate: must be an agent DM (Phase 1 scope)
+	agentID := parseAgentDMKey(key)
+	if agentID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "HUMAN_DM_NOT_SUPPORTED",
+			"only agent DM conversations can be promoted", nil)
+		return
+	}
+
+	// 4. Auth: caller must be a DM participant
+	if !isDMParticipant(key, user.ID()) {
+		Forbidden(w)
+		return
+	}
+
+	// 5. Resolve project from agent
+	ctx := r.Context()
+	projectID := resolveProjectFromDMKey(ctx, s, key)
+	if projectID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "NO_PROJECT",
+			"cannot determine project for this agent DM", nil)
+		return
+	}
+
+	// 6. Auth: caller must have project access
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	// 7. Acquire WebChatStore
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE",
+			"Chat not available", nil)
+		return
+	}
+
+	// 8. Parse and validate request body
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	var body struct {
+		Name           string `json:"name"`
+		IdempotencyKey string `json:"idempotencyKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	// Default thread name: use agent's display name, or title-case slug
+	if body.Name == "" {
+		agent, agentErr := s.store.GetAgent(ctx, agentID)
+		if agentErr == nil && agent != nil {
+			if agent.Name != "" {
+				body.Name = agent.Name
+			} else if agent.Slug != "" {
+				body.Name = titleCase(agent.Slug)
+			}
+		}
+		if body.Name == "" {
+			body.Name = "Promoted Thread"
+		}
+	}
+
+	// Validate thread name
+	if utf8.RuneCountInString(body.Name) > 100 {
+		ValidationError(w, "thread name must be 100 characters or less", nil)
+		return
+	}
+	if !threadNameRegexp.MatchString(body.Name) {
+		ValidationError(w, "thread name contains invalid characters", nil)
+		return
+	}
+
+	// 9. Check for in-flight dispatches
+	pendingCount, err := wcs.CountPendingMessages(ctx, key)
+	if err == nil && pendingCount > 0 {
+		writeError(w, http.StatusConflict, "IN_FLIGHT_MESSAGES",
+			"agent has pending replies — try again in a few seconds", nil)
+		return
+	}
+
+	// 10. Idempotency check: if DM has no messages left and a matching topic exists,
+	// the promotion already succeeded.
+	msgCount, _ := wcs.CountMessages(ctx, key)
+	if msgCount == 0 {
+		// DM has no messages — check if promotion already happened
+		topics, listErr := wcs.ListTopics(ctx, projectID)
+		if listErr == nil {
+			for _, t := range topics {
+				if t.CreatedBy == user.ID() && t.Name == body.Name {
+					writeJSON(w, http.StatusOK, promoteResponse{
+						WebChatTopic: t,
+						PromotedFrom: key,
+						MessageCount: 0,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	// 11. Build topic struct
+	topicID := uuid.New().String()
+	now := time.Now().UTC()
+	topic := WebChatTopic{
+		ID:             topicID,
+		ProjectID:      projectID,
+		Name:           body.Name,
+		DefaultAgent:   agentID,
+		CreatedBy:      user.ID(),
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	// 12. Execute atomic promotion
+	result, err := wcs.PromoteDM(ctx, topic, key)
+	if err != nil {
+		// Check for name conflict (unique constraint violation)
+		if strings.Contains(err.Error(), "UNIQUE constraint") ||
+			strings.Contains(err.Error(), "unique") ||
+			strings.Contains(err.Error(), "duplicate key") {
+			writeError(w, http.StatusConflict, "NAME_CONFLICT",
+				"a thread with that name already exists in this space", nil)
+			return
+		}
+		slog.ErrorContext(ctx, "promote DM failed", "error", err, "dmKey", key)
+		writeError(w, http.StatusInternalServerError, "INTERNAL",
+			"failed to promote conversation", nil)
+		return
+	}
+
+	// 13. Publish SSE events (outside transaction — best-effort)
+	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
+	s.events.PublishDMPromotedEvent(ctx, key, *result)
+
+	// 14. Return created topic
+	writeJSON(w, http.StatusCreated, promoteResponse{
+		WebChatTopic: *result,
+		PromotedFrom: key,
+		MessageCount: result.MessageCount,
+	})
+}
+
+// titleCase converts a hyphen/underscore-separated slug to title case.
+// e.g. "code-reviewer" → "Code Reviewer"
+func titleCase(slug string) string {
+	slug = strings.ReplaceAll(slug, "-", " ")
+	slug = strings.ReplaceAll(slug, "_", " ")
+	words := strings.Fields(slug)
+	for i, w := range words {
+		if len(w) > 0 {
+			r, size := utf8.DecodeRuneInString(w)
+			words[i] = string(unicode.ToUpper(r)) + w[size:]
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.
