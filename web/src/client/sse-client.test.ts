@@ -413,3 +413,23 @@ describe('SSEClient single connection', () => {
     expect(live.closed).toBe(true);
   });
 });
+
+describe('SSEClient connected event', () => {
+  it('dispatches connected on every successful open, including reconnects', () => {
+    const client = new SSEClient();
+    const connected = vi.fn();
+    client.addEventListener('connected', connected);
+
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    expect(connected).toHaveBeenCalledTimes(1);
+
+    // The drop and recovery cycle must announce the recovery: downstream
+    // catch-up (refetching what the dead stream missed) keys off it.
+    latest().simulateDrop();
+    vi.advanceTimersByTime(1_000);
+    latest().simulateOpen();
+    expect(connected).toHaveBeenCalledTimes(2);
+    client.disconnect();
+  });
+});

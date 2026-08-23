@@ -122,6 +122,11 @@ export class SSEClient extends EventTarget {
       this.reconnectAttempts = 0;
       this.connectionOpen = true;
       console.info('[SSE] Connected');
+      // The browser's own open signal. The server-sent "connected" event this
+      // client also listens for is never emitted by the hub, so consumers that
+      // need to know the stream is live (state.connected, the chat thread's
+      // catch-up refetch) would otherwise never hear anything.
+      this.dispatchEvent(new CustomEvent('connected'));
     };
 
     es.onerror = () => {
