@@ -96,7 +96,7 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		Channel:               e.Channel,
 		ThreadID:              e.ThreadID,
 		Visibility:            vis,
-		CreatedAt:             e.Created,
+		CreatedAt:             e.Created.UTC(),
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
@@ -107,6 +107,11 @@ func entMessageToStore(e *ent.Message) *store.Message {
 func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) error {
 	if msg.ID == "" || msg.ProjectID == "" || msg.Msg == "" {
 		return store.ErrInvalidInput
+	}
+	// Canonical wire format is UTC. Normalising at the single point every
+	// message passes through covers all callers, present and future.
+	if !msg.CreatedAt.IsZero() {
+		msg.CreatedAt = msg.CreatedAt.UTC()
 	}
 	uid, err := parseUUID(msg.ID)
 	if err != nil {

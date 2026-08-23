@@ -452,7 +452,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
 		Visibility:  msg.Visibility,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Now().UTC(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
@@ -591,7 +591,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       agent.ID,
 		DispatchState: store.MessageDispatchDispatched,
-		CreatedAt:     time.Now(),
+		CreatedAt:     time.Now().UTC(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)

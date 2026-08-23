@@ -489,7 +489,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 		Msg:         msgBody,
 		Type:        msgType,
 		AgentID:     agent.ID,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Now().UTC(),
 	}
 
 	if err := nd.store.CreateMessage(ctx, storeMsg); err != nil {

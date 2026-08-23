@@ -264,3 +264,41 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 			rr.Code, rr.Body.String())
 	}
 }
+
+// TestOutboundMessageTimestampIsUTC pins stored message CreatedAt to UTC so
+// serialized timestamps carry a Z suffix rather than a server-local offset.
+func TestOutboundMessageTimestampIsUTC(t *testing.T) {
+	// On a UTC host local time IS UTC and the assertion below cannot fire, so
+	// the test would guard nothing on CI. Pin a non-UTC zone for its duration.
+	origLocal := time.Local
+	time.Local = time.FixedZone("TST", 2*60*60)
+	t.Cleanup(func() { time.Local = origLocal })
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: api.NewUUID(), Name: "tz", Slug: "tz", Visibility: store.VisibilityPrivate}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	human := &store.User{ID: api.NewUUID(), Email: "human@example.com", DisplayName: "Human", Status: store.UserStatusActive}
+	if err := s.CreateUser(ctx, human); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	agent := &store.Agent{ID: api.NewUUID(), Name: "a", Slug: "a", ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	if rr := postOutbound(t, srv, project.ID, agent.ID, "hello"); rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	res, err := s.ListMessages(ctx, store.MessageFilter{}, store.ListOptions{Limit: 1})
+	if err != nil || len(res.Items) == 0 {
+		t.Fatalf("ListMessages: %v (%d items)", err, len(res.Items))
+	}
+	if _, off := res.Items[0].CreatedAt.Zone(); off != 0 {
+		t.Errorf("stored CreatedAt has offset %ds, want UTC", off)
+	}
+}

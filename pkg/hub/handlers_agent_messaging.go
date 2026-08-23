@@ -228,7 +228,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Channel:     req.Channel,
 		ThreadID:    req.ThreadID,
 		Visibility:  req.Visibility,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Now().UTC(),
 	}
 
 	// Build a structured message for external dispatch paths.
@@ -709,7 +709,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Channel:       structuredMsg.Channel,
 			ThreadID:      structuredMsg.ThreadID,
 			DispatchState: store.MessageDispatchDispatched,
-			CreatedAt:     time.Now(),
+			CreatedAt:     time.Now().UTC(),
 		}
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
@@ -933,7 +933,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				AgentID:       agent.ID,
 				GroupID:       groupID,
 				DispatchState: store.MessageDispatchDispatched,
-				CreatedAt:     time.Now(),
+				CreatedAt:     time.Now().UTC(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
@@ -1027,7 +1027,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Urgent:      userMsg.Urgent,
 				AgentID:     anchorAgent.ID,
 				GroupID:     groupID,
-				CreatedAt:   time.Now(),
+				CreatedAt:   time.Now().UTC(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
@@ -1233,7 +1233,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			Broadcasted:   true,
 			AgentID:       agent.ID,
 			DispatchState: store.MessageDispatchDispatched,
-			CreatedAt:     time.Now(),
+			CreatedAt:     time.Now().UTC(),
 		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
@@ -1360,7 +1360,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			Channel:       mentionMsg.Channel,
 			ThreadID:      mentionMsg.ThreadID,
 			DispatchState: store.MessageDispatchDispatched,
-			CreatedAt:     time.Now(),
+			CreatedAt:     time.Now().UTC(),
 		}
 		if mentionMsg.Metadata != nil {
 			storeMsg.GroupID = mentionMsg.Metadata["group_id"]
