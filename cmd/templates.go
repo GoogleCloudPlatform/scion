@@ -56,7 +56,7 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 
 	// Check if Hub is available (suppress errors, just skip Hub if not available)
 	var hubCtx *HubContext
-	var hubGlobal, hubProject []hubclient.Template
+	var hubGlobal, hubProject, hubUser []hubclient.Template
 	hubAvailable := false
 
 	if !noHub {
@@ -90,12 +90,24 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 				}
 			}
 
+			// Fetch user-scoped templates from Hub
+			userResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+				Scope:  "user",
+				Status: "active",
+			})
+			if err == nil {
+				hubUser = userResp.Templates
+			}
+
 			// Sort hub templates by name for consistent output
 			sort.Slice(hubGlobal, func(i, j int) bool {
 				return hubGlobal[i].Name < hubGlobal[j].Name
 			})
 			sort.Slice(hubProject, func(i, j int) bool {
 				return hubProject[i].Name < hubProject[j].Name
+			})
+			sort.Slice(hubUser, func(i, j int) bool {
+				return hubUser[i].Name < hubUser[j].Name
 			})
 		}
 	}
@@ -144,6 +156,13 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 				}
 				hubSection["project"] = entries
 			}
+			if len(hubUser) > 0 {
+				entries := make([]templateEntry, len(hubUser))
+				for i, t := range hubUser {
+					entries[i] = templateEntry{Name: t.Name, ID: t.ID, ContentHash: t.ContentHash}
+				}
+				hubSection["user"] = entries
+			}
 			if len(hubSection) > 0 {
 				output["hub"] = hubSection
 			}
@@ -155,8 +174,8 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
 	if hubAvailable {
-		// Hub mode: group by local/hub, then by global/project
-		printTemplateListHubMode(w, localGlobal, localProject, hubGlobal, hubProject)
+		// Hub mode: group by local/hub, then by global/project/user
+		printTemplateListHubMode(w, localGlobal, localProject, hubGlobal, hubProject, hubUser)
 	} else {
 		// Local mode: group by global/project
 		printTemplateListLocalMode(w, localGlobal, localProject)
@@ -195,14 +214,15 @@ func printTemplateListLocalMode(w *tabwriter.Writer, global, project []*config.T
 	}
 }
 
-func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*config.Template, hubGlobal, hubProject []hubclient.Template) {
+func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*config.Template, hubGlobal, hubProject, hubUser []hubclient.Template) {
 	hasLocalGlobal := len(localGlobal) > 0
 	hasLocalProject := len(localProject) > 0
 	hasHubGlobal := len(hubGlobal) > 0
 	hasHubProject := len(hubProject) > 0
+	hasHubUser := len(hubUser) > 0
 
 	hasLocal := hasLocalGlobal || hasLocalProject
-	hasHub := hasHubGlobal || hasHubProject
+	hasHub := hasHubGlobal || hasHubProject || hasHubUser
 
 	if !hasLocal && !hasHub {
 		_, _ = fmt.Fprintln(w, "No templates found.")
@@ -251,6 +271,16 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*
 			_, _ = fmt.Fprintln(w, "  Project:")
 			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH")
 			for _, t := range hubProject {
+				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
+			}
+		}
+		if hasHubUser {
+			if hasHubGlobal || hasHubProject {
+				_, _ = fmt.Fprintln(w)
+			}
+			_, _ = fmt.Fprintln(w, "  User:")
+			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH")
+			for _, t := range hubUser {
 				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
 			}
 		}

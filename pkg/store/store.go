@@ -526,7 +526,8 @@ type TemplateFilter struct {
 	Name      string // Exact match on template name
 	Scope     string
 	ScopeID   string
-	ProjectID string // When set without Scope, returns global + project-scoped templates for this project
+	ProjectID string // When set without Scope, returns global + project-scoped + user-scoped templates for this project
+	UserID    string // When set with ProjectID (no Scope), also includes user-scoped templates for this user
 	Harness   string
 	OwnerID   string
 	Status    string

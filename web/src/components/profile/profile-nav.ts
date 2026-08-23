@@ -46,6 +46,7 @@ const PROFILE_SECTIONS: NavSection[] = [
       { path: '/profile/secrets', label: 'Secrets', icon: 'shield-lock' },
       { path: '/profile/tokens', label: 'Access Tokens', icon: 'key' },
       { path: '/profile/skills', label: 'Skills', icon: 'puzzle' },
+      { path: '/profile/templates', label: 'Templates', icon: 'file-earmark-code' },
     ],
   },
   {

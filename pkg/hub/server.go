@@ -3574,6 +3574,14 @@ func (s *Server) registerRoutes() {
 		s.handleUserMeInjectedSkillByID(w, r, entryID)
 	})
 
+	// User-scoped template endpoints (/users/me/templates)
+	s.mux.HandleFunc("/api/v1/users/me/templates", s.handleUserMeTemplates)
+	s.mux.HandleFunc("/api/v1/users/me/templates/", func(w http.ResponseWriter, r *http.Request) {
+		templateID := strings.TrimPrefix(r.URL.Path, "/api/v1/users/me/templates/")
+		templateID = strings.TrimSuffix(templateID, "/")
+		s.handleUserMeTemplateByID(w, r, templateID)
+	})
+
 	// Hub-scope injected-skills endpoint
 	s.mux.HandleFunc("/api/v1/hub/settings/injected-skills", s.handleHubInjectedSkills)
 
