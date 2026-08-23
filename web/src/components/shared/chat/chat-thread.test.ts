@@ -643,3 +643,37 @@ describe('scion-chat-thread SSE attachment preview', () => {
     expect(chatMsg!.attachmentRefs[0].name).toBe('report.pdf');
   });
 });
+
+describe('scion-chat-thread catch-up after SSE reconnect', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('refetches the latest page when the stream reconnects', async () => {
+    await mount();
+
+    // The first connection is not a gap: history was just loaded.
+    fakeStateManager.dispatchEvent(new CustomEvent('connected'));
+    expect(historyCalls()).toBe(0);
+
+    // A second connection means the stream died and came back; the hub keeps
+    // no event history, so anything sent meanwhile was never delivered.
+    fakeStateManager.dispatchEvent(new CustomEvent('connected'));
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+  });
+
+  it('stops refetching once unmounted', async () => {
+    const el = await mount();
+    fakeStateManager.dispatchEvent(new CustomEvent('connected'));
+    el.remove();
+
+    fakeStateManager.dispatchEvent(new CustomEvent('connected'));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(historyCalls()).toBe(0);
+  });
+});

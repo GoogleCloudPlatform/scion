@@ -367,6 +367,25 @@ export class ScionChatThread extends LitElement {
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
 
+  /** True once an SSE connection has been observed while this thread listens. */
+  private _sawSseConnect = false;
+
+  /**
+   * The hub keeps no event history, so anything sent while the stream was down
+   * was never delivered; a reconnection refetches the latest page to fill the
+   * gap. mergeMessages dedupes, so overlap with what is already shown is safe.
+   */
+  private _sseReconnectHandler = (): void => {
+    if (!this._sawSseConnect) {
+      this._sawSseConnect = true;
+      return;
+    }
+    if (!this.loaded) return;
+    void this.fetchHistoryV2().catch((err) => {
+      console.warn('[chat-thread] catch-up fetch after reconnect failed:', err);
+    });
+  };
+
   /** Bound listener for v2 SSE typing events via stateManager. */
   private _v2TypingHandler = this.handleV2TypingEvent.bind(this);
 
@@ -823,6 +842,7 @@ export class ScionChatThread extends LitElement {
   /** Tear down v2 state so a fresh load can happen. */
   private resetV2State(): void {
     // Stop any active SSE listener
+    stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -873,6 +893,7 @@ export class ScionChatThread extends LitElement {
     super.disconnectedCallback();
     this.stopStream();
     // Clean up v2 SSE listeners
+    stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -1326,6 +1347,8 @@ export class ScionChatThread extends LitElement {
 
   /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
   private startStreamV2(): void {
+    this._sawSseConnect = stateManager.isConnected;
+    stateManager.addEventListener('connected', this._sseReconnectHandler);
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);

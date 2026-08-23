@@ -24,6 +24,9 @@
  *
  * Provides automatic reconnection with exponential backoff and
  * Last-Event-ID resume support (handled natively by EventSource).
+ *
+ * Reconnection retries indefinitely; a tab that becomes visible reconnects
+ * immediately.
  */
 
 /** Data shape for SSE 'update' events from the server */
@@ -42,10 +45,29 @@ type SSEClientEventMap = {
 export class SSEClient extends EventTarget {
   private eventSource: EventSource | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
+  /**
+   * Bumped whenever the connection lifecycle changes. An async continuation
+   * that captured an older value has been superseded and must not act.
+   */
+  private generation = 0;
   private baseReconnectDelay = 1000;
+  /** Backoff cap while a drop still looks transient. */
+  private fastReconnectCap = 30_000;
+  /**
+   * Backoff cap after fastReconnectAttempts failures.
+   */
+  private slowReconnectCap = 300_000;
+  /** Attempts spent at the fast cap before the slow one takes over. */
+  private fastReconnectAttempts = 10;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private subjects: string[] = [];
+  /**
+   * Whether a connection has been live since the last drop was reported.
+   * Guards the 'disconnected' event so listeners hear one drop per outage
+   * rather than one per failed retry.
+   */
+  private connectionOpen = false;
+  private onVisibilityChange: (() => void) | null = null;
 
   /**
    * Build the SSE URL with subscription subjects as query parameters.
@@ -67,33 +89,65 @@ export class SSEClient extends EventTarget {
     this.openConnection();
   }
 
+  /** Close and forget the current EventSource, if any. */
+  private closeEventSource(): void {
+    if (!this.eventSource) {
+      return;
+    }
+    this.eventSource.close();
+    this.eventSource = null;
+  }
+
   private openConnection(): void {
     if (this.subjects.length === 0) {
       return;
     }
 
-    const url = this.buildUrl(this.subjects);
-    this.eventSource = new EventSource(url);
+    this.watchVisibility();
 
-    this.eventSource.onopen = () => {
+    // Any connection still held here would be orphaned by the assignment
+    // below: nothing else tracks it, so disconnect() could not close it and
+    // its onerror would tear down its own replacement.
+    this.closeEventSource();
+
+    this.generation++;
+    const url = this.buildUrl(this.subjects);
+    const es = new EventSource(url);
+    this.eventSource = es;
+
+    // Each handler bails unless es is still the client's current connection,
+    // so a superseded connection cannot mutate state it no longer owns.
+    es.onopen = () => {
+      if (es !== this.eventSource) return;
       this.reconnectAttempts = 0;
+      this.connectionOpen = true;
       console.info('[SSE] Connected');
+      // The browser's own open signal. The server-sent "connected" event this
+      // client also listens for is never emitted by the hub, so consumers that
+      // need to know the stream is live (state.connected, the chat thread's
+      // catch-up refetch) would otherwise never hear anything.
+      this.dispatchEvent(new CustomEvent('connected'));
     };
 
-    this.eventSource.onerror = () => {
-      // EventSource fires error when connection drops.
-      // Close and attempt manual reconnect with backoff.
-      const readyState = this.eventSource?.readyState;
-      if (this.eventSource) {
-        this.eventSource.close();
-        this.eventSource = null;
+    es.onerror = () => {
+      if (es !== this.eventSource) return;
+      const wasOpen = this.connectionOpen;
+      this.connectionOpen = false;
+      this.closeEventSource();
+
+      // Once per live connection, not once per failed retry.
+      if (wasOpen) {
+        this.dispatchEvent(new CustomEvent('disconnected'));
       }
 
-      // If the connection was never opened (CONNECTING → error), the
-      // server likely returned a non-200 (e.g. 302 redirect to login
-      // after session invalidation). Probe the auth endpoint before
-      // burning through reconnect attempts.
-      if (readyState === EventSource.CONNECTING) {
+      // A handshake that never opened may have been rejected rather than
+      // dropped - a 401, or a redirect to the login page after the session
+      // was invalidated - so probe auth before retrying it forever. A
+      // connection that was live and then failed is a network drop and goes
+      // straight to backoff. readyState cannot make this distinction: per
+      // spec a rejected handshake lands CLOSED and a mid-stream drop lands
+      // CONNECTING, which is the opposite way round.
+      if (!wasOpen) {
         void this.checkAuthAndReconnect();
       } else {
         this.scheduleReconnect();
@@ -111,6 +165,8 @@ export class SSEClient extends EventTarget {
     });
 
     // Handle server-initiated reconnect (e.g. before a clean shutdown).
+    // connectionOpen is left alone: the feed was live a moment ago, so if the
+    // replacement connection never lands, that still counts as a drop.
     this.eventSource.addEventListener('reconnect', () => {
       this.reconnectAttempts = 0;
       this.eventSource?.close();
@@ -139,6 +195,7 @@ export class SSEClient extends EventTarget {
    * redirect to the login page instead of retrying.
    */
   private async checkAuthAndReconnect(): Promise<void> {
+    const generation = this.generation;
     try {
       const resp = await fetch('/auth/me', { credentials: 'include' });
       if (resp.status === 401 || resp.redirected) {
@@ -150,22 +207,36 @@ export class SSEClient extends EventTarget {
     } catch {
       // Network error — fall through to normal reconnect.
     }
+    // A connect(), reconnectNow() or disconnect() during the await has already
+    // decided what happens next; scheduling here would race it.
+    if (generation !== this.generation) {
+      return;
+    }
     this.scheduleReconnect();
   }
 
+  /**
+   * Queue the next connection attempt with exponential backoff.
+   */
   private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.warn('[SSE] Max reconnect attempts reached, giving up');
-      this.dispatchEvent(new CustomEvent('disconnected'));
+    // A retry already queued, or a deliberate disconnect, cancels this one.
+    if (this.reconnectTimer !== null || this.subjects.length === 0) {
       return;
     }
 
+    const cap =
+      this.reconnectAttempts < this.fastReconnectAttempts
+        ? this.fastReconnectCap
+        : this.slowReconnectCap;
+    const base = Math.min(cap, this.baseReconnectDelay * 2 ** this.reconnectAttempts);
+    // Proportional jitter (up to 10 percent either way), so open tabs spread
+    // out at every cap rather than clustering within a fixed 500ms window.
+    const delay = base + (Math.random() * 2 - 1) * base * 0.1;
     this.reconnectAttempts++;
-    const delay = this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-    // Cap delay at 30 seconds
-    const cappedDelay = Math.min(delay, 30_000);
 
-    console.info(`[SSE] Reconnecting in ${cappedDelay}ms (attempt ${this.reconnectAttempts})`);
+    console.info(
+      `[SSE] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`
+    );
     this.dispatchEvent(
       new CustomEvent('reconnecting', { detail: { attempt: this.reconnectAttempts } })
     );
@@ -173,25 +244,80 @@ export class SSEClient extends EventTarget {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.openConnection();
-    }, cappedDelay);
+    }, delay);
+  }
+
+  /**
+   * Cancel any pending backoff and connect immediately.
+   */
+  private reconnectNow(): void {
+    if (this.subjects.length === 0) {
+      return;
+    }
+
+    // Leave an open connection or in-flight handshake to resolve on its own.
+    const readyState = this.eventSource?.readyState;
+    if (readyState === EventSource.OPEN || readyState === EventSource.CONNECTING) {
+      return;
+    }
+
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+    this.openConnection();
+  }
+
+  /**
+   * Reconnect as soon as the tab is shown, not after whatever backoff was
+   * pending when it was hidden. Mobile browsers suspend a backgrounded tab and
+   * close its connections, so the feed is usually dead on return.
+   */
+  private watchVisibility(): void {
+    if (this.onVisibilityChange || typeof document === 'undefined') {
+      return;
+    }
+    this.onVisibilityChange = (): void => {
+      if (document.visibilityState !== 'visible') return;
+      if (this.connected || this.subjects.length === 0) return;
+      // Restart the backoff from the shortest delay.
+      this.reconnectAttempts = 0;
+      this.reconnectNow();
+    };
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
   }
 
   /**
    * Close the SSE connection and cancel any pending reconnection.
+   *
+   * Also drops the visibility listener: it holds a reference to this client,
+   * and left behind it would reopen a connection the caller just tore down.
+   * connect() re-registers it, so a disconnected client stays reusable.
    */
   disconnect(): void {
+    // Supersede any in-flight auth probe, which would otherwise schedule a
+    // reconnect for a client the caller just tore down.
+    this.generation++;
+
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
-    if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
+    if (this.onVisibilityChange) {
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
+      this.onVisibilityChange = null;
     }
+
+    this.closeEventSource();
 
     this.subjects = [];
     this.reconnectAttempts = 0;
+    this.connectionOpen = false;
   }
 
   /** Whether the connection is currently open */
