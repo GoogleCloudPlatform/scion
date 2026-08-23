@@ -105,9 +105,9 @@ function connectAndOpen(subjects = ['agent.>']): SSEClient {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  // Jitter is deliberate in production; here it would make timer maths
-  // unpredictable, so pin it to zero.
-  vi.spyOn(Math, 'random').mockReturnValue(0);
+  // Jitter is proportional and signed; 0.5 is its zero point, keeping timer
+  // maths exact.
+  vi.spyOn(Math, 'random').mockReturnValue(0.5);
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
   // A handshake that never opened probes this before retrying; an authorised
@@ -358,8 +358,8 @@ describe('SSEClient jitter', () => {
     const client = connectAndOpen();
     latest().simulateDrop();
 
-    // 1s base plus the full 500ms of jitter.
-    vi.advanceTimersByTime(1_499);
+    // 1s base plus the full +10% of proportional jitter.
+    vi.advanceTimersByTime(1_099);
     expect(FakeEventSource.instances).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(FakeEventSource.instances).toHaveLength(2);

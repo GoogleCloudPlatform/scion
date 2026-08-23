@@ -112,17 +112,20 @@ export class SSEClient extends EventTarget {
 
     this.generation++;
     const url = this.buildUrl(this.subjects);
-    this.eventSource = new EventSource(url);
+    const es = new EventSource(url);
+    this.eventSource = es;
 
-    this.eventSource.onopen = () => {
+    // Each handler bails unless es is still the client's current connection,
+    // so a superseded connection cannot mutate state it no longer owns.
+    es.onopen = () => {
+      if (es !== this.eventSource) return;
       this.reconnectAttempts = 0;
       this.connectionOpen = true;
       console.info('[SSE] Connected');
     };
 
-    this.eventSource.onerror = () => {
-      // EventSource fires error when connection drops.
-      // Close and attempt manual reconnect with backoff.
+    es.onerror = () => {
+      if (es !== this.eventSource) return;
       const wasOpen = this.connectionOpen;
       this.connectionOpen = false;
       this.closeEventSource();
@@ -216,13 +219,14 @@ export class SSEClient extends EventTarget {
       return;
     }
 
-    // Jitter so open tabs do not retry in lockstep.
     const cap =
       this.reconnectAttempts < this.fastReconnectAttempts
         ? this.fastReconnectCap
         : this.slowReconnectCap;
     const base = Math.min(cap, this.baseReconnectDelay * 2 ** this.reconnectAttempts);
-    const delay = base + Math.random() * 500;
+    // Proportional jitter (up to 10 percent either way), so open tabs spread
+    // out at every cap rather than clustering within a fixed 500ms window.
+    const delay = base + (Math.random() * 2 - 1) * base * 0.1;
     this.reconnectAttempts++;
 
     console.info(
