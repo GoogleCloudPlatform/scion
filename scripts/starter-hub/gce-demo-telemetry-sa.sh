@@ -124,7 +124,8 @@ for role in "${ROLES[@]}"; do
     echo "  -> ${role}"
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member "serviceAccount:${SA_EMAIL}" \
-        --role "${role}" > /dev/null
+        --role "${role}" \
+        --condition=None > /dev/null
 done
 
 # Create and download key
