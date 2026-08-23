@@ -164,6 +164,7 @@ exit_code=0
 if [[ -n "$stale" ]]; then
   stale_count=$(echo "$stale" | wc -l)
   echo "check-route-authz-manifest: WARNING — $stale_count stale manifest entries (route no longer registered):" >&2
+  # shellcheck disable=SC2001  # prepending to each line requires sed; ${var//} cannot do this
   echo "$stale" | sed 's/^/  /' >&2
   echo >&2
 fi
@@ -173,6 +174,7 @@ if [[ -n "$missing" ]]; then
   echo "check-route-authz-manifest: analysed $(provenance) — $missing_count routes without declared authorization posture" >&2
   echo >&2
   echo "Routes registered in registerRoutes() but missing from route_authz_manifest.go:" >&2
+  # shellcheck disable=SC2001  # prepending to each line requires sed; ${var//} cannot do this
   echo "$missing" | sed 's/^/  /' >&2
   echo >&2
   echo "Add each route to pkg/hub/route_authz_manifest.go with its authorization" >&2
