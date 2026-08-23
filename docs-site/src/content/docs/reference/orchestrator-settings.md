@@ -33,7 +33,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | :--- | :--- | :--- |
 | `schema_version` | string | **Required**. Must be `"1"`. |
 | `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). |
-| `default_template` | string | The default template to use when creating agents (e.g., `gemini`, `claude`). |
+| `default_template` | string | The default template to use when creating agents (e.g., `gemini`, `antigravity`). |
 | `image_registry` | string | Registry prefix for all standard harness images. Rewrites the registry portion of `scion-*` images (e.g., `ghcr.io/myorg`). See [Building Custom Images](/scion/local/custom-images/). |
 | `default_max_turns` | int | Default maximum number of turns an agent can take before termination. |
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |

@@ -417,7 +417,7 @@ Located at `.scion/settings.yaml` (YAML preferred) or `.scion/settings.json` (JS
 
 ```yaml
 active_profile: docker-local
-default_template: claude
+default_template: antigravity
 
 hub:
   enabled: true
