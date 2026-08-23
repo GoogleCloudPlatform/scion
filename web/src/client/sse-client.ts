@@ -128,7 +128,7 @@ export class SSEClient extends EventTarget {
       // catch-up refetch) would otherwise never hear anything.
       this.dispatchEvent(
         new CustomEvent('connected', {
-          detail: { connectionId: '', subjects: this.subjects },
+          detail: { connectionId: '', subjects: [...this.subjects] },
         })
       );
     };

@@ -445,7 +445,7 @@ describe('SSEClient connected event', () => {
     const event = connected.mock.calls[0]?.[0] as CustomEvent;
     expect(event.detail).not.toBeNull();
     expect(event.detail).toEqual({
-      connectionId: expect.any(String),
+      connectionId: '',
       subjects: ['agent.>', 'project.123'],
     });
     client.disconnect();
