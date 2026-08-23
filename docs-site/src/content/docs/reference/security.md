@@ -40,7 +40,7 @@ Agents running inside containers must report status back to the Hub without poss
   Providing the singular `"scope"` field in a token will silently fail, resulting in an empty scopes list and a locked-down agent.
   :::
 
-- **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`):
+- **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`). An empty or unspecified agent role is securely enforced to resolve to the least-privilege role (`AgentRoleNone`) across all authorization paths. Scheduled dispatch children automatically persist this explicit role, and dispatches lacking a creator are refused.
     - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
     - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.
     - `project:agent:create`, `project:agent:lifecycle`, `project:secret:read` (Full): Complete programmatic control allowing the agent to spawn sub-agents, manage their phases, and retrieve project secrets dynamically.

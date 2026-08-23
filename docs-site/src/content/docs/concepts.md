@@ -38,7 +38,7 @@ A **Harness-config** adapts a specific underlying LLM tool or agent software (li
 A **Template** is a blueprint for creating an agent. It defines the base configuration, system prompt, and tools that an agent will use.
 - Templates are stored in `.scion/templates/` and can be project-level or global (`~/.scion/templates/`).
 - Users can manage templates using the `scion templates` command suite (`create`, `clone`, `list`, `show`, `update-default`).
-- Scion comes with default templates for supported harnesses (e.g., `gemini`, `claude`, `opencode`, `codex`), but users can create custom templates for specialized roles (e.g., "Security Auditor", "React Specialist").
+- Scion comes with default templates for supported harnesses (e.g., `gemini`, `antigravity`, `opencode`, `codex`), but users can create custom templates for specialized roles (e.g., "Security Auditor", "React Specialist").
 
 
 ### Runtime

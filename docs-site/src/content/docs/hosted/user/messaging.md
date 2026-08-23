@@ -29,6 +29,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
 - **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
+- **Clickable File Paths**: File paths starting with `/workspace/...` or `/scion-volumes/...` render as interactive links. Clicking them immediately opens an on-demand file viewer dialog, fetching the current file content directly from the existing workspace and shared-directory APIs without leaving the chat context.
 - **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 

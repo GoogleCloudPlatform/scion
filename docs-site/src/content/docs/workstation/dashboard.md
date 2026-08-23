@@ -30,6 +30,7 @@ When enabled via the `web.native_chat` feature flag, the dashboard includes a to
 - **Composer Default-Agent Disambiguation**: When sending messages in spaces with multiple active agents, the composer helps resolve which agent is targeted if no explicit mention is used.
 - **Attachments**: Upload file or image attachments directly within the composer, with preview tiles rendered instantly on real-time SSE updates.
 - **Search**: Built-in chat search lets you query across historical messages and threads.
+- **Clickable File Paths**: File paths in chat messages starting with `/workspace/...` or `/scion-volumes/...` automatically render as clickable links. Clicking these paths opens an on-demand file viewer dialog, fetching the file contents instantly via existing workspace and shared-directory APIs.
 - **Chat/Log Switcher**: Instantly toggle between standard conversational chat with the agent and a real-time stream of the agent's raw execution logs inside the same view.
 - **@-Mentions & Autocomplete**: Call other agents into the thread by typing `@` to trigger a fuzzy-matching, keyboard-navigable agent dropdown. Protected by code-fence guards to prevent triggering inside Markdown code snippets.
 - **Visibility Density Filters**: Choose from three filter levels—**Conversation** (pure dialogue), **Verbose** (adds mentions/CCs), or **Full** (adds state updates and background processes)—with preferences saved individually per agent.

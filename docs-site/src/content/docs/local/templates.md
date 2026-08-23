@@ -41,7 +41,7 @@ description: "Senior code reviewer — correctness, readability, security, perfo
 agent_instructions: agents.md      # file reference (or inline text)
 system_prompt: system-prompt.md
 
-default_harness_config: claude     # harness-config to use when none is given
+default_harness_config: antigravity     # harness-config to use when none is given
 
 env:
   REVIEW_STRICTNESS: high

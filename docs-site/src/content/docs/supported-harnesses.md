@@ -14,7 +14,7 @@ projection, and MCP configuration across all bundles. See
 [Harness-Specific Settings](/scion/reference/harness-settings/) for how bundles are packaged and
 managed.
 
-`claude` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`, and
+`antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`, and
 `antigravity` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
 
