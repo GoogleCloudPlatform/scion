@@ -7,11 +7,14 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -136,13 +139,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// can distinguish automatic assistant replies from explicit
 		// agent→user messages.
 		if event.Name == hooks.EventAgentEnd && event.Data.AssistantText != "" {
-			text := event.Data.AssistantText
-			// Guard against very large assistant responses (e.g. full file
-			// dumps) bloating the message store and slowing the Messages tab.
-			const maxAssistantTextBytes = 64 * 1024
-			if len(text) > maxAssistantTextBytes {
-				text = text[:maxAssistantTextBytes] + "\n[truncated]"
-			}
+			text := truncateAssistantText(event.Data.AssistantText)
 
 			// Build metadata tags for content classification.
 			metadata := map[string]string{
@@ -329,6 +326,28 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 		CurrentTurns:      &turnCount,
 		CurrentModelCalls: &modelCallCount,
 	})
+}
+
+// truncateAssistantText caps an assistant reply at the hub's message-length
+// limit, measured in runes as the hub measures it, keeping the start of the
+// reply and reserving room for a marker reporting how many were dropped.
+func truncateAssistantText(text string) string {
+	total := utf8.RuneCountInString(text)
+	if total <= messages.MaxMessageLength {
+		return text
+	}
+
+	marker := func(dropped int) string {
+		return fmt.Sprintf("\n[truncated, %d characters omitted]", dropped)
+	}
+	// Sized against the worst case: the dropped count can only shrink the marker.
+	keep := messages.MaxMessageLength - utf8.RuneCountInString(marker(total))
+	if keep <= 0 {
+		// Defensive: unreachable at the current limit, but a negative slice
+		// would panic and no caller up to dispatchEvent recovers.
+		return string([]rune(text)[:messages.MaxMessageLength])
+	}
+	return string([]rune(text)[:keep]) + marker(total-keep)
 }
 
 // truncateMessage truncates a message to the specified length.
