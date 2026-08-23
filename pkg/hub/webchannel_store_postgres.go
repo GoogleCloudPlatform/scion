@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS webchat_conversation_context (
     project_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     last_channel TEXT,
+    last_thread_id TEXT,
     last_message_at TIMESTAMPTZ,
     PRIMARY KEY (user_id, project_id, agent_id)
 );
@@ -173,6 +174,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
 	}
 
+	// Adds last_thread_id to databases created before it was in the schema.
+	const ctxThreadCol = `
+ALTER TABLE webchat_conversation_context ADD COLUMN IF NOT EXISTS last_thread_id TEXT;
+`
+	if _, err := s.db.Exec(ctxThreadCol); err != nil {
+		return fmt.Errorf("webchat store: add conversation context thread_id: %w", err)
+	}
+
 	// Run idempotent migrations.
 	if err := s.runMigrations(); err != nil {
 		return fmt.Errorf("webchat store: migrations: %w", err)
@@ -199,34 +208,37 @@ DO UPDATE SET
 }
 
 // RecordChannel upserts the reply-affinity context for the given (user, project, agent) triple.
-func (s *pgWebChatStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error {
+func (s *pgWebChatStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel, threadID string, messageAt time.Time) error {
 	const query = `
-INSERT INTO webchat_conversation_context (user_id, project_id, agent_id, last_channel, last_message_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO webchat_conversation_context (user_id, project_id, agent_id, last_channel, last_thread_id, last_message_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (user_id, project_id, agent_id)
 DO UPDATE SET
     last_channel = EXCLUDED.last_channel,
+    last_thread_id = EXCLUDED.last_thread_id,
     last_message_at = EXCLUDED.last_message_at
 `
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt)
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, threadID, messageAt)
 	if err != nil {
 		return fmt.Errorf("webchat store: record channel: %w", err)
 	}
 	return nil
 }
 
-// GetLastChannel returns the last channel for (user, project, agent), or "" if no row exists.
-func (s *pgWebChatStore) GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error) {
-	const query = `SELECT last_channel FROM webchat_conversation_context WHERE user_id = $1 AND project_id = $2 AND agent_id = $3`
-	var channel sql.NullString
-	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&channel)
+// GetLastRoute returns where this user last spoke to this agent. The thread is
+// empty for channels that do not carry threads, and both are empty when no row
+// exists.
+func (s *pgWebChatStore) GetLastRoute(ctx context.Context, userID, projectID, agentID string) (string, string, error) {
+	const query = `SELECT last_channel, last_thread_id FROM webchat_conversation_context WHERE user_id = $1 AND project_id = $2 AND agent_id = $3`
+	var channel, threadID sql.NullString
+	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&channel, &threadID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", nil
+			return "", "", nil
 		}
-		return "", fmt.Errorf("webchat store: get last channel: %w", err)
+		return "", "", fmt.Errorf("webchat store: get last route: %w", err)
 	}
-	return channel.String, nil
+	return channel.String, threadID.String, nil
 }
 
 // GetThreadPrefs returns the display preferences for the given (user, project, agent) triple.

@@ -265,7 +265,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// Only record for user-identity senders with a known channel.
 	if s.webChatStore != nil && req.Message.Channel != "" && strings.HasPrefix(req.Message.Sender, "user:") {
 		if senderUserID != "" {
-			if err := s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now); err != nil {
+			if err := s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, req.Message.ThreadID, now); err != nil {
 				log.Error("Failed to record conversation context for broker inbound",
 					"user_id", senderUserID, "agent_id", agent.ID, "channel", req.Message.Channel, "error", err)
 			}

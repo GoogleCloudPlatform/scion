@@ -50,16 +50,16 @@ type WebChatStore interface {
 	// indexed read instead of an aggregate query.
 	TouchThread(ctx context.Context, userID, projectID, agentID, messageID string, activityAt time.Time) error
 
-	// RecordChannel upserts reply-affinity context for (user, project, agent).
-	// Records the last channel a message was seen on, so the hub can route
-	// untagged replies back to the channel the user last spoke from.
-	RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error
+	// RecordChannel upserts reply-affinity context for (user, project, agent):
+	// the channel and thread the user's message arrived on, so the hub can
+	// route an untagged reply back to where they were speaking.
+	RecordChannel(ctx context.Context, userID, projectID, agentID, channel, threadID string, messageAt time.Time) error
 
-	// GetLastChannel returns the last channel recorded for (user, project, agent),
-	// or "" if no row exists. Used for reply affinity: when an agent sends an
-	// untagged reply, the hub checks here to route to the channel the user last
-	// spoke from.
-	GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error)
+	// GetLastRoute returns the last channel and thread recorded for (user, project, agent),
+	// or empty strings if no row exists. Used for reply affinity: when an agent
+	// sends an untagged reply, the hub routes it back to where the user last
+	// spoke.
+	GetLastRoute(ctx context.Context, userID, projectID, agentID string) (channel, threadID string, err error)
 
 	// GetThreadPrefs returns the display preferences for a (user, project, agent) thread.
 	// Returns default prefs (visibility_mode = "conversation") if no row exists.
@@ -361,6 +361,7 @@ CREATE TABLE IF NOT EXISTS webchat_conversation_context (
     project_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     last_channel TEXT,
+    last_thread_id TEXT,
     last_message_at TEXT,
     PRIMARY KEY (user_id, project_id, agent_id)
 );
@@ -492,6 +493,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 	return nil
 }
 
+// addConversationContextThreadID adds last_thread_id to an existing
+// webchat_conversation_context. SQLite has no ADD COLUMN IF NOT EXISTS, so a
+// duplicate-column error is the success case on a database that already has it.
+func (s *sqliteWebChatStore) addConversationContextThreadID() error {
+	_, err := s.db.Exec(`ALTER TABLE webchat_conversation_context ADD COLUMN last_thread_id TEXT`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
 // TouchThread upserts the thread watermark for the given (user, project, agent) triple.
 func (s *sqliteWebChatStore) TouchThread(ctx context.Context, userID, projectID, agentID, messageID string, activityAt time.Time) error {
 	const query = `
@@ -510,34 +522,37 @@ DO UPDATE SET
 }
 
 // RecordChannel upserts the reply-affinity context for the given (user, project, agent) triple.
-func (s *sqliteWebChatStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error {
+func (s *sqliteWebChatStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel, threadID string, messageAt time.Time) error {
 	const query = `
-INSERT INTO webchat_conversation_context (user_id, project_id, agent_id, last_channel, last_message_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO webchat_conversation_context (user_id, project_id, agent_id, last_channel, last_thread_id, last_message_at)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (user_id, project_id, agent_id)
 DO UPDATE SET
     last_channel = excluded.last_channel,
+    last_thread_id = excluded.last_thread_id,
     last_message_at = excluded.last_message_at
 `
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt)
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, threadID, messageAt)
 	if err != nil {
 		return fmt.Errorf("webchat store: record channel: %w", err)
 	}
 	return nil
 }
 
-// GetLastChannel returns the last channel for (user, project, agent), or "" if no row exists.
-func (s *sqliteWebChatStore) GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error) {
-	const query = `SELECT last_channel FROM webchat_conversation_context WHERE user_id = ? AND project_id = ? AND agent_id = ?`
-	var channel sql.NullString
-	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&channel)
+// GetLastRoute returns where this user last spoke to this agent. The thread is
+// empty for channels that do not carry threads, and both are empty when no row
+// exists.
+func (s *sqliteWebChatStore) GetLastRoute(ctx context.Context, userID, projectID, agentID string) (string, string, error) {
+	const query = `SELECT last_channel, last_thread_id FROM webchat_conversation_context WHERE user_id = ? AND project_id = ? AND agent_id = ?`
+	var channel, threadID sql.NullString
+	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&channel, &threadID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", nil
+			return "", "", nil
 		}
-		return "", fmt.Errorf("webchat store: get last channel: %w", err)
+		return "", "", fmt.Errorf("webchat store: get last route: %w", err)
 	}
-	return channel.String, nil
+	return channel.String, threadID.String, nil
 }
 
 // GetThreadPrefs returns the display preferences for the given (user, project, agent) triple.
@@ -1215,6 +1230,9 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 
 // runMigrations executes idempotent data migrations.
 func (s *sqliteWebChatStore) runMigrations() error {
+	if err := s.addConversationContextThreadID(); err != nil {
+		return fmt.Errorf("conversation context thread_id: %w", err)
+	}
 	if err := s.migrateThreadIDs(DefaultMigrationBatchSize); err != nil {
 		return fmt.Errorf("thread_id backfill: %w", err)
 	}
