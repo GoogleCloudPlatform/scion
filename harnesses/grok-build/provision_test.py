@@ -513,7 +513,9 @@ class HookWriteTest(unittest.TestCase):
 
     def test_hooks_written_correctly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            provision._write_hooks(tmp)
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                provision._write_hooks(ctx)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
             self.assertTrue(os.path.isfile(hooks_path))
             with open(hooks_path) as f:
@@ -525,7 +527,9 @@ class HookWriteTest(unittest.TestCase):
 
     def test_session_start_uses_echo_with_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            provision._write_hooks(tmp)
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                provision._write_hooks(ctx)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
             with open(hooks_path) as f:
                 data = json.load(f)
@@ -538,7 +542,9 @@ class HookWriteTest(unittest.TestCase):
 
     def test_session_end_uses_echo_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            provision._write_hooks(tmp)
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                provision._write_hooks(ctx)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
             with open(hooks_path) as f:
                 data = json.load(f)
@@ -550,7 +556,9 @@ class HookWriteTest(unittest.TestCase):
 
     def test_pre_tool_use_uses_cat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            provision._write_hooks(tmp)
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                provision._write_hooks(ctx)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
             with open(hooks_path) as f:
                 data = json.load(f)
@@ -561,7 +569,9 @@ class HookWriteTest(unittest.TestCase):
 
     def test_stop_has_longer_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            provision._write_hooks(tmp)
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                provision._write_hooks(ctx)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
             with open(hooks_path) as f:
                 data = json.load(f)

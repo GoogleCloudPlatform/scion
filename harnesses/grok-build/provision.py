@@ -74,6 +74,11 @@ AUTH = scion_harness.AuthSpec(
 )
 
 
+def _grok_config_dir(ctx: scion_harness.ProvisionContext) -> str:
+    """Resolve the grok config directory, respecting GROK_HOME if set."""
+    return os.environ.get("GROK_HOME") or os.path.join(ctx.home, ".grok")
+
+
 def _read_token(ctx: scion_harness.ProvisionContext, env_key: str) -> str:
     """Read the token for an env-based auth method.
 
@@ -107,7 +112,7 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
         raise scion_harness.ProvisionError(
             f"GROK_AUTH secret is not valid JSON: {exc}"
         ) from exc
-    config_dir = os.environ.get("GROK_HOME") or scion_harness.expand_path("~/.grok")
+    config_dir = _grok_config_dir(ctx)
     os.makedirs(config_dir, exist_ok=True)
     target = os.path.join(config_dir, "auth.json")
     tmp = target + ".tmp"
@@ -357,7 +362,7 @@ _TOML_BARE_KEY_RE = _re.compile(r"^[A-Za-z0-9_-]+$")
 
 def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]) -> None:
     """Write MCP servers to ~/.grok/config.toml as [mcp_servers.*] sections."""
-    config_path = os.path.join(ctx.home, ".grok", "config.toml")
+    config_path = os.path.join(_grok_config_dir(ctx), "config.toml")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
     existing = ""
@@ -432,7 +437,7 @@ enabled = false
 
 def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
     """Write hardened settings to ~/.grok/config.toml with managed markers."""
-    config_path = os.path.join(ctx.home, ".grok", "config.toml")
+    config_path = os.path.join(_grok_config_dir(ctx), "config.toml")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
     existing = ""
@@ -598,8 +603,8 @@ _GROK_HOOK_EVENTS = [
 ]
 
 
-def _write_hooks(home: str) -> None:
-    """Write ~/.grok/hooks/scion.json wiring Grok events to sciontool.
+def _write_hooks(ctx: scion_harness.ProvisionContext) -> None:
+    """Write hooks/scion.json under the grok config dir, wiring events to sciontool.
 
     Each hook fires ``sciontool hook --dialect=grok-build`` which processes
     the event through the grok-build mapping dialect.
@@ -637,7 +642,7 @@ def _write_hooks(home: str) -> None:
 
     hooks_data: dict[str, Any] = {"hooks": hooks}
 
-    hooks_dir = os.path.join(home, ".grok", "hooks")
+    hooks_dir = os.path.join(_grok_config_dir(ctx), "hooks")
     os.makedirs(hooks_dir, exist_ok=True)
     hooks_path = os.path.join(hooks_dir, "scion.json")
     try:
@@ -768,7 +773,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     _harden_config(ctx)
 
     # --- Hook wiring --------------------------------------------------------
-    _write_hooks(ctx.home)
+    _write_hooks(ctx)
 
     ctx.info(f"method={resolved.method}")
 
