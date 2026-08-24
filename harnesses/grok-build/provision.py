@@ -106,7 +106,7 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
         raise scion_harness.ProvisionError(
             f"GROK_AUTH secret is not valid JSON: {exc}"
         ) from exc
-    config_dir = scion_harness.expand_path("~/.grok")
+    config_dir = os.environ.get("GROK_HOME") or scion_harness.expand_path("~/.grok")
     os.makedirs(config_dir, exist_ok=True)
     target = os.path.join(config_dir, "auth.json")
     tmp = target + ".tmp"
