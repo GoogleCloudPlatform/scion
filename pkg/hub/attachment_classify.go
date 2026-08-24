@@ -137,5 +137,10 @@ func ClassifyAttachment(filename string, head []byte) (string, error) {
 // starting with a tag, say. All of them are text; which of them a text-like
 // extension is stored as is decided by the extension, not by this.
 func isTextContentType(detected string) bool {
-	return strings.HasPrefix(detected, "text/")
+	// text/* types are obviously text. application/octet-stream is Go's
+	// http.DetectContentType fallback for "I don't know" — it fires for
+	// valid UTF-8 containing control characters the sniffer doesn't expect
+	// (e.g. vertical tab 0x0B). Since the caller already confirmed a
+	// text-like extension, treating "I don't know" as text is safe.
+	return strings.HasPrefix(detected, "text/") || detected == "application/octet-stream"
 }
