@@ -15,4 +15,4 @@ Three P0 permission escalation defects were patched from a permissions consensus
 * **[Auth]:** Redirect logged-out browser users to login on proxy routes — previously showed a raw JSON 401 error because proxy routes bypass `sessionAuthMiddleware` (which has redirect logic) and reach `UnifiedAuthMiddleware` (JSON-only). Adds browser-navigation check in `sessionToBearerMiddleware` scoped strictly to proxy routes (#1246).
 
 ## 📖 Docs
-* **[Docs]:** Nightly documentation update for Aug 21 — Includes 22 authz-guard bypass security fixes, fail-closed authorization, hub default model/thinking-level stamping, register_url for Discord and Telegram (#1248).
+* **[Docs]:** Nightly documentation update for Aug 21 — 22 authz-guard bypass security fixes, fail-closed authorization, hub default model/thinking-level stamping, register_url for Discord and Telegram (#1248).
