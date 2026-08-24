@@ -781,6 +781,102 @@ func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets_AbsolutePath
 	}
 }
 
+func TestContainerScriptHarness_ApplyAuthSettings_BrokerModePopulatesFileSecretFiles(t *testing.T) {
+	// In broker mode, file content is staged via SCION_STAGED_SECRETS by
+	// stagedsecrets.Write(), so FileMappings arrive with SourcePath=""
+	// (cleared by run.go). stageFileSecretFiles must still populate the
+	// file_secret_files map entry pointing to the ContainerPath so the
+	// container-side provisioner can find the file. No secret file should
+	// be written to the secrets dir (the broker already handled that).
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: codex\nimage: scion-codex:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+
+	entry := config.HarnessConfigEntry{
+		Harness: "codex",
+		Image:   "scion-codex:latest",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+		},
+		Auth: &config.HarnessAuthMetadata{
+			Types: map[string]config.HarnessAuthTypeMetadata{
+				"auth-file": {
+					RequiredFiles: []config.HarnessAuthFileRequirement{
+						{
+							Name:         "CODEX_AUTH",
+							Type:         "file",
+							TargetSuffix: "/.codex/auth.json",
+							Field:        "CodexAuthFile",
+						},
+					},
+				},
+			},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	agentHome := t.TempDir()
+
+	// Broker mode: SourcePath is empty (cleared by run.go), ContainerPath
+	// is preserved so the map entry can be populated.
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{},
+		Files: []api.FileMapping{
+			{SourcePath: "", ContainerPath: "~/.codex/auth.json"},
+		},
+	}
+
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings: %v", err)
+	}
+
+	// The FileMapping should have been consumed — NOT kept as a bind-mount.
+	if len(resolved.Files) != 0 {
+		t.Errorf("expected resolved.Files to be empty after staging; got %+v", resolved.Files)
+	}
+
+	// No secret file should be staged (broker handles content staging).
+	secretPath := filepath.Join(agentHome, ".scion", "harness", "secrets", "CODEX_AUTH")
+	if _, err := os.Stat(secretPath); err == nil {
+		t.Errorf("secret file should NOT be staged in broker mode; found at %s", secretPath)
+	}
+
+	// auth-candidates.json must have file_secret_files.CODEX_AUTH pointing
+	// to the container path where the broker stages the file.
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	fsf, ok := payload["file_secret_files"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("file_secret_files missing or wrong type: %T", payload["file_secret_files"])
+	}
+	codexAuthPath, ok := fsf["CODEX_AUTH"].(string)
+	if !ok || codexAuthPath == "" {
+		t.Errorf("file_secret_files.CODEX_AUTH missing or empty: %v", fsf)
+	}
+	// The path should be the normalized ContainerPath ($HOME/... form).
+	if codexAuthPath != "$HOME/.codex/auth.json" {
+		t.Errorf("file_secret_files.CODEX_AUTH=%q, want $HOME/.codex/auth.json", codexAuthPath)
+	}
+
+	// The files array should be empty (no bind-mounts).
+	filesRaw, _ := payload["files"].([]interface{})
+	if len(filesRaw) != 0 {
+		t.Errorf("files array should be empty; got %v", filesRaw)
+	}
+}
+
 func TestContainerScriptHarness_ApplyAuthSettings_NonFileCredentialKeptAsBindMount(t *testing.T) {
 	// FileMappings for credentials without a required_files declaration should
 	// remain as bind-mounts (not staged as secrets).
