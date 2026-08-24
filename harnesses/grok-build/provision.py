@@ -445,8 +445,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     if resolved.method == "vertex-ai":
         region_key = resolved.env_key or "GOOGLE_CLOUD_REGION"
-        region = _read_token(ctx, region_key) or os.environ.get(region_key, "")
-        project = _read_token(ctx, "GOOGLE_CLOUD_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+        region = _read_token(ctx, region_key)
+        project = _read_token(ctx, "GOOGLE_CLOUD_PROJECT")
         env["GOOGLE_CLOUD_PROJECT"] = project
         env["GOOGLE_CLOUD_REGION"] = region
         extra = {"vertex_ai": True}

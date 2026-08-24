@@ -220,6 +220,37 @@ class AuthSelectionVertexAiTest(unittest.TestCase):
                 resolved = ctx.select_auth(provision.AUTH)
             self.assertEqual(resolved.method, "vertex-ai")
 
+    def test_vertex_ai_location_key_env_overlay(self) -> None:
+        """Full provision with GOOGLE_CLOUD_LOCATION normalizes to GOOGLE_CLOUD_REGION."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "gcp-project")
+            with open(project_path, "w") as f:
+                f.write("loc-project")
+            location_path = os.path.join(tmp, "gcp-location")
+            with open(location_path, "w") as f:
+                f.write("asia-east1")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                        "GOOGLE_CLOUD_LOCATION": location_path,
+                    },
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                provision.provision(ctx)
+                outputs_path = os.path.join(tmp, "outputs", "env.json")
+                self.assertTrue(os.path.isfile(outputs_path))
+                with open(outputs_path) as f:
+                    env_data = json.load(f)
+                self.assertEqual(env_data["GOOGLE_CLOUD_PROJECT"], "loc-project")
+                self.assertEqual(env_data["GOOGLE_CLOUD_REGION"], "asia-east1")
+
 
 class AuthSelectionNoAuthTest(unittest.TestCase):
     """Test no-auth fallback."""
