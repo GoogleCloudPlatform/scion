@@ -1,0 +1,69 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scion data-driven dialect spec for xAI Grok Build CLI hook events.
+# Staged to $HOME/.scion/harness/dialect.yaml at agent start.
+dialect: grok-build
+
+event_name_fields: [hookEventName, hook_event_name, type]
+
+mappings:
+  # Session lifecycle.
+  SessionStart:
+    event: session-start
+  SessionEnd:
+    event: session-end
+
+  # Prompt lifecycle.
+  UserPromptSubmit:
+    event: prompt-submit
+    fields:
+      prompt: prompt
+
+  # Agent completion.
+  Stop:
+    event: agent-end
+  StopFailure:
+    event: agent-end
+    fields:
+      error: error
+  StopCancelled:
+    event: agent-end
+
+  # Tool lifecycle.
+  PreToolUse:
+    event: tool-start
+    fields:
+      tool_name: toolName
+      tool_input: toolInput
+  PostToolUse:
+    event: tool-end
+    fields:
+      tool_name: toolName
+      tool_output: toolResult
+  PostToolUseFailure:
+    event: tool-end
+    fields:
+      tool_name: toolName
+      error: error
+
+  # Subagent lifecycle.
+  SubagentStop:
+    event: subagent-end
+
+  # Notifications.
+  Notification:
+    event: notification
+    fields:
+      message: message

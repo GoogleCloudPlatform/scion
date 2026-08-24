@@ -21,7 +21,7 @@ import (
 	_ "embed"
 )
 
-//go:embed all:antigravity/* all:claude/* all:codex/* all:copilot/* all:gemini-cli/* all:hermes/* all:opencode/*
+//go:embed all:antigravity/* all:claude/* all:codex/* all:copilot/* all:gemini-cli/* all:grok-build/* all:hermes/* all:opencode/*
 var FS embed.FS
 
 //go:embed scion_harness.py
