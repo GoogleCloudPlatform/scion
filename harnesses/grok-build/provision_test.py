@@ -169,7 +169,8 @@ class InstructionsTest(unittest.TestCase):
                 target = os.path.join(tmp, "AGENTS.md")
                 scion_harness.project_instructions(ctx, target)
                 self.assertTrue(os.path.isfile(target))
-                content = open(target).read()
+                with open(target) as f:
+                    content = f.read()
                 self.assertIn("Do the thing.", content)
                 self.assertIn("<!-- BEGIN SCION MANAGED -->", content)
                 self.assertIn("<!-- END SCION MANAGED -->", content)
@@ -181,41 +182,10 @@ class InstructionsTest(unittest.TestCase):
 
 
 class MCPTranslationTest(unittest.TestCase):
-    """Test the MCP translate function."""
-
-    def _get_translate_fn(self):
-        """Extract the translate function by calling provision to build it."""
-        # We test the translate logic inline since it is defined inside provision().
-        # Re-create the logic here for unit testing.
-        def translate_mcp(name, spec):
-            transport = (spec.get("transport") or "").strip()
-            if transport == "stdio":
-                cmd = spec.get("command")
-                if not isinstance(cmd, str) or not cmd:
-                    return None
-                out = {"command": cmd}
-                args = spec.get("args") or []
-                if isinstance(args, list) and args:
-                    out["args"] = [str(a) for a in args]
-                env_map = spec.get("env")
-                if isinstance(env_map, dict) and env_map:
-                    out["env"] = {str(k): str(v) for k, v in env_map.items()}
-                return out
-            if transport in ("sse", "streamable-http"):
-                url = spec.get("url")
-                if not isinstance(url, str) or not url:
-                    return None
-                out = {"url": url}
-                headers = spec.get("headers")
-                if isinstance(headers, dict) and headers:
-                    out["headers"] = {str(k): str(v) for k, v in headers.items()}
-                return out
-            return None
-        return translate_mcp
+    """Test the module-level _translate_mcp function."""
 
     def test_stdio_translation(self) -> None:
-        translate = self._get_translate_fn()
-        result = translate("test-server", {
+        result = provision._translate_mcp("test-server", {
             "transport": "stdio",
             "command": "node",
             "args": ["server.js", "--port", "3000"],
@@ -227,15 +197,13 @@ class MCPTranslationTest(unittest.TestCase):
         self.assertEqual(result["env"], {"DEBUG": "true"})
 
     def test_stdio_missing_command(self) -> None:
-        translate = self._get_translate_fn()
-        result = translate("test-server", {
+        result = provision._translate_mcp("test-server", {
             "transport": "stdio",
         })
         self.assertIsNone(result)
 
     def test_sse_translation(self) -> None:
-        translate = self._get_translate_fn()
-        result = translate("sse-server", {
+        result = provision._translate_mcp("sse-server", {
             "transport": "sse",
             "url": "https://example.com/sse",
             "headers": {"Authorization": "Bearer token"},
@@ -245,8 +213,7 @@ class MCPTranslationTest(unittest.TestCase):
         self.assertEqual(result["headers"], {"Authorization": "Bearer token"})
 
     def test_streamable_http_translation(self) -> None:
-        translate = self._get_translate_fn()
-        result = translate("http-server", {
+        result = provision._translate_mcp("http-server", {
             "transport": "streamable-http",
             "url": "https://example.com/api",
         })
@@ -255,8 +222,7 @@ class MCPTranslationTest(unittest.TestCase):
         self.assertNotIn("headers", result)
 
     def test_unsupported_transport(self) -> None:
-        translate = self._get_translate_fn()
-        result = translate("bad-server", {
+        result = provision._translate_mcp("bad-server", {
             "transport": "grpc",
         })
         self.assertIsNone(result)
@@ -281,7 +247,8 @@ class MCPTomlWriteTest(unittest.TestCase):
                 provision._write_mcp_toml(ctx, servers)
                 config_path = os.path.join(grok_dir, "config.toml")
                 self.assertTrue(os.path.isfile(config_path))
-                content = open(config_path).read()
+                with open(config_path) as f:
+                    content = f.read()
                 self.assertIn("[mcp_servers.test-server]", content)
                 self.assertIn('command = "node"', content)
 
@@ -297,7 +264,8 @@ class MCPTomlWriteTest(unittest.TestCase):
                     f.write("[mcp_servers.old]\ncommand = \"old-cmd\"\n\n[other]\nkey = \"val\"\n")
                 servers = {"new-server": {"command": "new-cmd"}}
                 provision._write_mcp_toml(ctx, servers)
-                content = open(config_path).read()
+                with open(config_path) as f:
+                    content = f.read()
                 self.assertNotIn("[mcp_servers.old]", content)
                 self.assertIn("[mcp_servers.new-server]", content)
                 self.assertIn("[other]", content)
@@ -320,7 +288,8 @@ class ConfigHardeningTest(unittest.TestCase):
                 provision._harden_config(ctx)
                 config_path = os.path.join(grok_dir, "config.toml")
                 self.assertTrue(os.path.isfile(config_path))
-                content = open(config_path).read()
+                with open(config_path) as f:
+                    content = f.read()
                 self.assertIn("# BEGIN SCION MANAGED", content)
                 self.assertIn("# END SCION MANAGED", content)
                 self.assertIn("auto_update = false", content)
@@ -340,7 +309,8 @@ class ConfigHardeningTest(unittest.TestCase):
                 with open(config_path, "w") as f:
                     f.write('[mcp_servers.my_server]\ncommand = "test"\n')
                 provision._harden_config(ctx)
-                content = open(config_path).read()
+                with open(config_path) as f:
+                    content = f.read()
                 self.assertIn("[mcp_servers.my_server]", content)
                 self.assertIn("# BEGIN SCION MANAGED", content)
 
@@ -358,7 +328,8 @@ class ConfigHardeningTest(unittest.TestCase):
                         "# END SCION MANAGED\n"
                     )
                 provision._harden_config(ctx)
-                content = open(config_path).read()
+                with open(config_path) as f:
+                    content = f.read()
                 # Should have exactly one managed block.
                 self.assertEqual(content.count("# BEGIN SCION MANAGED"), 1)
                 self.assertEqual(content.count("# END SCION MANAGED"), 1)
@@ -371,29 +342,63 @@ class ConfigHardeningTest(unittest.TestCase):
 
 
 class ModelResolutionTest(unittest.TestCase):
-    """Test model resolution sets GROK_DEFAULT_MODEL."""
+    """Test model resolution via SCION_MODEL env var and model_aliases."""
 
-    def test_resolved_model_set_in_env(self) -> None:
+    _saved_scion_model: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._saved_scion_model = os.environ.pop("SCION_MODEL", None)
+
+    def tearDown(self) -> None:
+        os.environ.pop("SCION_MODEL", None)
+        if self._saved_scion_model is not None:
+            os.environ["SCION_MODEL"] = self._saved_scion_model
+        super().tearDown()
+
+    def _resolve(self, scion_model: str = "") -> str:
+        """Simulate the model resolution logic from provision()."""
+        if scion_model:
+            os.environ["SCION_MODEL"] = scion_model
+        else:
+            os.environ.pop("SCION_MODEL", None)
         ctx = _make_ctx({
-            "model_resolution": {"resolved": "grok-4"},
+            "harness_config": {
+                "no_auth": {"behavior": "drop-to-shell"},
+                "instructions_file": "AGENTS.md",
+                "model_aliases": {
+                    "small": "grok-3-mini",
+                    "medium": "grok-3",
+                    "large": "grok-4",
+                    "extra-large": "grok-4",
+                },
+            },
         })
-        model_res = ctx.model_resolution
-        resolved = model_res.get("resolved", "") if isinstance(model_res, dict) else ""
-        self.assertEqual(resolved, "grok-4")
+        raw = os.environ.get("SCION_MODEL", "").strip()
+        aliases = ctx.harness_config.get("model_aliases") or {}
+        return aliases.get(raw.lower(), raw) if raw else ""
 
-    def test_no_resolved_model(self) -> None:
-        ctx = _make_ctx({
-            "model_resolution": {},
-        })
-        model_res = ctx.model_resolution
-        resolved = model_res.get("resolved", "") if isinstance(model_res, dict) else ""
-        self.assertEqual(resolved, "")
+    def test_small_alias_resolves_to_grok_3_mini(self) -> None:
+        self.assertEqual(self._resolve("small"), "grok-3-mini")
 
-    def test_missing_model_resolution(self) -> None:
-        ctx = _make_ctx({})
-        model_res = ctx.model_resolution
-        resolved = model_res.get("resolved", "") if isinstance(model_res, dict) else ""
-        self.assertEqual(resolved, "")
+    def test_medium_alias_resolves_to_grok_3(self) -> None:
+        self.assertEqual(self._resolve("medium"), "grok-3")
+
+    def test_large_alias_resolves_to_grok_4(self) -> None:
+        self.assertEqual(self._resolve("large"), "grok-4")
+
+    def test_extra_large_alias_resolves_to_grok_4(self) -> None:
+        self.assertEqual(self._resolve("extra-large"), "grok-4")
+
+    def test_raw_model_name_passes_through(self) -> None:
+        self.assertEqual(self._resolve("grok-4-turbo"), "grok-4-turbo")
+
+    def test_empty_scion_model_returns_empty(self) -> None:
+        self.assertEqual(self._resolve(""), "")
+
+    def test_alias_is_case_insensitive(self) -> None:
+        self.assertEqual(self._resolve("SMALL"), "grok-3-mini")
+        self.assertEqual(self._resolve("Large"), "grok-4")
 
 
 # ---------------------------------------------------------------------------

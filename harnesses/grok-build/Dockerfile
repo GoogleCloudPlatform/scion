@@ -31,10 +31,10 @@ COPY --chown=scion:scion home/.grok/config.toml /home/scion/.grok/config.toml
 # Install grok CLI binary.
 # The official install script downloads to ~/.grok/bin/grok.
 # We run as root to install, then symlink to PATH and clean up.
+# Do NOT switch back to USER scion — sciontool init handles the user switch.
 USER root
 RUN curl -fsSL https://x.ai/cli/install.sh | bash \
     && ln -sf /root/.grok/bin/grok /usr/local/bin/grok \
     && rm -rf /root/.grok
-USER scion
 
 CMD ["grok"]
