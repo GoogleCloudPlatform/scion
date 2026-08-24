@@ -678,8 +678,11 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 		}
 
 		if f.SourcePath == "" {
-			// No host path to read; keep as bind-mount fallback.
-			remaining = append(remaining, f)
+			// Broker mode: file content is staged via SCION_STAGED_SECRETS
+			// (stagedsecrets.Write), so there is no host-side source path.
+			// Record the container target path in file_secret_files so the
+			// container-side provisioner script can locate the file.
+			fileSecretFiles[matchedName] = normCP
 			continue
 		}
 

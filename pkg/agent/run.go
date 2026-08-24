@@ -503,9 +503,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// Keep a copy of the full resolved auth material for secret filtering.
 		resolvedForSecretFilter := *resolved
 		if opts.BrokerMode {
-			// File projection is handled by writeFileSecrets() from ResolvedSecrets
-			// at container launch, not by applyResolvedAuth from local paths.
-			resolved.Files = nil
+			// File content projection is handled by writeFileSecrets() from
+			// ResolvedSecrets at container launch (via SCION_STAGED_SECRETS),
+			// not by applyResolvedAuth from local paths. Clear SourcePath so
+			// stageFileSecretFiles won't try to read host files, but preserve
+			// ContainerPath so it can populate file_secret_files in
+			// auth-candidates.json.
+			for i := range resolved.Files {
+				resolved.Files[i].SourcePath = ""
+			}
 		}
 		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
 		if err := harness.ValidateAuth(resolved); err != nil {
