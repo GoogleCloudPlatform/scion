@@ -325,6 +325,26 @@ class WriteAuthFileTest(unittest.TestCase):
                     provision._write_auth_file(ctx)
                 self.assertIn("not valid JSON", str(cm.exception))
 
+    def test_auth_file_already_on_disk(self) -> None:
+        """Broker-staged auth.json is accepted without read_file_secret."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {"file_secret_files": {}},
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            grok_dir = os.path.join(tmp, ".grok")
+            os.makedirs(grok_dir)
+            auth_path = os.path.join(grok_dir, "auth.json")
+            with open(auth_path, "w") as f:
+                json.dump({"token": "test123"}, f)
+            with temporary_home(tmp):
+                provision._write_auth_file(ctx)
+            # Should succeed without raising ProvisionError
+            self.assertTrue(os.path.isfile(auth_path))
+
     def test_output_file_has_0600_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             inputs_dir = os.path.join(tmp, "inputs")

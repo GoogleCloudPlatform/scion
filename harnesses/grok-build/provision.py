@@ -91,7 +91,27 @@ def _read_token(ctx: scion_harness.ProvisionContext, env_key: str) -> str:
 
 
 def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
-    """Write ~/.grok/auth.json from a staged GROK_AUTH file secret."""
+    """Write ~/.grok/auth.json from a staged GROK_AUTH file secret.
+
+    The broker may stage the file directly to the target path via secret
+    injection, bypassing the auth-candidates file_secret_files metadata.
+    Check the target path first before trying read_file_secret().
+    """
+    config_dir = os.environ.get("GROK_HOME") or scion_harness.expand_path("~/.grok")
+    target = os.path.join(config_dir, "auth.json")
+
+    # Check if broker already staged the file directly
+    if os.path.isfile(target):
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                content = f.read()
+            json.loads(content)  # Validate JSON
+            ctx.info("auth.json already present on disk (broker-staged)")
+            return
+        except (OSError, json.JSONDecodeError):
+            pass  # Fall through to secret-based write
+
+    # Fall back to reading from file_secret_files metadata
     content = ctx.read_file_secret("GROK_AUTH")
     if not content:
         raise scion_harness.ProvisionError(
@@ -106,9 +126,7 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
         raise scion_harness.ProvisionError(
             f"GROK_AUTH secret is not valid JSON: {exc}"
         ) from exc
-    config_dir = os.environ.get("GROK_HOME") or scion_harness.expand_path("~/.grok")
     os.makedirs(config_dir, exist_ok=True)
-    target = os.path.join(config_dir, "auth.json")
     tmp = target + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(content)
