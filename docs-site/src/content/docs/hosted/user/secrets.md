@@ -306,12 +306,12 @@ This feature was introduced in [`GoogleCloudPlatform/scion` PR #919](https://git
 
 To use secrets in production, the Hub must be configured with a production-grade secrets backend.
 
-### Secrets Backend (Required)
+### Secrets Backend
 
-Scion requires a secrets backend to store secret values. The recommended backend is **GCP Secret Manager**.
+Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest (derived from the hub signing secret).
 
-:::caution[No Plaintext Storage]
-The Hub does not store secret values in its database. Attempting to create or update secrets without a configured backend (e.g., using the default `local` backend) will return an error. You must configure GCP Secret Manager to use secret management features.
+:::note[Encryption at Rest]
+Secret values are never stored in plaintext. If using the default `local` backend, values are encrypted before being written to the database. Legacy plaintext values are transparently re-encrypted on their next write.
 :::
 
 #### Configuring GCP Secret Manager
