@@ -216,9 +216,9 @@ container environment. The following placeholders are supported — these are th
 env_template:
   TOOL_HOME: "{{ .AgentHome }}/.tool"
 
-# RIGHT — let the tool use its default $HOME-relative path
+# RIGHT — use placeholders for custom tool variables
 env_template:
-  SCION_AGENT_NAME: "{{ .AgentName }}"
+  MY_TOOL_AGENT: "{{ .AgentName }}"
 ```
 
 Precedence: container env (`env`, `env_template`, template/CLI env) beats the
