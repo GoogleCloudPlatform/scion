@@ -1,0 +1,11 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "grok-build",
+    "env_var": "XAI_API_KEY"
+  },
+  "env": {
+    "XAI_API_KEY": "test-api-key-value"
+  }
+}

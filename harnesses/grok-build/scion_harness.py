@@ -1,3 +1,4 @@
+# GENERATED FILE — DO NOT EDIT. Source: harnesses/scion_harness.py
 #!/usr/bin/env python3
 # Copyright 2026 Google LLC
 #
