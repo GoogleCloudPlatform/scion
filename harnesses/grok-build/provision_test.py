@@ -151,6 +151,87 @@ class AuthSelectionNoAuthTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Auth File Write Tests
+# ---------------------------------------------------------------------------
+
+
+class WriteAuthFileTest(unittest.TestCase):
+    """Test _write_auth_file writes, validates, and secures auth.json."""
+
+    def test_valid_json_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "grok-auth-secret")
+            with open(secret_path, "w") as f:
+                f.write('{"token": "xai-test-123"}')
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {"file_secret_files": {"GROK_AUTH": secret_path}},
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                provision._write_auth_file(ctx)
+                auth_path = os.path.join(tmp, ".grok", "auth.json")
+                self.assertTrue(os.path.isfile(auth_path))
+                with open(auth_path) as f:
+                    data = json.load(f)
+                self.assertEqual(data["token"], "xai-test-123")
+
+    def test_empty_secret_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "grok-auth-secret")
+            with open(secret_path, "w") as f:
+                f.write("   ")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {"file_secret_files": {"GROK_AUTH": secret_path}},
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                with self.assertRaises(scion_harness.ProvisionError) as cm:
+                    provision._write_auth_file(ctx)
+                self.assertIn("empty", str(cm.exception).lower())
+
+    def test_invalid_json_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "grok-auth-secret")
+            with open(secret_path, "w") as f:
+                f.write("not-valid-json{{{")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {"file_secret_files": {"GROK_AUTH": secret_path}},
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                with self.assertRaises(scion_harness.ProvisionError) as cm:
+                    provision._write_auth_file(ctx)
+                self.assertIn("not valid JSON", str(cm.exception))
+
+    def test_output_file_has_0600_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "grok-auth-secret")
+            with open(secret_path, "w") as f:
+                f.write('{"token": "secret"}')
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {"file_secret_files": {"GROK_AUTH": secret_path}},
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                provision._write_auth_file(ctx)
+                auth_path = os.path.join(tmp, ".grok", "auth.json")
+                mode = os.stat(auth_path).st_mode & 0o777
+                self.assertEqual(mode, 0o600)
+
+
+# ---------------------------------------------------------------------------
 # Instructions Tests
 # ---------------------------------------------------------------------------
 

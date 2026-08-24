@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re as _re
 import sys
 from typing import Any
 from urllib.parse import quote
@@ -110,8 +111,6 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
 # MCP translation – TOML output for grok config
 # ---------------------------------------------------------------------------
 
-
-import re as _re
 
 # TOML bare key: alphanumeric, dash, underscore only (TOML v1.0 §3.1).
 _TOML_BARE_KEY_RE = _re.compile(r"^[A-Za-z0-9_-]+$")
