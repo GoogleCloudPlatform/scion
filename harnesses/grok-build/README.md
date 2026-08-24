@@ -44,10 +44,17 @@ scion start --harness grok-build --env XAI_API_KEY=xai-...
 
 Use `~/.grok/auth.json` produced by `grok login --device-auth`:
 
+### Vertex AI
+
+Use GCP Vertex AI authentication by providing `GOOGLE_CLOUD_PROJECT` and a
+region (`GOOGLE_CLOUD_REGION` / `CLOUD_ML_REGION` / `GOOGLE_CLOUD_LOCATION`),
+plus Application Default Credentials (ADC).
+
 | Mode | Credential | Setup |
 |---|---|---|
 | API Key | XAI_API_KEY | Set env var with xAI API key |
 | Auth File | ~/.grok/auth.json | `grok login --device-auth` + capture |
+| Vertex AI | GOOGLE_CLOUD_PROJECT + region | GCP project and region env vars + ADC |
 
 ### Interactive Login (No-Auth Fallback)
 
@@ -79,6 +86,7 @@ python3 /home/scion/.scion/harness/capture_auth.py
   `AGENTS.md`; there is no native `--system-prompt` flag.
 - **No project-scoped MCP** — project-scoped MCP server entries are
   demoted to global scope.
-- **xAI API key or auth file required** — an xAI account with API access
-  is required. The harness provisions successfully without one, but the
-  CLI will fail with an auth error after launch.
+- **xAI API key, auth file, or Vertex AI required** — an xAI account
+  with API access (or GCP Vertex AI credentials) is required. The harness
+  provisions successfully without one, but the CLI will fail with an auth
+  error after launch.

@@ -233,6 +233,11 @@ from the `XAI_API_KEY` environment variable.
 Alternatively, a file-based auth method (`auth-file`) is supported using `~/.grok/auth.json`,
 produced by `grok login --device-auth`. Capture the credential with `capture_auth.py` after login.
 
+A third option is **Vertex AI** (auth type `vertex-ai`): provide `GOOGLE_CLOUD_PROJECT` and a
+region (`GOOGLE_CLOUD_REGION` / `CLOUD_ML_REGION` / `GOOGLE_CLOUD_LOCATION`), plus Application
+Default Credentials (ADC). Scion exposes the project and region as environment variables inside
+the container.
+
 If no credentials are found, the agent drops to a shell — run `grok login --device-auth`
 interactively, then capture the credential with the container's `capture_auth.py`
 (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
@@ -241,6 +246,7 @@ interactively, then capture the credential with the container's `capture_auth.py
 |---|---|---|
 | API Key | `XAI_API_KEY` | Set env var with xAI API key |
 | Auth File | `~/.grok/auth.json` | `grok login --device-auth` + capture |
+| Vertex AI | `GOOGLE_CLOUD_PROJECT` + region | Set GCP project and region env vars + ADC |
 
 ### Configuration
 - **Config directory**: `~/.grok/` (settings in `config.toml`).
@@ -254,7 +260,7 @@ interactively, then capture the credential with the container's `capture_auth.py
 - **No max_model_calls** — Grok hooks do not expose model-call start/end events. `max_turns` and `max_duration` are supported.
 - **System Prompt**: approximated via `AGENTS.md` (no native override).
 - **No project-scoped MCP**.
-- **OAuth/Vertex AI**: not supported — Grok uses xAI auth only.
+- **OAuth**: not supported — Grok uses xAI auth only.
 
 ---
 
@@ -277,7 +283,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ |
-| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
 
 * **Resume with Prompt**: Ability to provide a new task/prompt when resuming an existing session.
 * **Interject** (pending feature): Key used to interrupt the agent (e.g., stop generation).

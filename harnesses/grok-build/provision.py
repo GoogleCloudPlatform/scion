@@ -62,6 +62,12 @@ AUTH = scion_harness.AuthSpec(
             hint="provide grok auth at ~/.grok/auth.json",
             secret_key="GROK_AUTH",
         ),
+        scion_harness.env_method(
+            "vertex-ai",
+            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
+            hint="provide GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION",
+        ),
     ],
     fallback_to_none_on_error=True,
 )
@@ -436,6 +442,14 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if resolved.method == "auth-file":
         _write_auth_file(ctx)
         extra = {"auth_file_written": True}
+
+    if resolved.method == "vertex-ai":
+        region_key = resolved.env_key or "GOOGLE_CLOUD_REGION"
+        region = _read_token(ctx, region_key) or os.environ.get(region_key, "")
+        project = _read_token(ctx, "GOOGLE_CLOUD_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+        env["GOOGLE_CLOUD_PROJECT"] = project
+        env["GOOGLE_CLOUD_REGION"] = region
+        extra = {"vertex_ai": True}
 
     # --- Model resolution ---------------------------------------------------
     # The Go side does not populate ctx.model_resolution for out-of-tree
