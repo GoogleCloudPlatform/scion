@@ -120,14 +120,14 @@ The Hub uses a pluggable **SecretBackend** interface for secret storage:
 | Backend | Value Storage | Write Operations | Read Operations |
 |---------|--------------|-----------------|-----------------|
 | **`gcpsm`** (GCP Secret Manager) | Encrypted in GCP SM | Supported | Supported |
-| **`local`** (default) | N/A | **Rejected** (returns 501) | Read-only (existing data) |
+| **`local`** (default) | Encrypted at rest (AES-256-GCM) in Hub DB | Supported | Supported |
 
 When `gcpsm` is configured, a hybrid model is used:
 - **Metadata** (name, type, scope, version) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
 - GCP SM secret names follow the pattern: `scion-{scope}-{sha256(scopeID)[:12]}-{name}`.
 
-The `local` backend rejects all write operations to prevent plaintext secret storage. It supports read and delete operations only for migration of pre-existing data.
+The `local` backend now encrypts secret values at rest using AES-256-GCM, with domain-separated key derivation from the hub signing secret. Legacy plaintext values are transparently readable and will be automatically re-encrypted upon the next write operation.
 
 ### 4.2 Secret Scopes and Resolution
 

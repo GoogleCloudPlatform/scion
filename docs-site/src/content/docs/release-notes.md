@@ -4,14 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of August 10 -- 16, 2026
+## Latest: Week of August 17 -- 23, 2026
 
-August 10–16, 2026, marked a landmark week for Scion's communication capabilities, highlighted by the feature-complete launch of native web chat and major bidirectional messaging integrations for Microsoft Teams and Google Chat. Alongside these messaging breakthroughs, the platform received significant hardening for multi-instance high availability (HA) on Cloud Run and robust GCP service account IAM security authorization gates.
+This week brought major advancements to the Scion platform, focusing heavily on security hardening, closing the native web chat feature gap, and stabilizing High Availability deployments. A critical security sweep patched multiple P0 permission escalations and authorization bypasses, while the web chat gained everything from rich agent outputs and thread pinning to clickable file links.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-08-10/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-08-17/)
 
 ## Previous Weeks
 
+- [Week of August 10 -- 16, 2026](/scion/release-notes/2026-08-10/)
 - [Week of August 3 -- 9, 2026](/scion/release-notes/2026-08-03/)
 - [Week of July 27 -- August 2, 2026](/scion/release-notes/2026-07-27/)
 - [Week of July 19--25, 2026](/scion/release-notes/2026-07-19/)
