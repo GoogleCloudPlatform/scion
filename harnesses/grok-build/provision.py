@@ -94,7 +94,10 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
     """Write ~/.grok/auth.json from a staged GROK_AUTH file secret."""
     content = ctx.read_file_secret("GROK_AUTH")
     if not content:
-        return
+        raise scion_harness.ProvisionError(
+            "auth-file method selected but GROK_AUTH secret is missing; "
+            "check that the credential file was staged"
+        )
     if not content.strip():
         raise scion_harness.ProvisionError("GROK_AUTH secret is empty")
     try:
@@ -480,6 +483,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     instructions_file = harness_cfg.get("instructions_file") or "AGENTS.md"
     target = os.path.join(ctx.home, instructions_file)
     os.makedirs(os.path.dirname(target), exist_ok=True)
+    # include_skills left at default False: config.yaml declares skills_dir,
+    # so the host-side provisioner installs skills as individual files.
     try:
         scion_harness.project_instructions(ctx, target)
     except OSError as exc:

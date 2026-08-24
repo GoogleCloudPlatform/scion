@@ -52,8 +52,6 @@ def temporary_home(path: str):
 
 def _make_ctx(
     manifest: dict[str, Any] | None = None,
-    *,
-    home: str | None = None,
 ) -> scion_harness.ProvisionContext:
     """Build a ProvisionContext with sensible defaults for testing."""
     m: dict[str, Any] = {

@@ -82,6 +82,12 @@ if __name__ == "__main__":
     force = "--force" in sys.argv
     config_ok = _capture_auth_json(force, known.scope)
 
+    if rc == 0 and not config_ok:
+        # capture_auth_main succeeded (e.g. env-key) but grok auth.json
+        # capture failed — report partial success with non-zero exit.
+        print("capture-auth: warning: env-key captured but ~/.grok/auth.json not found",
+              file=sys.stderr)
+        sys.exit(1)
     if rc != 0 and config_ok:
         sys.exit(0)
     sys.exit(rc)

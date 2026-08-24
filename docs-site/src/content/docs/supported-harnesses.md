@@ -15,7 +15,7 @@ projection, and MCP configuration across all bundles. See
 managed.
 
 `antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`,
-`grok-build`, and `antigravity` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
+and `grok-build` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
 
 ## 1. Gemini CLI (`gemini-cli`)
