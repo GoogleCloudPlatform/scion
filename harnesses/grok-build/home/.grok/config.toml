@@ -1,0 +1,15 @@
+# Scion seed configuration for grok-build harness.
+# Disables interactive features that interfere with headless operation.
+
+[cli]
+auto_update = false
+
+[features]
+telemetry = false
+feedback = false
+
+[memory]
+enabled = false
+
+[subagents]
+enabled = false
