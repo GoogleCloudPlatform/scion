@@ -501,7 +501,20 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			return nil, fmt.Errorf("auth resolution failed: %w", err)
 		}
 		// Keep a copy of the full resolved auth material for secret filtering.
+		// Deep-copy the Files slice so in-place SourcePath clearing below
+		// does not leak into resolvedForSecretFilter.
 		resolvedForSecretFilter := *resolved
+		resolvedForSecretFilter.Files = append([]api.FileMapping(nil), resolved.Files...)
+		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
+		if err := harness.ValidateAuth(resolved); err != nil {
+			if canFallbackToNoAuth() {
+				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
+				opts.NoAuth = true
+				warnings = append(warnings, "Auth: credential validation failed, starting in no-auth mode")
+				goto authDone
+			}
+			return nil, fmt.Errorf("auth validation failed: %w", err)
+		}
 		if opts.BrokerMode {
 			// File content projection is handled by writeFileSecrets() from
 			// ResolvedSecrets at container launch (via SCION_STAGED_SECRETS),
@@ -512,16 +525,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			for i := range resolved.Files {
 				resolved.Files[i].SourcePath = ""
 			}
-		}
-		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
-		if err := harness.ValidateAuth(resolved); err != nil {
-			if canFallbackToNoAuth() {
-				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
-				opts.NoAuth = true
-				warnings = append(warnings, "Auth: credential validation failed, starting in no-auth mode")
-				goto authDone
-			}
-			return nil, fmt.Errorf("auth validation failed: %w", err)
 		}
 		// Allow harnesses to update their native settings files (e.g. Gemini settings.json)
 		if applier, ok := h.(api.AuthSettingsApplier); ok {
