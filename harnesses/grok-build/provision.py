@@ -111,40 +111,10 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _translate_mcp(name: str, spec: dict[str, Any]) -> dict[str, Any] | None:
-    """Translate a universal MCP server spec to grok-build's native format.
+import re as _re
 
-    Maps:
-      - stdio → command/args/env
-      - sse/streamable-http → url/headers
-    Returns None to skip unsupported transports.
-    """
-    transport = (spec.get("transport") or "").strip()
-
-    if transport == "stdio":
-        cmd = spec.get("command")
-        if not isinstance(cmd, str) or not cmd:
-            return None
-        out: dict[str, Any] = {"command": cmd}
-        args = spec.get("args") or []
-        if isinstance(args, list) and args:
-            out["args"] = [str(a) for a in args]
-        env_map = spec.get("env")
-        if isinstance(env_map, dict) and env_map:
-            out["env"] = {str(k): str(v) for k, v in env_map.items()}
-        return out
-
-    if transport in ("sse", "streamable-http"):
-        url = spec.get("url")
-        if not isinstance(url, str) or not url:
-            return None
-        out = {"url": url}
-        headers = spec.get("headers")
-        if isinstance(headers, dict) and headers:
-            out["headers"] = {str(k): str(v) for k, v in headers.items()}
-        return out
-
-    return None
+# TOML bare key: alphanumeric, dash, underscore only (TOML v1.0 §3.1).
+_TOML_BARE_KEY_RE = _re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]) -> None:
@@ -169,6 +139,12 @@ def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]
     # Build new TOML sections.
     sections: list[str] = []
     for name in sorted(servers.keys()):
+        if not _TOML_BARE_KEY_RE.match(name):
+            ctx.warn(
+                f"mcp server {name!r}: name is not a valid TOML bare key "
+                "(alphanumeric, dash, underscore only); skipping"
+            )
+            continue
         entry = servers[name]
         lines: list[str] = [f"[mcp_servers.{name}]"]
         for key in sorted(entry.keys()):
@@ -182,9 +158,12 @@ def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]
         sections.append("\n".join(lines))
 
     new_content = cleaned.rstrip("\n")
-    if new_content:
-        new_content += "\n\n"
-    new_content += "\n\n".join(sections) + "\n"
+    if sections:
+        if new_content:
+            new_content += "\n\n"
+        new_content += "\n\n".join(sections) + "\n"
+    elif new_content:
+        new_content += "\n"
 
     scion_harness.atomic_write_text(config_path, new_content)
 
@@ -494,8 +473,41 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx.warn(f"failed to project instructions: {exc}")
 
     # --- MCP translation (TOML output) --------------------------------------
+    def translate_mcp(name: str, spec: dict[str, Any]) -> dict[str, Any] | None:
+        transport = (spec.get("transport") or "").strip()
+
+        if transport == "stdio":
+            cmd = spec.get("command")
+            if not isinstance(cmd, str) or not cmd:
+                ctx.info(f"mcp server {name!r}: stdio transport missing command")
+                return None
+            out: dict[str, Any] = {"command": cmd}
+            args = spec.get("args") or []
+            if isinstance(args, list) and args:
+                out["args"] = [str(a) for a in args]
+            env_map = spec.get("env")
+            if isinstance(env_map, dict) and env_map:
+                out["env"] = {str(k): str(v) for k, v in env_map.items()}
+            return out
+
+        if transport in ("sse", "streamable-http"):
+            url = spec.get("url")
+            if not isinstance(url, str) or not url:
+                ctx.info(
+                    f"mcp server {name!r}: {transport} transport missing url"
+                )
+                return None
+            out = {"url": url}
+            headers = spec.get("headers")
+            if isinstance(headers, dict) and headers:
+                out["headers"] = {str(k): str(v) for k, v in headers.items()}
+            return out
+
+        ctx.info(f"mcp server {name!r}: unsupported transport {transport!r}")
+        return None
+
     scion_harness.apply_mcp_translated(
-        ctx, _translate_mcp, lambda servers: _write_mcp_toml(ctx, servers)
+        ctx, translate_mcp, lambda servers: _write_mcp_toml(ctx, servers)
     )
 
     # --- Config hardening ---------------------------------------------------

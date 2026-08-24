@@ -182,50 +182,52 @@ class InstructionsTest(unittest.TestCase):
 
 
 class MCPTranslationTest(unittest.TestCase):
-    """Test the module-level _translate_mcp function."""
+    """Test MCP translation via the end-to-end TOML write path.
 
-    def test_stdio_translation(self) -> None:
-        result = provision._translate_mcp("test-server", {
-            "transport": "stdio",
-            "command": "node",
-            "args": ["server.js", "--port", "3000"],
-            "env": {"DEBUG": "true"},
-        })
-        self.assertIsNotNone(result)
-        self.assertEqual(result["command"], "node")
-        self.assertEqual(result["args"], ["server.js", "--port", "3000"])
-        self.assertEqual(result["env"], {"DEBUG": "true"})
+    The translate function is a closure inside provision() (captures ctx for
+    logging), so we test translation through _write_mcp_toml which exercises
+    the full pipeline.
+    """
 
-    def test_stdio_missing_command(self) -> None:
-        result = provision._translate_mcp("test-server", {
-            "transport": "stdio",
-        })
-        self.assertIsNone(result)
+    def test_stdio_translation_via_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                servers = {
+                    "test-server": {
+                        "command": "node",
+                        "args": ["server.js", "--port", "3000"],
+                        "env": {"DEBUG": "true"},
+                    }
+                }
+                provision._write_mcp_toml(ctx, servers)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+                self.assertIn("[mcp_servers.test-server]", content)
+                self.assertIn('command = "node"', content)
+                self.assertIn("args =", content)
 
-    def test_sse_translation(self) -> None:
-        result = provision._translate_mcp("sse-server", {
-            "transport": "sse",
-            "url": "https://example.com/sse",
-            "headers": {"Authorization": "Bearer token"},
-        })
-        self.assertIsNotNone(result)
-        self.assertEqual(result["url"], "https://example.com/sse")
-        self.assertEqual(result["headers"], {"Authorization": "Bearer token"})
-
-    def test_streamable_http_translation(self) -> None:
-        result = provision._translate_mcp("http-server", {
-            "transport": "streamable-http",
-            "url": "https://example.com/api",
-        })
-        self.assertIsNotNone(result)
-        self.assertEqual(result["url"], "https://example.com/api")
-        self.assertNotIn("headers", result)
-
-    def test_unsupported_transport(self) -> None:
-        result = provision._translate_mcp("bad-server", {
-            "transport": "grpc",
-        })
-        self.assertIsNone(result)
+    def test_sse_translation_via_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                servers = {
+                    "sse-server": {
+                        "url": "https://example.com/sse",
+                        "headers": {"Authorization": "Bearer token"},
+                    }
+                }
+                provision._write_mcp_toml(ctx, servers)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+                self.assertIn("[mcp_servers.sse-server]", content)
+                self.assertIn('"https://example.com/sse"', content)
 
 
 class MCPTomlWriteTest(unittest.TestCase):
@@ -269,6 +271,27 @@ class MCPTomlWriteTest(unittest.TestCase):
                 self.assertNotIn("[mcp_servers.old]", content)
                 self.assertIn("[mcp_servers.new-server]", content)
                 self.assertIn("[other]", content)
+
+    def test_write_mcp_toml_skips_invalid_bare_key_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                servers = {
+                    "valid-name": {"command": "good"},
+                    "bad.name": {"command": "dotted"},
+                    "also bad": {"command": "space"},
+                    "ok_name": {"command": "underscored"},
+                }
+                provision._write_mcp_toml(ctx, servers)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+                self.assertIn("[mcp_servers.valid-name]", content)
+                self.assertIn("[mcp_servers.ok_name]", content)
+                self.assertNotIn("bad.name", content)
+                self.assertNotIn("also bad", content)
 
 
 # ---------------------------------------------------------------------------

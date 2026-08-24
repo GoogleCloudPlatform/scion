@@ -46,7 +46,6 @@ command:
 
 env_template:
   SCION_AGENT_NAME: "{{ .AgentName }}"
-  GROK_TELEMETRY_ENABLED: "false"
   GROK_HOME: "{{ .AgentHome }}/.grok"
   NO_COLOR: "1"
 
