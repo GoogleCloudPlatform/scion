@@ -188,8 +188,38 @@ block below — see the precedence note there.
 ### Environment
 
 - `env`: static env vars set in the container.
-- `env_template`: values with placeholder expansion — `{{ .AgentName }}`,
-  `{{ .AgentHome }}`, `{{ .UnixUsername }}` (only these three).
+- `env_template`: values with placeholder expansion (see table below).
+
+#### Template variables
+
+`env_template` values are expanded by `expandEnvTemplate`
+(`pkg/harness/container_script_harness.go`) before they are injected into the
+container environment. The following placeholders are supported — these are the
+**only** three; any other `{{ .… }}` token is left as-is:
+
+| Placeholder | Expands to |
+|---|---|
+| `{{ .AgentName }}` | The agent's name (e.g. `my-agent`). |
+| `{{ .AgentHome }}` | The **host-side** path to the agent's home directory. This is the path on the machine running scion, *not* the container's `$HOME`. |
+| `{{ .UnixUsername }}` | The unix username of the agent user inside the container (e.g. `scion`). |
+
+> **⚠ Warning — `{{ .AgentHome }}` is a host path.**
+> Because `{{ .AgentHome }}` resolves to the host-side agent home directory,
+> it should generally **not** be used to construct paths that the containerized
+> tool will consume at runtime — the host path does not exist inside the
+> container. Tools should rely on their own default `$HOME`-relative paths
+> instead. Misuse of `{{ .AgentHome }}` was the root cause of
+> [#1225](https://github.com/GoogleCloudPlatform/scion/pull/1225).
+
+```yaml
+# WRONG — AgentHome is the host path, not container $HOME
+env_template:
+  TOOL_HOME: "{{ .AgentHome }}/.tool"
+
+# RIGHT — let the tool use its default $HOME-relative path
+env_template:
+  SCION_AGENT_NAME: "{{ .AgentName }}"
+```
 
 Precedence: container env (`env`, `env_template`, template/CLI env) beats the
 `env.json` overlay your provisioner writes — the overlay only adds keys that
