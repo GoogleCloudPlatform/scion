@@ -332,6 +332,28 @@ func TestClassifyAttachment_TextWithUnusualControlChars(t *testing.T) {
 			}
 		})
 	}
+
+	// Null bytes in content with a text-like extension should be rejected —
+	// they indicate genuinely binary data wearing a text-like name.
+	nullTests := []struct {
+		name     string
+		filename string
+		head     []byte
+	}{
+		{
+			name:     "text with null byte",
+			filename: "doc.md",
+			head:     []byte("# Title\x00binary"),
+		},
+	}
+	for _, tt := range nullTests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ClassifyAttachment(tt.filename, tt.head)
+			if err == nil {
+				t.Errorf("ClassifyAttachment(%q) accepted content with null bytes; want rejection", tt.filename)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
