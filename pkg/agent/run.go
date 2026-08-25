@@ -500,6 +500,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 			return nil, fmt.Errorf("auth resolution failed: %w", err)
 		}
+		if resolved == nil {
+			// ResolveAuth returned nil without error — treat as no auth available.
+			if canFallbackToNoAuth() {
+				util.Debugf("auth: resolution returned nil, falling back to no-auth mode")
+				opts.NoAuth = true
+				warnings = append(warnings, "Auth: no credentials found, starting in no-auth mode")
+				goto authDone
+			}
+			return nil, fmt.Errorf("auth resolution returned nil for method %q", auth.SelectedType)
+		}
 		// Keep a copy of the full resolved auth material for secret filtering.
 		// Deep-copy the Files slice so in-place SourcePath clearing below
 		// does not leak into resolvedForSecretFilter.
@@ -517,7 +527,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 		}
 		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
-		if err := harness.ValidateAuth(resolved); err != nil {
+		if err := harness.ValidateAuth(resolved, opts.BrokerMode); err != nil {
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
 				opts.NoAuth = true

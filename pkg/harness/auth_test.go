@@ -303,7 +303,7 @@ func TestValidateAuth_Valid(t *testing.T) {
 			"ANTHROPIC_API_KEY": "sk-ant-test",
 		},
 	}
-	if err := ValidateAuth(resolved); err != nil {
+	if err := ValidateAuth(resolved, false); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -322,13 +322,13 @@ func TestValidateAuth_ValidWithFiles(t *testing.T) {
 			{SourcePath: tmpFile, ContainerPath: "~/.config/gcp/adc.json"},
 		},
 	}
-	if err := ValidateAuth(resolved); err != nil {
+	if err := ValidateAuth(resolved, false); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestValidateAuth_Nil(t *testing.T) {
-	err := ValidateAuth(nil)
+	err := ValidateAuth(nil, false)
 	if err == nil {
 		t.Fatal("expected error for nil resolved auth")
 	}
@@ -342,7 +342,7 @@ func TestValidateAuth_EmptyMethod(t *testing.T) {
 		Method:  "",
 		EnvVars: map[string]string{"KEY": "value"},
 	}
-	err := ValidateAuth(resolved)
+	err := ValidateAuth(resolved, false)
 	if err == nil {
 		t.Fatal("expected error for empty method")
 	}
@@ -359,7 +359,7 @@ func TestValidateAuth_EmptyEnvValue(t *testing.T) {
 			"EMPTY_KEY": "",
 		},
 	}
-	err := ValidateAuth(resolved)
+	err := ValidateAuth(resolved, false)
 	if err == nil {
 		t.Fatal("expected error for empty env var value")
 	}
@@ -375,7 +375,7 @@ func TestValidateAuth_MissingSourceFile(t *testing.T) {
 			{SourcePath: "/nonexistent/path/creds.json", ContainerPath: "~/.config/gcp/adc.json"},
 		},
 	}
-	err := ValidateAuth(resolved)
+	err := ValidateAuth(resolved, false)
 	if err == nil {
 		t.Fatal("expected error for missing source file")
 	}
@@ -394,7 +394,7 @@ func TestValidateAuth_EmptyContainerPath(t *testing.T) {
 			{SourcePath: tmpFile, ContainerPath: ""},
 		},
 	}
-	err := ValidateAuth(resolved)
+	err := ValidateAuth(resolved, false)
 	if err == nil {
 		t.Fatal("expected error for empty container path")
 	}
@@ -408,8 +408,25 @@ func TestValidateAuth_EmptyEnvVarsAndFiles(t *testing.T) {
 	resolved := &api.ResolvedAuth{
 		Method: "passthrough",
 	}
-	if err := ValidateAuth(resolved); err != nil {
+	if err := ValidateAuth(resolved, false); err != nil {
 		t.Errorf("unexpected error for passthrough with no env/files: %v", err)
+	}
+}
+
+func TestValidateAuth_BrokerModeEmptySourcePath(t *testing.T) {
+	resolved := &api.ResolvedAuth{
+		Method: "auth-file",
+		Files: []api.FileMapping{
+			{SourcePath: "", ContainerPath: "~/.codex/auth.json"},
+		},
+	}
+	// In broker mode, empty SourcePath is valid.
+	if err := ValidateAuth(resolved, true); err != nil {
+		t.Errorf("ValidateAuth(brokerMode=true) should accept empty SourcePath: %v", err)
+	}
+	// In non-broker mode, empty SourcePath is an error.
+	if err := ValidateAuth(resolved, false); err == nil {
+		t.Error("ValidateAuth(brokerMode=false) should reject empty SourcePath")
 	}
 }
 
