@@ -855,9 +855,9 @@ func TestHasAnyKey_ProgenySecretResolution(t *testing.T) {
 
 	t.Run("progeny agent finds inherited secret", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:       childAgentID,
-			OwnerID:  parentAgentID, // Not the user — this is the bug scenario
-			Ancestry: []string{childAgentID, parentAgentID, userID},
+			ID:            childAgentID,
+			OwnerID:       parentAgentID, // Not the user — this is the bug scenario
+			Ancestry:      []string{childAgentID, parentAgentID, userID},
 			AppliedConfig: &store.AgentAppliedConfig{},
 		}
 
@@ -869,9 +869,9 @@ func TestHasAnyKey_ProgenySecretResolution(t *testing.T) {
 
 	t.Run("direct agent finds own secret", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:       tid("hak-direct-agent"),
-			OwnerID:  userID, // Direct user ownership
-			Ancestry: []string{tid("hak-direct-agent")},
+			ID:            tid("hak-direct-agent"),
+			OwnerID:       userID, // Direct user ownership
+			Ancestry:      []string{tid("hak-direct-agent")},
 			AppliedConfig: &store.AgentAppliedConfig{},
 		}
 
@@ -883,9 +883,9 @@ func TestHasAnyKey_ProgenySecretResolution(t *testing.T) {
 
 	t.Run("progeny agent without matching secret returns false", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:       childAgentID,
-			OwnerID:  parentAgentID,
-			Ancestry: []string{childAgentID, parentAgentID, userID},
+			ID:            childAgentID,
+			OwnerID:       parentAgentID,
+			Ancestry:      []string{childAgentID, parentAgentID, userID},
 			AppliedConfig: &store.AgentAppliedConfig{},
 		}
 
@@ -920,9 +920,9 @@ func TestHasAnyKey_ProgenyEnvVarResolution(t *testing.T) {
 
 	t.Run("progeny agent finds inherited env var", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:       childAgentID,
-			OwnerID:  parentAgentID,
-			Ancestry: []string{childAgentID, parentAgentID, userID},
+			ID:            childAgentID,
+			OwnerID:       parentAgentID,
+			Ancestry:      []string{childAgentID, parentAgentID, userID},
 			AppliedConfig: &store.AgentAppliedConfig{},
 		}
 
@@ -957,9 +957,9 @@ func TestHasAnyKey_NoProgenyForDirectAgent(t *testing.T) {
 
 	t.Run("direct agent does not use progeny path", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:       tid("hak-noprog-agent"),
-			OwnerID:  userID, // Different from otherUser
-			Ancestry: nil,    // No ancestry — direct agent
+			ID:            tid("hak-noprog-agent"),
+			OwnerID:       userID, // Different from otherUser
+			Ancestry:      nil,    // No ancestry — direct agent
 			AppliedConfig: &store.AgentAppliedConfig{},
 		}
 
