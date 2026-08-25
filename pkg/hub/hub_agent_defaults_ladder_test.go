@@ -278,6 +278,66 @@ func TestApplyHubAgentDefaults_NilAppliedConfig(t *testing.T) {
 	}))
 }
 
+// TestApplyHubAgentDefaults_HarnessAuth verifies the only-if-empty guard for
+// DefaultHarnessAuth. Same pattern as DefaultHarnessConfig: the hub operational
+// default fills ac.HarnessAuth only when no higher tier has set it.
+func TestApplyHubAgentDefaults_HarnessAuth(t *testing.T) {
+	const hubDefault = "vertex-ai"
+
+	tests := []struct {
+		name      string
+		incumbent string
+		want      string
+	}{
+		{
+			name:      "LosesToRequest",
+			incumbent: "api-key",
+			want:      "api-key",
+		},
+		{
+			name:      "LosesToProjectAnnotation",
+			incumbent: "oauth-token",
+			want:      "oauth-token",
+		},
+		{
+			name:      "AppliesWhenEmpty",
+			incumbent: "",
+			want:      hubDefault,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ac := &store.AgentAppliedConfig{HarnessAuth: tt.incumbent}
+			applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+				DefaultHarnessAuth: hubDefault,
+			})
+			assert.Equal(t, tt.want, ac.HarnessAuth)
+		})
+	}
+}
+
+// TestApplyHubAgentDefaults_HarnessAuthEmptyDefault verifies that an empty hub
+// DefaultHarnessAuth leaves ac.HarnessAuth untouched.
+func TestApplyHubAgentDefaults_HarnessAuthEmptyDefault(t *testing.T) {
+	ac := &store.AgentAppliedConfig{}
+	applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{})
+	assert.Empty(t, ac.HarnessAuth)
+}
+
+// TestApplyHubAgentDefaults_HarnessAuthDoesNotAffectHCProvenance verifies that
+// applying only DefaultHarnessAuth (no DefaultHarnessConfig) returns false, so
+// callers do not set withHubDefaultHarnessConfig context spuriously.
+func TestApplyHubAgentDefaults_HarnessAuthDoesNotAffectHCProvenance(t *testing.T) {
+	ac := &store.AgentAppliedConfig{}
+	applied := applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+		DefaultHarnessAuth: "vertex-ai",
+	})
+	assert.Equal(t, "vertex-ai", ac.HarnessAuth)
+	assert.False(t, applied,
+		"auth-only application must not signal harness-config provenance")
+}
+
 // ---------------------------------------------------------------------------
 // default_template — create path, and the degradation rule
 // ---------------------------------------------------------------------------

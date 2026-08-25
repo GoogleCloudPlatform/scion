@@ -66,6 +66,7 @@ interface ProjectResourceSpec {
 interface ProjectSettings {
   defaultTemplate?: string | undefined;
   defaultHarnessConfig?: string | undefined;
+  defaultHarnessAuth?: string | undefined;
   telemetryEnabled?: boolean | null | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
@@ -168,6 +169,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configDefaultHarnessConfig = '';
+
+  @state()
+  private configDefaultHarnessAuth = '';
 
   @state()
   private configTelemetryEnabled: boolean | null = null;
@@ -1037,6 +1041,7 @@ export class ScionPageProjectSettings extends LitElement {
       // Populate form state from settings (same as before)
       this.configDefaultTemplate = this.settings.defaultTemplate || '';
       this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
+      this.configDefaultHarnessAuth = this.settings.defaultHarnessAuth || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
       this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
@@ -1244,6 +1249,7 @@ export class ScionPageProjectSettings extends LitElement {
       const body: ProjectSettings = {
         defaultTemplate: this.configDefaultTemplate || undefined,
         defaultHarnessConfig: this.configDefaultHarnessConfig || undefined,
+        defaultHarnessAuth: this.configDefaultHarnessAuth || undefined,
         defaultModel: defaultModel || undefined,
         telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
@@ -1827,6 +1833,38 @@ export class ScionPageProjectSettings extends LitElement {
                 </sl-select>
                 <span class="field-help"
                   >Harness configuration used by default for new agents.</span
+                >
+              </div>
+
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-harness-auth')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Harness Auth
+                  ${this.renderHubIndicator('scion.io/default-harness-auth')}</label
+                >
+                <sl-select
+                  placeholder=${this.hubSelectLabel(
+                    'scion.io/default-harness-auth',
+                    'None (use server default)'
+                  )}
+                  clearable
+                  value=${this.configDefaultHarnessAuth}
+                  ?disabled=${!canEdit}
+                  @sl-change=${(e: Event) => {
+                    this.configDefaultHarnessAuth = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="api-key">Provider API Key</sl-option>
+                  <sl-option value="oauth-token">OAuth Token</sl-option>
+                  <sl-option value="auth-file">Harness credential file</sl-option>
+                  <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
+                  <sl-option value="none">No Authentication</sl-option>
+                </sl-select>
+                <span class="field-help"
+                  >Default authentication type for new agents in this project.</span
                 >
               </div>
 

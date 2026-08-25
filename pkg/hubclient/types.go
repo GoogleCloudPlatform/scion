@@ -203,6 +203,7 @@ type ProjectSettings struct {
 	ActiveProfile          string                 `json:"activeProfile,omitempty"`
 	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
+	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
 	DefaultModel           string                 `json:"defaultModel,omitempty"`
 	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
 	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`
