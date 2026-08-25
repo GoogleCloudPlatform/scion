@@ -54,7 +54,7 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
 
       return {
         render(markdown: string): string {
-          const rawHtml = marked.parse(markdown, { async: false, breaks: true }) as string;
+          const rawHtml = marked.parse(markdown, { async: false }) as string;
           return purify.sanitize(rawHtml);
         },
       };
