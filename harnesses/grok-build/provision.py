@@ -164,7 +164,6 @@ def _configure_vertex_ai(
         )
 
     # Place ADC credentials file if staged.
-    adc_path = ""
     adc_content = ctx.read_file_secret("gcloud-adc")
     if adc_content:
         adc_dir = os.path.join(ctx.home, ".config", "gcloud")
@@ -172,8 +171,7 @@ def _configure_vertex_ai(
         adc_target = os.path.join(adc_dir, "application_default_credentials.json")
         scion_harness.atomic_write_text(adc_target, adc_content)
         os.chmod(adc_target, 0o600)
-        adc_path = adc_target
-        env["GOOGLE_APPLICATION_CREDENTIALS"] = adc_path
+        env["GOOGLE_APPLICATION_CREDENTIALS"] = adc_target
         ctx.info(f"placed ADC credentials at {adc_target}")
 
     # Write Vertex AI model config to config.toml.
@@ -216,7 +214,7 @@ command = "gcloud auth print-access-token"
 
 [model.{_VERTEX_MODEL_CONFIG_NAME}]
 model = "{_VERTEX_MODEL_ID}"
-base_url = "{base_url}"
+base_url = "{scion_harness.toml_escape(base_url)}"
 auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"
 
 [models]
@@ -574,6 +572,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         resolved_model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
         if resolved_model:
             env["GROK_DEFAULT_MODEL"] = resolved_model
+    else:
+        if os.environ.get("SCION_MODEL", "").strip():
+            ctx.info("vertex-ai: SCION_MODEL ignored; model routing via config.toml [models]")
 
     # --- Telemetry: inject native OTel env vars when enabled ----------------
     telemetry_payload = ctx.telemetry

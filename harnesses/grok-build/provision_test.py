@@ -1079,6 +1079,25 @@ class VertexAIAuthTest(unittest.TestCase):
                 'command = "gcloud auth print-access-token"', content
             )
 
+    def test_api_key_preferred_over_vertex_ai(self) -> None:
+        """When both XAI_API_KEY and GOOGLE_CLOUD_PROJECT are present,
+        api-key is selected (listed first in AUTH)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["XAI_API_KEY", "GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {},
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                resolved = ctx.select_auth(provision.AUTH)
+            self.assertEqual(resolved.method, "api-key")
+
     def test_vertex_empty_project_raises(self) -> None:
         """When GOOGLE_CLOUD_PROJECT is empty, ProvisionError is raised."""
         with tempfile.TemporaryDirectory() as tmp:
