@@ -279,6 +279,83 @@ func TestClassifyAttachment_EmptyFileIsText(t *testing.T) {
 	}
 }
 
+// Text files with unusual control characters (e.g. vertical tab 0x0B) cause
+// Go's http.DetectContentType to return application/octet-stream, which used
+// to be rejected. Since the extension is a known text-like extension, the
+// content sniffer's "I don't know" should be treated as text.
+func TestClassifyAttachment_TextWithUnusualControlChars(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		head     []byte
+		wantMIME string
+	}{
+		{
+			name:     "markdown with vertical tab",
+			filename: "doc.md",
+			head:     []byte("# Title\n\nSome text\x0bMore text\n"),
+			wantMIME: "text/markdown",
+		},
+		{
+			name:     "json with vertical tab",
+			filename: "config.json",
+			head:     []byte("{\"key\": \"value\x0b\"}\n"),
+			wantMIME: "text/plain",
+		},
+		{
+			name:     "yaml with vertical tab",
+			filename: "deploy.yaml",
+			head:     []byte("services:\n  hub:\x0b {}\n"),
+			wantMIME: "text/plain",
+		},
+		{
+			name:     "go source with vertical tab",
+			filename: "main.go",
+			head:     []byte("package main\n\nfunc main() {\x0b}\n"),
+			wantMIME: "text/plain",
+		},
+		{
+			name:     "log with vertical tab",
+			filename: "app.log",
+			head:     []byte("2026-01-01 INFO started\x0bmore output\n"),
+			wantMIME: "text/plain",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ClassifyAttachment(tt.filename, tt.head)
+			if err != nil {
+				t.Fatalf("ClassifyAttachment(%q) error: %v", tt.filename, err)
+			}
+			if got != tt.wantMIME {
+				t.Errorf("ClassifyAttachment(%q) = %q, want %q", tt.filename, got, tt.wantMIME)
+			}
+		})
+	}
+
+	// Null bytes in content with a text-like extension should be rejected —
+	// they indicate genuinely binary data wearing a text-like name.
+	nullTests := []struct {
+		name     string
+		filename string
+		head     []byte
+	}{
+		{
+			name:     "text with null byte",
+			filename: "doc.md",
+			head:     []byte("# Title\x00binary"),
+		},
+	}
+	for _, tt := range nullTests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ClassifyAttachment(tt.filename, tt.head)
+			if err == nil {
+				t.Errorf("ClassifyAttachment(%q) accepted content with null bytes; want rejection", tt.filename)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Upload handler: classification and per-file results
 // ---------------------------------------------------------------------------

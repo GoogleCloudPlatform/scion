@@ -111,7 +111,7 @@ func ClassifyAttachment(filename string, head []byte) (string, error) {
 	// binary payload wearing a .json name should not become an attachment the
 	// UI offers to preview as source.
 	if textLikeExtensions[ext] {
-		if !isTextContentType(detected) {
+		if !isTextContentType(detected, head) {
 			return "", fmt.Errorf("%s content does not look like text", ext)
 		}
 		if ext == ".md" {
@@ -136,6 +136,23 @@ func ClassifyAttachment(filename string, head []byte) (string, error) {
 // text/html or text/xml when the content opens with markup — a Markdown file
 // starting with a tag, say. All of them are text; which of them a text-like
 // extension is stored as is decided by the extension, not by this.
-func isTextContentType(detected string) bool {
-	return strings.HasPrefix(detected, "text/")
+func isTextContentType(detected string, head []byte) bool {
+	if strings.HasPrefix(detected, "text/") {
+		return true
+	}
+	// application/octet-stream is Go's http.DetectContentType fallback
+	// for "I don't know" — it fires for valid UTF-8 containing control
+	// characters the sniffer doesn't expect (e.g. vertical tab 0x0B).
+	// Since the caller already confirmed a text-like extension, treat
+	// "I don't know" as text unless the content contains null bytes,
+	// which are characteristic of genuinely binary files.
+	if detected == "application/octet-stream" {
+		for _, b := range head {
+			if b == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
