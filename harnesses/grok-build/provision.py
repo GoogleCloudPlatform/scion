@@ -169,15 +169,18 @@ def _configure_vertex_ai(
         adc_dir = os.path.join(ctx.home, ".config", "gcloud")
         os.makedirs(adc_dir, exist_ok=True)
         adc_target = os.path.join(adc_dir, "application_default_credentials.json")
-        scion_harness.atomic_write_text(adc_target, adc_content)
-        os.chmod(adc_target, 0o600)
+        scion_harness.atomic_write_text(adc_target, adc_content, mode=0o600)
         env["GOOGLE_APPLICATION_CREDENTIALS"] = adc_target
         ctx.info(f"placed ADC credentials at {adc_target}")
 
-    # Write Vertex AI model config to config.toml.
-    _write_vertex_config(ctx, base_url)
+    # Resolve model ID — allow SCION_MODEL to override the default.
+    raw_model = os.environ.get("SCION_MODEL", "").strip()
+    model_id = raw_model if raw_model else _VERTEX_MODEL_ID
 
-    ctx.info(f"vertex-ai: project={project} base_url={base_url}")
+    # Write Vertex AI model config to config.toml.
+    _write_vertex_config(ctx, base_url, model_id)
+
+    ctx.info(f"vertex-ai: project={project} model={model_id} base_url={base_url}")
 
     return {"vertex_ai": True, "vertex_base_url": base_url}
 
@@ -185,6 +188,7 @@ def _configure_vertex_ai(
 def _write_vertex_config(
     ctx: scion_harness.ProvisionContext,
     base_url: str,
+    model_id: str,
 ) -> None:
     """Append Vertex AI auth_provider and model config to config.toml."""
     config_path = os.path.join(ctx.home, ".grok", "config.toml")
@@ -213,7 +217,7 @@ def _write_vertex_config(
 command = "gcloud auth print-access-token"
 
 [model.{_VERTEX_MODEL_CONFIG_NAME}]
-model = "{_VERTEX_MODEL_ID}"
+model = "{scion_harness.toml_escape(model_id)}"
 base_url = "{scion_harness.toml_escape(base_url)}"
 auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"
 
@@ -572,9 +576,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         resolved_model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
         if resolved_model:
             env["GROK_DEFAULT_MODEL"] = resolved_model
-    else:
-        if os.environ.get("SCION_MODEL", "").strip():
-            ctx.info("vertex-ai: SCION_MODEL ignored; model routing via config.toml [models]")
+    # vertex-ai model resolution handled in _configure_vertex_ai
 
     # --- Telemetry: inject native OTel env vars when enabled ----------------
     telemetry_payload = ctx.telemetry

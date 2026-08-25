@@ -1098,6 +1098,38 @@ class VertexAIAuthTest(unittest.TestCase):
                 resolved = ctx.select_auth(provision.AUTH)
             self.assertEqual(resolved.method, "api-key")
 
+    def test_vertex_custom_model_from_scion_model(self) -> None:
+        """SCION_MODEL overrides the default vertex model ID."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "xai/grok-4.2"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            self.assertIn("xai/grok-4.2", content)
+            self.assertNotIn("xai/grok-4.6", content)
+
     def test_vertex_empty_project_raises(self) -> None:
         """When GOOGLE_CLOUD_PROJECT is empty, ProvisionError is raised."""
         with tempfile.TemporaryDirectory() as tmp:
