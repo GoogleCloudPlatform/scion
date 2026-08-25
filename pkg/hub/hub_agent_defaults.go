@@ -60,6 +60,7 @@ func (s *Server) hubAgentDefaults() opsettings.AgentDefaultsSettings {
 func agentDefaultsEqual(a, b opsettings.AgentDefaultsSettings) bool {
 	if a.DefaultTemplate != b.DefaultTemplate ||
 		a.DefaultHarnessConfig != b.DefaultHarnessConfig ||
+		a.DefaultHarnessAuth != b.DefaultHarnessAuth ||
 		a.DefaultMaxTurns != b.DefaultMaxTurns ||
 		a.DefaultMaxModelCalls != b.DefaultMaxModelCalls ||
 		a.DefaultMaxDuration != b.DefaultMaxDuration ||
@@ -135,6 +136,9 @@ func applyHubAgentDefaults(ac *store.AgentAppliedConfig, d opsettings.AgentDefau
 	if ac.HarnessConfig == "" && d.DefaultHarnessConfig != "" {
 		ac.HarnessConfig = d.DefaultHarnessConfig
 		hcChanged = true
+	}
+	if ac.HarnessAuth == "" && d.DefaultHarnessAuth != "" {
+		ac.HarnessAuth = d.DefaultHarnessAuth
 	}
 	if ac.Model == "" && d.DefaultModel != "" {
 		ac.Model = d.DefaultModel

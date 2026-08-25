@@ -32,6 +32,7 @@ import (
 const (
 	projectSettingDefaultTemplate        = "scion.io/default-template"
 	projectSettingDefaultHarnessConfig   = "scion.io/default-harness-config"
+	projectSettingDefaultHarnessAuth     = "scion.io/default-harness-auth"
 	projectSettingDefaultModel           = "scion.io/default-model"
 	projectSettingDefaultThinkingLevel   = "scion.io/default-thinking-level"
 	projectSettingTelemetryEnabled       = "scion.io/telemetry-enabled"
@@ -121,6 +122,7 @@ const (
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
 	projectSettingDefaultHarnessConfig,
+	projectSettingDefaultHarnessAuth,
 	projectSettingDefaultModel,
 	projectSettingDefaultThinkingLevel,
 	projectSettingTelemetryEnabled,
@@ -320,6 +322,7 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 
 	settings.DefaultTemplate = project.Annotations[projectSettingDefaultTemplate]
 	settings.DefaultHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	settings.DefaultHarnessAuth = project.Annotations[projectSettingDefaultHarnessAuth]
 	settings.DefaultModel = project.Annotations[projectSettingDefaultModel]
 	if val, ok := project.Annotations[projectSettingDefaultThinkingLevel]; ok {
 		if n, err := strconv.Atoi(val); err == nil {
@@ -401,6 +404,7 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 
 	setOrDelete(project.Annotations, projectSettingDefaultTemplate, settings.DefaultTemplate)
 	setOrDelete(project.Annotations, projectSettingDefaultHarnessConfig, settings.DefaultHarnessConfig)
+	setOrDelete(project.Annotations, projectSettingDefaultHarnessAuth, settings.DefaultHarnessAuth)
 	setOrDelete(project.Annotations, projectSettingDefaultModel, settings.DefaultModel)
 	if settings.DefaultThinkingLevel != nil {
 		project.Annotations[projectSettingDefaultThinkingLevel] = strconv.Itoa(*settings.DefaultThinkingLevel)
@@ -492,6 +496,11 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// Apply default harness config (only if not already set)
 	if ac.HarnessConfig == "" && settings.DefaultHarnessConfig != "" {
 		ac.HarnessConfig = settings.DefaultHarnessConfig
+	}
+
+	// Apply default harness auth (only if not already set)
+	if ac.HarnessAuth == "" && settings.DefaultHarnessAuth != "" {
+		ac.HarnessAuth = settings.DefaultHarnessAuth
 	}
 
 	// Apply default model (only if not already set by agent/template/CLI)

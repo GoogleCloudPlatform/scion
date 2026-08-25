@@ -236,6 +236,11 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		path:              []string{"default_harness_config"},
 		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
+	projectSettingDefaultHarnessAuth: {
+		source:            hubSourceAgentDefaults,
+		path:              []string{"default_harness_auth"},
+		absentWhenMissing: false, // string, "" dropped by omitempty
+	},
 	projectSettingDefaultModel: {
 		source:            hubSourceAgentDefaults,
 		path:              []string{"default_model"},

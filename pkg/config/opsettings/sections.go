@@ -59,6 +59,7 @@ type AutoExposePortsSettings struct {
 type AgentDefaultsSettings struct {
 	DefaultTemplate      string            `json:"default_template,omitempty"`
 	DefaultHarnessConfig string            `json:"default_harness_config,omitempty"`
+	DefaultHarnessAuth   string            `json:"default_harness_auth,omitempty"`
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty"`
 	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty"`
 	DefaultMaxDuration   string            `json:"default_max_duration,omitempty"`

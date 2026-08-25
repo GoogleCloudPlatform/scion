@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -210,6 +211,169 @@ func TestApplyProjectDefaults_HarnessConfig(t *testing.T) {
 		applyProjectDefaults(ac, project)
 		assert.Empty(t, ac.HarnessConfig)
 	})
+}
+
+func TestApplyProjectDefaults_HarnessAuth(t *testing.T) {
+	t.Run("applies default harness auth when empty", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{
+				"scion.io/default-harness-auth": "vertex-ai",
+			},
+		}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "vertex-ai", ac.HarnessAuth)
+	})
+
+	t.Run("does not override explicit harness auth", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{
+				"scion.io/default-harness-auth": "vertex-ai",
+			},
+		}
+		ac := &store.AgentAppliedConfig{HarnessAuth: "api-key"}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "api-key", ac.HarnessAuth)
+	})
+
+	t.Run("nil project is safe", func(t *testing.T) {
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, nil)
+		assert.Empty(t, ac.HarnessAuth)
+	})
+
+	t.Run("nil annotations is safe", func(t *testing.T) {
+		project := &store.Project{}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+		assert.Empty(t, ac.HarnessAuth)
+	})
+
+	t.Run("no default set leaves auth empty", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{},
+		}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+		assert.Empty(t, ac.HarnessAuth)
+	})
+}
+
+// TestProjectSettings_DefaultHarnessAuth_RoundTrip verifies the annotation
+// round-trip: PUT stores the value, GET returns it, empty PUT clears it.
+func TestProjectSettings_DefaultHarnessAuth_RoundTrip(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	putBody := hubclient.ProjectSettings{
+		DefaultHarnessAuth: "vertex-ai",
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var putResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
+	assert.Equal(t, "vertex-ai", putResp.DefaultHarnessAuth)
+
+	// GET should return persisted value
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var getResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
+	assert.Equal(t, "vertex-ai", getResp.DefaultHarnessAuth)
+
+	// Clear by sending empty value
+	clearBody := hubclient.ProjectSettings{}
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var clearResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clearResp))
+	assert.Empty(t, clearResp.DefaultHarnessAuth)
+}
+
+// TestHarnessAuth_Precedence_ProjectBeatsHub verifies the full precedence chain:
+// project default beats hub default when per-agent is empty.
+func TestHarnessAuth_Precedence_ProjectBeatsHub(t *testing.T) {
+	project := &store.Project{
+		Annotations: map[string]string{
+			"scion.io/default-harness-auth": "oauth-token",
+		},
+	}
+
+	ac := &store.AgentAppliedConfig{}
+
+	// Step 1: project defaults fill first
+	applyProjectDefaults(ac, project)
+	assert.Equal(t, "oauth-token", ac.HarnessAuth,
+		"project default should fill empty HarnessAuth")
+
+	// Step 2: hub defaults run after — should NOT override the project value
+	applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+		DefaultHarnessAuth: "vertex-ai",
+	})
+	assert.Equal(t, "oauth-token", ac.HarnessAuth,
+		"hub default must not override project default")
+}
+
+// TestHarnessAuth_Precedence_ExplicitBeatsAll verifies that an explicit per-agent
+// harnessAuth beats both project and hub defaults.
+func TestHarnessAuth_Precedence_ExplicitBeatsAll(t *testing.T) {
+	project := &store.Project{
+		Annotations: map[string]string{
+			"scion.io/default-harness-auth": "oauth-token",
+		},
+	}
+
+	ac := &store.AgentAppliedConfig{HarnessAuth: "api-key"}
+
+	applyProjectDefaults(ac, project)
+	assert.Equal(t, "api-key", ac.HarnessAuth,
+		"explicit per-agent should beat project default")
+
+	applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+		DefaultHarnessAuth: "vertex-ai",
+	})
+	assert.Equal(t, "api-key", ac.HarnessAuth,
+		"explicit per-agent should beat hub default")
+}
+
+// TestHarnessAuth_Precedence_HubFillsWhenBothEmpty verifies that the hub default
+// fills when both per-agent and project defaults are empty.
+func TestHarnessAuth_Precedence_HubFillsWhenBothEmpty(t *testing.T) {
+	project := &store.Project{
+		Annotations: map[string]string{},
+	}
+
+	ac := &store.AgentAppliedConfig{}
+
+	applyProjectDefaults(ac, project)
+	assert.Empty(t, ac.HarnessAuth,
+		"no project default → HarnessAuth stays empty")
+
+	applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{
+		DefaultHarnessAuth: "vertex-ai",
+	})
+	assert.Equal(t, "vertex-ai", ac.HarnessAuth,
+		"hub default should fill when both per-agent and project are empty")
+}
+
+// TestHarnessAuth_Precedence_NoDefaultUnchanged verifies that when no default
+// is set at any level, behavior is unchanged (harnessAuth stays empty).
+func TestHarnessAuth_Precedence_NoDefaultUnchanged(t *testing.T) {
+	project := &store.Project{
+		Annotations: map[string]string{},
+	}
+
+	ac := &store.AgentAppliedConfig{}
+
+	applyProjectDefaults(ac, project)
+	applyHubAgentDefaults(ac, opsettings.AgentDefaultsSettings{})
+
+	assert.Empty(t, ac.HarnessAuth,
+		"no defaults at any level → HarnessAuth stays empty")
 }
 
 func TestProjectSettings_DefaultModel(t *testing.T) {

@@ -37,6 +37,14 @@
       "x-scope": "any",
       "x-since": "1"
     },
+    "default_harness_auth": {
+      "type": "string",
+      "enum": ["", "api-key", "oauth-token", "auth-file", "vertex-ai", "none"],
+      "description": "Default authentication type for new agents. Applied when no explicit auth type is set at the agent, harness-config, or profile level.",
+      "x-env-var": "SCION_DEFAULT_HARNESS_AUTH",
+      "x-scope": "any",
+      "x-since": "1"
+    },
     "image_registry": {
       "type": "string",
       "description": "Container image registry prefix. When set, replaces the registry portion of any scion-* harness-config image at resolution time.",

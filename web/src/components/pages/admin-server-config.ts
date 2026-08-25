@@ -222,6 +222,7 @@ interface ServerConfigResponse {
   active_profile?: string;
   default_template?: string;
   default_harness_config?: string;
+  default_harness_auth?: string;
   image_registry?: string;
   workspace_path?: string;
   server?: V1ServerConfig;
@@ -375,6 +376,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // agent_defaults section
   default_template: 'Default Template',
   default_harness_config: 'Default Harness Config',
+  default_harness_auth: 'Default Harness Auth',
   default_max_turns: 'Default Max Turns',
   default_max_model_calls: 'Default Max Model Calls',
   default_max_duration: 'Default Max Duration',
@@ -436,6 +438,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultHarnessConfig = '';
   @state() private harnessConfigSelection = '';
   @state() private customHarnessConfig = '';
+  @state() private defaultHarnessAuth = '';
   @state() private harnessConfigs: HarnessConfigEntry[] = [];
   @state() private imageRegistry = '';
   @state() private workspacePath = '';
@@ -1419,6 +1422,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultTemplate = data.default_template || '';
     this.defaultHarnessConfig = data.default_harness_config || '';
     this.syncHarnessConfigSelection();
+    this.defaultHarnessAuth = data.default_harness_auth || '';
     this.imageRegistry = data.image_registry || '';
     this.workspacePath = data.workspace_path || '';
 
@@ -1662,6 +1666,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // General — only Layer-1 top-level keys
     if (ok('default_template')) payload.default_template = this.defaultTemplate;
     if (ok('default_harness_config')) payload.default_harness_config = this.resolvedHarnessConfig;
+    if (ok('default_harness_auth')) payload.default_harness_auth = this.defaultHarnessAuth || '';
     if (ok('image_registry')) payload.image_registry = this.imageRegistry;
 
     // Default agent limits
@@ -1822,6 +1827,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
     if (ok('default_harness_config'))
       payload.default_harness_config = this.defaultHarnessConfig || undefined;
+    if (ok('default_harness_auth'))
+      payload.default_harness_auth = this.defaultHarnessAuth || undefined;
     if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
     if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
 
@@ -2872,6 +2879,35 @@ export class ScionPageAdminServerConfig extends LitElement {
                       </div>
                     `
                   : nothing}
+                <div class="form-field">
+                  <label>Default Harness Auth</label>
+                  ${this.renderFieldValue(
+                    'default_harness_auth',
+                    this.defaultHarnessAuth
+                      ? {
+                          'api-key': 'Provider API Key',
+                          'oauth-token': 'OAuth Token',
+                          'auth-file': 'Harness credential file',
+                          'vertex-ai': 'Vertex Model Garden',
+                          none: 'No Authentication',
+                        }[this.defaultHarnessAuth] || this.defaultHarnessAuth
+                      : 'None',
+                    html`${this.renderEnvBadge('default_harness_auth')}
+                      <sl-select
+                        .value=${this.defaultHarnessAuth}
+                        @sl-change=${(e: Event) => {
+                          this.defaultHarnessAuth = (e.target as HTMLSelectElement).value;
+                        }}
+                      >
+                        <sl-option value="">None</sl-option>
+                        <sl-option value="api-key">Provider API Key</sl-option>
+                        <sl-option value="oauth-token">OAuth Token</sl-option>
+                        <sl-option value="auth-file">Harness credential file</sl-option>
+                        <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
+                        <sl-option value="none">No Authentication</sl-option>
+                      </sl-select>`
+                  )}
+                </div>
                 <div class="form-field full-width">
                   <label>Workspace Path</label>
                   <span class="hint">Override default workspace path for agent worktrees</span>
