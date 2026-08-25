@@ -1583,6 +1583,9 @@ type AgentMutation struct {
 	tool_name              *string
 	connection_state       *string
 	container_status       *string
+	exit_code              *int
+	addexit_code           *int
+	exit_reason            *string
 	runtime_state          *string
 	stalled_from_activity  *string
 	current_turns          *int
@@ -2431,6 +2434,125 @@ func (m *AgentMutation) ContainerStatusCleared() bool {
 func (m *AgentMutation) ResetContainerStatus() {
 	m.container_status = nil
 	delete(m.clearedFields, agent.FieldContainerStatus)
+}
+
+// SetExitCode sets the "exit_code" field.
+func (m *AgentMutation) SetExitCode(i int) {
+	m.exit_code = &i
+	m.addexit_code = nil
+}
+
+// ExitCode returns the value of the "exit_code" field in the mutation.
+func (m *AgentMutation) ExitCode() (r int, exists bool) {
+	v := m.exit_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExitCode returns the old "exit_code" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldExitCode(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExitCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExitCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExitCode: %w", err)
+	}
+	return oldValue.ExitCode, nil
+}
+
+// AddExitCode adds i to the "exit_code" field.
+func (m *AgentMutation) AddExitCode(i int) {
+	if m.addexit_code != nil {
+		*m.addexit_code += i
+	} else {
+		m.addexit_code = &i
+	}
+}
+
+// AddedExitCode returns the value that was added to the "exit_code" field in this mutation.
+func (m *AgentMutation) AddedExitCode() (r int, exists bool) {
+	v := m.addexit_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (m *AgentMutation) ClearExitCode() {
+	m.exit_code = nil
+	m.addexit_code = nil
+	m.clearedFields[agent.FieldExitCode] = struct{}{}
+}
+
+// ExitCodeCleared returns if the "exit_code" field was cleared in this mutation.
+func (m *AgentMutation) ExitCodeCleared() bool {
+	_, ok := m.clearedFields[agent.FieldExitCode]
+	return ok
+}
+
+// ResetExitCode resets all changes to the "exit_code" field.
+func (m *AgentMutation) ResetExitCode() {
+	m.exit_code = nil
+	m.addexit_code = nil
+	delete(m.clearedFields, agent.FieldExitCode)
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (m *AgentMutation) SetExitReason(s string) {
+	m.exit_reason = &s
+}
+
+// ExitReason returns the value of the "exit_reason" field in the mutation.
+func (m *AgentMutation) ExitReason() (r string, exists bool) {
+	v := m.exit_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExitReason returns the old "exit_reason" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldExitReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExitReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExitReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExitReason: %w", err)
+	}
+	return oldValue.ExitReason, nil
+}
+
+// ClearExitReason clears the value of the "exit_reason" field.
+func (m *AgentMutation) ClearExitReason() {
+	m.exit_reason = nil
+	m.clearedFields[agent.FieldExitReason] = struct{}{}
+}
+
+// ExitReasonCleared returns if the "exit_reason" field was cleared in this mutation.
+func (m *AgentMutation) ExitReasonCleared() bool {
+	_, ok := m.clearedFields[agent.FieldExitReason]
+	return ok
+}
+
+// ResetExitReason resets all changes to the "exit_reason" field.
+func (m *AgentMutation) ResetExitReason() {
+	m.exit_reason = nil
+	delete(m.clearedFields, agent.FieldExitReason)
 }
 
 // SetRuntimeState sets the "runtime_state" field.
@@ -3632,7 +3754,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 37)
+	fields := make([]string, 0, 39)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -3680,6 +3802,12 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.container_status != nil {
 		fields = append(fields, agent.FieldContainerStatus)
+	}
+	if m.exit_code != nil {
+		fields = append(fields, agent.FieldExitCode)
+	}
+	if m.exit_reason != nil {
+		fields = append(fields, agent.FieldExitReason)
 	}
 	if m.runtime_state != nil {
 		fields = append(fields, agent.FieldRuntimeState)
@@ -3784,6 +3912,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.ConnectionState()
 	case agent.FieldContainerStatus:
 		return m.ContainerStatus()
+	case agent.FieldExitCode:
+		return m.ExitCode()
+	case agent.FieldExitReason:
+		return m.ExitReason()
 	case agent.FieldRuntimeState:
 		return m.RuntimeState()
 	case agent.FieldStalledFromActivity:
@@ -3867,6 +3999,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldConnectionState(ctx)
 	case agent.FieldContainerStatus:
 		return m.OldContainerStatus(ctx)
+	case agent.FieldExitCode:
+		return m.OldExitCode(ctx)
+	case agent.FieldExitReason:
+		return m.OldExitReason(ctx)
 	case agent.FieldRuntimeState:
 		return m.OldRuntimeState(ctx)
 	case agent.FieldStalledFromActivity:
@@ -4030,6 +4166,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetContainerStatus(v)
 		return nil
+	case agent.FieldExitCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExitCode(v)
+		return nil
+	case agent.FieldExitReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExitReason(v)
+		return nil
 	case agent.FieldRuntimeState:
 		v, ok := value.(string)
 		if !ok {
@@ -4185,6 +4335,9 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *AgentMutation) AddedFields() []string {
 	var fields []string
+	if m.addexit_code != nil {
+		fields = append(fields, agent.FieldExitCode)
+	}
 	if m.addcurrent_turns != nil {
 		fields = append(fields, agent.FieldCurrentTurns)
 	}
@@ -4202,6 +4355,8 @@ func (m *AgentMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *AgentMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
+	case agent.FieldExitCode:
+		return m.AddedExitCode()
 	case agent.FieldCurrentTurns:
 		return m.AddedCurrentTurns()
 	case agent.FieldCurrentModelCalls:
@@ -4217,6 +4372,13 @@ func (m *AgentMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *AgentMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case agent.FieldExitCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddExitCode(v)
+		return nil
 	case agent.FieldCurrentTurns:
 		v, ok := value.(int)
 		if !ok {
@@ -4275,6 +4437,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(agent.FieldContainerStatus) {
 		fields = append(fields, agent.FieldContainerStatus)
+	}
+	if m.FieldCleared(agent.FieldExitCode) {
+		fields = append(fields, agent.FieldExitCode)
+	}
+	if m.FieldCleared(agent.FieldExitReason) {
+		fields = append(fields, agent.FieldExitReason)
 	}
 	if m.FieldCleared(agent.FieldRuntimeState) {
 		fields = append(fields, agent.FieldRuntimeState)
@@ -4361,6 +4529,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldContainerStatus:
 		m.ClearContainerStatus()
+		return nil
+	case agent.FieldExitCode:
+		m.ClearExitCode()
+		return nil
+	case agent.FieldExitReason:
+		m.ClearExitReason()
 		return nil
 	case agent.FieldRuntimeState:
 		m.ClearRuntimeState()
@@ -4459,6 +4633,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldContainerStatus:
 		m.ResetContainerStatus()
+		return nil
+	case agent.FieldExitCode:
+		m.ResetExitCode()
+		return nil
+	case agent.FieldExitReason:
+		m.ResetExitReason()
 		return nil
 	case agent.FieldRuntimeState:
 		m.ResetRuntimeState()

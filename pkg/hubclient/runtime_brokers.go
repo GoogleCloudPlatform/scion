@@ -195,6 +195,8 @@ type AgentHeartbeat struct {
 	Message         string `json:"message,omitempty"`     // Error or status message from agent-info.json
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
+	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
 }
 
 // CreateBrokerRequest is the request to create a new broker registration.

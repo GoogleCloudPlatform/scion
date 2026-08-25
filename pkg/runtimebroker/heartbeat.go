@@ -283,6 +283,8 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 			ContainerStatus: ag.ContainerStatus,
 			HarnessAuth:     ag.HarnessAuth,
 			Profile:         ag.Profile,
+			ExitCode:        ag.ExitCode,
+			ExitReason:      ag.ExitReason,
 		}
 		if ag.Detail != nil && ag.Detail.Message != "" {
 			agentHB.Message = ag.Detail.Message

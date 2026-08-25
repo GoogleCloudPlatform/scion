@@ -212,6 +212,34 @@ func (_c *AgentCreate) SetNillableContainerStatus(v *string) *AgentCreate {
 	return _c
 }
 
+// SetExitCode sets the "exit_code" field.
+func (_c *AgentCreate) SetExitCode(v int) *AgentCreate {
+	_c.mutation.SetExitCode(v)
+	return _c
+}
+
+// SetNillableExitCode sets the "exit_code" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableExitCode(v *int) *AgentCreate {
+	if v != nil {
+		_c.SetExitCode(*v)
+	}
+	return _c
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (_c *AgentCreate) SetExitReason(v string) *AgentCreate {
+	_c.mutation.SetExitReason(v)
+	return _c
+}
+
+// SetNillableExitReason sets the "exit_reason" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableExitReason(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetExitReason(*v)
+	}
+	return _c
+}
+
 // SetRuntimeState sets the "runtime_state" field.
 func (_c *AgentCreate) SetRuntimeState(v string) *AgentCreate {
 	_c.mutation.SetRuntimeState(v)
@@ -775,6 +803,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldContainerStatus, field.TypeString, value)
 		_node.ContainerStatus = value
 	}
+	if value, ok := _c.mutation.ExitCode(); ok {
+		_spec.SetField(agent.FieldExitCode, field.TypeInt, value)
+		_node.ExitCode = &value
+	}
+	if value, ok := _c.mutation.ExitReason(); ok {
+		_spec.SetField(agent.FieldExitReason, field.TypeString, value)
+		_node.ExitReason = value
+	}
 	if value, ok := _c.mutation.RuntimeState(); ok {
 		_spec.SetField(agent.FieldRuntimeState, field.TypeString, value)
 		_node.RuntimeState = value
@@ -1209,6 +1245,48 @@ func (u *AgentUpsert) UpdateContainerStatus() *AgentUpsert {
 // ClearContainerStatus clears the value of the "container_status" field.
 func (u *AgentUpsert) ClearContainerStatus() *AgentUpsert {
 	u.SetNull(agent.FieldContainerStatus)
+	return u
+}
+
+// SetExitCode sets the "exit_code" field.
+func (u *AgentUpsert) SetExitCode(v int) *AgentUpsert {
+	u.Set(agent.FieldExitCode, v)
+	return u
+}
+
+// UpdateExitCode sets the "exit_code" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateExitCode() *AgentUpsert {
+	u.SetExcluded(agent.FieldExitCode)
+	return u
+}
+
+// AddExitCode adds v to the "exit_code" field.
+func (u *AgentUpsert) AddExitCode(v int) *AgentUpsert {
+	u.Add(agent.FieldExitCode, v)
+	return u
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (u *AgentUpsert) ClearExitCode() *AgentUpsert {
+	u.SetNull(agent.FieldExitCode)
+	return u
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (u *AgentUpsert) SetExitReason(v string) *AgentUpsert {
+	u.Set(agent.FieldExitReason, v)
+	return u
+}
+
+// UpdateExitReason sets the "exit_reason" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateExitReason() *AgentUpsert {
+	u.SetExcluded(agent.FieldExitReason)
+	return u
+}
+
+// ClearExitReason clears the value of the "exit_reason" field.
+func (u *AgentUpsert) ClearExitReason() *AgentUpsert {
+	u.SetNull(agent.FieldExitReason)
 	return u
 }
 
@@ -1896,6 +1974,55 @@ func (u *AgentUpsertOne) UpdateContainerStatus() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearContainerStatus() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearContainerStatus()
+	})
+}
+
+// SetExitCode sets the "exit_code" field.
+func (u *AgentUpsertOne) SetExitCode(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetExitCode(v)
+	})
+}
+
+// AddExitCode adds v to the "exit_code" field.
+func (u *AgentUpsertOne) AddExitCode(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddExitCode(v)
+	})
+}
+
+// UpdateExitCode sets the "exit_code" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateExitCode() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateExitCode()
+	})
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (u *AgentUpsertOne) ClearExitCode() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearExitCode()
+	})
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (u *AgentUpsertOne) SetExitReason(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetExitReason(v)
+	})
+}
+
+// UpdateExitReason sets the "exit_reason" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateExitReason() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateExitReason()
+	})
+}
+
+// ClearExitReason clears the value of the "exit_reason" field.
+func (u *AgentUpsertOne) ClearExitReason() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearExitReason()
 	})
 }
 
@@ -2807,6 +2934,55 @@ func (u *AgentUpsertBulk) UpdateContainerStatus() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearContainerStatus() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearContainerStatus()
+	})
+}
+
+// SetExitCode sets the "exit_code" field.
+func (u *AgentUpsertBulk) SetExitCode(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetExitCode(v)
+	})
+}
+
+// AddExitCode adds v to the "exit_code" field.
+func (u *AgentUpsertBulk) AddExitCode(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddExitCode(v)
+	})
+}
+
+// UpdateExitCode sets the "exit_code" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateExitCode() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateExitCode()
+	})
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (u *AgentUpsertBulk) ClearExitCode() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearExitCode()
+	})
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (u *AgentUpsertBulk) SetExitReason(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetExitReason(v)
+	})
+}
+
+// UpdateExitReason sets the "exit_reason" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateExitReason() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateExitReason()
+	})
+}
+
+// ClearExitReason clears the value of the "exit_reason" field.
+func (u *AgentUpsertBulk) ClearExitReason() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearExitReason()
 	})
 }
 

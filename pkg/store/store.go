@@ -288,7 +288,8 @@ type AgentStatusUpdate struct {
 	StartedAt         string `json:"startedAt,omitempty"`
 
 	// Exit tracking
-	ExitCode *int `json:"exitCode,omitempty"`
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	ExitReason string `json:"exitReason,omitempty"`
 }
 
 // ProjectStore defines project-related persistence operations.

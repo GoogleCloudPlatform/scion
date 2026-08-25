@@ -121,6 +121,16 @@ func ContainerStatus(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldContainerStatus, v))
 }
 
+// ExitCode applies equality check predicate on the "exit_code" field. It's identical to ExitCodeEQ.
+func ExitCode(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldExitCode, v))
+}
+
+// ExitReason applies equality check predicate on the "exit_reason" field. It's identical to ExitReasonEQ.
+func ExitReason(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldExitReason, v))
+}
+
 // RuntimeState applies equality check predicate on the "runtime_state" field. It's identical to RuntimeStateEQ.
 func RuntimeState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRuntimeState, v))
@@ -1029,6 +1039,131 @@ func ContainerStatusEqualFold(v string) predicate.Agent {
 // ContainerStatusContainsFold applies the ContainsFold predicate on the "container_status" field.
 func ContainerStatusContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldContainerStatus, v))
+}
+
+// ExitCodeEQ applies the EQ predicate on the "exit_code" field.
+func ExitCodeEQ(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldExitCode, v))
+}
+
+// ExitCodeNEQ applies the NEQ predicate on the "exit_code" field.
+func ExitCodeNEQ(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldExitCode, v))
+}
+
+// ExitCodeIn applies the In predicate on the "exit_code" field.
+func ExitCodeIn(vs ...int) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldExitCode, vs...))
+}
+
+// ExitCodeNotIn applies the NotIn predicate on the "exit_code" field.
+func ExitCodeNotIn(vs ...int) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldExitCode, vs...))
+}
+
+// ExitCodeGT applies the GT predicate on the "exit_code" field.
+func ExitCodeGT(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldExitCode, v))
+}
+
+// ExitCodeGTE applies the GTE predicate on the "exit_code" field.
+func ExitCodeGTE(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldExitCode, v))
+}
+
+// ExitCodeLT applies the LT predicate on the "exit_code" field.
+func ExitCodeLT(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldExitCode, v))
+}
+
+// ExitCodeLTE applies the LTE predicate on the "exit_code" field.
+func ExitCodeLTE(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldExitCode, v))
+}
+
+// ExitCodeIsNil applies the IsNil predicate on the "exit_code" field.
+func ExitCodeIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldExitCode))
+}
+
+// ExitCodeNotNil applies the NotNil predicate on the "exit_code" field.
+func ExitCodeNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldExitCode))
+}
+
+// ExitReasonEQ applies the EQ predicate on the "exit_reason" field.
+func ExitReasonEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldExitReason, v))
+}
+
+// ExitReasonNEQ applies the NEQ predicate on the "exit_reason" field.
+func ExitReasonNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldExitReason, v))
+}
+
+// ExitReasonIn applies the In predicate on the "exit_reason" field.
+func ExitReasonIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldExitReason, vs...))
+}
+
+// ExitReasonNotIn applies the NotIn predicate on the "exit_reason" field.
+func ExitReasonNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldExitReason, vs...))
+}
+
+// ExitReasonGT applies the GT predicate on the "exit_reason" field.
+func ExitReasonGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldExitReason, v))
+}
+
+// ExitReasonGTE applies the GTE predicate on the "exit_reason" field.
+func ExitReasonGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldExitReason, v))
+}
+
+// ExitReasonLT applies the LT predicate on the "exit_reason" field.
+func ExitReasonLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldExitReason, v))
+}
+
+// ExitReasonLTE applies the LTE predicate on the "exit_reason" field.
+func ExitReasonLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldExitReason, v))
+}
+
+// ExitReasonContains applies the Contains predicate on the "exit_reason" field.
+func ExitReasonContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldExitReason, v))
+}
+
+// ExitReasonHasPrefix applies the HasPrefix predicate on the "exit_reason" field.
+func ExitReasonHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldExitReason, v))
+}
+
+// ExitReasonHasSuffix applies the HasSuffix predicate on the "exit_reason" field.
+func ExitReasonHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldExitReason, v))
+}
+
+// ExitReasonIsNil applies the IsNil predicate on the "exit_reason" field.
+func ExitReasonIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldExitReason))
+}
+
+// ExitReasonNotNil applies the NotNil predicate on the "exit_reason" field.
+func ExitReasonNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldExitReason))
+}
+
+// ExitReasonEqualFold applies the EqualFold predicate on the "exit_reason" field.
+func ExitReasonEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldExitReason, v))
+}
+
+// ExitReasonContainsFold applies the ContainsFold predicate on the "exit_reason" field.
+func ExitReasonContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldExitReason, v))
 }
 
 // RuntimeStateEQ applies the EQ predicate on the "runtime_state" field.

@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -317,7 +318,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				name = c.Names[0]
 			}
 
-			agents = append(agents, api.AgentInfo{
+			info := api.AgentInfo{
 				ContainerID:     c.Id,
 				Name:            name,
 				ContainerStatus: c.Status,
@@ -332,7 +333,15 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
 				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
-			})
+			}
+			if code, ok := ExitCodeFromContainerStatus(c.Status); ok {
+				ec := code
+				info.ExitCode = &ec
+				if code != 0 {
+					info.ExitReason = string(state.ActivityCrashed)
+				}
+			}
+			agents = append(agents, info)
 		}
 	}
 

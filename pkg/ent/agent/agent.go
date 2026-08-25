@@ -48,6 +48,10 @@ const (
 	FieldConnectionState = "connection_state"
 	// FieldContainerStatus holds the string denoting the container_status field in the database.
 	FieldContainerStatus = "container_status"
+	// FieldExitCode holds the string denoting the exit_code field in the database.
+	FieldExitCode = "exit_code"
+	// FieldExitReason holds the string denoting the exit_reason field in the database.
+	FieldExitReason = "exit_reason"
 	// FieldRuntimeState holds the string denoting the runtime_state field in the database.
 	FieldRuntimeState = "runtime_state"
 	// FieldStalledFromActivity holds the string denoting the stalled_from_activity field in the database.
@@ -140,6 +144,8 @@ var Columns = []string{
 	FieldToolName,
 	FieldConnectionState,
 	FieldContainerStatus,
+	FieldExitCode,
+	FieldExitReason,
 	FieldRuntimeState,
 	FieldStalledFromActivity,
 	FieldCurrentTurns,
@@ -311,6 +317,16 @@ func ByConnectionState(opts ...sql.OrderTermOption) OrderOption {
 // ByContainerStatus orders the results by the container_status field.
 func ByContainerStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldContainerStatus, opts...).ToFunc()
+}
+
+// ByExitCode orders the results by the exit_code field.
+func ByExitCode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExitCode, opts...).ToFunc()
+}
+
+// ByExitReason orders the results by the exit_reason field.
+func ByExitReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExitReason, opts...).ToFunc()
 }
 
 // ByRuntimeState orders the results by the runtime_state field.

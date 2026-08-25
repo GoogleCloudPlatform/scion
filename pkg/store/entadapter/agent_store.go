@@ -99,6 +99,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		ToolName:            a.ToolName,
 		ConnectionState:     a.ConnectionState,
 		ContainerStatus:     a.ContainerStatus,
+		ExitCode:            a.ExitCode,
+		ExitReason:          a.ExitReason,
 		RuntimeState:        a.RuntimeState,
 		StalledFromActivity: a.StalledFromActivity,
 		CurrentTurns:        a.CurrentTurns,
@@ -381,6 +383,8 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetContainerStatus(a.ContainerStatus).
 		SetRuntimeState(a.RuntimeState).
 		SetStalledFromActivity(a.StalledFromActivity).
+		SetNillableExitCode(a.ExitCode).
+		SetExitReason(a.ExitReason).
 		SetImage(a.Image).
 		SetDetached(a.Detached).
 		SetRuntime(a.Runtime).
@@ -702,6 +706,12 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 	if su.ContainerStatus != "" {
 		upd.SetContainerStatus(su.ContainerStatus)
+	}
+	if su.ExitCode != nil {
+		upd.SetExitCode(*su.ExitCode)
+	}
+	if su.ExitReason != "" {
+		upd.SetExitReason(su.ExitReason)
 	}
 	if su.RuntimeState != "" {
 		upd.SetRuntimeState(su.RuntimeState)
