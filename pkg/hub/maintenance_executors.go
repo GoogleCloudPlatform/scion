@@ -551,22 +551,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 	}
 
-	// Derive image name from config.yaml's image field (like the CLI does)
-	// to ensure the built image matches what config.yaml declares.
-	imageName := ""
-	if hc.Config != nil && hc.Config.Image != "" {
-		name := hc.Config.Image
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			name = name[:idx]
-		}
-		imageName = name
-	}
-	if imageName == "" {
-		imageName = hc.Slug
-		if imageName == "" {
-			imageName = hc.Name
-		}
-	}
+	imageName := deriveImageBaseName(hc)
 	outputImage := imageName + ":" + tag
 	_, _ = fmt.Fprintf(logger, "Building %s from harness-config %q...\n", outputImage, hc.Name)
 	log.Debug("Starting container build",
@@ -603,9 +588,9 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		outputImage = pushImage
 	}
 
-	// Update the harness config's image in storage and the DB so agents
+	// Update the harness config's image in the DB so agents
 	// pick up the newly-built image instead of the stale upstream reference.
-	if err := syncBuiltImage(ctx, e.storage, e.store, logger, hc, tmpDir, outputImage); err != nil {
+	if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
 		log.Error("Failed to sync built image back to store", "error", err)
 		_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 	}
@@ -778,22 +763,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 		}
 	}()
 
-	// Derive image name from config.yaml's image field (like the CLI does)
-	// to ensure the built image matches what config.yaml declares.
-	imageName := ""
-	if hc.Config != nil && hc.Config.Image != "" {
-		name := hc.Config.Image
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			name = name[:idx]
-		}
-		imageName = name
-	}
-	if imageName == "" {
-		imageName = hc.Slug
-		if imageName == "" {
-			imageName = hc.Name
-		}
-	}
+	imageName := deriveImageBaseName(hc)
 	baseImage := registry + "/scion-base:" + tag
 	outputImage := registry + "/" + imageName + ":" + tag
 
@@ -894,7 +864,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 			_, _ = fmt.Fprintf(logger, "\nCloud Build completed successfully: %s\n", outputImage)
 			log.Info("Cloud Build complete", "build_id", buildID, "image", outputImage)
 
-			if err := syncBuiltImage(ctx, e.storage, e.store, logger, hc, tmpDir, outputImage); err != nil {
+			if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
 				log.Error("Failed to sync built image back to store", "error", err)
 				_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 			}
@@ -922,12 +892,29 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 }
 
+// deriveImageBaseName returns the base image name (without tag) for a
+// harness config, preferring the config.yaml image field and falling
+// back to the slug or name.
+func deriveImageBaseName(hc *store.HarnessConfig) string {
+	if hc.Config != nil && hc.Config.Image != "" {
+		name := hc.Config.Image
+		if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			name = name[:idx]
+		}
+		return name
+	}
+	if hc.Slug != "" {
+		return hc.Slug
+	}
+	return hc.Name
+}
+
 // syncBuiltImage updates the harness config's DB record to reference the
 // newly-built image without modifying config.yaml in storage. The image field
 // in config.yaml is a stable reference; two-phase resolution at agent start
 // prefers local images. This matches the CLI build path's behavior
 // (see cmd/build.go syncBuildToHub).
-func syncBuiltImage(ctx context.Context, stor storage.Storage, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
+func syncBuiltImage(ctx context.Context, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, outputImage string) error {
 	if hc.Config == nil {
 		hc.Config = &store.HarnessConfigData{}
 	}
