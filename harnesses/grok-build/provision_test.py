@@ -833,5 +833,329 @@ class CaFileEnvTest(BaseTelemetryTest):
         self.assertNotIn("OTEL_EXPORTER_OTLP_CERTIFICATE", env)
 
 
+# ---------------------------------------------------------------------------
+# Vertex AI Auth Tests
+# ---------------------------------------------------------------------------
+
+
+class VertexAIAuthTest(unittest.TestCase):
+    """Test Vertex AI auth selection and provisioning."""
+
+    _saved_env: dict[str, str]
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._saved_env = {}
+        for key in list(os.environ):
+            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL")):
+                self._saved_env[key] = os.environ.pop(key)
+
+    def tearDown(self) -> None:
+        for key in list(os.environ):
+            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL")):
+                os.environ.pop(key, None)
+        os.environ.update(self._saved_env)
+        super().tearDown()
+
+    def test_vertex_ai_selected_when_project_present(self) -> None:
+        """vertex-ai auth is selected when GOOGLE_CLOUD_PROJECT is in env_vars
+        and neither XAI_API_KEY nor GROK_AUTH are present."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                resolved = ctx.select_auth(provision.AUTH)
+            self.assertEqual(resolved.method, "vertex-ai")
+
+    def test_vertex_config_written_to_config_toml(self) -> None:
+        """When vertex-ai method is used, config.toml contains correct entries."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                self.assertTrue(os.path.isfile(config_path))
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn("[auth_provider.vertex-grok]", content)
+            self.assertIn("[model.vertex-grok]", content)
+            self.assertIn("[models]", content)
+            self.assertIn('default = "vertex-grok"', content)
+            self.assertIn("my-gcp-project", content)
+
+    def test_vertex_global_endpoint_when_no_region(self) -> None:
+        """When GOOGLE_CLOUD_REGION is not set, the base_url uses the global
+        endpoint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn(
+                "https://aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/global/endpoints/openapi",
+                content,
+            )
+
+    def test_vertex_regional_endpoint_when_region_set(self) -> None:
+        """When GOOGLE_CLOUD_REGION is set, the base_url uses the regional
+        endpoint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            region_path = os.path.join(tmp, "region")
+            with open(region_path, "w") as f:
+                f.write("us-central1")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                        "GOOGLE_CLOUD_REGION": region_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn(
+                "https://us-central1-aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/us-central1/endpoints/openapi",
+                content,
+            )
+
+    def test_vertex_adc_placed_when_staged(self) -> None:
+        """When gcloud-adc file secret is staged, it is written to
+        ~/.config/gcloud/application_default_credentials.json and
+        GOOGLE_APPLICATION_CREDENTIALS is set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            adc_path = os.path.join(tmp, "adc-creds")
+            with open(adc_path, "w") as f:
+                f.write('{"type": "authorized_user", "client_id": "test"}')
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                    },
+                    "file_secret_files": {
+                        "gcloud-adc": adc_path,
+                    },
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                target = os.path.join(
+                    tmp, ".config", "gcloud",
+                    "application_default_credentials.json",
+                )
+                self.assertTrue(os.path.isfile(target))
+                with open(target) as f:
+                    content = f.read()
+                self.assertIn("authorized_user", content)
+                mode = os.stat(target).st_mode & 0o777
+                self.assertEqual(mode, 0o600)
+            self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", env)
+            self.assertEqual(env["GOOGLE_APPLICATION_CREDENTIALS"], target)
+
+    def test_vertex_no_adc_still_works(self) -> None:
+        """vertex-ai works without ADC credentials (workload identity
+        environments)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                extra = provision._configure_vertex_ai(ctx, env)
+            self.assertTrue(extra.get("vertex_ai"))
+            self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", env)
+
+    def test_vertex_auth_provider_command(self) -> None:
+        """Verify the auth_provider block uses 'gcloud auth print-access-token'
+        as the command."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn(
+                'command = "gcloud auth print-access-token"', content
+            )
+
+    def test_api_key_preferred_over_vertex_ai(self) -> None:
+        """When both XAI_API_KEY and GOOGLE_CLOUD_PROJECT are present,
+        api-key is selected (listed first in AUTH)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["XAI_API_KEY", "GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {},
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                resolved = ctx.select_auth(provision.AUTH)
+            self.assertEqual(resolved.method, "api-key")
+
+    def test_vertex_custom_model_from_scion_model(self) -> None:
+        """SCION_MODEL overrides the default vertex model ID."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "xai/grok-4.2"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            self.assertIn("xai/grok-4.2", content)
+            self.assertNotIn("xai/grok-4.6", content)
+
+    def test_vertex_empty_project_raises(self) -> None:
+        """When GOOGLE_CLOUD_PROJECT is empty, ProvisionError is raised."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            # Create an empty project file.
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                with self.assertRaises(scion_harness.ProvisionError) as cm:
+                    provision._configure_vertex_ai(ctx, env)
+                self.assertIn("GOOGLE_CLOUD_PROJECT", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
