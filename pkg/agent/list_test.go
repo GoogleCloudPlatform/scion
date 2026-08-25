@@ -513,6 +513,97 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 	}
 }
 
+func TestListPhaseErrorPreservedWithNilExitCode(t *testing.T) {
+	// Verify that when the runtime reports PhaseError but ExitCode is nil
+	// (unknown), the phase is NOT downgraded to PhaseStopped. This covers
+	// the case where a K8s pod fails without a captured exit code.
+	nonZero := 137
+	tests := []struct {
+		name         string
+		runtimePhase string
+		exitCode     *int
+		infoPhase    string
+		wantPhase    string
+	}{
+		{
+			name:         "PhaseError with nil exit code stays PhaseError",
+			runtimePhase: string(state.PhaseError),
+			exitCode:     nil,
+			infoPhase:    string(state.PhaseRunning),
+			wantPhase:    string(state.PhaseError),
+		},
+		{
+			name:         "PhaseError with non-zero exit code stays PhaseError",
+			runtimePhase: string(state.PhaseError),
+			exitCode:     &nonZero,
+			infoPhase:    string(state.PhaseRunning),
+			wantPhase:    string(state.PhaseError),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			projectPath := filepath.Join(tmpDir, ".scion")
+			agentName := "phase-error-agent"
+			agentHome := filepath.Join(projectPath, "agents", agentName, "home")
+			if err := os.MkdirAll(agentHome, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			info := api.AgentInfo{
+				Name:     agentName,
+				Phase:    tc.infoPhase,
+				Activity: string(state.ActivityThinking),
+			}
+			infoData, _ := json.MarshalIndent(info, "", "  ")
+			if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			mock := &runtime.MockRuntime{
+				ListFunc: func(_ context.Context, _ map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{
+						{
+							Name:        agentName,
+							ProjectPath: projectPath,
+							Phase:       tc.runtimePhase,
+							ExitCode:    tc.exitCode,
+						},
+					}, nil
+				},
+			}
+
+			mgr := NewManager(mock)
+			agents, err := mgr.List(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+
+			var found *api.AgentInfo
+			for i := range agents {
+				if agents[i].Name == agentName {
+					found = &agents[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatal("agent not found in list results")
+			}
+
+			if found.Phase != tc.wantPhase {
+				t.Errorf("Phase = %q, want %q", found.Phase, tc.wantPhase)
+			}
+			if found.Activity != "" {
+				t.Errorf("Activity = %q, want empty (should be cleared for terminal phase)", found.Activity)
+			}
+		})
+	}
+}
+
 func TestListTerminalPhaseOverridesAgentInfoPhase(t *testing.T) {
 	// When the runtime reports a terminal phase (stopped/error), it takes
 	// precedence over whatever agent-info.json says. The runtimePhases map

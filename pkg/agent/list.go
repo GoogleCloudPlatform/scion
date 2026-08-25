@@ -75,12 +75,12 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	runningNames := make(map[string]bool)
-	runtimePhases := make(map[int]string, len(agents))
+	runtimePhases := make(map[string]string, len(agents))
 	for i := range agents {
 		// Capture the runtime's Phase before agent-info.json overwrites it.
 		// The runtime Phase (derived from container state) is authoritative
 		// for running/stopped reconciliation below.
-		runtimePhases[i] = agents[i].Phase
+		runtimePhases[agents[i].Name] = agents[i].Phase
 		runningNames[agents[i].Name] = true
 		if agents[i].ProjectPath != "" {
 			// ResolveAgentDir probes both worktree and shared-workspace
@@ -161,7 +161,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		// Reconcile phase with actual container status.
 		// The runtime Phase (captured before agent-info.json merge) is
 		// authoritative for whether the container is running or stopped.
-		runtimePhase := runtimePhases[i]
+		runtimePhase := runtimePhases[agents[i].Name]
 		isContainerRunning := runtimePhase == string(state.PhaseRunning)
 		isContainerStopped := runtimePhase == string(state.PhaseStopped) || runtimePhase == string(state.PhaseError)
 
@@ -177,7 +177,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			if hasCode {
 				exitCode = *agents[i].ExitCode
 			}
-			crashed := hasCode && exitCode != 0
+			crashed := (hasCode && exitCode != 0) || runtimePhase == string(state.PhaseError)
 			p := state.Phase(agents[i].Phase)
 			switch p {
 			case state.PhaseRunning:

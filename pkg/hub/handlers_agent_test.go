@@ -5218,6 +5218,106 @@ func TestListAgents_ResponseMetadata(t *testing.T) {
 	assert.NotEmpty(t, resp.NextCursor, "nextCursor should be non-empty when more results exist")
 }
 
+// TestBrokerHeartbeat_PhaseErrorPersistsExitCodeAndReason verifies that when
+// a broker directly reports PhaseError (e.g. a failed K8s pod), the hub
+// persists ExitCode and ExitReason. Previously the exit-code extraction block
+// was gated on PhaseStopped only, so PhaseError heartbeats lost this data.
+func TestBrokerHeartbeat_PhaseErrorPersistsExitCodeAndReason(t *testing.T) {
+	nonZero := 137
+	cases := []struct {
+		name           string
+		hbPhase        string
+		hbExitCode     *int
+		hbExitReason   string
+		wantPhase      string
+		wantExitCode   *int
+		wantExitReason string
+		wantMessage    string
+	}{
+		{
+			name:           "PhaseError with non-zero exit code persists ExitCode and ExitReason",
+			hbPhase:        string(state.PhaseError),
+			hbExitCode:     &nonZero,
+			hbExitReason:   "crashed",
+			wantPhase:      string(state.PhaseError),
+			wantExitCode:   &nonZero,
+			wantExitReason: "crashed",
+			wantMessage:    "Agent crashed with exit code 137",
+		},
+		{
+			name:           "PhaseError with nil exit code preserves PhaseError and ExitReason",
+			hbPhase:        string(state.PhaseError),
+			hbExitCode:     nil,
+			hbExitReason:   "crashed",
+			wantPhase:      string(state.PhaseError),
+			wantExitCode:   nil,
+			wantExitReason: "crashed",
+		},
+		{
+			name:           "PhaseStopped with non-zero exit code still promotes to PhaseError",
+			hbPhase:        string(state.PhaseStopped),
+			hbExitCode:     &nonZero,
+			hbExitReason:   "crashed",
+			wantPhase:      string(state.PhaseError),
+			wantExitCode:   &nonZero,
+			wantExitReason: "crashed",
+			wantMessage:    "Agent crashed with exit code 137",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-pe-exit-" + tc.name), Name: "P", Slug: "pe-exit-proj-" + tc.name}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-pe-exit-" + tc.name), Name: "B", Slug: "pe-exit-broker-" + tc.name,
+				Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-pe-exit-" + tc.name), Slug: "pe-exit-slug-" + tc.name, Name: "A",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+				Phase: string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			heartbeat := brokerHeartbeatRequest{
+				Status: "online",
+				Projects: []brokerProjectHeartbeat{{
+					ProjectID:  project.ID,
+					AgentCount: 1,
+					Agents: []brokerAgentHeartbeat{{
+						Slug:       agent.Slug,
+						Phase:      tc.hbPhase,
+						ExitCode:   tc.hbExitCode,
+						ExitReason: tc.hbExitReason,
+					}},
+				}},
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", heartbeat)
+			assert.Equal(t, http.StatusOK, rec.Code)
+
+			updated, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, updated.Phase, "phase mismatch")
+			if tc.wantExitCode != nil {
+				require.NotNil(t, updated.ExitCode, "ExitCode should be persisted")
+				assert.Equal(t, *tc.wantExitCode, *updated.ExitCode, "ExitCode value mismatch")
+			}
+			if tc.wantExitReason != "" {
+				assert.Equal(t, tc.wantExitReason, updated.ExitReason, "ExitReason should be persisted")
+			}
+			if tc.wantMessage != "" {
+				assert.Equal(t, tc.wantMessage, updated.Message, "Message mismatch")
+			}
+		})
+	}
+}
+
 // TestBrokerHeartbeat_BackfillsContainerStatusFromStructuredPhase verifies
 // that when a broker sends structured Phase/ExitCode but no ContainerStatus,
 // the hub renders a backward-compatible ContainerStatus display string.

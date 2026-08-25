@@ -715,11 +715,14 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// Derive a crash from the exit code even when the broker
 					// reports a plain "stopped". Prefer the structured ExitCode
 					// field; fall back to parsing ContainerStatus for old brokers.
-					if hbPhase == state.PhaseStopped {
+					if hbPhase == state.PhaseStopped || hbPhase == state.PhaseError {
 						if agentHB.ExitCode != nil && *agentHB.ExitCode != 0 {
 							// crash path
-							hbPhase = state.PhaseError
-							agentHB.Phase = string(state.PhaseError)
+							if hbPhase == state.PhaseStopped {
+								// Promote PhaseStopped→PhaseError when exit code is non-zero.
+								hbPhase = state.PhaseError
+								agentHB.Phase = string(state.PhaseError)
+							}
 							statusUpdate.ExitCode = agentHB.ExitCode
 							if isValidExitReason(agentHB.ExitReason) {
 								statusUpdate.ExitReason = agentHB.ExitReason
@@ -729,8 +732,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							if statusUpdate.Message == "" {
 								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
 							}
-						} else if agentHB.ExitCode == nil {
-							// Legacy fallback: parse from ContainerStatus string (old broker)
+						} else if hbPhase == state.PhaseStopped && agentHB.ExitCode == nil {
+							// Legacy fallback: parse from ContainerStatus string (old broker).
+							// Only applies to PhaseStopped — PhaseError already has the correct phase.
 							if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
 								hbPhase = state.PhaseError
 								agentHB.Phase = string(state.PhaseError)
@@ -741,7 +745,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								}
 							}
 						} else {
-							// ExitCode == 0: clean exit, keep PhaseStopped
+							// PhaseStopped with ExitCode == 0 (clean exit) or
+							// PhaseError with nil/zero ExitCode: persist what we have.
 							statusUpdate.ExitCode = agentHB.ExitCode
 							if isValidExitReason(agentHB.ExitReason) {
 								statusUpdate.ExitReason = agentHB.ExitReason
