@@ -74,6 +74,13 @@ steps:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-grok-build'
+    dir: 'harnesses/grok-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-grok-build:$_SHORT_SHA', '-t', '$_REGISTRY/scion-grok-build:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-hermes'
     dir: 'harnesses/hermes'
     args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hermes:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hermes:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
