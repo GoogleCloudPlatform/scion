@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -434,6 +436,17 @@ func (ws *WebServer) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
+// ::1, or "localhost"). It returns false for non-loopback IPs (including
+// "0.0.0.0" and "::") and for unresolvable hostnames.
+func IsLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // NewWebServer creates a new web frontend server.
 func NewWebServer(cfg WebServerConfig) *WebServer {
 	if cfg.Port == 0 {
@@ -441,6 +454,15 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
+	}
+
+	// Defense-in-depth: refuse to start dev auth on a non-loopback interface.
+	// The primary check is in initWebServer (cmd layer), but this guard
+	// protects against any code path that constructs a WebServer directly.
+	if cfg.DevAuthToken != "" && !IsLoopbackHost(cfg.Host) {
+		log.Fatalf("dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
+			"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
+			"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth.", cfg.Host)
 	}
 
 	ws := &WebServer{

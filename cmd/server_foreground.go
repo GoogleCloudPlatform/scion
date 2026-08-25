@@ -2184,6 +2184,16 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webHost = "0.0.0.0"
 	}
 
+	// Refuse to start when dev auth is enabled on a non-loopback interface.
+	// Dev auth auto-logs in every request as admin — exposing it on a public
+	// address would create an unauthenticated admin endpoint.
+	if devAuthToken != "" && !hub.IsLoopbackHost(webHost) {
+		return nil, fmt.Errorf(
+			"dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
+				"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
+				"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
+	}
+
 	// Allow env var overrides for session/OAuth config
 	sessionSecret := resolveSessionSecret()
 	baseURL := webBaseURL

@@ -142,6 +142,11 @@ deploy_service() {
   local settings_secret="$1"
   local session_secret="$2"
 
+  # SECURITY: The flags --no-allow-unauthenticated and --iap are critical.
+  # Never add --no-invoker-iam-check — that flag would bypass Cloud Run's IAM
+  # invoker check and expose the service to unauthenticated traffic, defeating
+  # the IAP gate. See design doc S2 requirement in
+  # .design/projects/single-node/cloudrun-instances-sandboxes.md §4.11.
   gcloud run deploy "$SERVICE_NAME" \
     --image "$IMAGE" \
     --region "$REGION" \
