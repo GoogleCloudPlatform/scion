@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -111,12 +112,8 @@ var deleteCmd = &cobra.Command{
 					continue // Not a scion-managed container
 				}
 
-				status := strings.ToLower(a.ContainerStatus)
-				// Check if running
-				if strings.HasPrefix(status, "up") ||
-					strings.HasPrefix(status, "running") ||
-					strings.HasPrefix(status, "pending") ||
-					strings.HasPrefix(status, "restarting") {
+				// Skip running/provisioning agents
+				if a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseProvisioning) {
 					continue
 				}
 

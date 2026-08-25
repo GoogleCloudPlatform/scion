@@ -54,6 +54,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// Validate ExitReason before passing to the store: only terminal
+	// activities are valid exit reasons. Silently drop invalid values
+	// rather than rejecting the entire status update.
+	if status.ExitReason != "" && !isValidExitReason(status.ExitReason) {
+		status.ExitReason = "" // silently drop invalid values
+	}
+
 	// Guard against phase regressions and auto-correct phase from activity.
 	if status.Phase != "" || status.Activity != "" {
 		agent, err := s.store.GetAgent(ctx, id)
@@ -301,6 +308,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if action == api.AgentActionStop {
 		statusUpdate.ContainerStatus = "stopped"
 		statusUpdate.Activity = ""
+		zero := 0
+		statusUpdate.ExitCode = &zero
 	}
 	// When starting or restarting, propagate container status from broker response
 	if (action == api.AgentActionStart || action == api.AgentActionRestart) && agent.ContainerStatus != "" {
@@ -436,10 +445,12 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					"agent_id", agent.ID, "error", dispatchErr)
 			} else {
 				// Update agent status in store
+				zero := 0
 				statusUpdate := store.AgentStatusUpdate{
 					Phase:           string(state.PhaseStopped),
 					ContainerStatus: "stopped",
 					Activity:        "",
+					ExitCode:        &zero,
 				}
 				if updateErr := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); updateErr != nil {
 					res.Status = "error"

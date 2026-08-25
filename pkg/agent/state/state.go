@@ -131,6 +131,26 @@ const (
 	ActivityCrashed         Activity = "crashed"
 )
 
+// ExitReason describes why an agent process terminated. Unlike Activity
+// (self-reported by the agent), ExitReason is runtime-derived and set by
+// the platform when it observes a container/process exit.
+type ExitReason string
+
+const (
+	ExitReasonCrashed        ExitReason = "crashed"
+	ExitReasonLimitsExceeded ExitReason = "limits_exceeded"
+)
+
+// IsValid reports whether r is a recognised ExitReason value.
+// Empty string is valid (no reason given).
+func (r ExitReason) IsValid() bool {
+	switch r {
+	case "", ExitReasonCrashed, ExitReasonLimitsExceeded:
+		return true
+	}
+	return false
+}
+
 // allActivities is the internal list; Activities() returns a copy.
 var allActivities = []Activity{
 	ActivityWorking,

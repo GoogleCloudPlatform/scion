@@ -1912,6 +1912,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		status := string(p.Status.Phase)
 		agentStatus := ""
+		var exitCode *int
+		var exitReason string
 		switch p.Status.Phase {
 		case corev1.PodSucceeded:
 			agentStatus = string(state.PhaseStopped)
@@ -1929,6 +1931,11 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					status = fmt.Sprintf("%s (%s)", p.Status.Phase, cs.State.Waiting.Reason)
 				} else if cs.State.Terminated != nil {
 					status = fmt.Sprintf("%s (%s)", p.Status.Phase, cs.State.Terminated.Reason)
+					ec := int(cs.State.Terminated.ExitCode)
+					exitCode = &ec
+					if ec != 0 {
+						exitReason = string(state.ExitReasonCrashed)
+					}
 					if agentStatus == "" {
 						if cs.State.Terminated.ExitCode == 0 {
 							agentStatus = string(state.PhaseStopped)
@@ -1965,6 +1972,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			Annotations:     p.Annotations,
 			ContainerStatus: status,
 			Phase:           agentStatus,
+			ExitCode:        exitCode,
+			ExitReason:      exitReason,
 			Image:           agentImage,
 			Runtime:         r.Name(),
 			Kubernetes: &api.AgentK8sMetadata{
@@ -2037,7 +2046,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	podName = agent.ContainerID
 
 	// For Kubernetes, we want to ensure it is in Running phase
-	if !strings.EqualFold(agent.ContainerStatus, string(corev1.PodRunning)) {
+	if agent.Phase != string(state.PhaseRunning) {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 

@@ -5217,3 +5217,297 @@ func TestListAgents_ResponseMetadata(t *testing.T) {
 	assert.Greater(t, resp.TotalCount, 0, "totalCount should be present and non-zero")
 	assert.NotEmpty(t, resp.NextCursor, "nextCursor should be non-empty when more results exist")
 }
+
+// TestBrokerHeartbeat_PhaseErrorPersistsExitCodeAndReason verifies that when
+// a broker directly reports PhaseError (e.g. a failed K8s pod), the hub
+// persists ExitCode and ExitReason. Previously the exit-code extraction block
+// was gated on PhaseStopped only, so PhaseError heartbeats lost this data.
+func TestBrokerHeartbeat_PhaseErrorPersistsExitCodeAndReason(t *testing.T) {
+	nonZero := 137
+	cases := []struct {
+		name           string
+		hbPhase        string
+		hbExitCode     *int
+		hbExitReason   string
+		wantPhase      string
+		wantExitCode   *int
+		wantExitReason string
+		wantMessage    string
+	}{
+		{
+			name:           "PhaseError with non-zero exit code persists ExitCode and ExitReason",
+			hbPhase:        string(state.PhaseError),
+			hbExitCode:     &nonZero,
+			hbExitReason:   "crashed",
+			wantPhase:      string(state.PhaseError),
+			wantExitCode:   &nonZero,
+			wantExitReason: "crashed",
+			wantMessage:    "Agent crashed with exit code 137",
+		},
+		{
+			name:           "PhaseError with nil exit code preserves PhaseError and ExitReason",
+			hbPhase:        string(state.PhaseError),
+			hbExitCode:     nil,
+			hbExitReason:   "crashed",
+			wantPhase:      string(state.PhaseError),
+			wantExitCode:   nil,
+			wantExitReason: "crashed",
+		},
+		{
+			name:           "PhaseStopped with non-zero exit code still promotes to PhaseError",
+			hbPhase:        string(state.PhaseStopped),
+			hbExitCode:     &nonZero,
+			hbExitReason:   "crashed",
+			wantPhase:      string(state.PhaseError),
+			wantExitCode:   &nonZero,
+			wantExitReason: "crashed",
+			wantMessage:    "Agent crashed with exit code 137",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-pe-exit-" + tc.name), Name: "P", Slug: "pe-exit-proj-" + tc.name}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-pe-exit-" + tc.name), Name: "B", Slug: "pe-exit-broker-" + tc.name,
+				Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-pe-exit-" + tc.name), Slug: "pe-exit-slug-" + tc.name, Name: "A",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+				Phase: string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			heartbeat := brokerHeartbeatRequest{
+				Status: "online",
+				Projects: []brokerProjectHeartbeat{{
+					ProjectID:  project.ID,
+					AgentCount: 1,
+					Agents: []brokerAgentHeartbeat{{
+						Slug:       agent.Slug,
+						Phase:      tc.hbPhase,
+						ExitCode:   tc.hbExitCode,
+						ExitReason: tc.hbExitReason,
+					}},
+				}},
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", heartbeat)
+			assert.Equal(t, http.StatusOK, rec.Code)
+
+			updated, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, updated.Phase, "phase mismatch")
+			if tc.wantExitCode != nil {
+				require.NotNil(t, updated.ExitCode, "ExitCode should be persisted")
+				assert.Equal(t, *tc.wantExitCode, *updated.ExitCode, "ExitCode value mismatch")
+			}
+			if tc.wantExitReason != "" {
+				assert.Equal(t, tc.wantExitReason, updated.ExitReason, "ExitReason should be persisted")
+			}
+			if tc.wantMessage != "" {
+				assert.Equal(t, tc.wantMessage, updated.Message, "Message mismatch")
+			}
+		})
+	}
+}
+
+// TestBrokerHeartbeat_BackfillsContainerStatusFromStructuredPhase verifies
+// that when a broker sends structured Phase/ExitCode but no ContainerStatus,
+// the hub renders a backward-compatible ContainerStatus display string.
+func TestBrokerHeartbeat_BackfillsContainerStatusFromStructuredPhase(t *testing.T) {
+	zero := 0
+	nonZero := 137
+	cases := []struct {
+		name                string
+		initialPhase        string // agent's initial phase in store
+		hbPhase             string
+		hbExitCode          *int
+		wantContainerStatus string
+		wantPhase           string
+	}{
+		{
+			name:                "running phase backfills running",
+			initialPhase:        string(state.PhaseRunning),
+			hbPhase:             string(state.PhaseRunning),
+			wantContainerStatus: "running",
+			wantPhase:           string(state.PhaseRunning),
+		},
+		{
+			name:                "stopped phase backfills stopped",
+			initialPhase:        string(state.PhaseRunning),
+			hbPhase:             string(state.PhaseStopped),
+			hbExitCode:          &zero,
+			wantContainerStatus: "stopped",
+			wantPhase:           string(state.PhaseStopped),
+		},
+		{
+			name:                "error phase with exit code backfills exited (N)",
+			initialPhase:        string(state.PhaseRunning),
+			hbPhase:             string(state.PhaseStopped),
+			hbExitCode:          &nonZero,
+			wantContainerStatus: "exited (137)",
+			wantPhase:           string(state.PhaseError),
+		},
+		{
+			name:                "provisioning phase backfills created",
+			initialPhase:        string(state.PhaseCreated),
+			hbPhase:             string(state.PhaseProvisioning),
+			wantContainerStatus: "created",
+			wantPhase:           string(state.PhaseProvisioning),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-backfill-" + tc.name), Name: "P", Slug: "backfill-proj-" + tc.name}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-backfill-" + tc.name), Name: "B", Slug: "backfill-broker-" + tc.name,
+				Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-backfill-" + tc.name), Slug: "backfill-slug-" + tc.name, Name: "A",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+				Phase: tc.initialPhase,
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			hb := brokerHeartbeatRequest{
+				Status: "online",
+				Projects: []brokerProjectHeartbeat{{
+					ProjectID:  project.ID,
+					AgentCount: 1,
+					Agents: []brokerAgentHeartbeat{{
+						Slug:     agent.Slug,
+						Phase:    tc.hbPhase,
+						ExitCode: tc.hbExitCode,
+						// No ContainerStatus — should be backfilled
+					}},
+				}},
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+			assert.Equal(t, http.StatusOK, rec.Code)
+
+			updated, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, updated.Phase, "phase mismatch")
+			assert.Equal(t, tc.wantContainerStatus, updated.ContainerStatus, "ContainerStatus should be backfilled from structured Phase")
+		})
+	}
+}
+
+// TestBrokerHeartbeat_NoBackfillWhenContainerStatusPresent verifies that
+// the backfill logic does not overwrite a ContainerStatus that the broker
+// already sent.
+func TestBrokerHeartbeat_NoBackfillWhenContainerStatusPresent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-no-backfill"), Name: "P", Slug: "no-backfill-proj"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-no-backfill"), Name: "B", Slug: "no-backfill-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	agent := &store.Agent{
+		ID: tid("agent-no-backfill"), Slug: "no-backfill-slug", Name: "A",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:  project.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseRunning),
+				ContainerStatus: "Up 2 hours", // Explicit ContainerStatus from broker
+			}},
+		}},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Up 2 hours", updated.ContainerStatus, "broker-provided ContainerStatus should not be overwritten")
+}
+
+// TestStopAgent_SetsExitCodeZero verifies that when an agent is stopped via
+// the lifecycle handler, the ExitCode is set to 0 (clean exit).
+func TestStopAgent_SetsExitCodeZero(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-stop-exitcode"), Name: "P", Slug: "stop-exitcode-proj"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:        tid("agent-stop-exitcode"),
+		Slug:      "stop-exitcode-slug",
+		Name:      "Stop ExitCode Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), updated.Phase)
+	assert.Equal(t, "stopped", updated.ContainerStatus)
+	require.NotNil(t, updated.ExitCode, "ExitCode should be set on stop")
+	assert.Equal(t, 0, *updated.ExitCode, "ExitCode should be 0 for clean stop")
+}
+
+// TestStopAllAgents_SetsExitCodeZero verifies that the stop-all handler
+// records ExitCode=0 for each stopped agent.
+func TestStopAllAgents_SetsExitCodeZero(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-stopall-exit"), Name: "P", Slug: "stopall-exit-proj"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agentIDs := []string{tid("agent-stopall-exit-1"), tid("agent-stopall-exit-2")}
+	for _, id := range agentIDs {
+		agent := &store.Agent{
+			ID:        id,
+			Slug:      id,
+			Name:      id,
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	for _, id := range agentIDs {
+		updated, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), updated.Phase, "agent %s should be stopped", id)
+		require.NotNil(t, updated.ExitCode, "agent %s ExitCode should be set", id)
+		assert.Equal(t, 0, *updated.ExitCode, "agent %s ExitCode should be 0 for clean stop", id)
+	}
+}

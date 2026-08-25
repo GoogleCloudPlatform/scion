@@ -302,6 +302,53 @@ func (_u *AgentUpdate) ClearContainerStatus() *AgentUpdate {
 	return _u
 }
 
+// SetExitCode sets the "exit_code" field.
+func (_u *AgentUpdate) SetExitCode(v int) *AgentUpdate {
+	_u.mutation.ResetExitCode()
+	_u.mutation.SetExitCode(v)
+	return _u
+}
+
+// SetNillableExitCode sets the "exit_code" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableExitCode(v *int) *AgentUpdate {
+	if v != nil {
+		_u.SetExitCode(*v)
+	}
+	return _u
+}
+
+// AddExitCode adds value to the "exit_code" field.
+func (_u *AgentUpdate) AddExitCode(v int) *AgentUpdate {
+	_u.mutation.AddExitCode(v)
+	return _u
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (_u *AgentUpdate) ClearExitCode() *AgentUpdate {
+	_u.mutation.ClearExitCode()
+	return _u
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (_u *AgentUpdate) SetExitReason(v string) *AgentUpdate {
+	_u.mutation.SetExitReason(v)
+	return _u
+}
+
+// SetNillableExitReason sets the "exit_reason" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableExitReason(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetExitReason(*v)
+	}
+	return _u
+}
+
+// ClearExitReason clears the value of the "exit_reason" field.
+func (_u *AgentUpdate) ClearExitReason() *AgentUpdate {
+	_u.mutation.ClearExitReason()
+	return _u
+}
+
 // SetRuntimeState sets the "runtime_state" field.
 func (_u *AgentUpdate) SetRuntimeState(v string) *AgentUpdate {
 	_u.mutation.SetRuntimeState(v)
@@ -909,6 +956,21 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.ContainerStatusCleared() {
 		_spec.ClearField(agent.FieldContainerStatus, field.TypeString)
 	}
+	if value, ok := _u.mutation.ExitCode(); ok {
+		_spec.SetField(agent.FieldExitCode, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedExitCode(); ok {
+		_spec.AddField(agent.FieldExitCode, field.TypeInt, value)
+	}
+	if _u.mutation.ExitCodeCleared() {
+		_spec.ClearField(agent.FieldExitCode, field.TypeInt)
+	}
+	if value, ok := _u.mutation.ExitReason(); ok {
+		_spec.SetField(agent.FieldExitReason, field.TypeString, value)
+	}
+	if _u.mutation.ExitReasonCleared() {
+		_spec.ClearField(agent.FieldExitReason, field.TypeString)
+	}
 	if value, ok := _u.mutation.RuntimeState(); ok {
 		_spec.SetField(agent.FieldRuntimeState, field.TypeString, value)
 	}
@@ -1434,6 +1496,53 @@ func (_u *AgentUpdateOne) SetNillableContainerStatus(v *string) *AgentUpdateOne 
 // ClearContainerStatus clears the value of the "container_status" field.
 func (_u *AgentUpdateOne) ClearContainerStatus() *AgentUpdateOne {
 	_u.mutation.ClearContainerStatus()
+	return _u
+}
+
+// SetExitCode sets the "exit_code" field.
+func (_u *AgentUpdateOne) SetExitCode(v int) *AgentUpdateOne {
+	_u.mutation.ResetExitCode()
+	_u.mutation.SetExitCode(v)
+	return _u
+}
+
+// SetNillableExitCode sets the "exit_code" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableExitCode(v *int) *AgentUpdateOne {
+	if v != nil {
+		_u.SetExitCode(*v)
+	}
+	return _u
+}
+
+// AddExitCode adds value to the "exit_code" field.
+func (_u *AgentUpdateOne) AddExitCode(v int) *AgentUpdateOne {
+	_u.mutation.AddExitCode(v)
+	return _u
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (_u *AgentUpdateOne) ClearExitCode() *AgentUpdateOne {
+	_u.mutation.ClearExitCode()
+	return _u
+}
+
+// SetExitReason sets the "exit_reason" field.
+func (_u *AgentUpdateOne) SetExitReason(v string) *AgentUpdateOne {
+	_u.mutation.SetExitReason(v)
+	return _u
+}
+
+// SetNillableExitReason sets the "exit_reason" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableExitReason(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetExitReason(*v)
+	}
+	return _u
+}
+
+// ClearExitReason clears the value of the "exit_reason" field.
+func (_u *AgentUpdateOne) ClearExitReason() *AgentUpdateOne {
+	_u.mutation.ClearExitReason()
 	return _u
 }
 
@@ -2073,6 +2182,21 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.ContainerStatusCleared() {
 		_spec.ClearField(agent.FieldContainerStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExitCode(); ok {
+		_spec.SetField(agent.FieldExitCode, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedExitCode(); ok {
+		_spec.AddField(agent.FieldExitCode, field.TypeInt, value)
+	}
+	if _u.mutation.ExitCodeCleared() {
+		_spec.ClearField(agent.FieldExitCode, field.TypeInt)
+	}
+	if value, ok := _u.mutation.ExitReason(); ok {
+		_spec.SetField(agent.FieldExitReason, field.TypeString, value)
+	}
+	if _u.mutation.ExitReasonCleared() {
+		_spec.ClearField(agent.FieldExitReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.RuntimeState(); ok {
 		_spec.SetField(agent.FieldRuntimeState, field.TypeString, value)

@@ -99,6 +99,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		ToolName:            a.ToolName,
 		ConnectionState:     a.ConnectionState,
 		ContainerStatus:     a.ContainerStatus,
+		ExitCode:            a.ExitCode,
+		ExitReason:          a.ExitReason,
 		RuntimeState:        a.RuntimeState,
 		StalledFromActivity: a.StalledFromActivity,
 		CurrentTurns:        a.CurrentTurns,
@@ -391,6 +393,13 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetVisibility(a.Visibility).
 		SetUpdated(now).
 		SetStateVersion(newVersion)
+
+	if a.ExitCode != nil {
+		update.SetExitCode(*a.ExitCode)
+	} else {
+		update.ClearExitCode()
+	}
+	update.SetExitReason(a.ExitReason)
 
 	if a.Labels != nil {
 		update.SetLabels(a.Labels)
@@ -692,6 +701,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetMessage("")
 		}
 		upd.SetStalledFromActivity("")
+		upd.ClearExitCode()
+		upd.SetExitReason("")
 	}
 
 	if su.Message != "" {
@@ -702,6 +713,12 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 	if su.ContainerStatus != "" {
 		upd.SetContainerStatus(su.ContainerStatus)
+	}
+	if su.ExitCode != nil {
+		upd.SetExitCode(*su.ExitCode)
+	}
+	if su.ExitReason != "" {
+		upd.SetExitReason(su.ExitReason)
 	}
 	if su.RuntimeState != "" {
 		upd.SetRuntimeState(su.RuntimeState)

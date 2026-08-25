@@ -582,7 +582,9 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		phase = info.Phase
 		status = info.Phase
 	} else {
-		// Legacy fallback: derive phase and status from container status
+		// Legacy fallback: derive phase from ContainerStatus for runtimes
+		// that don't populate Phase directly. All current runtimes populate
+		// Phase as of #1257, but this remains for backward compatibility.
 		switch {
 		case info.ContainerStatus == "":
 			phase = string(state.PhaseCreated)
@@ -639,7 +641,8 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 	return resp
 }
 
-// containsAny checks if s contains any of the substrings (case-insensitive).
+// containsAny is used by the legacy ContainerStatus-to-Phase fallback.
+// It checks if s contains any of the substrings (case-insensitive).
 func containsAny(s string, substrs ...string) bool {
 	s = strings.ToLower(s)
 	for _, sub := range substrs {

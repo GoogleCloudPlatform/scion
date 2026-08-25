@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -225,7 +226,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			}
 		}
 
-		agents = append(agents, api.AgentInfo{
+		info := api.AgentInfo{
 			ContainerID:     c.Configuration.ID,
 			Name:            c.Configuration.Labels["scion.name"],
 			Template:        c.Configuration.Labels["scion.template"],
@@ -240,7 +241,15 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			Phase:           phaseFromContainerStatus(c.Status.State),
 			Image:           c.Configuration.Image.Reference,
 			Runtime:         r.Name(),
-		})
+		}
+		if code, ok := ExitCodeFromContainerStatus(c.Status.State); ok {
+			ec := code
+			info.ExitCode = &ec
+			if code != 0 {
+				info.ExitReason = string(state.ExitReasonCrashed)
+			}
+		}
+		agents = append(agents, info)
 	}
 
 	return agents, nil
@@ -271,8 +280,7 @@ func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Check if running
-	status := strings.ToLower(a.ContainerStatus)
-	if !strings.HasPrefix(status, "up") && status != "running" {
+	if a.Phase != string(state.PhaseRunning) {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, a.ContainerStatus, id)
 	}
 

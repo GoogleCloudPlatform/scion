@@ -46,6 +46,8 @@ type Agent struct {
 	ConnectionState string `json:"connectionState,omitempty"` // connected, disconnected, unknown
 	ContainerStatus string `json:"containerStatus,omitempty"` // Container-level status
 	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
+	ExitCode        *int   `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
+	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason: "crashed" or "limits_exceeded"
 
 	// Limits tracking (updated by sciontool status reports)
 	CurrentTurns      int       `json:"currentTurns,omitempty"`
@@ -1914,6 +1916,8 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		Activity:        a.Activity,
 		ContainerStatus: a.ContainerStatus,
 		RuntimeState:    a.RuntimeState,
+		ExitCode:        a.ExitCode,
+		ExitReason:      a.ExitReason,
 
 		// Runtime configuration
 		Image:           a.Image,

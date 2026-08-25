@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -317,7 +318,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				name = c.Names[0]
 			}
 
-			agents = append(agents, api.AgentInfo{
+			info := api.AgentInfo{
 				ContainerID:     c.Id,
 				Name:            name,
 				ContainerStatus: c.Status,
@@ -332,7 +333,15 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
 				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
-			})
+			}
+			if code, ok := ExitCodeFromContainerStatus(c.Status); ok {
+				ec := code
+				info.ExitCode = &ec
+				if code != 0 {
+					info.ExitReason = string(state.ExitReasonCrashed)
+				}
+			}
+			agents = append(agents, info)
 		}
 	}
 
@@ -365,8 +374,7 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Check if running
-	status := strings.ToLower(agent.ContainerStatus)
-	if !strings.HasPrefix(status, "up") && status != "running" {
+	if agent.Phase != string(state.PhaseRunning) {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 

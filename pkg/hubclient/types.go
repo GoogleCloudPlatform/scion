@@ -58,6 +58,8 @@ type Agent struct {
 	OwnerID           string            `json:"ownerId,omitempty"`
 	Visibility        string            `json:"visibility,omitempty"`
 	StateVersion      int64             `json:"stateVersion,omitempty"`
+	ExitCode          *int              `json:"exitCode,omitempty"`
+	ExitReason        string            `json:"exitReason,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.

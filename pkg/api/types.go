@@ -579,6 +579,8 @@ type AgentInfo struct {
 	ContainerStatus string       `json:"containerStatus,omitempty"` // Container status (e.g., Up 2 hours)
 	Phase           string       `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
 	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
+	ExitCode        *int         `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
+	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason: "crashed" or "limits_exceeded"
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 
 	// Runtime configuration

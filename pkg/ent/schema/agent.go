@@ -87,6 +87,11 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("container_status").
 			Optional(),
+		field.Int("exit_code").
+			Optional().
+			Nillable(),
+		field.String("exit_reason").
+			Optional(),
 		field.String("runtime_state").
 			Optional(),
 		field.String("stalled_from_activity").

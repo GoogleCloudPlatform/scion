@@ -60,6 +60,8 @@ var (
 		{Name: "tool_name", Type: field.TypeString, Nullable: true},
 		{Name: "connection_state", Type: field.TypeString, Nullable: true},
 		{Name: "container_status", Type: field.TypeString, Nullable: true},
+		{Name: "exit_code", Type: field.TypeInt, Nullable: true},
+		{Name: "exit_reason", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_state", Type: field.TypeString, Nullable: true},
 		{Name: "stalled_from_activity", Type: field.TypeString, Nullable: true},
 		{Name: "current_turns", Type: field.TypeInt, Default: 0},
@@ -91,7 +93,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[37]},
+				Columns:    []*schema.Column{AgentsColumns[39]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -100,7 +102,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[37]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[39]},
 			},
 		},
 	}

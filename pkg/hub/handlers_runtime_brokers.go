@@ -618,6 +618,8 @@ type brokerAgentHeartbeat struct {
 	Message         string `json:"message,omitempty"`     // Error or status message from agent
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
+	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
@@ -710,20 +712,46 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					hbPhase := state.Phase(agentHB.Phase)
 					curPhase := state.Phase(agent.Phase)
 
-					// Derive a crash from the container exit code even when the
-					// broker reports a plain "stopped" (its phase derivation is
-					// based on the container being exited, not on the exit code).
-					// A non-zero exit means the agent crashed → error, with the
-					// exit code recorded so the UI can show it. This works even
-					// if sciontool's own crash report never reached the hub.
-					if hbPhase == state.PhaseStopped {
-						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
-							hbPhase = state.PhaseError
-							agentHB.Phase = string(state.PhaseError)
-							c := code
-							statusUpdate.ExitCode = &c
+					// Derive a crash from the exit code even when the broker
+					// reports a plain "stopped". Prefer the structured ExitCode
+					// field; fall back to parsing ContainerStatus for old brokers.
+					if hbPhase == state.PhaseStopped || hbPhase == state.PhaseError {
+						if agentHB.ExitCode != nil && *agentHB.ExitCode != 0 {
+							// crash path
+							if hbPhase == state.PhaseStopped {
+								// Promote PhaseStopped→PhaseError when exit code is non-zero.
+								hbPhase = state.PhaseError
+								agentHB.Phase = string(state.PhaseError)
+							}
+							statusUpdate.ExitCode = agentHB.ExitCode
+							if isValidExitReason(agentHB.ExitReason) {
+								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
+							}
 							if statusUpdate.Message == "" {
-								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
+								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
+							}
+						} else if hbPhase == state.PhaseStopped && agentHB.ExitCode == nil {
+							// Legacy fallback: parse from ContainerStatus string (old broker).
+							// Only applies to PhaseStopped — PhaseError already has the correct phase.
+							if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
+								hbPhase = state.PhaseError
+								agentHB.Phase = string(state.PhaseError)
+								c := code
+								statusUpdate.ExitCode = &c
+								if statusUpdate.Message == "" {
+									statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
+								}
+							}
+						} else {
+							// PhaseStopped with ExitCode == 0 (clean exit) or
+							// PhaseError with nil/zero ExitCode: persist what we have.
+							statusUpdate.ExitCode = agentHB.ExitCode
+							if isValidExitReason(agentHB.ExitReason) {
+								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
 						}
 					}
@@ -769,7 +797,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					case strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped":
 						// A non-zero exit code means the agent crashed → error
 						// (restartable); a zero/absent code is a clean stop.
-						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
 							statusUpdate.Phase = string(state.PhaseError)
 							c := code
 							statusUpdate.ExitCode = &c
@@ -787,6 +815,27 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						if agent.Phase != string(state.PhaseRunning) {
 							statusUpdate.Phase = string(state.PhaseProvisioning)
 						}
+					}
+				}
+			}
+
+			// If the broker didn't send a ContainerStatus but we have structured
+			// fields, render a display string for backward-compatible clients.
+			if statusUpdate.ContainerStatus == "" && agentHB.ContainerStatus == "" {
+				if statusUpdate.Phase != "" {
+					switch state.Phase(statusUpdate.Phase) {
+					case state.PhaseRunning:
+						statusUpdate.ContainerStatus = "running"
+					case state.PhaseStopped:
+						statusUpdate.ContainerStatus = "stopped"
+					case state.PhaseError:
+						if statusUpdate.ExitCode != nil {
+							statusUpdate.ContainerStatus = fmt.Sprintf("exited (%d)", *statusUpdate.ExitCode)
+						} else {
+							statusUpdate.ContainerStatus = "exited"
+						}
+					case state.PhaseProvisioning:
+						statusUpdate.ContainerStatus = "created"
 					}
 				}
 			}
@@ -895,4 +944,9 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	writeJSON(w, http.StatusOK, ListBrokerProjectsResponse{
 		Projects: projects,
 	})
+}
+
+// isValidExitReason reports whether reason is a valid ExitReason value.
+func isValidExitReason(reason string) bool {
+	return state.ExitReason(reason).IsValid()
 }
