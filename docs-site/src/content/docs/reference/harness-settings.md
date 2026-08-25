@@ -166,6 +166,7 @@ Templates are evaluated **on the host (broker)** *before* the container starts. 
 
 | Variable | Description |
 | :--- | :--- |
+| `{{ .AgentName }}` | The name (slug) of the agent being started. |
 | `{{ .AgentHome }}` | The absolute path to the agent's home directory on the **host machine**. |
 
 Use `env_template` sparingly to pass host-side paths to the container (e.g., passing a socket path that is bind-mounted). Do **not** use it to reference paths inside the container, as they will evaluate to the host path instead. Use the standard `env` map for static or container-side environment variables.
