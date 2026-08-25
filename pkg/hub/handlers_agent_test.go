@@ -5225,12 +5225,12 @@ func TestBrokerHeartbeat_BackfillsContainerStatusFromStructuredPhase(t *testing.
 	zero := 0
 	nonZero := 137
 	cases := []struct {
-		name                 string
-		initialPhase         string // agent's initial phase in store
-		hbPhase              string
-		hbExitCode           *int
-		wantContainerStatus  string
-		wantPhase            string
+		name                string
+		initialPhase        string // agent's initial phase in store
+		hbPhase             string
+		hbExitCode          *int
+		wantContainerStatus string
+		wantPhase           string
 	}{
 		{
 			name:                "running phase backfills running",
