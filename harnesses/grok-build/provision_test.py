@@ -847,12 +847,12 @@ class VertexAIAuthTest(unittest.TestCase):
         super().setUp()
         self._saved_env = {}
         for key in list(os.environ):
-            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL")):
+            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL", "SCION_METADATA_")):
                 self._saved_env[key] = os.environ.pop(key)
 
     def tearDown(self) -> None:
         for key in list(os.environ):
-            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL")):
+            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL", "SCION_METADATA_")):
                 os.environ.pop(key, None)
         os.environ.update(self._saved_env)
         super().tearDown()
@@ -1198,6 +1198,55 @@ class VertexAIAuthTest(unittest.TestCase):
                 os.environ.pop("SCION_MODEL", None)
             self.assertIn("xai/grok-4.2", content)
             self.assertNotIn("xai/grok-4.6", content)
+
+    def test_vertex_detected_from_metadata_project_id(self) -> None:
+        """GCP identity's SCION_METADATA_PROJECT_ID triggers vertex-ai auth."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["SCION_METADATA_PROJECT_ID"],
+                    "env_secret_files": {},
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            with temporary_home(tmp):
+                resolved = ctx.select_auth(provision.AUTH)
+            self.assertEqual(resolved.method, "vertex-ai")
+
+    def test_vertex_uses_metadata_project_id_fallback(self) -> None:
+        """Falls back to SCION_METADATA_PROJECT_ID when GOOGLE_CLOUD_PROJECT is absent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            # No GOOGLE_CLOUD_PROJECT secret file — only SCION_METADATA_PROJECT_ID
+            # is available via the environment (injected by the platform).
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["SCION_METADATA_PROJECT_ID"],
+                    "env_secret_files": {},
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ["SCION_METADATA_PROJECT_ID"] = "my-assigned-project"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_METADATA_PROJECT_ID", None)
+            # The project from SCION_METADATA_PROJECT_ID should appear in config.
+            self.assertIn("my-assigned-project", content)
+            # GOOGLE_CLOUD_PROJECT should be exported for downstream tools.
+            self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "my-assigned-project")
 
     def test_vertex_empty_project_raises(self) -> None:
         """When GOOGLE_CLOUD_PROJECT is empty, ProvisionError is raised."""

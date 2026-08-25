@@ -64,7 +64,7 @@ AUTH = scion_harness.AuthSpec(
         ),
         scion_harness.env_method(
             "vertex-ai",
-            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=["GOOGLE_CLOUD_PROJECT", "SCION_METADATA_PROJECT_ID"],
             hint="set GOOGLE_CLOUD_PROJECT for Vertex AI model routing",
         ),
     ],
@@ -136,6 +136,10 @@ def _configure_vertex_ai(
       - [models] default = "vertex-grok"
     """
     project = _read_token(ctx, "GOOGLE_CLOUD_PROJECT")
+    if not project:
+        # Fallback: when GCP identity is assigned, the platform injects the
+        # project ID as SCION_METADATA_PROJECT_ID.
+        project = os.environ.get("SCION_METADATA_PROJECT_ID", "").strip()
     if not project:
         raise scion_harness.ProvisionError(
             "vertex-ai auth selected but GOOGLE_CLOUD_PROJECT is empty"
