@@ -194,6 +194,63 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 	return nil
 }
 
+// UpdateSecretMeta updates only metadata columns of an existing secret without
+// touching the encrypted value. The version is incremented automatically.
+func (s *SecretStore) UpdateSecretMeta(ctx context.Context, key, scope, scopeID string, meta *store.SecretMetaUpdate) (*store.Secret, error) {
+	// Fetch the existing secret to validate existence and get current state.
+	existing, err := s.GetSecret(ctx, key, scope, scopeID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	existing.Version++
+	existing.Updated = now
+
+	update := s.client.Secret.Update().
+		Where(
+			entsecret.KeyEQ(key),
+			entsecret.ScopeEQ(scope),
+			entsecret.ScopeIDEQ(scopeID),
+		).
+		SetVersion(existing.Version).
+		SetUpdated(now)
+
+	if meta.UpdatedBy != "" {
+		update.SetUpdatedBy(meta.UpdatedBy)
+		existing.UpdatedBy = meta.UpdatedBy
+	}
+	if meta.Description != nil {
+		update.SetDescription(*meta.Description)
+		existing.Description = *meta.Description
+	}
+	if meta.InjectionMode != "" {
+		update.SetInjectionMode(entsecret.InjectionMode(meta.InjectionMode))
+		existing.InjectionMode = meta.InjectionMode
+	}
+	if meta.SecretType != "" {
+		update.SetSecretType(entsecret.SecretType(meta.SecretType))
+		existing.SecretType = meta.SecretType
+	}
+	if meta.Target != "" {
+		update.SetTarget(meta.Target)
+		existing.Target = meta.Target
+	}
+	if meta.AllowProgeny != nil {
+		update.SetAllowProgeny(*meta.AllowProgeny)
+		existing.AllowProgeny = *meta.AllowProgeny
+	}
+
+	n, err := update.Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		return nil, store.ErrNotFound
+	}
+	return existing, nil
+}
+
 // UpsertSecret creates or updates a secret, keyed by (key, scope, scopeID).
 func (s *SecretStore) UpsertSecret(ctx context.Context, secret *store.Secret) (bool, error) {
 	now := time.Now()

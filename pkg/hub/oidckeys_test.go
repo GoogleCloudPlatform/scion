@@ -90,6 +90,10 @@ func (m *oidcMockSecretBackend) GetMeta(_ context.Context, _, _, _ string) (*sec
 	return nil, nil
 }
 
+func (m *oidcMockSecretBackend) UpdateMeta(_ context.Context, _ *secret.UpdateMetaInput) (*secret.SecretMeta, error) {
+	return nil, nil
+}
+
 func (m *oidcMockSecretBackend) Resolve(_ context.Context, _, _, _ string, _ *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	return nil, nil
 }

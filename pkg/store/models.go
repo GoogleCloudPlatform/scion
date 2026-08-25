@@ -1153,6 +1153,17 @@ type Secret struct {
 	UpdatedBy string `json:"updatedBy,omitempty"`
 }
 
+// SecretMetaUpdate contains fields for a metadata-only secret update.
+// Only non-zero fields are applied. The encrypted value is never modified.
+type SecretMetaUpdate struct {
+	Description   *string // pointer: nil = no change, "" = clear
+	InjectionMode string  // "" = no change
+	SecretType    string  // "" = no change
+	Target        string  // "" = no change
+	AllowProgeny  *bool   // pointer: nil = no change
+	UpdatedBy     string
+}
+
 // SecretType constants define how a secret is projected into the agent container.
 const (
 	SecretTypeEnvironment = "environment" // Injected as environment variable (default)

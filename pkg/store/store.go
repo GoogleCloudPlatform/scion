@@ -745,6 +745,11 @@ type SecretStore interface {
 	// Returns ErrNotFound if the secret doesn't exist.
 	GetSecretValue(ctx context.Context, key, scope, scopeID string) (encryptedValue string, err error)
 
+	// UpdateSecretMeta updates metadata fields of an existing secret without
+	// modifying the encrypted value. Increments the version automatically.
+	// Returns the updated secret. Returns ErrNotFound if the secret doesn't exist.
+	UpdateSecretMeta(ctx context.Context, key, scope, scopeID string, meta *SecretMetaUpdate) (*Secret, error)
+
 	// ListProgenySecrets returns user-scoped secrets with allowProgeny=true
 	// whose createdBy is in the given set of ancestor IDs.
 	// Note: EncryptedValue is NOT populated in the returned secrets.

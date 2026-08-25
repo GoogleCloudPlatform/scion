@@ -67,6 +67,10 @@ func (m *migrationSecretBackend) GetMeta(_ context.Context, name, _, _ string) (
 	return &secret.SecretMeta{Name: name}, nil
 }
 
+func (m *migrationSecretBackend) UpdateMeta(_ context.Context, _ *secret.UpdateMetaInput) (*secret.SecretMeta, error) {
+	return nil, nil
+}
+
 func (m *migrationSecretBackend) Resolve(context.Context, string, string, string, *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	return nil, nil
 }

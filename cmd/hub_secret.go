@@ -148,6 +148,25 @@ Examples:
 	RunE: runSecretList,
 }
 
+// hubSecretUpdateCmd updates secret metadata without changing the value
+var hubSecretUpdateCmd = &cobra.Command{
+	Use:   "update KEY",
+	Short: "Update secret metadata",
+	Long: `Update secret metadata without re-entering the secret value.
+
+Only the specified flags are updated; all other fields remain unchanged.
+At least one metadata flag must be provided.
+
+Examples:
+  scion hub secret update API_KEY --description "Production API key"
+  scion hub secret update API_KEY --injection-mode always
+  scion hub secret update API_KEY --type variable
+  scion hub secret update API_KEY --allow-progeny
+  scion hub secret update --project API_KEY --description "Project key"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSecretUpdate,
+}
+
 // hubSecretClearCmd clears a secret
 var hubSecretClearCmd = &cobra.Command{
 	Use:   "clear KEY",
@@ -168,12 +187,13 @@ func init() {
 	hubSecretCmd.AddCommand(hubSecretGetCmd)
 	hubSecretCmd.AddCommand(hubSecretListCmd)
 	hubSecretCmd.AddCommand(hubSecretClearCmd)
+	hubSecretCmd.AddCommand(hubSecretUpdateCmd)
 
 	// Add scope flags to all subcommands.
 	// --scope selects the scope level (hub, user). --project/--broker select their
 	// respective scopes and support both bare usage (infer from settings) and
 	// explicit name/ID via --project=<name|id>.
-	for _, cmd := range []*cobra.Command{hubSecretSetCmd, hubSecretGetCmd, hubSecretListCmd, hubSecretClearCmd} {
+	for _, cmd := range []*cobra.Command{hubSecretSetCmd, hubSecretGetCmd, hubSecretListCmd, hubSecretClearCmd, hubSecretUpdateCmd} {
 		cmd.Flags().StringVar(&secretScope, "scope", "", "Scope level: hub, user (default: user)")
 		cmd.Flags().StringVar(&secretProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
 		cmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
@@ -194,6 +214,13 @@ func init() {
 	hubSecretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
 	hubSecretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Projection target (env var name, json key, or file path; defaults to KEY)")
 	hubSecretSetCmd.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "Allow creator's progeny agents to access this secret (user scope only)")
+
+	// Metadata flags for update command
+	hubSecretUpdateCmd.Flags().StringP("description", "d", "", "Description for the secret")
+	hubSecretUpdateCmd.Flags().String("injection-mode", "", "Injection mode: always or as_needed")
+	hubSecretUpdateCmd.Flags().String("type", "", "Secret type: environment, variable, file")
+	hubSecretUpdateCmd.Flags().String("target", "", "Projection target (env var name, json key, or file path)")
+	hubSecretUpdateCmd.Flags().Bool("allow-progeny", false, "Allow creator's progeny agents to access this secret (user scope only)")
 }
 
 // resolveSecretScope determines the scope and scopeID based on flags.
@@ -530,6 +557,108 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("%-30s  %-12s  %-8s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, progenyLabel, s.Version, s.Updated.Format("2006-01-02 15:04:05"))
 	}
 
+	return nil
+}
+
+func runSecretUpdate(cmd *cobra.Command, args []string) error {
+	key := args[0]
+
+	// Validate key
+	if key == "" {
+		return fmt.Errorf("key cannot be empty")
+	}
+
+	// Check that at least one metadata flag is provided
+	descChanged := cmd.Flags().Changed("description")
+	injectionChanged := cmd.Flags().Changed("injection-mode")
+	typeChanged := cmd.Flags().Changed("type")
+	targetChanged := cmd.Flags().Changed("target")
+	progenyChanged := cmd.Flags().Changed("allow-progeny")
+
+	if !descChanged && !injectionChanged && !typeChanged && !targetChanged && !progenyChanged {
+		return fmt.Errorf("at least one metadata flag must be provided (--description, --injection-mode, --type, --target, --allow-progeny)")
+	}
+
+	// Validate injection-mode if provided
+	injectionMode, _ := cmd.Flags().GetString("injection-mode")
+	if injectionChanged && injectionMode != "always" && injectionMode != "as_needed" {
+		return fmt.Errorf("injection-mode must be \"always\" or \"as_needed\"")
+	}
+
+	// Validate type if provided
+	secretTypeVal, _ := cmd.Flags().GetString("type")
+	if typeChanged {
+		switch secretTypeVal {
+		case "environment", "variable", "file":
+			// valid
+		default:
+			return fmt.Errorf("type must be one of: environment, variable, file")
+		}
+	}
+
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve project path: %w", err)
+	}
+
+	settings, err := config.LoadSettings(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	client, err := getHubClient(settings)
+	if err != nil {
+		return err
+	}
+
+	scope, scopeID, err := resolveSecretScope(cmd, settings)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
+	if err != nil {
+		return err
+	}
+
+	req := &hubclient.UpdateSecretMetaRequest{
+		Scope:   scope,
+		ScopeID: scopeID,
+	}
+
+	if descChanged {
+		desc, _ := cmd.Flags().GetString("description")
+		req.Description = &desc
+	}
+	if injectionChanged {
+		req.InjectionMode = injectionMode
+	}
+	if typeChanged {
+		req.Type = secretTypeVal
+	}
+	if targetChanged {
+		target, _ := cmd.Flags().GetString("target")
+		req.Target = target
+	}
+	if progenyChanged {
+		progeny, _ := cmd.Flags().GetBool("allow-progeny")
+		req.AllowProgeny = &progeny
+	}
+
+	secret, err := client.Secrets().UpdateMeta(ctx, key, req)
+	if err != nil {
+		return fmt.Errorf("failed to update secret metadata: %w", err)
+	}
+
+	typeLabel := secret.SecretType
+	if typeLabel == "" {
+		typeLabel = "environment"
+	}
+
+	fmt.Printf("Updated secret metadata for %s (scope: %s, type: %s, version: %d)\n", key, scope, typeLabel, secret.Version)
 	return nil
 }
 

@@ -46,7 +46,7 @@ export class ScionSecretList extends LitElement {
 
   // Create/Update dialog
   @state() private dialogOpen = false;
-  @state() private dialogMode: 'create' | 'update' = 'create';
+  @state() private dialogMode: 'create' | 'update' | 'edit-settings' = 'create';
   @state() private dialogKey = '';
   @state() private dialogValue = '';
   @state() private dialogDescription = '';
@@ -130,6 +130,19 @@ export class ScionSecretList extends LitElement {
     this.dialogOpen = true;
   }
 
+  private openEditSettingsDialog(secret: Secret): void {
+    this.dialogMode = 'edit-settings';
+    this.dialogKey = secret.key;
+    this.dialogValue = '';
+    this.dialogDescription = secret.description || '';
+    this.dialogType = secret.type;
+    this.dialogTarget = secret.target || '';
+    this.dialogInjectionMode = secret.injectionMode || 'as_needed';
+    this.dialogAllowProgeny = secret.allowProgeny || false;
+    this.dialogError = null;
+    this.dialogOpen = true;
+  }
+
   private closeDialog(): void {
     this.dialogOpen = false;
   }
@@ -143,7 +156,9 @@ export class ScionSecretList extends LitElement {
       return;
     }
 
-    if (!this.dialogValue) {
+    const isEditSettings = this.dialogMode === 'edit-settings';
+
+    if (!isEditSettings && !this.dialogValue) {
       this.dialogError = 'Value is required';
       return;
     }
@@ -152,26 +167,48 @@ export class ScionSecretList extends LitElement {
     this.dialogError = null;
 
     try {
-      const body: Record<string, unknown> = {
-        value: btoa(
-          Array.from(new TextEncoder().encode(this.dialogValue), (b) =>
-            String.fromCharCode(b)
-          ).join('')
-        ),
-        scope: this.scope,
-        description: this.dialogDescription || undefined,
-        type: this.dialogType,
-        target: this.dialogTarget || undefined,
-        injectionMode: this.dialogInjectionMode,
-        allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
-      };
+      let body: Record<string, unknown>;
+      let method: string;
+
+      if (isEditSettings) {
+        // PATCH: metadata-only update, no value
+        body = {
+          description: this.dialogDescription,
+          type: this.dialogType,
+          target: this.dialogTarget || undefined,
+          injectionMode: this.dialogInjectionMode,
+          allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
+        };
+        method = 'PATCH';
+      } else {
+        // PUT: full update including value
+        body = {
+          value: btoa(
+            Array.from(new TextEncoder().encode(this.dialogValue), (b) =>
+              String.fromCharCode(b)
+            ).join('')
+          ),
+          scope: this.scope,
+          description: this.dialogDescription || undefined,
+          type: this.dialogType,
+          target: this.dialogTarget || undefined,
+          injectionMode: this.dialogInjectionMode,
+          allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
+        };
+        method = 'PUT';
+      }
 
       if (this.scope === 'project') {
         body.scopeId = this.scopeId;
       }
 
-      const response = await apiFetch(`${this.apiBasePath}/secrets/${encodeURIComponent(key)}`, {
-        method: 'PUT',
+      const url =
+        isEditSettings && this.scope !== 'project'
+          ? `${this.apiBasePath}/secrets/${encodeURIComponent(key)}?scope=${this.scope}`
+          : `${this.apiBasePath}/secrets/${encodeURIComponent(key)}`;
+
+      const response = await apiFetch(url, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -417,6 +454,12 @@ export class ScionSecretList extends LitElement {
         </td>
         <td class="actions-cell">
           <sl-icon-button
+            name="pencil"
+            label="Edit settings"
+            ?disabled=${isDeleting}
+            @click=${() => this.openEditSettingsDialog(secret)}
+          ></sl-icon-button>
+          <sl-icon-button
             name="arrow-clockwise"
             label="Update value"
             ?disabled=${isDeleting}
@@ -456,7 +499,12 @@ export class ScionSecretList extends LitElement {
 
   private renderDialog() {
     const isCreate = this.dialogMode === 'create';
-    const title = isCreate ? 'Add Secret' : 'Update Secret';
+    const isEditSettings = this.dialogMode === 'edit-settings';
+    const title = isEditSettings
+      ? 'Edit Secret Settings'
+      : isCreate
+        ? 'Add Secret'
+        : 'Update Secret';
 
     return html`
       <sl-dialog label=${title} ?open=${this.dialogOpen} @sl-request-close=${this.closeDialog}>
@@ -472,38 +520,42 @@ export class ScionSecretList extends LitElement {
             required
           ></sl-input>
 
-          ${this.dialogType === 'file'
-            ? html`
-                <sl-textarea
-                  class="secret-value"
-                  label="Value"
-                  placeholder="Paste file contents (e.g. private key)"
-                  value=${this.dialogValue}
-                  rows="6"
-                  resize="vertical"
-                  @sl-input=${(e: Event) => {
-                    this.dialogValue = (e.target as HTMLTextAreaElement).value;
-                  }}
-                  required
-                ></sl-textarea>
-              `
-            : html`
-                <sl-input
-                  label="Value"
-                  placeholder="Secret value"
-                  value=${this.dialogValue}
-                  type="password"
-                  @sl-input=${(e: Event) => {
-                    this.dialogValue = (e.target as HTMLInputElement).value;
-                  }}
-                  required
-                ></sl-input>
-              `}
+          ${isEditSettings
+            ? nothing
+            : this.dialogType === 'file'
+              ? html`
+                  <sl-textarea
+                    class="secret-value"
+                    label="Value"
+                    placeholder="Paste file contents (e.g. private key)"
+                    value=${this.dialogValue}
+                    rows="6"
+                    resize="vertical"
+                    @sl-input=${(e: Event) => {
+                      this.dialogValue = (e.target as HTMLTextAreaElement).value;
+                    }}
+                    required
+                  ></sl-textarea>
+                `
+              : html`
+                  <sl-input
+                    label="Value"
+                    placeholder="Secret value"
+                    value=${this.dialogValue}
+                    type="password"
+                    @sl-input=${(e: Event) => {
+                      this.dialogValue = (e.target as HTMLInputElement).value;
+                    }}
+                    required
+                  ></sl-input>
+                `}
 
-          <div class="dialog-hint">
-            <sl-icon name="info-circle"></sl-icon>
-            Secret values are encrypted and can never be retrieved after saving.
-          </div>
+          ${isEditSettings
+            ? nothing
+            : html`<div class="dialog-hint">
+                <sl-icon name="info-circle"></sl-icon>
+                Secret values are encrypted and can never be retrieved after saving.
+              </div>`}
 
           <sl-select
             label="Type"
@@ -591,7 +643,7 @@ export class ScionSecretList extends LitElement {
           ?disabled=${this.dialogLoading}
           @click=${this.handleSave}
         >
-          ${isCreate ? 'Create' : 'Update'}
+          ${isCreate ? 'Create' : isEditSettings ? 'Save' : 'Update'}
         </sl-button>
       </sl-dialog>
     `;

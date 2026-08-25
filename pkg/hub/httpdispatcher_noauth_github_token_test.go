@@ -74,6 +74,10 @@ func (m *mockGitTokenSecretBackend) GetMeta(_ context.Context, _, _, _ string) (
 	return nil, nil
 }
 
+func (m *mockGitTokenSecretBackend) UpdateMeta(_ context.Context, _ *secret.UpdateMetaInput) (*secret.SecretMeta, error) {
+	return nil, nil
+}
+
 func (m *mockGitTokenSecretBackend) Resolve(_ context.Context, _, _, _ string, _ *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	return m.secrets, nil
 }

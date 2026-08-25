@@ -228,6 +228,24 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	return created, meta, nil
 }
 
+func (b *GCPBackend) UpdateMeta(ctx context.Context, input *UpdateMetaInput) (*SecretMeta, error) {
+	// Metadata-only update: only modify the Hub DB record.
+	// Do NOT create a new GCP SM version — the secret value is unchanged.
+	meta := &store.SecretMetaUpdate{
+		Description:   input.Description,
+		InjectionMode: input.InjectionMode,
+		SecretType:    input.SecretType,
+		Target:        input.Target,
+		AllowProgeny:  input.AllowProgeny,
+		UpdatedBy:     input.UpdatedBy,
+	}
+	updated, err := b.store.UpdateSecretMeta(ctx, input.Name, input.Scope, input.ScopeID, meta)
+	if err != nil {
+		return nil, err
+	}
+	return fromStoreSecretMeta(updated), nil
+}
+
 func (b *GCPBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
 	smName := b.gcpSecretName(name, scope, scopeID)
 	fullName := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
