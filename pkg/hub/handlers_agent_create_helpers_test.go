@@ -829,3 +829,143 @@ func TestResumeInPlaceDecision(t *testing.T) {
 		})
 	}
 }
+
+// TestHasAnyKey_ProgenySecretResolution verifies that hasAnyKey correctly finds
+// allowProgeny secrets inherited through a progeny agent's ancestry chain.
+func TestHasAnyKey_ProgenySecretResolution(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("hak-user-1")
+	parentAgentID := tid("hak-parent-agent")
+	childAgentID := tid("hak-child-agent")
+
+	// Create a user-scoped secret with AllowProgeny=true, created by the user.
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             tid("sec-progeny-apikey"),
+		Key:            "ANTHROPIC_API_KEY",
+		EncryptedValue: "encrypted-value",
+		SecretType:     store.SecretTypeEnvironment,
+		Scope:          store.ScopeUser,
+		ScopeID:        userID,
+		AllowProgeny:   true,
+		CreatedBy:      userID,
+		InjectionMode:  store.InjectionModeAsNeeded,
+	}))
+
+	t.Run("progeny agent finds inherited secret", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:            childAgentID,
+			OwnerID:       parentAgentID, // Not the user — this is the bug scenario
+			Ancestry:      []string{childAgentID, parentAgentID, userID},
+			AppliedConfig: &store.AgentAppliedConfig{},
+		}
+
+		found, err := srv.hasAnyKey(ctx, agent, []string{"ANTHROPIC_API_KEY"})
+		require.NoError(t, err)
+		assert.True(t, found,
+			"progeny agent should find allowProgeny secret via ancestry")
+	})
+
+	t.Run("direct agent finds own secret", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:            tid("hak-direct-agent"),
+			OwnerID:       userID, // Direct user ownership
+			Ancestry:      []string{tid("hak-direct-agent")},
+			AppliedConfig: &store.AgentAppliedConfig{},
+		}
+
+		found, err := srv.hasAnyKey(ctx, agent, []string{"ANTHROPIC_API_KEY"})
+		require.NoError(t, err)
+		assert.True(t, found,
+			"direct agent should find secret via OwnerID lookup")
+	})
+
+	t.Run("progeny agent without matching secret returns false", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:            childAgentID,
+			OwnerID:       parentAgentID,
+			Ancestry:      []string{childAgentID, parentAgentID, userID},
+			AppliedConfig: &store.AgentAppliedConfig{},
+		}
+
+		found, err := srv.hasAnyKey(ctx, agent, []string{"NONEXISTENT_KEY"})
+		require.NoError(t, err)
+		assert.False(t, found,
+			"progeny agent should not find nonexistent key")
+	})
+}
+
+// TestHasAnyKey_ProgenyEnvVarResolution verifies that hasAnyKey correctly finds
+// allowProgeny env vars inherited through a progeny agent's ancestry chain.
+func TestHasAnyKey_ProgenyEnvVarResolution(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("hak-ev-user-1")
+	parentAgentID := tid("hak-ev-parent-agent")
+	childAgentID := tid("hak-ev-child-agent")
+
+	// Create a user-scoped env var with AllowProgeny=true.
+	require.NoError(t, st.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-progeny-key"),
+		Key:           "GEMINI_API_KEY",
+		Value:         "gemini-value",
+		Scope:         store.ScopeUser,
+		ScopeID:       userID,
+		AllowProgeny:  true,
+		CreatedBy:     userID,
+		InjectionMode: store.InjectionModeAlways,
+	}))
+
+	t.Run("progeny agent finds inherited env var", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:            childAgentID,
+			OwnerID:       parentAgentID,
+			Ancestry:      []string{childAgentID, parentAgentID, userID},
+			AppliedConfig: &store.AgentAppliedConfig{},
+		}
+
+		found, err := srv.hasAnyKey(ctx, agent, []string{"GEMINI_API_KEY"})
+		require.NoError(t, err)
+		assert.True(t, found,
+			"progeny agent should find allowProgeny env var via ancestry")
+	})
+}
+
+// TestHasAnyKey_NoProgenyForDirectAgent verifies that the progeny code path
+// does not fire for direct agents (ancestry length <= 1).
+func TestHasAnyKey_NoProgenyForDirectAgent(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("hak-noprog-user")
+	otherUserID := tid("hak-noprog-other")
+
+	// Create a secret owned by otherUser with AllowProgeny=true.
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             tid("sec-noprog"),
+		Key:            "SECRET_KEY",
+		EncryptedValue: "encrypted",
+		SecretType:     store.SecretTypeEnvironment,
+		Scope:          store.ScopeUser,
+		ScopeID:        otherUserID,
+		AllowProgeny:   true,
+		CreatedBy:      otherUserID,
+		InjectionMode:  store.InjectionModeAsNeeded,
+	}))
+
+	t.Run("direct agent does not use progeny path", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:            tid("hak-noprog-agent"),
+			OwnerID:       userID, // Different from otherUser
+			Ancestry:      nil,    // No ancestry — direct agent
+			AppliedConfig: &store.AgentAppliedConfig{},
+		}
+
+		found, err := srv.hasAnyKey(ctx, agent, []string{"SECRET_KEY"})
+		require.NoError(t, err)
+		assert.False(t, found,
+			"direct agent should not find secrets via progeny resolution")
+	})
+}
