@@ -1275,5 +1275,93 @@ class VertexAIAuthTest(unittest.TestCase):
                 self.assertIn("GOOGLE_CLOUD_PROJECT", str(cm.exception))
 
 
+# ---------------------------------------------------------------------------
+# Native System Prompt Tests
+# ---------------------------------------------------------------------------
+
+
+class NativeSystemPromptTest(unittest.TestCase):
+    """Test native system prompt routing via _apply_native_system_prompt."""
+
+    def test_system_prompt_written_to_native_file(self) -> None:
+        """System prompt is written to .grok/system-prompt.md when staged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            with open(os.path.join(inputs_dir, "system-prompt.md"), "w") as f:
+                f.write("You are a helpful assistant.\n")
+            ctx = _make_ctx({
+                "harness_bundle_dir": tmp,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": ".grok/AGENTS.md",
+                    "system_prompt_file": ".grok/system-prompt.md",
+                    "system_prompt_mode": "native",
+                    "skills_dir": ".grok/skills",
+                },
+            })
+            with temporary_home(tmp):
+                provision._apply_native_system_prompt(ctx)
+                target = os.path.join(tmp, ".grok", "system-prompt.md")
+                self.assertTrue(os.path.isfile(target))
+                with open(target) as f:
+                    content = f.read()
+                self.assertEqual(content, "You are a helpful assistant.\n")
+
+    def test_system_prompt_not_in_agents_md(self) -> None:
+        """When native routing is used, system prompt is NOT in AGENTS.md."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            with open(os.path.join(inputs_dir, "system-prompt.md"), "w") as f:
+                f.write("You are a system prompt.\n")
+            with open(os.path.join(inputs_dir, "instructions.md"), "w") as f:
+                f.write("Do the thing.\n")
+            ctx = _make_ctx({
+                "harness_bundle_dir": tmp,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": ".grok/AGENTS.md",
+                    "system_prompt_file": ".grok/system-prompt.md",
+                    "system_prompt_mode": "native",
+                    "skills_dir": ".grok/skills",
+                },
+            })
+            with temporary_home(tmp):
+                provision._apply_native_system_prompt(ctx)
+                target = os.path.join(tmp, ".grok", "AGENTS.md")
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                scion_harness.project_instructions(
+                    ctx, target, system_prompt_mode="none",
+                )
+                with open(target) as f:
+                    content = f.read()
+                self.assertIn("Do the thing.", content)
+                self.assertNotIn("You are a system prompt.", content)
+
+    def test_no_system_prompt_file_when_empty(self) -> None:
+        """When no system prompt is staged, .grok/system-prompt.md is not created."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            # Stage an empty system prompt.
+            with open(os.path.join(inputs_dir, "system-prompt.md"), "w") as f:
+                f.write("   \n")
+            ctx = _make_ctx({
+                "harness_bundle_dir": tmp,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": ".grok/AGENTS.md",
+                    "system_prompt_file": ".grok/system-prompt.md",
+                    "system_prompt_mode": "native",
+                    "skills_dir": ".grok/skills",
+                },
+            })
+            with temporary_home(tmp):
+                provision._apply_native_system_prompt(ctx)
+                target = os.path.join(tmp, ".grok", "system-prompt.md")
+                self.assertFalse(os.path.isfile(target))
+
+
 if __name__ == "__main__":
     unittest.main()
