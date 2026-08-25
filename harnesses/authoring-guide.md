@@ -131,6 +131,24 @@ Base flags should put the tool in full-permission, non-interactive-approval
 mode (`--yolo`, `--dangerously-skip-permissions`, `approval_policy = never`,
 etc.) — the agent runs unattended inside a sandboxed container.
 
+> **⚠ Always configure the CLI for interactive/REPL mode.**
+> The Scion runtime manages the terminal session via a PTY, delivers task
+> prompts as input, and expects the tool to stay running for the agent's
+> entire lifetime. `command.base` must launch the CLI in its interactive
+> (REPL) mode — **not** single-prompt or batch mode. Single-prompt flags
+> (e.g. `-p`, `--single`, `--batch`) cause the tool to exit after one task,
+> breaking session management, resume, and follow-up prompts.
+>
+> ```yaml
+> # WRONG — single-prompt mode exits after one task
+> command:
+>   base: ["grok", "-p", "--yolo"]
+>
+> # RIGHT — interactive mode stays running
+> command:
+>   base: ["grok", "--yolo"]
+> ```
+
 ### Prompts, instructions, skills
 
 | Field | Meaning |
