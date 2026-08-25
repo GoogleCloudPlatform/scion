@@ -96,13 +96,18 @@ auth:
       required_files:
         - name: gcloud-adc
           type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
           field: GoogleAppCredentials
           target_suffix: "/.config/gcloud/application_default_credentials.json"
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
   autodetect:
     env:
       XAI_API_KEY: api-key
       GOOGLE_CLOUD_PROJECT: vertex-ai
       SCION_METADATA_PROJECT_ID: vertex-ai
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
     files:
       GROK_AUTH: auth-file
       gcloud-adc: vertex-ai
