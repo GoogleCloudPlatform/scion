@@ -553,9 +553,9 @@ type SetSecretResponse struct {
 type PatchSecretRequest struct {
 	Description   *string `json:"description"`             // null = no change, "" = clear
 	InjectionMode string  `json:"injectionMode,omitempty"` // "" = no change
-	Type          string  `json:"type,omitempty"`           // "" = no change
-	Target        string  `json:"target,omitempty"`         // "" = no change
-	AllowProgeny  *bool   `json:"allowProgeny,omitempty"`   // null = no change
+	Type          string  `json:"type,omitempty"`          // "" = no change
+	Target        string  `json:"target,omitempty"`        // "" = no change
+	AllowProgeny  *bool   `json:"allowProgeny,omitempty"`  // null = no change
 }
 
 // metaToStoreSecret converts a secret.SecretMeta to a store.Secret for API response compatibility.
@@ -2025,6 +2025,14 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
+		// allowProgeny is only valid on user-scoped secrets
+		if req.AllowProgeny != nil && *req.AllowProgeny {
+			ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
+				"field": "allowProgeny",
+				"scope": store.ScopeProject,
+			})
+			return
+		}
 		patchInput := &secret.UpdateMetaInput{
 			Name:          key,
 			Scope:         store.ScopeProject,
@@ -2744,6 +2752,14 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": req.Target})
 				return
 			}
+		}
+		// allowProgeny is only valid on user-scoped secrets
+		if req.AllowProgeny != nil && *req.AllowProgeny {
+			ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
+				"field": "allowProgeny",
+				"scope": store.ScopeRuntimeBroker,
+			})
+			return
 		}
 		patchInput := &secret.UpdateMetaInput{
 			Name:          key,

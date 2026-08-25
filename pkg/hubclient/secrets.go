@@ -113,13 +113,13 @@ type AgentSetSecretResponse struct {
 // UpdateSecretMetaRequest is the request for metadata-only secret updates (PATCH).
 // Only non-null/non-empty fields are applied. The secret value is never modified.
 type UpdateSecretMetaRequest struct {
-	Description   *string `json:"description,omitempty"`    // null = no change, "" = clear
-	InjectionMode string  `json:"injectionMode,omitempty"`  // "" = no change
-	Type          string  `json:"type,omitempty"`            // "" = no change
-	Target        string  `json:"target,omitempty"`          // "" = no change
-	AllowProgeny  *bool   `json:"allowProgeny,omitempty"`    // null = no change
-	Scope         string  `json:"scope,omitempty"`           // Scope type (default: user)
-	ScopeID       string  `json:"scopeId,omitempty"`         // Required for project/runtime_broker scope
+	Description   *string `json:"description,omitempty"`   // null = no change, "" = clear
+	InjectionMode string  `json:"injectionMode,omitempty"` // "" = no change
+	Type          string  `json:"type,omitempty"`          // "" = no change
+	Target        string  `json:"target,omitempty"`        // "" = no change
+	AllowProgeny  *bool   `json:"allowProgeny,omitempty"`  // null = no change
+	Scope         string  `json:"scope,omitempty"`         // Scope type (default: user)
+	ScopeID       string  `json:"scopeId,omitempty"`       // Required for project/runtime_broker scope
 }
 
 // List returns secret metadata for the specified scope.
