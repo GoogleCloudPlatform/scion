@@ -270,6 +270,9 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 func TestOutboundMessageTimestampIsUTC(t *testing.T) {
 	// On a UTC host local time IS UTC and the assertion below cannot fire, so
 	// the test would guard nothing on CI. Pin a non-UTC zone for its duration.
+	// time.Local is process-global, so this test must stay non-parallel (no
+	// t.Parallel): go test runs a package's tests sequentially by default, and
+	// t.Cleanup restores the zone before any later test observes it.
 	origLocal := time.Local
 	time.Local = time.FixedZone("TST", 2*60*60)
 	t.Cleanup(func() { time.Local = origLocal })

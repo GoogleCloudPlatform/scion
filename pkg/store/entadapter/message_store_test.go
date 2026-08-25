@@ -200,3 +200,49 @@ func TestCreateMessagePublishesEvent(t *testing.T) {
 	require.Len(t, pub.published, 1)
 	assert.Equal(t, msg.ID, pub.published[0].ID)
 }
+
+// TestCreateMessageReturnsUTCWhenCreatedAtZero covers the return path when the
+// caller supplies no timestamp and the ent schema default (local time) fills
+// it in. CreateMessage announces and hands back this same object, so a local
+// zone here would serialize a stale offset. See the gemini review on #1263.
+func TestCreateMessageReturnsUTCWhenCreatedAtZero(t *testing.T) {
+	// Pin a non-UTC zone so a missed .UTC() shows a non-zero offset; on a UTC
+	// host the two coincide and the assertion could not fire. time.Local is
+	// process-global — keep this test non-parallel; t.Cleanup restores it.
+	origLocal := time.Local
+	time.Local = time.FixedZone("TST", 2*60*60)
+	t.Cleanup(func() { time.Local = origLocal })
+
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.CreatedAt = time.Time{} // caller supplies no timestamp
+	require.NoError(t, s.CreateMessage(ctx, msg))
+
+	require.False(t, msg.CreatedAt.IsZero())
+	_, offset := msg.CreatedAt.Zone()
+	assert.Equal(t, 0, offset, "returned CreatedAt must be UTC (zero offset), got %s", msg.CreatedAt)
+}
+
+// TestCreateMessageNormalizesNonUTCInputToUTC checks the input path with an
+// explicit non-UTC zone instead of mutating time.Local, so it is parallel-safe
+// and host-independent. It asserts the UTC shape of the result and that the
+// instant is preserved (noon at +02:00 is 10:00 UTC). It cannot isolate the
+// post-Save return normalization — the top-of-function input normalization masks
+// it; TestCreateMessageReturnsUTCWhenCreatedAtZero covers that path.
+func TestCreateMessageNormalizesNonUTCInputToUTC(t *testing.T) {
+	t.Parallel()
+
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.CreatedAt = time.Date(2026, 1, 2, 12, 0, 0, 0, time.FixedZone("TST", 2*60*60))
+	require.NoError(t, s.CreateMessage(ctx, msg))
+
+	require.False(t, msg.CreatedAt.IsZero())
+	_, offset := msg.CreatedAt.Zone()
+	assert.Equal(t, 0, offset, "returned CreatedAt must be UTC, got %s", msg.CreatedAt)
+	assert.Equal(t, 10, msg.CreatedAt.UTC().Hour(), "instant must be preserved: 12:00+02:00 == 10:00Z")
+}

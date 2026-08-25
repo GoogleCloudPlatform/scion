@@ -164,7 +164,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	if err != nil {
 		return mapError(err)
 	}
-	msg.CreatedAt = created.Created
+	// Zero input takes the ent default, which is local; normalise the value we
+	// hand back so the announced/serialised message is UTC like every other path.
+	msg.CreatedAt = created.Created.UTC()
 	msg.Type = created.Type
 	msg.DispatchState = created.DispatchState
 
