@@ -30,7 +30,7 @@ provisioner:
 config_dir: .grok
 skills_dir: .grok/skills
 interrupt_key: C-c
-instructions_file: AGENTS.md
+instructions_file: .grok/AGENTS.md
 system_prompt_mode: prepend_to_instructions
 
 model_aliases:
@@ -57,7 +57,7 @@ capabilities:
     enabled: { support: "yes" }
     native_emitter: { support: "yes" }
   prompts:
-    system_prompt: { support: "partial", reason: "System prompt is prepended to AGENTS.md" }
+    system_prompt: { support: "partial", reason: "System prompt is prepended to .grok/AGENTS.md" }
     agent_instructions: { support: "yes" }
   auth:
     api_key: { support: "yes" }
