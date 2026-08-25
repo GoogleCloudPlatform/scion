@@ -297,8 +297,10 @@ func ValidateAuth(resolved *api.ResolvedAuth) error {
 		if f.ContainerPath == "" {
 			return fmt.Errorf("auth validation failed: file mapping for %q has no container path", f.SourcePath)
 		}
-		if _, err := os.Stat(f.SourcePath); err != nil {
-			return fmt.Errorf("auth validation failed: credential file %q does not exist: %w", f.SourcePath, err)
+		if f.SourcePath != "" {
+			if _, err := os.Stat(f.SourcePath); err != nil {
+				return fmt.Errorf("auth validation failed: credential file %q does not exist: %w", f.SourcePath, err)
+			}
 		}
 	}
 
