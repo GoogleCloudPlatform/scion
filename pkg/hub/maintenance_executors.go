@@ -36,10 +36,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"google.golang.org/protobuf/types/known/durationpb"
-	"gopkg.in/yaml.v3"
 )
 
 // MaintenanceExecutor defines the interface for a runnable maintenance operation.
@@ -553,9 +551,21 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 	}
 
-	imageName := hc.Slug
+	// Derive image name from config.yaml's image field (like the CLI does)
+	// to ensure the built image matches what config.yaml declares.
+	imageName := ""
+	if hc.Config != nil && hc.Config.Image != "" {
+		name := hc.Config.Image
+		if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			name = name[:idx]
+		}
+		imageName = name
+	}
 	if imageName == "" {
-		imageName = hc.Name
+		imageName = hc.Slug
+		if imageName == "" {
+			imageName = hc.Name
+		}
 	}
 	outputImage := imageName + ":" + tag
 	_, _ = fmt.Fprintf(logger, "Building %s from harness-config %q...\n", outputImage, hc.Name)
@@ -768,10 +778,21 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 		}
 	}()
 
-	// Build the output image reference.
-	imageName := hc.Slug
+	// Derive image name from config.yaml's image field (like the CLI does)
+	// to ensure the built image matches what config.yaml declares.
+	imageName := ""
+	if hc.Config != nil && hc.Config.Image != "" {
+		name := hc.Config.Image
+		if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			name = name[:idx]
+		}
+		imageName = name
+	}
 	if imageName == "" {
-		imageName = hc.Name
+		imageName = hc.Slug
+		if imageName == "" {
+			imageName = hc.Name
+		}
 	}
 	baseImage := registry + "/scion-base:" + tag
 	outputImage := registry + "/" + imageName + ":" + tag
@@ -901,64 +922,12 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 }
 
-// syncBuiltImage updates the harness config's config.yaml in storage and the
-// DB record to reference the newly-built image. Shared by both local and Cloud
-// Build executors.
+// syncBuiltImage updates the harness config's DB record to reference the
+// newly-built image without modifying config.yaml in storage. The image field
+// in config.yaml is a stable reference; two-phase resolution at agent start
+// prefers local images. This matches the CLI build path's behavior
+// (see cmd/build.go syncBuildToHub).
 func syncBuiltImage(ctx context.Context, stor storage.Storage, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
-	configPath := filepath.Join(tmpDir, "config.yaml")
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to read config.yaml: %w", err)
-	}
-
-	var doc yaml.Node
-	if err := yaml.Unmarshal(configData, &doc); err != nil {
-		return fmt.Errorf("failed to parse config.yaml: %w", err)
-	}
-	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("config.yaml root is not a YAML mapping")
-	}
-	{
-		mapping := doc.Content[0]
-		found := false
-		for i := 0; i < len(mapping.Content)-1; i += 2 {
-			if mapping.Content[i].Value == "image" {
-				mapping.Content[i+1].Value = outputImage
-				found = true
-				break
-			}
-		}
-		if !found {
-			mapping.Content = append(mapping.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
-				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
-			)
-		}
-	}
-
-	updatedData, err := yaml.Marshal(&doc)
-	if err != nil {
-		return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
-	}
-
-	if stor != nil && hc.StoragePath != "" {
-		objectPath := hc.StoragePath + "/config.yaml"
-		if _, err := stor.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
-			return fmt.Errorf("failed to upload updated config.yaml to storage: %w", err)
-		}
-		_, _ = fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
-	}
-
-	configHash := transfer.HashBytes(updatedData)
-	for i, f := range hc.Files {
-		if f.Path == "config.yaml" {
-			hc.Files[i].Size = int64(len(updatedData))
-			hc.Files[i].Hash = configHash
-			break
-		}
-	}
-	hc.ContentHash = computeContentHash(hc.Files)
-
 	if hc.Config == nil {
 		hc.Config = &store.HarnessConfigData{}
 	}
