@@ -383,8 +383,6 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetContainerStatus(a.ContainerStatus).
 		SetRuntimeState(a.RuntimeState).
 		SetStalledFromActivity(a.StalledFromActivity).
-		SetNillableExitCode(a.ExitCode).
-		SetExitReason(a.ExitReason).
 		SetImage(a.Image).
 		SetDetached(a.Detached).
 		SetRuntime(a.Runtime).
@@ -395,6 +393,13 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetVisibility(a.Visibility).
 		SetUpdated(now).
 		SetStateVersion(newVersion)
+
+	if a.ExitCode != nil {
+		update.SetExitCode(*a.ExitCode)
+	} else {
+		update.ClearExitCode()
+	}
+	update.SetExitReason(a.ExitReason)
 
 	if a.Labels != nil {
 		update.SetLabels(a.Labels)
@@ -696,6 +701,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetMessage("")
 		}
 		upd.SetStalledFromActivity("")
+		upd.ClearExitCode()
+		upd.SetExitReason("")
 	}
 
 	if su.Message != "" {

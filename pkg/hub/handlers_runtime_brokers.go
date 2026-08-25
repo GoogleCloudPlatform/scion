@@ -717,7 +717,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// field; fall back to parsing ContainerStatus for old brokers.
 					if hbPhase == state.PhaseStopped {
 						if agentHB.ExitCode != nil && *agentHB.ExitCode != 0 {
-							// Structured path: use ExitCode directly
+							// crash path
 							hbPhase = state.PhaseError
 							agentHB.Phase = string(state.PhaseError)
 							statusUpdate.ExitCode = agentHB.ExitCode
@@ -738,9 +738,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 									statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
 								}
 							}
-						}
-						// If ExitCode is non-nil and == 0: clean exit, keep PhaseStopped
-						if agentHB.ExitCode != nil && *agentHB.ExitCode == 0 {
+						} else {
+							// ExitCode == 0: clean exit, keep PhaseStopped
 							statusUpdate.ExitCode = agentHB.ExitCode
 							if isValidExitReason(agentHB.ExitReason) {
 								statusUpdate.ExitReason = agentHB.ExitReason

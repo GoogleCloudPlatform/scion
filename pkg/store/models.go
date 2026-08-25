@@ -1916,6 +1916,8 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		Activity:        a.Activity,
 		ContainerStatus: a.ContainerStatus,
 		RuntimeState:    a.RuntimeState,
+		ExitCode:        a.ExitCode,
+		ExitReason:      a.ExitReason,
 
 		// Runtime configuration
 		Image:           a.Image,

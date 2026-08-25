@@ -940,4 +940,66 @@ func TestAgentStore_ExitCodeExitReason_Persistence(t *testing.T) {
 		assert.Equal(t, 42, *got.ExitCode)
 		assert.Equal(t, "limits_exceeded", got.ExitReason)
 	})
+
+	t.Run("restart clears ExitCode and ExitReason", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "exit-restart")
+		a.Phase = "running"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		// Set ExitCode=137 and ExitReason="crashed" via UpdateAgentStatus
+		ec := 137
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:      "error",
+			Activity:   "crashed",
+			ExitCode:   &ec,
+			ExitReason: "crashed",
+		}))
+
+		// Verify they were set
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.ExitCode)
+		assert.Equal(t, 137, *got.ExitCode)
+		assert.Equal(t, "crashed", got.ExitReason)
+
+		// Simulate restart: transition from error to running
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    "running",
+			Activity: "working",
+		}))
+
+		// Verify ExitCode is nil and ExitReason is "" after restart
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got.ExitCode, "ExitCode must be cleared on restart")
+		assert.Equal(t, "", got.ExitReason, "ExitReason must be cleared on restart")
+	})
+
+	t.Run("UpdateAgent clears nil ExitCode", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "exit-clear")
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		// Set an exit code via UpdateAgent
+		ec := 42
+		a.ExitCode = &ec
+		a.ExitReason = "crashed"
+		require.NoError(t, s.UpdateAgent(ctx, a))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.ExitCode)
+		assert.Equal(t, 42, *got.ExitCode)
+
+		// Clear ExitCode by setting it to nil via UpdateAgent
+		got.ExitCode = nil
+		got.ExitReason = ""
+		require.NoError(t, s.UpdateAgent(ctx, got))
+
+		got2, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got2.ExitCode, "nil ExitCode via UpdateAgent must clear the field")
+		assert.Equal(t, "", got2.ExitReason, "empty ExitReason via UpdateAgent must clear the field")
+	})
 }
