@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -347,8 +348,7 @@ Examples:
 				return err
 			}
 			for _, a := range agents {
-				status := strings.ToLower(a.ContainerStatus)
-				if strings.HasPrefix(status, "up") || status == "running" {
+				if a.Phase == string(state.PhaseRunning) {
 					targets = append(targets, a.Name)
 				}
 			}

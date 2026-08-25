@@ -262,8 +262,7 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Check if running
-	status := strings.ToLower(agent.ContainerStatus)
-	if !strings.HasPrefix(status, "up") && status != "running" {
+	if agent.Phase != string(state.PhaseRunning) {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -907,9 +908,7 @@ profiles:
 
 func TestStartReturnsRunningStatus(t *testing.T) {
 	// This tests the early-return path when a container is already running.
-	// The runtime's List() may return a stale Status (e.g. "created") from the
-	// container runtime, but Start() should override it to "running" since
-	// isRunning is confirmed true via ContainerStatus.
+	// The runtime's Phase field is authoritative for running state detection.
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{
@@ -917,7 +916,7 @@ func TestStartReturnsRunningStatus(t *testing.T) {
 					ContainerID:     "abc123",
 					Name:            "test-agent",
 					ContainerStatus: "Up 2 hours",
-					Phase:           "created", // stale phase from runtime
+					Phase:           string(state.PhaseRunning),
 				},
 			}, nil
 		},

@@ -814,6 +814,27 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 
+			// If the broker didn't send a ContainerStatus but we have structured
+			// fields, render a display string for backward-compatible clients.
+			if statusUpdate.ContainerStatus == "" && agentHB.ContainerStatus == "" {
+				if statusUpdate.Phase != "" {
+					switch state.Phase(statusUpdate.Phase) {
+					case state.PhaseRunning:
+						statusUpdate.ContainerStatus = "running"
+					case state.PhaseStopped:
+						statusUpdate.ContainerStatus = "stopped"
+					case state.PhaseError:
+						if statusUpdate.ExitCode != nil {
+							statusUpdate.ContainerStatus = fmt.Sprintf("exited (%d)", *statusUpdate.ExitCode)
+						} else {
+							statusUpdate.ContainerStatus = "exited"
+						}
+					case state.PhaseProvisioning:
+						statusUpdate.ContainerStatus = "created"
+					}
+				}
+			}
+
 			// Backfill HarnessAuth and Profile from heartbeat if the agent record is missing them.
 			// This covers agents created before tracking was added, or
 			// agents where values were auto-detected rather than explicitly set.

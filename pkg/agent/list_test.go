@@ -278,9 +278,12 @@ func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 }
 
 func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
+	zero := 0
 	tests := []struct {
 		name            string
+		runtimePhase    string
 		containerStatus string
+		exitCode        *int
 		infoPhase       string
 		infoActivity    string
 		wantPhase       string
@@ -288,19 +291,23 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 	}{
 		{
 			name:            "running container overrides stopped phase",
+			runtimePhase:    string(state.PhaseRunning),
 			containerStatus: "Up 2 hours",
 			infoPhase:       string(state.PhaseStopped),
 			wantPhase:       string(state.PhaseRunning),
 		},
 		{
 			name:            "running status overrides stopped phase",
+			runtimePhase:    string(state.PhaseRunning),
 			containerStatus: "running",
 			infoPhase:       string(state.PhaseStopped),
 			wantPhase:       string(state.PhaseRunning),
 		},
 		{
 			name:            "exited container overrides running phase",
+			runtimePhase:    string(state.PhaseStopped),
 			containerStatus: "Exited (0) 5 minutes ago",
+			exitCode:        &zero,
 			infoPhase:       string(state.PhaseRunning),
 			infoActivity:    string(state.ActivityThinking),
 			wantPhase:       string(state.PhaseStopped),
@@ -308,7 +315,9 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 		},
 		{
 			name:            "stopped container overrides running phase",
+			runtimePhase:    string(state.PhaseStopped),
 			containerStatus: "stopped",
+			exitCode:        &zero,
 			infoPhase:       string(state.PhaseRunning),
 			infoActivity:    string(state.ActivityExecuting),
 			wantPhase:       string(state.PhaseStopped),
@@ -316,6 +325,7 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 		},
 		{
 			name:            "consistent running state unchanged",
+			runtimePhase:    string(state.PhaseRunning),
 			containerStatus: "Up 10 minutes",
 			infoPhase:       string(state.PhaseRunning),
 			infoActivity:    string(state.ActivityThinking),
@@ -324,7 +334,9 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 		},
 		{
 			name:            "consistent stopped state unchanged",
+			runtimePhase:    string(state.PhaseStopped),
 			containerStatus: "Exited (0) 1 hour ago",
+			exitCode:        &zero,
 			infoPhase:       string(state.PhaseStopped),
 			wantPhase:       string(state.PhaseStopped),
 		},
@@ -359,7 +371,9 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 						{
 							Name:            agentName,
 							ProjectPath:     projectPath,
+							Phase:           tc.runtimePhase,
 							ContainerStatus: tc.containerStatus,
+							ExitCode:        tc.exitCode,
 						},
 					}, nil
 				},
@@ -394,10 +408,12 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 
 func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	nonZero := 1
 	tests := []struct {
 		name            string
 		runtimePhase    string
 		containerStatus string
+		exitCode        *int
 		wantPhase       string
 	}{
 		{
@@ -410,6 +426,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 			name:            "legacy ended maps failed pod to error",
 			runtimePhase:    runtime.LegacyAgentPhaseEnded,
 			containerStatus: "Failed (Error)",
+			exitCode:        &nonZero,
 			wantPhase:       string(state.PhaseError),
 		},
 		{
@@ -454,6 +471,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 							Runtime:         "kubernetes",
 							Phase:           tc.runtimePhase,
 							ContainerStatus: tc.containerStatus,
+							ExitCode:        tc.exitCode,
 						},
 					}, nil
 				},

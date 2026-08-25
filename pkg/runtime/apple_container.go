@@ -280,8 +280,7 @@ func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Check if running
-	status := strings.ToLower(a.ContainerStatus)
-	if !strings.HasPrefix(status, "up") && status != "running" {
+	if a.Phase != string(state.PhaseRunning) {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, a.ContainerStatus, id)
 	}
 

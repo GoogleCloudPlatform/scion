@@ -961,10 +961,10 @@ func phaseFromContainerStatus(status string) string {
 // as "Exited (137) 2 minutes ago" (Docker/Podman) or "exited (0)".
 var exitedStatusRe = regexp.MustCompile(`(?i)exited\s*\((\d+)\)`)
 
-// ExitCodeFromContainerStatus extracts the exit code from a container status
-// string like "Exited (137) 2 minutes ago". It returns (code, true) when an
-// exited status with a parseable code is present, otherwise (0, false). A plain
-// "stopped" (no embedded code) yields (0, false).
+// Deprecated: ExitCodeFromContainerStatus parses exit codes from container
+// status strings like "Exited (137)". New code should use the structured
+// ExitCode field on AgentInfo/AgentHeartbeat instead. This function remains
+// for the hub's legacy heartbeat fallback path (old brokers without ExitCode).
 func ExitCodeFromContainerStatus(status string) (int, bool) {
 	m := exitedStatusRe.FindStringSubmatch(status)
 	if m == nil {

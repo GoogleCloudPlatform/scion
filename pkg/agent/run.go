@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -98,8 +99,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if !matchAgentProject(a, projectName, projectID) {
 				continue
 			}
-			status := strings.ToLower(a.ContainerStatus)
-			isRunning := strings.HasPrefix(status, "up") || status == "running"
+			isRunning := a.Phase == string(state.PhaseRunning)
 			if isRunning {
 				// If a new task is provided, we might want to recreate even if running
 				// but if no task provided, we just return the running one
@@ -1066,8 +1066,7 @@ authDone:
 		for _, a := range allAgents {
 			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
 				// Check if the container has already exited
-				containerStatus := strings.ToLower(a.ContainerStatus)
-				if strings.Contains(containerStatus, "exited") || strings.Contains(containerStatus, "dead") {
+				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, id)

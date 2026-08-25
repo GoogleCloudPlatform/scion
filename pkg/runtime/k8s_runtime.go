@@ -2046,7 +2046,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	podName = agent.ContainerID
 
 	// For Kubernetes, we want to ensure it is in Running phase
-	if !strings.EqualFold(agent.ContainerStatus, string(corev1.PodRunning)) {
+	if agent.Phase != string(state.PhaseRunning) {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 
