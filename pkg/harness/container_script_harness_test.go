@@ -1255,3 +1255,105 @@ func TestDiscoverExistingSecretFiles(t *testing.T) {
 		t.Error("empty secret file should not be included in file secrets")
 	}
 }
+
+func TestContainerScriptHarness_ResolveAuth_SelectedTypeFiltersFiles(t *testing.T) {
+	// When a specific auth type is selected, ResolveAuth must only include
+	// file mappings from that auth type — not from all types. This prevents
+	// ValidateAuth from failing with "credential file does not exist" for
+	// files belonging to unselected auth types (issue #1241).
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: testharness\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+
+	entry := config.HarnessConfigEntry{
+		Harness: "testharness",
+		Image:   "scion-test:latest",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+			Timeout:          "10s",
+		},
+		Auth: &config.HarnessAuthMetadata{
+			Types: map[string]config.HarnessAuthTypeMetadata{
+				"vertex-ai": {
+					// vertex-ai has no required_files
+				},
+				"auth-file": {
+					RequiredFiles: []config.HarnessAuthFileRequirement{
+						{
+							Name:         "GROK_AUTH",
+							Type:         "file",
+							TargetSuffix: "/.grok/auth.json",
+							Field:        "GrokAuthFile",
+						},
+					},
+				},
+			},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	t.Run("selected_type_excludes_other_files", func(t *testing.T) {
+		resolved, err := h.ResolveAuth(api.AuthConfig{
+			SelectedType: "vertex-ai",
+			Files:        map[string]string{"GrokAuthFile": "/tmp/fake-auth.json"},
+		})
+		if err != nil {
+			t.Fatalf("ResolveAuth: %v", err)
+		}
+		// With vertex-ai selected, the auth-file's GrokAuthFile mapping
+		// must NOT appear in resolved.Files.
+		for _, fm := range resolved.Files {
+			if fm.ContainerPath == "~/.grok/auth.json" {
+				t.Errorf("resolved.Files contains auth-file mapping %v, but vertex-ai was selected", fm)
+			}
+		}
+	})
+
+	t.Run("auto_detect_includes_all_files", func(t *testing.T) {
+		resolved, err := h.ResolveAuth(api.AuthConfig{
+			SelectedType: "", // auto-detect
+			Files:        map[string]string{"GrokAuthFile": "/tmp/fake-auth.json"},
+		})
+		if err != nil {
+			t.Fatalf("ResolveAuth: %v", err)
+		}
+		// With no selected type, all auth types' file mappings should be
+		// included — the provisioner will decide which to use.
+		found := false
+		for _, fm := range resolved.Files {
+			if fm.ContainerPath == "~/.grok/auth.json" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("resolved.Files should contain auth-file mapping in auto-detect mode")
+		}
+	})
+
+	t.Run("unrecognized_selected_type_falls_back_to_all", func(t *testing.T) {
+		resolved, err := h.ResolveAuth(api.AuthConfig{
+			SelectedType: "unknown-type",
+			Files:        map[string]string{"GrokAuthFile": "/tmp/fake-auth.json"},
+		})
+		if err != nil {
+			t.Fatalf("ResolveAuth: %v", err)
+		}
+		// Unrecognized type should gracefully fall back to all types.
+		found := false
+		for _, fm := range resolved.Files {
+			if fm.ContainerPath == "~/.grok/auth.json" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("resolved.Files should contain auth-file mapping for unrecognized selected type (graceful fallback)")
+		}
+	})
+}
