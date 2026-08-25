@@ -140,6 +140,36 @@ your local on-disk files. In the web UI, the delete dialog offers an **"Also del
 checkbox to remove the Hub-stored files as well. To remove a local directory, delete it from the
 filesystem or reinstall with `--force`.
 
+## Configuration (`config.yaml`)
+
+The `config.yaml` file at the root of a harness-config bundle defines its runtime parameters. Beyond basic fields like `image`, `harness` type, and `model_aliases`, it includes capabilities and launch configurations.
+
+### Command Execution (`command`)
+
+The `command` block defines how the agent's primary LLM tool is invoked.
+
+*   `base`: A list of strings forming the base command to run.
+    :::caution[Interactive Terminal Required]
+    The tool specified in `command.base` **must** be an interactive application that keeps running and accepts input via the terminal. The Scion runtime manages terminal sessions via a PTY and requires the process to stay alive. Tools that execute a single prompt and exit immediately will cause the agent to terminate prematurely.
+    :::
+*   `task_flag`: CLI flag used to pass the task (e.g., `--prompt`).
+*   `resume_flag`: CLI flag to resume a previous session (e.g., `--session`).
+*   `system_prompt_flag`: CLI flag for the system prompt.
+
+### Environment Templates (`env_template`)
+
+The `env_template` block defines a map of environment variables to inject into the container, with support for Go template variable substitution.
+
+:::warning[Host-Side Evaluation]
+Templates are evaluated **on the host (broker)** *before* the container starts. They have access to host paths, not container paths.
+:::
+
+| Variable | Description |
+| :--- | :--- |
+| `{{ .AgentHome }}` | The absolute path to the agent's home directory on the **host machine**. |
+
+Use `env_template` sparingly to pass host-side paths to the container (e.g., passing a socket path that is bind-mounted). Do **not** use it to reference paths inside the container, as they will evaluate to the host path instead. Use the standard `env` map for static or container-side environment variables.
+
 ## Key Concepts
 - **Tools**: Allowlists of local or remote functions the LLM is permitted to call.
 - **Profiles**: Harness-level profiles (distinct from Scion profiles) that control model parameters.
