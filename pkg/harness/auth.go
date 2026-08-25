@@ -271,7 +271,7 @@ func OverlaySettings(auth *api.AuthConfig, h api.Harness, agentDir string) {
 // It acts as a post-resolution safety net: ResolveAuth should produce correct
 // results, but ValidateAuth catches any bugs or race conditions (e.g., a
 // credential file deleted between GatherAuth and container launch).
-func ValidateAuth(resolved *api.ResolvedAuth) error {
+func ValidateAuth(resolved *api.ResolvedAuth, brokerMode bool) error {
 	if resolved == nil {
 		return fmt.Errorf("auth validation failed: resolved auth is nil")
 	}
@@ -296,6 +296,14 @@ func ValidateAuth(resolved *api.ResolvedAuth) error {
 	for _, f := range resolved.Files {
 		if f.ContainerPath == "" {
 			return fmt.Errorf("auth validation failed: file mapping for %q has no container path", f.SourcePath)
+		}
+		if f.SourcePath == "" {
+			if brokerMode {
+				// Broker mode: SourcePath intentionally cleared — file content
+				// is staged via SCION_STAGED_SECRETS, not local paths.
+				continue
+			}
+			return fmt.Errorf("auth validation failed: file mapping for container path %q has no source path", f.ContainerPath)
 		}
 		if _, err := os.Stat(f.SourcePath); err != nil {
 			return fmt.Errorf("auth validation failed: credential file %q does not exist: %w", f.SourcePath, err)
