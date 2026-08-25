@@ -30,8 +30,9 @@ provisioner:
 config_dir: .grok
 skills_dir: .grok/skills
 interrupt_key: C-c
-instructions_file: AGENTS.md
-system_prompt_mode: prepend_to_instructions
+instructions_file: .grok/AGENTS.md
+system_prompt_file: .grok/system-prompt.md
+system_prompt_mode: native
 
 model_aliases:
   small: grok-3-mini
@@ -43,6 +44,7 @@ command:
   base: ["grok", "--yolo", "--sandbox", "off"]
   resume_flag: "-c"
   task_position: after_base_args
+  system_prompt_flag: "--system-prompt-override"
 
 env_template:
   SCION_AGENT_NAME: "{{ .AgentName }}"
@@ -57,7 +59,7 @@ capabilities:
     enabled: { support: "yes" }
     native_emitter: { support: "yes" }
   prompts:
-    system_prompt: { support: "partial", reason: "System prompt is prepended to AGENTS.md" }
+    system_prompt: { support: "yes" }
     agent_instructions: { support: "yes" }
   auth:
     api_key: { support: "yes" }

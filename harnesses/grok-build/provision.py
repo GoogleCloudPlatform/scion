@@ -23,7 +23,9 @@ Grok-build-native concerns handled here:
     written to ~/.grok/auth.json from a staged file secret.
   - MCP servers translate to TOML [mcp_servers.*] entries in
     ~/.grok/config.toml (stdio→command/args/env, sse/http→url/headers).
-  - Instructions project to AGENTS.md (configurable via instructions_file).
+  - Instructions project to .grok/AGENTS.md (configurable via instructions_file).
+  - System prompt is written to .grok/system-prompt.md and passed via
+    --system-prompt-override (native routing).
   - ~/.grok/config.toml gets hardened defaults (auto-update off, telemetry
     off, memory off, subagents off).
   - Hook wiring to sciontool via ~/.grok/hooks/scion.json.
@@ -113,6 +115,33 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
         f.write(content)
     os.chmod(tmp, 0o600)
     os.replace(tmp, target)
+
+
+def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> None:
+    """Write the staged system prompt to the native grok CLI location.
+
+    config.yaml declares system_prompt_file (.grok/system-prompt.md) and
+    system_prompt_mode (native), so the prompt goes into its own file rather
+    than being prepended to the instructions file. The Go-side harness reads
+    this file and passes it via --system-prompt-override.
+    """
+    system_prompt = ctx.read_input_text("system-prompt.md")
+    if not system_prompt.strip():
+        return
+
+    target = str(ctx.harness_config.get("system_prompt_file") or "")
+    if not target:
+        return
+
+    full = os.path.join(ctx.home, target)
+    parent = os.path.dirname(full)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = full + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(system_prompt)
+    os.replace(tmp, full)
+    ctx.info(f"wrote system prompt to {full}")
 
 
 # ---------------------------------------------------------------------------
@@ -613,15 +642,18 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     ctx.write_outputs(resolved, env=env, extra=extra)
 
+    # --- System prompt (native routing) -------------------------------------
+    _apply_native_system_prompt(ctx)
+
     # --- Instructions projection --------------------------------------------
     harness_cfg = ctx.harness_config
-    instructions_file = harness_cfg.get("instructions_file") or "AGENTS.md"
+    instructions_file = harness_cfg.get("instructions_file") or ".grok/AGENTS.md"
     target = os.path.join(ctx.home, instructions_file)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     # include_skills left at default False: config.yaml declares skills_dir,
     # so the host-side provisioner installs skills as individual files.
     try:
-        scion_harness.project_instructions(ctx, target)
+        scion_harness.project_instructions(ctx, target, system_prompt_mode="none")
     except OSError as exc:
         ctx.warn(f"failed to project instructions: {exc}")
 
