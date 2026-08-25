@@ -301,7 +301,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 		typesToProcess := c.entry.Auth.Types
 		if auth.SelectedType != "" {
 			if selectedType, ok := c.entry.Auth.Types[auth.SelectedType]; ok {
-				typesToProcess = map[string]api.HarnessAuthTypeMetadata{
+				typesToProcess = map[string]config.HarnessAuthTypeMetadata{
 					auth.SelectedType: selectedType,
 				}
 			}
