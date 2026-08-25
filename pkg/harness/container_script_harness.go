@@ -292,9 +292,23 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// field names to their container target paths using the harness config's
 	// required_files entries. A seen set keyed by Field prevents duplicate
 	// mappings when the same field appears in multiple auth types.
+	//
+	// When a specific auth type is selected, only gather file mappings for
+	// that type. In auto-detect mode (SelectedType empty), gather from all
+	// types and let the provisioner script decide.
 	if c.entry.Auth != nil {
 		seenFields := make(map[string]struct{})
-		for _, authType := range c.entry.Auth.Types {
+		typesToProcess := c.entry.Auth.Types
+		if auth.SelectedType != "" {
+			if selectedType, ok := c.entry.Auth.Types[auth.SelectedType]; ok {
+				typesToProcess = map[string]config.HarnessAuthTypeMetadata{
+					auth.SelectedType: selectedType,
+				}
+			}
+			// If the selected type isn't in the map, typesToProcess stays as
+			// all types (graceful fallback for unrecognized selections).
+		}
+		for _, authType := range typesToProcess {
 			for _, rf := range authType.RequiredFiles {
 				if rf.Field == "" || rf.TargetSuffix == "" {
 					continue
