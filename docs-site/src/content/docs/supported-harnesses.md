@@ -252,9 +252,9 @@ interactively, then capture the credential with the container's `capture_auth.py
 ### Configuration
 - **Config directory**: `~/.grok/` (settings in `config.toml`).
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Grok has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
-- **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections. Project-scoped MCP servers are not supported (demoted to global).
+- **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
 - **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4`, `extra-large` → `grok-4`.
-- **Hooks**: Grok events are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect.
+- **Hooks**: 11 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect.
 - **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
 
 ### Known Limitations

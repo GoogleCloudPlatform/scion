@@ -48,7 +48,7 @@ Agent state uses a layered model:
 - `GET /:id`: Get broker status and capacity.
 
 #### Chat Attachments (`/api/v1/chat/attachments`)
-- `POST /`: Upload one or more files (`multipart/form-data`, field `files`, optional `project_id`). Max 10 files, 10 MB each.
+- `POST /`: Upload one or more files (`multipart/form-data`, field `files`, optional `project_id`). Max 10 files, 10 MB each. Text files containing unusual control characters (e.g., vertical tab `0x0B`) are supported and correctly identified as text.
 - `GET /:id`: Download a stored attachment. Responses carry `X-Content-Type-Options: nosniff`, and `Content-Disposition: inline` only for image types — everything else is served as an `attachment`.
 
 Uploads are accepted or refused **per file**, and the response reports both outcomes:
