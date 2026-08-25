@@ -898,8 +898,13 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 func deriveImageBaseName(hc *store.HarnessConfig) string {
 	if hc.Config != nil && hc.Config.Image != "" {
 		name := hc.Config.Image
+		// Only strip a tag — the colon must appear after the last slash
+		// to distinguish "registry:port/image" from "image:tag".
 		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			name = name[:idx]
+			slashIdx := strings.LastIndex(name, "/")
+			if idx > slashIdx {
+				name = name[:idx]
+			}
 		}
 		return name
 	}
