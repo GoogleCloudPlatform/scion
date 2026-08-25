@@ -233,6 +233,12 @@ from the `XAI_API_KEY` environment variable.
 Alternatively, a file-based auth method (`auth-file`) is supported using `~/.grok/auth.json`,
 produced by `grok login --device-auth`. Capture the credential with `capture_auth.py` after login.
 
+A **Vertex AI** auth method (`vertex-ai`) routes inference through Google Cloud's Vertex AI
+Model Garden. Set `GOOGLE_CLOUD_PROJECT` and optionally `GOOGLE_CLOUD_REGION` (defaults to the
+global endpoint). The provisioner writes `[auth_provider]` and `[model]` entries to
+`~/.grok/config.toml` using `gcloud auth print-access-token` for on-demand token refresh.
+Application Default Credentials (ADC) are placed automatically when staged.
+
 If no credentials are found, the agent drops to a shell — run `grok login --device-auth`
 interactively, then capture the credential with the container's `capture_auth.py`
 (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
@@ -241,6 +247,7 @@ interactively, then capture the credential with the container's `capture_auth.py
 |---|---|---|
 | API Key | `XAI_API_KEY` | Set env var with xAI API key |
 | Auth File | `~/.grok/auth.json` | `grok login --device-auth` + capture |
+| Vertex AI | `GOOGLE_CLOUD_PROJECT` | Set env var with GCP project ID |
 
 ### Configuration
 - **Config directory**: `~/.grok/` (settings in `config.toml`).
@@ -277,7 +284,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ |
-| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
 
 * **Resume with Prompt**: Ability to provide a new task/prompt when resuming an existing session.
 * **Interject** (pending feature): Key used to interrupt the agent (e.g., stop generation).
