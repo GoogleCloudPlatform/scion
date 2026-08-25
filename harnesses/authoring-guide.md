@@ -132,7 +132,7 @@ mode (`--yolo`, `--dangerously-skip-permissions`, `approval_policy = never`,
 etc.) — the agent runs unattended inside a sandboxed container.
 
 > **⚠ Always configure the CLI for interactive/REPL mode.**
-> The scion runtime manages the terminal session via a PTY, delivers task
+> The Scion runtime manages the terminal session via a PTY, delivers task
 > prompts as input, and expects the tool to stay running for the agent's
 > entire lifetime. `command.base` must launch the CLI in its interactive
 > (REPL) mode — **not** single-prompt or batch mode. Single-prompt flags
