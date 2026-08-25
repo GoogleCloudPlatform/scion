@@ -521,7 +521,8 @@ func settingsFromGolden(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(string(raw), "\n")
+	normalized := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
 	const key = "  settings.yaml: |"
 	start := -1
 	for i, l := range lines {

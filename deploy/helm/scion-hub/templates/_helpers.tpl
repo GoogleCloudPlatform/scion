@@ -2297,8 +2297,8 @@ defaults, takes auth-enabled from a development flag and binds 127.0.0.1. */}}
 {{- /* HA preflight block 1, part 3: hub blob storage. GCS, and not the
 Filestore share - workspace storage is a different subsystem under
 server.workspace_storage and does not satisfy this. */}}
-{{- if eq $emittedDriver "postgres" }}
-{{- if ne (dig "server" "storage" "provider" "" $doc) "gcs" }}
+{{- if eq (lower (toString $emittedDriver)) "postgres" }}
+{{- if ne (lower (toString (dig "server" "storage" "provider" "" $doc))) "gcs" }}
 {{- fail (printf "rendered settings.yaml must set server.storage.provider: gcs under Postgres, got %s. Local blob storage is not HA-safe and the hub refuses to start. This is the hub's own blob store; the Filestore workspace share does not satisfy it." (include "scion-hub.diagValue" (dig "server" "storage" "provider" "" $doc))) }}
 {{- end }}
 {{- if not (dig "server" "storage" "bucket" "" $doc) }}
@@ -2432,10 +2432,10 @@ database.max.open.conns and the variable never binds.
 
 {{- /* server.storage: the HUB'S BLOB STORE. Not the Filestore workspace share. */}}
 {{- $storage := dict "provider" .Values.storage.provider }}
-{{- if eq .Values.storage.provider "gcs" }}
+{{- if eq (lower (toString .Values.storage.provider)) "gcs" }}
 {{- $bucket := .Values.storage.bucket }}
-{{- if and (eq $driver "postgres") (not $bucket) }}
-{{- fail "storage.bucket is required when database.driver is postgres: a Postgres hub is an HA deployment, and an HA hub refuses to start without server.storage.provider=gcs and a bucket. This is the hub's blob store, not the workspace share." }}
+{{- if not $bucket }}
+{{- fail "storage.bucket is required when storage.provider is gcs: a GCS storage provider cannot function without a bucket name." }}
 {{- end }}
 {{- $storage = set $storage "bucket" $bucket }}
 {{- end }}

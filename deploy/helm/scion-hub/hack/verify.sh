@@ -3226,7 +3226,7 @@ expect_render_failure \
 # template guards are what is left, so they are worth testing on their own.
 expect_render_failure \
   "the TEMPLATE rejects postgres without a GCS bucket" \
-  "storage.bucket is required when database.driver is postgres" \
+  "storage.bucket is required when storage.provider is gcs" \
   --skip-schema-validation \
   "${BASE[@]}" \
   --set database.driver=postgres \
