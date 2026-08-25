@@ -177,7 +177,9 @@ def _configure_vertex_ai(
     # Vertex AI Model Garden may not have all xAI models available.
     raw_model = os.environ.get("SCION_MODEL", "").strip()
     if raw_model:
-        aliases = ctx.harness_config.get("model_aliases") or {}
+        aliases = ctx.harness_config.get("model_aliases")
+        if not isinstance(aliases, dict):
+            aliases = {}
         if raw_model.lower() in aliases:
             # Scion alias (small, medium, large) — use default Vertex model.
             model_id = _VERTEX_MODEL_ID
