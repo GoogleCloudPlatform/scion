@@ -1364,7 +1364,9 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 }
 
 // hasAnyKey returns true if at least one of the keys is present in the
-// agent's env, or in the hub's env/secret stores at user or project scope.
+// agent's env, or in the hub's env/secret stores at user, project, or hub scope.
+// For progeny agents (those with ancestry len > 1), it also checks for
+// allowProgeny secrets and env vars inherited through the ancestry chain.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
@@ -1421,5 +1423,37 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			}
 		}
 	}
+
+	// Progeny resolution: when the agent has ancestry (len > 1 means it is a
+	// progeny agent, not a direct user agent), check for allowProgeny secrets
+	// and env vars inherited through the ancestry chain. This parallels the
+	// resolution in pkg/secret/localbackend.go.
+	if len(agent.Ancestry) > 1 {
+		keySet := make(map[string]struct{}, len(keys))
+		for _, k := range keys {
+			keySet[k] = struct{}{}
+		}
+
+		progenySecrets, err := s.store.ListProgenySecrets(ctx, agent.Ancestry)
+		if err != nil {
+			return false, err
+		}
+		for _, ps := range progenySecrets {
+			if _, ok := keySet[ps.Key]; ok {
+				return true, nil
+			}
+		}
+
+		progenyEnvVars, err := s.store.ListProgenyEnvVars(ctx, agent.Ancestry)
+		if err != nil {
+			return false, err
+		}
+		for _, pev := range progenyEnvVars {
+			if _, ok := keySet[pev.Key]; ok {
+				return true, nil
+			}
+		}
+	}
+
 	return false, nil
 }
