@@ -19,6 +19,7 @@
 
 hub:
   hubId: ci-cluster-rbac
+  baseUrl: https://ci-cluster-rbac.example.com
 
 image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke

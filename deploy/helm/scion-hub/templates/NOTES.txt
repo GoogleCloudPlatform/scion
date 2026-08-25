@@ -67,16 +67,184 @@ THE IMAGE
   tag.
 {{- end }}
 
+CONFIGURATION
+{{ if .Values.config.existingSecret }}
+  From your own Secret: {{ .Values.config.existingSecret }}, key settings.yaml.
+
+  The chart rendered nothing and validated nothing. Hosted mode, the hub ID, the
+  preflight keys and schema_version are all yours to get right - see the section
+  below on schema_version in particular, which is not optional.
+
+  These values of yours reached nothing. Each one only ever wrote to the
+  settings.yaml the chart did not render, so whatever you set them to, the
+  running hub takes the key on the right from YOUR file or from its own default:
+
+{{ include "scion-hub.existingSecretTransfers" . }}
+
+  This is the complete list as of this chart version, and it is checked against
+  the render rather than maintained by hand. Values not listed here still work
+  normally - they reach the Deployment, the RBAC or the Service. Three that also
+  write to settings.yaml are missing on purpose: config.extra, storage.bucket
+  and agents.imageRegistry fail the render outright when set alongside
+  config.existingSecret, so they cannot go quiet on you.
+{{- else }}
+  From the Secret {{ include "scion-hub.settingsSecretName" . }}, key settings.yaml.
+
+    kubectl --namespace {{ .Release.Namespace }} get secret {{ include "scion-hub.settingsSecretName" . }} \
+      -o jsonpath='{.data.settings\.yaml}' | base64 -d
+{{- end }}
+
+  Mounted read-only at {{ include "scion-hub.scionDir" . }}/settings.yaml.
+
+  Configuration is a file and not environment variables, and that is not a style
+  choice. A SCION_SERVER_ name binds only if every underscore-separated segment
+  is a plain lowercase word or is listed in camelCaseFields
+  (pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL binds and
+  SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error - and the
+  discarded one is still listed to the admin server-config view as an active
+  override, so it is reported as applied. The ones that DO bind are worse: they
+  are applied after settings.yaml is read and win, so the hub runs a
+  configuration this chart never rendered and its guards never saw. Use
+  config.extra, which lands in the file.
+
+THE SETTINGS FILE IS READ-ONLY. THIS IS DELIBERATE.
+
+  If you are here because the hub logged a warning about being unable to write
+  its settings file, or because a settings change you made through the API did
+  not stick: that is this mount, working. Making it writable is the wrong fix,
+  and it is the fix everybody reaches for first, so here is the reasoning before
+  you spend the evening on it.
+
+  The hub rewrites settings.yaml at runtime. In a Deployment those writes are
+  pod-local - the other replicas never see them, and they are lost at pod
+  replacement. That alone would only be lossy. What makes it dangerous is
+  syncHubSettings, which runs on every boot and re-seeds shared database state
+  from the pod-local file for every section whose row is absent or still marked
+  as seeded. So a pod that can write this file can promote its own local
+  divergence into the shared truth every other replica then reads, at a moment
+  nobody chose, with no error anywhere.
+
+  Making the file writable does not fix that. It re-enables it. The proper fix is
+  in the hub - the settings file becomes read-only in hosted mode with the
+  database as the sole writable store - and it is tracked as ptone/scion#1091.
+  When that lands this mount stops being load-bearing. Until then it is the only
+  thing preventing the divergence, and the cost of it is a log line.
+
+  Note the directory is NOT read-only. Only the one file is. {{ include "scion-hub.scionDir" . }}
+  is the hub's whole state directory - storage/, templates/ and scion-token are
+  all created in it - so mounting configuration over the directory breaks the hub
+  in ways that have nothing to do with configuration.
+
+  WHAT DOES NOT PERSIST, SPECIFICALLY. "Some settings may not persist" is no use
+  to someone who just got an HTTP 200. Until #1091:
+
+    - The GitHub App configuration PUT returns HTTP 200 and does not persist.
+      You get a success response and no effect, every time, indefinitely. This
+      is the one most likely to cost someone an afternoon.
+    - The integration settings writes mostly log a warning and carry on. One of
+      them returns HTTP 500 to the caller while the server keeps running.
+    - The startup write logs a warning and continues.
+
+  Nothing crashloops, nothing is corrupted, and nothing diverges. Every one of
+  these paths is soft by inspection - no log.Fatal, no os.Exit, no panic.
+
+  This is a behaviour change from a writable settings file, and in one respect it
+  looks worse: previously these writes succeeded, appeared to work, and were
+  silently lost at the next pod replacement. Now they never take effect at all.
+  Consistent beats intermittent - a write that always fails visibly is
+  debuggable, and a write that works until a rollout is not - but you have to be
+  told, which is what this section is for.
+
+  Configure these through your values file and helm upgrade instead. Note the
+  separate hazard that a hub which has already run against Postgres keeps some
+  settings in database rows that shadow the file entirely; see VALIDATION.md.
+
+SCHEMA_VERSION IS LOAD-BEARING
+
+  The rendered file carries schema_version: "1", and it is not boilerplate.
+
+  The hub auto-migrates a settings file whose format it cannot detect, the
+  detector keys on this field, and the migration replaces the file with
+  os.Rename. Renaming over a bind-mounted path returns EBUSY. Every other write
+  to this file under the mount is soft; that one is a hard failure. Rendering
+  schema_version is what stops the migration from ever being attempted, and the
+  hub does not guard the path itself in hosted mode - deliberately, on the
+  grounds that the chart controls the input. If you supply your own settings.yaml
+  through config.existingSecret, it must carry schema_version.
+
 WHAT THIS RELEASE DOES NOT YET DO
 
-  The chart is being built incrementally and this release installs the core
-  workload only. It renders no server configuration, so the hub falls back to
-  its own defaults - SQLite and local workspace storage. (It does write a
-  settings.yaml for itself on first boot, from its embedded defaults, but that
-  file carries no server section, which is what leaves the defaults in force.)
-  It does not yet
-  configure Cloud SQL, GCS blob storage, Filestore, a session secret, Ingress or
-  IAP. Do not treat this as a production install.
+  The chart is being built incrementally. It renders the hub's settings.yaml,
+  but it does not yet configure Cloud SQL and the database URL, GCS credentials
+  beyond the bucket name, Filestore, the session secret, the OAuth client
+  secret, Ingress or IAP. Do not treat this as a production install.
+
+  THIS RELEASE CAN TURN THE HUB'S HA PREFLIGHT ON, AND IT CANNOT SATISFY IT, SO
+  THE CHART REFUSES TO RENDER THOSE SHAPES. Three of the settings this chart
+  writes make isHADeployment (cmd/server_foreground.go:927) true on their own:
+
+    hub.extraEnv setting K_SERVICE                    (:928)
+    database.driver: postgres                         (:931)
+    storage.provider: gcs with auth.mode: proxy       (:934)
+
+  Any one of them runs validateHostedHAPreflight, whose error aborts startup
+  rather than degrading: the caller is `if err := validateHostedHAPreflight(cfg)`
+  and it log.Fatalf's. WHICH of its gates have no source in this chart depends on
+  auth.mode, because the hub's IAP gates sit inside `if cfg.Auth.Mode == "proxy"`
+  and an oauth deployment never reaches them. Measured by walking the real
+  preflight gate by gate over the settings.yaml this chart renders, in the order
+  the hub checks them - the list below is checked against that walk, it is not
+  typed from memory:
+{{- if eq (toString .Values.auth.mode) "proxy" }}
+
+    server.database.url                     Cloud SQL phase
+    a durable session secret                session-secret phase
+    server.auth.proxy.provider: iap         }
+    server.auth.proxy.iap.audience          }
+    server.auth.transport present           }  Ingress/IAP phase
+    server.auth.transport.mode: iap         }
+    server.auth.transport.oidc_audience     }
+    server.auth.transport.platform_auth_sa  }
+{{- else }}
+
+    server.database.url                     Cloud SQL phase
+    a durable session secret                session-secret phase
+
+  That is the whole list for auth.mode: {{ .Values.auth.mode }}. The IAP gates
+  are not work you are waiting on - this shape never reaches them, so the
+  Ingress/IAP phase lands nothing this refusal is blocked on.
+{{- end }}
+
+  You would meet them one at a time, each only after fixing the one before it,
+  because the preflight returns on the first failure. Rather than let you find
+  that out one install at a time, the chart refuses up front and names them all.
+  Set acknowledgeHAUnlanded: true to render anyway - for rendering the
+  settings.yaml, which works, not for installing, which does not. The chart
+  already satisfies the rest of what the preflight demands (the hub ID, the
+  postgres driver, gcs storage and the bucket), which is why the refusal starts
+  at the database URL and not earlier.
+
+  The default install is unaffected: sqlite and local storage match none of the
+  three routes, isHADeployment is false, and the preflight is skipped.
+{{- $haRoutes := include "scion-hub.haRoutes" . }}
+{{- if $haRoutes }}
+
+  THESE VALUES ARE ON ONE OF THOSE ROUTES AND THE REFUSAL WAS SUPPRESSED.
+
+  {{ $haRoutes }}, so the hub's isHADeployment test is true for this release.
+  The chart did not refuse only because acknowledgeHAUnlanded is set.
+
+  THE RENDER IS NOT A VERDICT ON THE INSTALL. The settings.yaml above is
+  correct, and the hub will still abort at the first of the gates listed
+  here - server.database.url - before it serves anything. Nothing in this
+  release closes any of them.
+
+  If you started from ci/values-settings.yaml or ci/values-settings-oauth.yaml,
+  the flag arrived with the file. Those two fixtures set it so that the
+  rendering path can be exercised, and they are also the shapes an operator is
+  most likely to copy - so the chart's own examples are the one case where the
+  refusal that names these gates never prints. That is why this paragraph does.
+{{- end }}
 
   The hub images published from this repository today run as root, so until a
   hub-gke image exists there is nothing this chart can successfully schedule.

@@ -1,0 +1,84 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# values-settings.yaml with the authentication mode changed, and nothing else
+# changed. Keep it that way: the point of this file is that a diff of the two
+# renders shows the authentication subtree and nothing more. Anything else that
+# drifts between them makes that check stop meaning what it claims to mean.
+#
+# THE FIVE BLOCK-1 KEYS RENDER IN EITHER AUTHENTICATION MODE, and that is what
+# the paired diff is for: the hub ID, the Postgres driver, the database URL, GCS
+# storage with a bucket and a durable session secret are required whichever mode
+# is selected. A chart that rendered those under proxy and dropped one under
+# oauth would install fine and fail at hub startup, naming the missing key but
+# not the reason it went missing.
+#
+# THE PREFLIGHT AS A WHOLE IS NOT MODE-BLIND, THOUGH, AND THIS FILE USED TO SAY
+# IT WAS. Measured by walking validateHostedHAPreflight gate by gate on the
+# settings.yaml each fixture renders (hack/ha-gates.txt records both arms): this
+# file is refused by a STRICT SUBSET of what values-settings.yaml is refused by.
+# The preflight's IAP gates sit inside `if cfg.Auth.Mode == "proxy"`, so an
+# oauth shape never reaches any of them and stops at the two gates that are
+# mode-independent: server.database.url and the durable session/signing secret.
+#
+# [HISTORY 2026-08-17] THIS SAID THE OPPOSITE: "this file is refused by one gate
+# more than values-settings.yaml. The extra one is server.auth.mode=proxy
+# (cmd/server_foreground.go:980)". It was true when written and 1b3c9418 "fix: do
+# not require IAP for hosted HA preflight" deleted that gate, so oauth went from
+# superset-by-one to subset. TWO THINGS ABOUT THAT CITE ARE WORTH KEEPING. The
+# line number did not rot in the way that announces itself - :980 still resolves,
+# and it is now the storage.provider gate, so a reader who checked it landed on a
+# real line about something else and came away reassured. And "one gate fewer" is
+# the plausible hand-fix and would be a SECOND false sentence: the difference is
+# the whole IAP family, not one gate.
+
+# SET BECAUSE THIS FIXTURE IS EXACTLY THE SHAPE THE FLAG EXISTS FOR. Postgres
+# alone makes the hub's isHADeployment test true, so without this the chart
+# refuses to render this file at all. The fixture's job is to exercise the
+# rendered settings.yaml, not to install, and the acknowledgement is how it says
+# so. Deleted with the flag when Cloud SQL and ingress/IAP land.
+acknowledgeHAUnlanded: true
+
+hub:
+  hubId: ci-settings
+  name: CI Settings Hub
+  baseUrl: https://ci-settings.example.com
+
+image:
+  repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
+  tag: ci
+
+database:
+  driver: postgres
+
+storage:
+  provider: gcs
+  bucket: ci-settings-hub-blobs
+
+auth:
+  mode: oauth
+  # The client credentials and session secret oauth needs are not rendered by
+  # this chart yet, so this install would not start. The schema requires the
+  # acknowledgement rather than letting the mode be selected by accident.
+  acknowledgeOAuthUnlanded: true
+
+agents:
+  imageRegistry: us-docker.pkg.dev/scion-ci/scion
+
+config:
+  extra:
+    server:
+      log_level: debug
+      scheduler:
+        interval_seconds: 30

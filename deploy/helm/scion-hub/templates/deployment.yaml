@@ -32,6 +32,26 @@ limitations under the License.
 */}}
 {{- include "scion-hub.assertNoCredentialsInValues" . }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
+{{- include "scion-hub.assertExtraEnv" . }}
+{{- include "scion-hub.assertHAUnlanded" . }}
+{{- /*
+Called from here, and not only from the settings template, because the settings
+template is skipped entirely when config.existingSecret is set - which is the
+only case this assertion has anything to say about. The Deployment always
+renders, so the check always runs.
+*/}}
+{{- include "scion-hub.assertConfigSource" . }}
+{{- /*
+Same reason, different guard. scion-hub.agentNamespace refuses a disagreeing
+rbac.agentNamespace / runtime.namespace pair, and every one of its other callers
+is conditional: the Role and RoleBinding are skipped when
+runtime.listAllNamespaces is set, and the settings template is skipped when
+config.existingSecret is set. Set both and the only remaining caller is
+NOTES.txt, which is not a manifest and is not rendered by every client. The
+Deployment always renders, so calling it here is what makes the guard
+unconditional. The output is discarded; this is the call, not a use.
+*/}}
+{{- $_ := include "scion-hub.agentNamespace" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -68,12 +88,25 @@ spec:
 
         Two things about this annotation that are easy to get wrong later.
 
-        It records the operator's INTENT, not an observation of the hub. Nothing
-        in this chart yet feeds hub.hubId into the running process - the
-        settings file that does arrives with the configuration rendering - so
-        until then the hub's actual ID is still hostname-derived and this
-        annotation can legitimately disagree with it. Do not read it as a
-        control or as a status field.
+        It records the operator's INTENT, not an observation of the hub, and the
+        two halves of that sentence now behave differently. This chart does feed
+        hub.hubId into the running process: server.hub.hub_id in the mounted
+        settings.yaml comes from the same helper this annotation does, so within
+        one render they cannot disagree, and hack/verify.sh asserts that pairing
+        per permutation. Treat a disagreement as a defect rather than as the
+        expected state - which is the reverse of what this paragraph said while
+        the chart rendered no settings file, and it changed without this file
+        being edited.
+
+        The exception is config.existingSecret, where the settings file is the
+        operator's and this annotation is still rendered from hub.hubId. There
+        the two are genuinely independent and can differ, which is one more
+        reason that path validates nothing.
+
+        It is still not an observation either way. Nothing reads the running hub
+        back into it, so a pod whose settings file failed to load reports the
+        intended ID here regardless. Do not read it as a control or as a status
+        field.
 
         The prefix is deliberate. This repository has two pod-annotation
         conventions: agent pods use a bare "scion.<name>" form (see
@@ -84,6 +117,31 @@ spec:
         precedent to copy.
         */}}
         scion.io/hub-id: {{ $hubId | quote }}
+        {{- /*
+        envFrom is resolved once, when the container starts. Unlike a mounted
+        ConfigMap the kubelet never refreshes it, so without this a helm upgrade
+        that changes the hub's environment would report success and change
+        nothing until something else happened to restart the pods.
+        */}}
+        checksum/env-config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+        {{- /*
+        Required, not decorative. settings.yaml is delivered as a subPath mount,
+        and a subPath mount is bound when the container starts and frozen for
+        its lifetime - the kubelet's periodic refresh of Secret volumes does not
+        reach through one. Without this annotation a helm upgrade that changes
+        the hub's configuration reports success and changes nothing at all,
+        until some unrelated event happens to restart the pods and the new
+        configuration takes effect at a time nobody chose.
+
+        Rendered from the template output rather than from the values, so it
+        covers what actually lands in the file, config.extra included. Omitted
+        entirely under config.existingSecret: the chart renders no file there,
+        the checksum would be of nothing, and a constant that never changes is
+        worse than an absent one because it looks like coverage.
+        */}}
+        {{- if not .Values.config.existingSecret }}
+        checksum/settings: {{ include (print $.Template.BasePath "/secret-settings.yaml") . | sha256sum }}
+        {{- end }}
         {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -103,6 +161,27 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             {{- include "scion-hub.hubArgs" . | nindent 12 }}
+          {{- /*
+          The hub's whole environment. Configuration lives in settings.yaml, not
+          here - see configmap-env.yaml for why.
+          */}}
+          envFrom:
+            - configMapRef:
+                name: {{ include "scion-hub.envConfigMapName" . }}
+          env:
+            {{- /*
+            The namespace the hub is running in, which it reads to decide where
+            to create agent pods when no namespace is configured. There is no
+            way to derive this at template time that survives being installed
+            into a different namespace than the one rendered against.
+            */}}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.hub.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.hub.webPort }}
@@ -159,6 +238,72 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          volumeMounts:
+            {{- /*
+            The hub's state directory, writable. It is not a config directory:
+            storage/, templates/ and scion-token are all created in it at
+            runtime, so mounting the config over the whole directory - the
+            shortcut this shape exists to avoid - breaks the hub for reasons
+            that have nothing to do with configuration.
+
+            emptyDir and not a PVC because none of it is data worth keeping. In
+            the hosted deployment the blob store is GCS, the database is Cloud
+            SQL and the workspace share is Filestore; what is left here is
+            scratch that is correct to lose with the pod.
+            */}}
+            - name: scion-home
+              mountPath: {{ include "scion-hub.scionDir" . | quote }}
+            {{- /*
+            The one file in that directory that the hub may not write.
+
+            subPath, so a single file lands inside the writable directory rather
+            than replacing it. Read-only on purpose: the hub rewrites
+            settings.yaml at runtime, and on a multi-replica deployment those
+            writes are pod-local while syncHubSettings re-seeds shared database
+            state from whatever the local file says - so a pod that successfully
+            writes here can push its own divergence into truth the other pods
+            then read. Every write path to this file is soft (a warning, or a
+            500 to one caller, with the server continuing), so refusing the
+            write costs a log line and prevents the divergence. Tracked as
+            ptone/scion#1091; see NOTES.txt before making this writable.
+            */}}
+            - name: settings
+              mountPath: {{ printf "%s/settings.yaml" (include "scion-hub.scionDir" .) | quote }}
+              subPath: settings.yaml
+              readOnly: true
+      volumes:
+        - name: scion-home
+          emptyDir: {}
+        - name: settings
+          secret:
+            secretName: {{ include "scion-hub.settingsSecretName" . }}
+            {{- /*
+            0444, and specifically not 0600.
+
+            A Secret volume is projected root:root regardless of the pod's
+            securityContext, and this pod runs as a non-root uid. 0600 would
+            therefore produce a file the hub cannot read - and the hub does not
+            report that as a permissions problem: it starts with defaults, then
+            fails the hosted preflight naming a configuration key, which sends
+            the reader to the settings file that is in fact correct.
+
+            The alternative, 0440 with a pod-level fsGroup, was considered and
+            rejected. fsGroup is pod-wide, so every sidecar gets the group and
+            can read the file anyway - it is the appearance of a boundary rather
+            than a boundary - and it makes the kubelet apply recursive ownership
+            changes to volumes, which is a real hazard once an NFS workspace
+            share is mounted here. Do not add fsGroup to fix a permissions
+            problem on this file.
+
+            The leading zero is part of the value. Kubernetes reads manifests as
+            YAML 1.1, where 0444 is octal 292; strip the zero and it becomes
+            decimal 444, which is octal 0674 - group-writable, still a valid
+            mode, and accepted without complaint. Do not "simplify" it.
+            */}}
+            defaultMode: 0444
+            items:
+              - key: settings.yaml
+                path: settings.yaml
       {{- with .Values.hub.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

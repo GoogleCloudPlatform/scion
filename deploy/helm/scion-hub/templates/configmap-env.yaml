@@ -1,0 +1,102 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+{{/*
+The hub process environment.
+
+This is the whole of it, and the list is short on purpose. Configuration is
+delivered as a rendered settings.yaml, not as SCION_SERVER_* variables, because
+whether such a name binds is decided by a lookup table and nothing in the name
+says which way it went. envKeyToConfigKey (pkg/config/hub_config.go:976) splits
+on underscores and requires every segment to survive camelCaseFields (:919), so
+SCION_SERVER_DATABASE_URL binds and SCION_SERVER_DATABASE_MAX_OPEN_CONNS does
+not. A name that misses is dropped by k.Unmarshal with no error, no warning and
+no log line, and is then still reported to the admin server-config view as an
+active override. A name that hits is applied AFTER settings.yaml is loaded
+(:683) and wins, which puts the hub's real configuration out of reach of every
+guard in this chart. Those are exactly the settings a chart reaches for
+environment variables to deliver.
+
+Everything below is read by a literal os.Getenv, so no name mapper stands
+between the value here and the value the hub uses.
+
+Nothing secret goes in a ConfigMap. The session secret arrives by envFrom from
+its own Secret, added with the rest of the secret handling.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scion-hub.envConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scion-hub.labels" . | nindent 4 }}
+data:
+  # The only lever on where the hub looks for settings.yaml. There is no
+  # SCION_HOME and no config-path override: the directory is os.UserHomeDir()
+  # plus .scion, full stop.
+  HOME: {{ .Values.hub.home | quote }}
+
+  # Emptied deliberately. The Cloud Run image bakes KUBECONFIG=/home/scion/
+  # .kube/config, and an explicit kubeconfig takes precedence over in-cluster
+  # credentials - so a stale baked value silently disables the ServiceAccount
+  # the pod is running with, and the hub's inability to schedule agent pods
+  # presents as an RBAC problem. Cheap insurance against a whole class of
+  # regression, and harmless if the image is clean.
+  KUBECONFIG: ""
+
+  # Mandatory here. Absence only warns, and the fallback is
+  # http://localhost:<port>: agents cannot reach that, and the session cookie's
+  # Secure attribute is derived from the https:// prefix, so the fallback also
+  # quietly serves cookies without Secure.
+  SCION_SERVER_BASE_URL: {{ include "scion-hub.baseUrl" . | quote }}
+
+  # Compared against the literal string "true", so it is emitted as a string and
+  # any other value means false. When true the hub refuses to start rather than
+  # fall back to a per-process signing key, which across replicas would sign
+  # tokens each of the others reject.
+  #
+  # THE REFUSAL BELOW EXISTS BECAUSE THE HUB'S REFUSAL IS NOT SCOPED TO ITS OWN
+  # HARM. Setting this true in this release does not make the hub careful; it
+  # makes the hub refuse to boot, every time, on a first install, with nothing
+  # the operator can do about it from this chart. The hub resolves a stable key
+  # from a pre-configured key, then SharedSigningSecret, then a secret backend,
+  # then the store (pkg/hub/server.go:1445). SharedSigningSecret is
+  # resolveSessionSecret() (cmd/server_foreground.go:1556), which reads only
+  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
+  # (cmd/server_foreground.go:1452-1462); the chart renders none of them, and
+  # hub.extraEnv - the one operator-controlled env channel - refuses all three
+  # by name as credential material (_helpers.tpl:1306). The store is empty on a
+  # first boot. So there is no key, pkg/hub/server.go:1634 errors,
+  # pkg/hub/server.go:1008 makes it fatal, and cmd/server_foreground.go:259
+  # calls log.Fatalf.
+  #
+  # config.existingSecret is the one shape where true is satisfiable, and it is
+  # not hypothetical: the operator writes their own settings.yaml, so they can
+  # set server.secrets.backend and pre-provision the key there. The chart does
+  # not render that file and has no business second-guessing it.
+  #
+  # This turns a CrashLoopBackOff at 03:00 into a values error at install time.
+  {{- if and .Values.auth.requireStableSigningKey (not .Values.config.existingSecret) }}
+  {{- fail "auth.requireStableSigningKey is true, but nothing in this release can satisfy it, so the hub would refuse to start on every first boot. The hub needs a pre-configured key, a SharedSigningSecret, a secret backend or a key already in its store (pkg/hub/server.go:1445); SharedSigningSecret comes only from --session-secret, SCION_SERVER_SESSION_SECRET or SESSION_SECRET (cmd/server_foreground.go:1452-1462), this chart renders none of them, hub.extraEnv refuses all three as credential material, and a first boot has an empty store. The failure is log.Fatalf at cmd/server_foreground.go:259, not a warning. Leave it false until the session-secret phase renders the Secret; that phase flips this default to true in the same change. Under config.existingSecret it is allowed, because your own settings.yaml can configure server.secrets and pre-provision the key." }}
+  {{- end }}
+  SCION_REQUIRE_STABLE_SIGNING_KEY: {{ ternary "true" "false" .Values.auth.requireStableSigningKey | quote }}
+  {{- with .Values.hub.adminMode }}
+
+  # Truthy values are true, 1 and yes.
+  SCION_SERVER_ADMIN_MODE: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.hub.maintenanceMessage }}
+  SCION_SERVER_MAINTENANCE_MESSAGE: {{ . | quote }}
+  {{- end }}

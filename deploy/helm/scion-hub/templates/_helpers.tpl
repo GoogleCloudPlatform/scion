@@ -646,19 +646,36 @@ the mechanism was sound and only the justification was invented:
 
   - THE SUBJECT IS WHAT THIS CHART RENDERS, NOT WHAT THE PROJECT IS BUILDING
     TOWARD. Every wrong answer below came from substituting the second for the
-    first, so: this chart mounts no volumes and renders no --db. Replicas share
-    NO mutable state, and isHADeployment (cmd/server_foreground.go:927) is FALSE
-    at every replica count - K_SERVICE is unset on GKE, the driver is not
-    postgres, and the gcs-plus-proxy branch is unset - so the hosted HA preflight
-    at :921 does not run either.
-  - The stated harm - "two hubs writing the same RWX workspace share" - is
-    therefore not a thing this chart can produce.
-  - The replacement harm - "the upgrade transiently enters HA mode" - is false
-    for the same reason, and not for the reason first given for it. HA is not
-    "already on"; it is off, at one replica and at ten.
-  - LATER PHASES FALSIFY THAT ON PURPOSE, WHICH IS WHY IT IS WRITTEN DOWN RATHER
-    THAN LEFT AS AN ABSENCE. The Cloud SQL phase sets the postgres driver and
-    turns isHADeployment true; the Filestore phase lands the shared volumes.
+    first. What it renders now: an emptyDir at the hub's state directory, a
+    read-only settings.yaml projected into it, and no --db on argv. Both volumes
+    are pod-local and one of them cannot be written, so REPLICAS STILL SHARE NO
+    MUTABLE STATE - which is the property the argument below actually needs.
+  - isHADeployment IS TRUE HERE AND WAS FALSE AT PHASE 0, BY TWO INDEPENDENT
+    ROUTES. This bullet used to say the chart mounted no volumes and that
+    isHADeployment (cmd/server_foreground.go:927) was false at every replica
+    count. Both halves were true while the chart rendered no settings file. Now
+    a rendered server.database.driver of postgres satisfies the test at :931,
+    and server.storage.provider gcs together with server.auth.mode proxy
+    satisfies the one at :934. GKE does not set K_SERVICE, but hub.extraEnv can
+    and it renders - measured - so that route is reachable from this chart too,
+    and assertHAUnlanded transcribes all three rather than two.
+    hostedHAGuardsRequired (:921) is therefore satisfied and
+    the hosted HA preflight DOES run - which is why this chart renders the five
+    Block-1 keys in both auth modes rather than leaving them to the hub.
+  - The stated harm - "two hubs writing the same RWX workspace share" - is still
+    not a thing this chart can produce, and the reason is now narrower than "no
+    volumes". It is that the share itself does not exist: no RWX volume, no
+    workspace_storage section, nothing two pods can both write.
+  - The replacement harm - "the upgrade transiently enters HA mode" - has to be
+    stated more carefully than it was. HA DETECTION is on, at one replica and at
+    ten, so "it is off" is no longer the answer. The answer is that entering the
+    hub's HA mode costs nothing here, because every consequence of it is about
+    shared mutable state and there is none to share. The refusal was wrong for
+    the reason above, not for this one.
+  - LATER PHASES CHANGE THIS AGAIN, WHICH IS WHY IT IS WRITTEN DOWN RATHER THAN
+    LEFT AS AN ABSENCE. Cloud SQL supplies the database URL behind the postgres
+    driver this chart already renders; the workspace-share phase lands the RWX
+    volume.
     Concurrency correctness becomes a live question at that point, and it is
     answered there by Postgres advisory locks (pg_try_advisory_lock,
     pkg/provision/provision.go:109-116, "for cross-node mutual exclusion", and
@@ -1092,21 +1109,28 @@ Exactly one list is.
        file and then tests raw["server"] for present AND NON-NIL. It never asks
        whether the file exists as a separate question, and "server: ~" parses,
        has the key, and is still not found.
-     - A GLOBAL settings.yaml ALREADY EXISTS AT PHASE 0. This chart delivers no
-       ConfigMap and no Secret, but the hub writes one before it reads one:
-       cmd/server_foreground.go:107 calls config.InitGlobal, seeded from
-       pkg/config/embeds/default_settings.yaml - which carries schema_version,
+     - THE GLOBAL settings.yaml IS THIS CHART'S, AND IT CARRIES A server KEY.
+       That is the whole transition, and it is why the flag is inert here rather
+       than merely discouraged. The chart mounts an emptyDir at $HOME/.scion and
+       lands its rendered settings.yaml into it as a subPath, so the file
+       GetGlobalDir() resolves to is the file this chart wrote.
+     - THE HUB DOES NOT SEED ONE OVER THE TOP, AND THE REASON IS THE MOUNT. The
+       seeding call is guarded at cmd/server_foreground.go:104 by
+       os.Stat(globalDir) / os.IsNotExist, so config.InitGlobal (:107) fires only
+       when $HOME/.scion is ABSENT. The emptyDir makes the directory exist before
+       the process starts, so the guard takes the else branch and the embedded
+       defaults in pkg/config/embeds/default_settings.yaml - schema_version,
        active_profile, default_template, default_harness_config, image_registry,
-       cli, runtimes and profiles, AND NO server KEY. So "the chart ships no
-       settings file" is true and is NOT the reason; the reason is that the file
-       which does exist has no server key.
-     - AND "the hub always creates it" IS NOT DURABLE EITHER. InitGlobal is
-       guarded at cmd/server_foreground.go:104 by os.Stat(globalDir) /
-       os.IsNotExist. It fires only when $HOME/.scion is absent. A phase that
-       mounts a volume there skips the seeding entirely and the contents become
-       whatever the volume holds. Phase 0's answer does not move - an empty
-       mounted directory still has no server key - but a comment keyed off the
-       file would.
+       cli, runtimes, profiles, AND NO server KEY - are never materialised. The
+       rendered file is the only settings.yaml in the container.
+     - THE PREVIOUS PARAGRAPH WAS RIGHT FOR A REASON THAT NO LONGER APPLIES, and
+       it is kept here because the reasoning is what a later phase needs. At
+       phase 0 the chart delivered no ConfigMap and no Secret, the directory did
+       not exist, InitGlobal fired, and the seeded file had no server key - so
+       the flag was LIVE, by a different route to a different answer. Anything
+       that changes what is at $HOME/.scion changes which of these two paragraphs
+       applies: mounting a volume with no settings.yaml in it puts the flag back
+       to LIVE, and nothing in the render inspects that.
 
    THREE VALUES, NOT TWO. Reading the flag as binary is what produced two of the
    wrong answers above. In order of evaluation:
@@ -1278,36 +1302,67 @@ Exactly one list is.
 {{- $aliasOrIgnored := list "production" "port" }}
 
 {{- /*
-4. A LATER PHASE DELIVERS THESE THROUGH A CHANNEL OTHER THAN argv, AND argv WINS
-   OVER IT SILENTLY. The tense is the correction from round 4 and it is the whole
-   point of this paragraph. This comment used to open "the chart ALREADY delivers
-   these settings through a channel other than argv", WHICH IS FALSE AT THIS HEAD:
-   the chart renders no ConfigMap, no Secret, no env, no envFrom and no volumes,
-   so it delivers none of these five through any channel whatsoever. Four of them
-   - db, storage-bucket, storage-dir, base-url - are fully LIVE on argv today
-   (cmd/server_foreground.go:875-877, :889-891, :892-894, :2102) and would simply
-   take effect if passed. There is no second source yet for anything to disagree
-   with.
+4. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
+   SILENTLY. Two of the five are delivered by this chart and three are not, and
+   that split is the paragraph. It was one claim about five flags until the
+   settings rendering landed, and it is two claims now.
+
+   DELIVERED HERE. argv is a second source for these today:
+
+     base-url        SCION_SERVER_BASE_URL, templates/configmap-env.yaml:57,
+                     reaching the container by envFrom at
+                     templates/deployment.yaml:147-148.
+     storage-bucket  server.storage.bucket in the rendered settings.yaml.
+
+   NOT DELIVERED HERE. Live on argv, nothing to disagree with, would simply take
+   effect if passed:
+
+     db              cfg.Database.URL, cmd/server_foreground.go:875-877.
+                     Arrives with Cloud SQL.
+     storage-dir     cfg.Storage.LocalPath, cmd/server_foreground.go:890-892.
+                     Arrives with the workspace share.
+     admin-emails    cfg.Hub.AdminEmails, cmd/server_foreground.go:1402-1409 and
+                     :2116-2124. Both sites read argv first and consult the
+                     settings file only when argv is empty. No phase claims it.
+
+   THIS HEADER WAS CORRECT AND STOPPED BEING CORRECT WITHOUT THE FILE BEING
+   EDITED. It read "there is no second source yet for anything to disagree with"
+   and "none of them lands anywhere", which were true while the chart rendered no
+   ConfigMap, no Secret and no volumes, and false the moment it rendered all
+   three. The refusal at the bottom of this file went stale in the same instant
+   and for the same reason, which is why they are fixed together: this header is
+   that refusal's justification, and fixing one alone leaves the file arguing
+   with itself. An unchanged file is not evidence that its claims about the rest
+   of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead - and none of them lands anywhere. They are not rendered
-   ($setByChart), they do not select which configuration is loaded ($neverPassed),
-   they are neither inert nor misnamed ($aliasOrIgnored), and they do not weaken
-   authentication ($unsafeToPass). The harm is real and arrives on a known
-   schedule: when the configuration phase lands, an argv copy added today becomes
-   the silent winner over the channel that phase delivers, and nothing logs the
-   disagreement. The asymmetry is what decides it - reserving now costs an
-   operator a flag they have no reason to want and un-reserving later is a
-   deliberate act with a place to record itself (see the closing paragraph),
-   whereas reserving after the fact requires somebody to notice.
+   where it lands instead. For base-url and storage-bucket that is the first list
+   above, and the answer is still not argv. For the other three it is nowhere
+   yet. None of the five is rendered as an argument ($setByChart), none selects
+   which configuration is loaded ($neverPassed), none is inert or misnamed
+   ($aliasOrIgnored), and none weakens authentication ($unsafeToPass).
+
+   The harm is present for the first list and scheduled for the second. Passing
+   -base-url or -storage-bucket today makes argv the silent winner over a value
+   this chart rendered, and nothing logs the disagreement. Passing one of the
+   other three today changes a setting nothing else sets; the same silent
+   overriding starts the day its channel lands, with no edit here to mark it. The
+   asymmetry is what decides it - reserving costs an operator a flag they have no
+   reason to want, un-reserving is a deliberate act with a place to record itself
+   (see the closing paragraph), and reserving after the fact requires somebody to
+   notice.
 
    Not verifiable against the rendered arguments, by construction - the rendered
-   argument list is where these must NOT appear. Check them against the channel.
+   argument list is where these must NOT appear. Check them against the channel,
+   which hack/verify.sh now does: it asserts the first list against the render and
+   the second against its absence, so moving an entry between the two lists
+   without moving the code, or the reverse, is a red test rather than a paragraph
+   nobody re-reads.
 
-   NAME THE CHANNEL WHEN YOU ADD AN ENTRY, because it is not the same channel
-   for every entry and the precedence differs. admin-emails, db, storage-bucket
-   and storage-dir are destined for the settings file. base-url is destined for
-   the SCION_SERVER_BASE_URL environment variable.
+   NAME THE CHANNEL WHEN YOU ADD AN ENTRY, because it is not the same channel for
+   every entry and the precedence differs. admin-emails, db, storage-bucket and
+   storage-dir belong to the settings file; base-url belongs to the
+   SCION_SERVER_BASE_URL environment variable.
 
    Precedence for base-url, read from the hub rather than assumed, because "two
    sources" only matters if one of them silently loses:
@@ -1318,9 +1373,10 @@ Exactly one list is.
        settings file server.hub.public_url, else --base-url, else
        SCION_SERVER_BASE_URL, else project settings, else localhost
 
-   Two consequences, both silent. ARGV BEATS THE ENVIRONMENT AT BOTH SITES: a
-   future phase that emits --base-url shadows the environment variable, with no
-   error and, unless --debug is on, no log line either. And the two sites do not
+   Two consequences, both silent. ARGV BEATS THE ENVIRONMENT AT BOTH SITES, and
+   the environment variable is one this chart renders, so an argv --base-url
+   shadows a live value rather than a hypothetical one, with no error and, unless
+   --debug is on, no log line either. And the two sites do not
    agree with each other - the settings file outranks argv when resolving the
    agent-facing endpoint but is not consulted at all for the OAuth redirect - so
    argv plus a settings file that sets public_url yields two different base URLs
@@ -1356,8 +1412,17 @@ Exactly one list is.
    happens to look like a credential, and a passphrase does not. And it PRE-EMPTS
    the delivery channel: resolveSessionSecret (cmd/server_foreground.go:1452-1456)
    takes the flag first and only falls back to SCION_SERVER_SESSION_SECRET, so an
-   argv value silently outranks the Secret-backed environment variable a later
-   phase mounts.
+   argv value silently outranks the Secret-backed environment variable the
+   session-secret phase mounts. THAT CHANNEL IS NOT THE SECRET THIS CHART ALREADY
+   RENDERS, and the distinction is worth the sentence: this chart renders a Secret
+   holding settings.yaml, and the settings file has no session-secret key at all:
+   there is no such field anywhere in V1ServerConfig, and resolveSessionSecret
+   reads exactly three sources in order - the flag, SCION_SERVER_SESSION_SECRET,
+   then bare SESSION_SECRET for compatibility - none of which is a file. So the
+   presence of a Secret in the rendered output says nothing about
+   this claim, which stays forward-tensed until SCION_SERVER_SESSION_SECRET is
+   emitted. Measured at this head: zero occurrences of SESSION_SECRET in every
+   permutation's render.
 
    --dev-auth (cmd/server.go:251) IS A DIRECT WRITE TO cfg.Auth.Enabled AT
    cmd/server_foreground.go:884-886, AND THE DANGEROUS DIRECTION IS TRUE, NOT
@@ -1545,7 +1610,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: a later phase delivers this setting through another channel - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy added now becomes a second and invisible source for one value the moment that channel lands, with nothing reporting the disagreement. This chart delivers none of them yet: today the flag would simply take effect, which is why this reservation cannot be inferred from the rendered output and is written down here instead." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Two of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket onto server.storage.bucket in the settings file it renders, so passing either makes argv the winner over a value already set here. The other three - -db, -storage-dir and -admin-emails - have no second source in this release and would simply take effect; they stay reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
@@ -1612,4 +1677,889 @@ positive of exactly the kind the hasPrefix fix was written to remove. Translated
 {{- include "scion-hub.assertNoCredential" (dict "value" $arg "source" "hub.args entry") }}
 {{- end }}
 {{- toYaml $args }}
+{{- end }}
+
+{{/*
+=============================================================================
+Configuration intake: the rendered settings.yaml
+=============================================================================
+
+The hub is configured by a settings.yaml file, not by SCION_SERVER_* environment
+variables. That is not a style preference.
+
+THE RULE, MEASURED. On the path this chart uses, loadGlobalConfigFromSettings
+calls applyEnvOverrides (pkg/config/hub_config.go:683 and :1191), which maps each
+name through envKeyToConfigKey (:976): lowercase, split on "_", replace any
+segment that has an entry in the camelCaseFields table (:919), join with ".".
+So a SCION_SERVER_ name binds if and only if EVERY underscore-separated segment
+is either a plain lowercase word matching its koanf tag or has a table entry.
+Anything else produces a key that matches no field, and k.Unmarshal (:1198) is
+called without ErrorUnused, so it is discarded with no error, no warning and no
+log line.
+
+Worked both ways, because the reachable half is the part that was wrong here for
+three phases:
+
+  SCION_SERVER_DATABASE_DRIVER  -> database.driver   BINDS
+  SCION_SERVER_DATABASE_URL     -> database.url      BINDS
+  SCION_SERVER_OIDC_ENABLED     -> oidc.enabled      BINDS
+  SCION_SERVER_DATABASE_MAX_OPEN_CONNS -> database.max.open.conns  discarded
+                                   (koanf tag is max_open_conns; the underscores
+                                    became dots before anything could rejoin them)
+  SCION_SERVER_OIDC_ISSUER_URL  -> oidc.issuer.url   discarded, same reason
+                                   (OIDCProviderConfig.IssuerURL, koanf issuer_url)
+  SCION_SERVER_OIDC_ISSUERURL   -> oidc.issuerurl    discarded, DIFFERENT reason
+                                   (OIDCLoginConfig.IssuerURL is koanf issuerUrl
+                                    and "issuerurl" has no camelCaseFields entry)
+
+Two failure modes, one symptom. TestEnvKeyToConfigKey has DATABASE_DRIVER as an
+explicit passing sub-case, so "the database keyspace binds under no spelling" was
+one `go test` away from being checked at any point.
+
+AND A DISCARDED VARIABLE IS NOT SILENT DOWNSTREAM - IT IS REPORTED AS APPLIED.
+DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) is `envKoanf.Keys()`: it
+returns every SCION_SERVER_ name in the environment, having never asked whether
+any of them reached a field. So the admin server-config view lists a dropped
+variable as an active override. Worse than silence.
+*/}}
+
+{{/* Name of the Secret holding the rendered settings.yaml. */}}
+{{- define "scion-hub.settingsSecretName" -}}
+{{- if .Values.config.existingSecret }}
+{{- .Values.config.existingSecret }}
+{{- else }}
+{{- printf "%s-settings" (include "scion-hub.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
+The hub's state directory: hub.home plus /.scion.
+
+Not configurable independently, and there is no lever that separates the config
+file from the rest of it. The path is os.UserHomeDir() + "/.scion", hardcoded -
+there is no SCION_HOME and no config-path flag - and settings.yaml, storage/,
+templates/ and scion-token all live in it. That is why the directory is backed
+by a writable emptyDir and only the one file inside it is read-only.
+*/}}
+{{- define "scion-hub.scionDir" -}}
+{{- printf "%s/.scion" (trimSuffix "/" .Values.hub.home) }}
+{{- end }}
+
+{{/* Name of the ConfigMap holding the process environment. */}}
+{{- define "scion-hub.envConfigMapName" -}}
+{{- printf "%s-env" (include "scion-hub.fullname" .) }}
+{{- end }}
+
+{{/*
+The externally reachable hub URL, as SCION_SERVER_BASE_URL.
+
+Required, and required to be https://. Absence only warns: the hub falls back to
+http://localhost:<port>, which agents cannot reach, and - because the session
+cookie's Secure attribute is literally strings.HasPrefix(baseURL, "https://") -
+an http:// value silently serves session cookies without Secure.
+
+The design conditions the https:// requirement on ingress.enabled. Ingress does
+not exist in this chart yet, and there is no plaintext deployment of it, so the
+requirement is unconditional here. If a non-TLS path is ever added, relax it
+then, deliberately.
+*/}}
+{{- define "scion-hub.baseUrl" -}}
+{{- $url := required "hub.baseUrl is required: the externally reachable URL of the hub, e.g. https://hub.example.com. Without it the hub falls back to http://localhost:<port>, which agents cannot reach." .Values.hub.baseUrl }}
+{{- if not (hasPrefix "https://" $url) }}
+{{- fail (printf "hub.baseUrl must start with https://, got %q. The session cookie's Secure attribute is derived from this prefix, so a plaintext base URL silently ships session cookies without Secure." $url) }}
+{{- end }}
+{{- $url }}
+{{- end }}
+
+{{/*
+Reject any operator-supplied environment variable that would desynchronise the
+chart's guards from the hub's configuration.
+
+THE REASON CHANGED AND THE REFUSAL DID NOT. This guard used to be defended on the
+grounds that SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are "unreachable by
+any spelling". That is FALSE - see the intake section above - and a guard
+defended by a false premise gets deleted the moment somebody checks the premise.
+gd-p2-dev and gd-p3-dev checked it, from opposite ends, against a passing test in
+the repo.
+
+THE HARM, MEASURED THROUGH THE HUB. applyEnvOverrides runs AFTER settings.yaml is
+loaded (pkg/config/hub_config.go:683) and wins, so a bound SCION_SERVER_DATABASE_
+variable silently overrides the file this chart renders. Measured: minimal's
+settings.yaml says driver: sqlite; with SCION_SERVER_DATABASE_DRIVER=postgres in
+the environment, config.LoadGlobalConfig reports driver "postgres",
+isHADeployment (cmd/server_foreground.go:927) flips to TRUE, and the hub aborts
+at the hosted HA preflight - from a release that assertHAUnlanded passed, because
+assertHAUnlanded reads .Values.database.driver, which still says sqlite.
+
+That is the harm and it is specific to this chart: the chart's guards reason
+about the configuration the chart RENDERED, and this variable changes the
+configuration the hub RUNS. Every premise those guards rest on stops being true,
+and nothing anywhere reports it.
+
+The chart's own templates emit no such variable; hub.extraEnv is the one place an
+operator could add one, and these two prefixes are the most likely mistake
+because they are the settings a chart most wants to deliver.
+*/}}
+{{- define "scion-hub.assertExtraEnv" -}}
+{{- /*
+THE SHADOW LIST IS READ OUT OF THE RENDERED ConfigMap, NOT WRITTEN DOWN HERE.
+It was written down here, and it was already wrong: it named four variables while
+configmap-env.yaml emitted six, so SCION_SERVER_ADMIN_MODE and
+SCION_SERVER_MAINTENANCE_MESSAGE could be shadowed silently - the two that are
+emitted conditionally, which is to say the two a hand-maintained list was always
+going to miss.
+
+Rendering the ConfigMap and taking its keys makes the two lists the same list.
+Adding a variable to the ConfigMap without adding it to this guard stops being
+expressible, which is the only version of "keep these in sync" that is a
+mechanism rather than a request. It also gets the conditional keys exactly
+right: when hub.adminMode is unset the chart emits nothing to shadow, and an
+extraEnv entry of that name is legitimately allowed.
+
+POD_NAMESPACE is the one literal, and it has to be. It is not in the ConfigMap -
+it is a fieldRef in the container's env list, which cannot be rendered from here
+without the Deployment rendering itself. hack/verify.sh closes that by reading
+the shadowable names back out of the rendered manifest, ConfigMap keys and
+container env entries alike, and asserting this guard refuses every one of them.
+*/}}
+{{- $envDoc := fromYaml (include (print .Template.BasePath "/configmap-env.yaml") .) }}
+{{- $shadowable := concat (keys (default dict $envDoc.data)) (list "POD_NAMESPACE") }}
+{{- if lt (len $shadowable) 5 }}
+{{- fail (printf "the environment ConfigMap rendered %d keys, which is fewer than the chart is known to emit unconditionally - hub.extraEnv's shadow guard derives its list from those keys and would be checking almost nothing." (len (default dict $envDoc.data))) }}
+{{- end }}
+{{- range $entry := .Values.hub.extraEnv }}
+{{- $name := toString (dig "name" "" $entry) }}
+{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
+{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go:683) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go:927) becomes true while acknowledgeHAUnlanded never fires, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- end }}
+{{- if has $name $shadowable }}
+{{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
+{{- end }}
+{{- /*
+The same two rules the argument guard applies to argv, applied to env, through
+the same two shared helpers rather than a second near-miss copy of them. A
+literal value here is stored in the Deployment and readable by anyone who can
+read the object - which is a wider set of people than can read a Secret, and a
+set that grows every time somebody is granted "just read access to the
+workloads". valueFrom.secretKeyRef is untouched by both checks: it carries a
+reference, not the material, so neither a name nor a value test has anything to
+say about it.
+
+Both are conditioned on the entry actually carrying a literal, for that reason.
+
+THE UNDERSCORE IS WHY $name IS TRANSLATED BEFORE THE NAME CHECK.
+scion-hub.assertNoCredentialName matches a credential noun as a whole trailing
+SEGMENT, and its segment separator is the hyphen, because it was written for
+flag names. Environment variable names separate with underscores, so passing
+SESSION_SECRET to it unchanged matches nothing at all: the guard renders, reads
+as applied, and is inert. Translating _ to - puts the name into the alphabet the
+helper's positional rule is expressed in, and the rule then means the same thing
+on both axes - SESSION_SECRET is caught, TOKEN_TTL_SECONDS and MAX_TOKENS are
+not. verify.sh asserts the catch and both non-catches, so a regression here
+cannot pass as "no false positives".
+
+Do not "simplify" this by widening the shared helper's character class instead.
+The translation belongs to the caller whose names use underscores; the helper is
+shared with argv, where the hyphen rule is the correct one.
+*/}}
+{{- if hasKey $entry "value" }}
+{{- include "scion-hub.assertNoCredentialName" (dict "name" (replace "_" "-" $name) "source" (printf "hub.extraEnv entry %s: the name" $name)) }}
+{{- include "scion-hub.assertNoCredential" (dict "value" (dig "value" "" $entry) "source" (printf "hub.extraEnv value of %s" $name)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+THE VALUES THAT REACH settings.yaml AND ONLY settings.yaml, AND WHAT THEY WRITE.
+The single source for that list. NOTES.txt renders it, values.yaml repeats it in
+prose at config.existingSecret, and hack/verify.sh checks all three against the
+render rather than against each other.
+
+Under config.existingSecret the chart writes no settings.yaml, so each of these
+values silently does nothing and the operator's own file has to carry the key on
+the right. That is the whole content of the list: what you now owe.
+
+WHY THESE ARE DOCUMENTED AND THE THREE BELOW ARE REFUSED, WHICH IS NOT A
+JUDGEMENT ABOUT WHICH MATTER MORE. It is about what a template can see. Helm
+hands a template the MERGED values and no way to ask which of them the operator
+actually wrote, so intent is only legible where the chart's default is empty:
+config.extra, storage.bucket and agents.imageRegistry are empty by default, so a
+non-empty one was typed by someone and can be refused. Every value here has a
+non-empty default - auth.mode is "proxy", hub.name is "Scion Hub",
+database.maxOpenConns is 25 - and a guard on truthiness would fire on a values
+file that never mentioned them. There is no third option: a literal copy of the
+default inside the guard is a second source of truth for the default, and it
+goes stale in exactly the direction that turns the guard off.
+
+So this list is not a weaker refusal. It is the part of the same problem that a
+refusal cannot express, and it is checked to the same standard: hack/verify.sh
+mutates every leaf of values.yaml, renders, and requires each value whose only
+effect is on the settings document to be EITHER refused by the guard below OR
+named here with the settings key its mutation actually moved. A value in neither
+place fails the suite, and so does an entry here that no longer moves the key it
+claims. The pairs below were produced by that probe, not written from memory.
+
+Both columns are load-bearing. The left tells an operator which of their values
+went nowhere; the right tells them what to write instead, which is the only half
+they can act on, and it is not guessable from the left - hub.name becomes
+server.hub.hub_name, and rbac.agentNamespace and runtime.namespace both become
+the same runtimes.kubernetes.namespace.
+*/}}
+{{- define "scion-hub.existingSecretTransfers" -}}
+  auth.mode                  ->  server.auth.mode
+  database.connMaxIdleTime   ->  server.database.conn_max_idle_time
+  database.connMaxLifetime   ->  server.database.conn_max_lifetime
+  database.maxIdleConns      ->  server.database.max_idle_conns
+  database.maxOpenConns      ->  server.database.max_open_conns
+  hub.hubId                  ->  server.hub.hub_id
+  hub.name                   ->  server.hub.hub_name
+  rbac.agentNamespace        ->  runtimes.kubernetes.namespace
+  runtime.listAllNamespaces  ->  runtimes.kubernetes.list_all_namespaces
+  runtime.namespace          ->  runtimes.kubernetes.namespace
+{{- end }}
+
+{{/*
+config.existingSecret means "I supply the whole settings.yaml myself", so the
+chart renders none - and every value whose only effect is on the file it did not
+render becomes inert. An inert value is the same silent no-op this whole design
+exists to avoid, so supplying both is an error rather than a precedence rule.
+
+The three names below are the settings values with an empty default, which is
+what makes them refusable at all; the reasoning is in the comment above the
+transfer list, and the two lists are checked together as one partition of the
+values tree. Later phases append their own inline values here as they are
+introduced (the database password, the session secret, the OAuth client secret).
+
+Two settings values are missing from the list on purpose and are covered anyway.
+storage.provider and database.driver have non-empty defaults, so neither can be
+refused on truthiness - but the only other value each can take (gcs, postgres)
+is one the chart already requires storage.bucket alongside, so any render that
+moves either of them is refused for the bucket. hack/verify.sh proves that by
+mutation rather than by argument; if a later phase makes either reachable
+without a bucket, that check goes red rather than the pair going quiet.
+
+MUST be called from a template that always renders. Calling it only from
+scion-hub.settings does not work, and does not look broken: the settings
+template is reached through secret-settings.yaml, which is itself skipped when
+config.existingSecret is set - so the one configuration this check exists to
+reject is the one configuration in which it never runs. deployment.yaml calls
+it; keep that call.
+*/}}
+{{- define "scion-hub.assertConfigSource" -}}
+{{- if .Values.config.existingSecret }}
+{{- $inline := list }}
+{{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
+{{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
+{{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- if $inline }}
+{{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The HA acknowledgement gate.
+
+WHAT IT IS FOR. This chart can render a configuration that satisfies the hub's
+isHADeployment test (cmd/server_foreground.go, func isHADeployment), which turns
+on validateHostedHAPreflight. This release cannot satisfy the gates listed below,
+so the hub aborts where runServerForeground calls
+`if err := validateHostedHAPreflight(cfg); err != nil` before it serves anything.
+
+[HISTORY 2026-08-17] THIS PARAGRAPH SAID "that preflight has thirteen gates",
+eleven lines above the sentence below claiming there is no count anywhere in this
+file. Both were written the same day. 1b3c9418 then made the count wrong as well
+as forbidden, and the sentence that forbade it did not notice, because a prose
+claim about a file's contents is not a check on that file's contents. The count
+is gone; the prohibition below now has nothing to contradict it. The postgres/gcs
+shape is a choice an operator can coherently have made, so this is an opt-in
+acknowledgement rather than a refusal.
+
+MEASURED, gate by gate, through config.LoadGlobalConfig and the real
+validateHostedHAPreflight, on the settings.yaml this chart actually renders -
+not read off this table. cmd/helm_chart_ha_contract_test.go walks it and writes
+hack/ha-gates.txt; hack/verify.sh checks this table against that walk in both
+directions. If the hub gains or loses a gate, that check goes red and this table
+is what has to move. THERE IS NO COUNT ANYWHERE IN THIS FILE, deliberately: a
+count is the thing that agreed with itself in three places for a day while
+agreeing with the hub in none.
+
+ci/values-settings.yaml, in hub order:
+
+  GATE TABLE BEGIN
+    server.database.url                        Cloud SQL phase
+    a durable session/signing secret           session-secret phase
+    server.auth.proxy.provider=iap             ingress/IAP phase
+    server.auth.proxy.iap.audience             ingress/IAP phase
+    server.auth.transport                      ingress/IAP phase
+    server.auth.transport.mode=iap             ingress/IAP phase
+    server.auth.transport.oidc_audience        ingress/IAP phase
+    server.auth.transport.platform_auth_sa     ingress/IAP phase
+  GATE TABLE END
+
+ci/values-settings-oauth.yaml refuses on a STRICT SUBSET of that table: the first
+two rows only. The hub's IAP gates sit inside `if cfg.Auth.Mode == "proxy"` in
+validateHostedHAPreflight, so an oauth deployment never reaches them and the
+ingress/IAP phase lands nothing that arm is waiting on.
+
+[HISTORY 2026-08-17] THIS SAID THE OPPOSITE - "refuses on one gate more,
+server.auth.mode=proxy, which is not an unlanded phase" - and it was true when
+written. 1b3c9418 "fix: do not require IAP for hosted HA preflight" deleted that
+gate and moved the IAP family inside the auth.mode test, inverting the direction:
+oauth went from superset-by-one to subset-by-six. The same claim was live in three
+places (here, templates/NOTES.txt, values.yaml at auth.mode). Correcting one of
+them by hand is what left the other two standing with MORE authority, not less,
+so the fix that matters is the exclusivity assertion in hack/verify.sh, not this
+paragraph.
+
+THE FIVE IN CIRCULATION WERE A PROBE'S EXTENT, NOT THE HUB'S. That walk stopped
+at server.auth.transport because the prober could not satisfy it, and its stop
+was read as the preflight's end. Gates lie past that wall and they are real.
+A later walk supplying a WELL-FORMED IAP audience missed a further refusal,
+isSupportedIAPAudience, which is a second objection to the value of
+server.auth.proxy.iap.audience rather than a table row. Both mistakes are the
+same mistake: reporting what the probe reached as what the hub does.
+
+WHAT THIS CHART ALREADY SATISFIES, so nobody re-derives it: server.hub.hub_id,
+server.database.driver=postgres, and server.storage.provider=gcs with a bucket.
+Those three are why the refusal starts at the database URL rather than at gate
+one.
+
+THE ROUTE SET IS TRANSCRIBED FROM THE HUB, NOT INVENTED HERE.
+cmd/server_ha_preflight_test.go:248-256 (ab0d227, branch
+scion/ha-deployment-tripwire - not an ancestor of this branch; fetch that ref to
+read it) WILL make this a two-way contract once it lands: a route added there
+and not here makes this condition UNDER-trigger, rendering an HA config with no
+acknowledgement, which cannot boot; a route removed or swapped there and not
+here makes it OVER-trigger, demanding an acknowledgement for a deployment that
+is not HA. All three routes are transcribed below. Grep this tree for
+acknowledgeHAUnlanded to find it, as that comment instructs.
+
+Route 1 is K_SERVICE, and it is NOT dead here. GKE does not set it, but
+hub.extraEnv does - measured, it renders - so an operator can turn HA detection
+on through a channel that looks unrelated to the database. The hub tests
+os.Getenv("K_SERVICE") != "", so an explicit empty value is not the route; a
+valueFrom is counted, because the chart cannot read it and under-triggering is
+the outcome that will not boot.
+
+Routes 2 and 3 use lower-cased comparison because the hub uses strings.EqualFold
+(:931, :934), while auth.mode is compared exactly (:934) and so is compared
+exactly here. The schema already enums all three to lower case, which makes the
+difference unobservable today - transcribed faithfully anyway, because the
+contract above is with the hub's test and not with the schema.
+
+NOT EVALUATED UNDER config.existingSecret, and that is a real hole rather than
+an oversight: the chart renders no settings.yaml in that shape, so it cannot see
+the driver, the storage provider or the auth mode. Route 1 is still checked,
+because extraEnv is the chart's own value either way.
+*/}}
+{{/*
+THE ROUTE SET, once, so the refusal and NOTES.txt cannot disagree about whether
+this release is on one. Emits the routes joined by " and ", or the empty string
+when there are none - which is falsey, so callers test it directly.
+
+Shared deliberately, and it is NOT the same decision as the gate list. The
+routes are a computed property of these values and must be identical in both
+places or one of them is lying about the deployment in front of the operator.
+The gate list is prose written for two different audiences and stays duplicated,
+with a parity check over the copies rather than a shared definition.
+*/}}
+{{- define "scion-hub.haRoutes" -}}
+{{- $routes := list }}
+{{- range .Values.hub.extraEnv }}
+{{- if eq .name "K_SERVICE" }}
+{{- if or .value .valueFrom }}
+{{- $routes = append $routes "hub.extraEnv sets K_SERVICE (cmd/server_foreground.go, isHADeployment: os.Getenv(\"K_SERVICE\") != \"\")" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not .Values.config.existingSecret }}
+{{- if eq (lower (toString .Values.database.driver)) "postgres" }}
+{{- $routes = append $routes "database.driver is postgres (cmd/server_foreground.go, isHADeployment: strings.EqualFold(cfg.Database.Driver, \"postgres\"))" }}
+{{- end }}
+{{- if and (eq (lower (toString .Values.storage.provider)) "gcs") (eq (toString .Values.auth.mode) "proxy") }}
+{{- $routes = append $routes "storage.provider is gcs and auth.mode is proxy (cmd/server_foreground.go, isHADeployment: strings.EqualFold(cfg.Storage.Provider, \"gcs\") && cfg.Auth.Mode == \"proxy\")" }}
+{{- end }}
+{{- end }}
+{{- join " and " $routes }}
+{{- end }}
+
+{{/*
+THE GATE ENUMERATION IS PER-AUTH-MODE, AND IT IS THAT WAY BECAUSE THE HUB IS.
+
+Until 1b3c9418 ("fix: do not require IAP for hosted HA preflight", Preston
+Holmes, 2026-08-17) this list was the same in both modes and the chart printed
+one sentence. That commit deleted the gate "hosted HA deployment requires
+server.auth.mode=proxy for IAP authentication" and moved the seven IAP gates
+inside `if cfg.Auth.Mode == "proxy" {` in validateHostedHAPreflight. So under
+auth.mode oauth the hub now asks for NONE of the IAP configuration, and the
+single sentence became false about seven of the nine gates it named - while
+still refusing correctly, which is the dangerous combination: a refusal that
+is right about the outcome and wrong about the reason teaches the operator to
+go fix seven things that were never going to be checked.
+
+BOTH LISTS ARE DERIVED, NOT WRITTEN. hack/ha-gates.txt is produced by
+cmd/helm_chart_ha_contract_test.go driving the real validateHostedHAPreflight
+over this chart's own goldens, one gate at a time; the proxy arm walks eight
+and the oauth arm walks two. tests/render-guards.sh reads that artifact and
+asserts, per arm, that the message below names every gate in it AND NAMES NO
+OTHERS. The upper half of that assertion is new: the previous guard only
+checked that nothing was missing, so this message could name a gate the hub
+had deleted and stay green - which is exactly what it did for the forty
+minutes between 1b3c9418 landing and being noticed.
+*/}}
+{{- define "scion-hub.assertHAUnlanded" -}}
+{{- $routes := include "scion-hub.haRoutes" . }}
+{{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
+{{- $gates := "server.database.url, from the Cloud SQL phase, and a durable session/signing secret, from the session-secret phase. That is the whole list for auth.mode oauth: the hub's IAP gates sit inside `if cfg.Auth.Mode == \"proxy\"` in validateHostedHAPreflight, so this shape never reaches them and the ingress/IAP phase lands nothing this release is waiting on" }}
+{{- $removal := "That flag stops being needed for auth.mode oauth when the Cloud SQL phase and the session-secret phase have both landed. The ingress/IAP phase is not on this shape's path and waiting for it would hold the flag one phase too long; Filestore lands none of them either" }}
+{{- if eq (toString .Values.auth.mode) "proxy" }}
+{{- $gates = "server.database.url, from the Cloud SQL phase; a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase" }}
+{{- $removal = "That flag stops being needed for auth.mode proxy when the Cloud SQL phase, the session-secret phase and the ingress/IAP phase have all landed. Filestore lands none of them" }}
+{{- end }}
+{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go, func validateHostedHAPreflight), and it aborts before serving where runServerForeground calls `if err := validateHostedHAPreflight(cfg); err != nil`. These preflight gates have no source in this chart, measured in hub order by walking the real preflight: %s. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. %s." $routes $gates $removal) }}
+{{- end }}
+{{- end }}
+
+{{/*
+A value, as it should appear inside a diagnostic. Quoted, except when there is
+nothing to quote, in which case the word null - which is what YAML calls it.
+
+printf %q against a nil renders the literal text %!q(<nil>), and every one of the
+assertions below reaches nil by an ordinary route: a key present with no value
+("mode:" and nothing after it) parses to nil, and dig's default only covers the
+key being ABSENT. So the operator who writes the near-miss gets a message with a
+Go format error in the middle of it, at the exact moment they are trying to work
+out what the chart read. Missing and null then also print identically as "",
+which hides the difference between a key they did not write and a key they wrote
+wrong.
+
+toString alone is not the fix: it turns nil into the string "<nil>", and %q then
+quotes it into "<nil>", which reads as a value the operator supplied.
+*/}}
+{{- define "scion-hub.diagValue" -}}
+{{- if kindIs "invalid" . }}null{{ else }}{{ printf "%q" (toString .) }}{{ end }}
+{{- end }}
+
+{{/*
+Assertions on the settings document AS EMITTED.
+
+Deliberately run against the bytes parsed back from the rendered text rather
+than against the dictionary they were built from, and after config.extra has
+been merged. config.extra is a deep merge over the whole tree, so without this
+an operator could set server.mode: workstation through it and defeat the rule
+that no value can disable hosted mode - the same hole for every invariant below.
+
+Every check here has a positive form. "server.mode is not workstation" would
+pass on a typo'd or absent mode; "server.mode equals hosted" does not. The hub
+ID check asserts the emitted value equals the operator's, which "no Helm
+generator appears in the hub-ID position" does not.
+*/}}
+{{- define "scion-hub.assertSettings" -}}
+{{- $root := .root }}
+{{- $doc := fromYaml .rendered }}
+{{- if hasKey $doc "Error" }}
+{{- fail (printf "the rendered settings.yaml is not valid YAML: %v" (get $doc "Error")) }}
+{{- end }}
+
+{{- /*
+schema_version. This is a safety property, not a formality, and it is the one
+check in this file most likely to be deleted by someone tidying up.
+
+The hub does not migrate settings at startup. MigrateSettingsFile has exactly
+two callers: the "scion config migrate" CLI, and a lazy auto-migration inside
+SetSettingValue that fires ONLY when the file has no schema_version key. So a
+file that declares schema_version never migrates, and a file that omits it can
+migrate at an arbitrary moment during normal operation.
+
+That matters because settings.yaml is delivered as a subPath bind mount, and
+MigrateSettingsFile replaces the file with os.Rename. Renaming over a bind mount
+returns EBUSY. Every other write path to this file is soft - a warning, or a 500
+to one caller, with the server continuing - so omitting schema_version is the
+one way to turn a mount that merely refuses writes into a hard failure.
+
+Present is not enough; it has to be the value that stops migration, as a string.
+*/}}
+{{- if ne (dig "schema_version" "" $doc) "1" }}
+{{- fail (printf "rendered settings.yaml must carry schema_version: \"1\" as a string, got %s. Without it the hub's lazy auto-migration can fire during operation, and it replaces the file with os.Rename, which returns EBUSY against the subPath mount this file is delivered through." (include "scion-hub.diagValue" (dig "schema_version" "" $doc))) }}
+{{- end }}
+{{- if not (dig "active_profile" "" $doc) }}
+{{- fail "rendered settings.yaml must set a non-empty top-level active_profile" }}
+{{- end }}
+{{- if not (dig "profiles" "" $doc) }}
+{{- fail "rendered settings.yaml must carry a non-empty top-level profiles map" }}
+{{- end }}
+{{- if not (dig "runtimes" "" $doc) }}
+{{- fail "rendered settings.yaml must carry a non-empty top-level runtimes map" }}
+{{- end }}
+
+{{- /*
+The top-level server: key, and it carries a load-bearing property that nothing
+else in this file would suggest.
+
+It is not only that the hub's configuration lives under it. It is that EMITTING
+THIS KEY IS WHAT MAKES --config INERT. Not "--config is inert" - it is not, as a
+general fact, and writing it that way is how the property gets dropped. At Phase
+0, which rendered no settings Secret, the flag was fully live.
+
+AND NOT BECAUSE NO FILE EXISTED. A global settings.yaml may well exist without
+this chart writing one: the hub seeds it from its own embedded defaults on a
+first boot (cmd/server_foreground.go:104-109 -> config.InitMachine,
+pkg/config/init.go:588-599), and those defaults carry no server key.
+loadServerFromSettingsFile does not test existence, it tests the key
+(:1344-1347).
+
+THE TRIGGER IS THE KEY, NOT THE FILE, which is the whole reason this assertion
+is worth its lines. "The chart mounts a settings.yaml" does not keep --config
+inert. Nest the server section under a profile, rename it, deliver it in a
+second file - every one of those still mounts a settings.yaml, and every one of
+them hands the flag back its effect. This phase supplies the key; drop it and the
+deployment is back where Phase 0 was.
+
+  LoadGlobalConfig            pkg/config/hub_config.go:628
+  loadGlobalConfigFromSettings                        :640
+    reads GetGlobalDir() FIRST and UNCONDITIONALLY, and consults the --config
+    path only `if !found`                             :647-660
+  loadServerFromSettingsFile                          :1331
+    found = the file parses AND raw["server"] exists AND is non-nil
+                                                      :1344-1347
+
+WHAT THE FLAG DOES WHEN IT IS LIVE, WHICH IS NOT A REDIRECT. It cannot be one:
+GetGlobalDir (pkg/config/paths.go:188-194) is os.UserHomeDir() joined with
+GlobalDir and TAKES NO ARGUMENTS, so no flag value can move the directory the
+hub reads first. Dropping this key opens two narrower routes instead:
+
+  :648-659  the --config path's own directory is searched for a settings.yaml,
+            and if that file has a server key it becomes the SOLE source of the
+            server config - a substitution of that section, nothing merged
+  :635      failing that, loadGlobalConfigLegacy(configPath) (:699), which loads
+            defaults, then ~/.scion/server.yaml (:772-775), then LAYERS the
+            --config path over the result (:777-787) - an overlay
+
+Both are real and neither is "the whole configuration load moves". Keep the
+distinction: a mitigation scoped to preventing redirection does not cover an
+overlay. A settings.yaml of only profiles and runtimes - a plausible
+minimisation, and one that would look like a simplification - is what opens
+them.
+
+IN THE INERT STATE IT IS A NO-OP WITH NO SIGNAL, WHICH IS WHY THIS ASSERTION IS
+THE ONLY WARNING THERE WILL EVER BE. --config is not marked deprecated -
+MarkDeprecated appears twice in cmd/server.go, :236 and :290, both for
+--production; the flag itself is a plain StringVarP at :237 - and the two
+warnings in the load path (:668, :678) are about a server.yaml beside
+settings.yaml, the second of them additionally requiring hasServerYAML(dir)
+(:1393), which this chart creates nowhere. So while this key is emitted the flag
+is accepted and ignored in silence, and without it it takes effect in the same
+silence. The author of the refactor that flips it gets no runtime symptom to
+discover. They get this message, at render time, or they get nothing.
+
+Non-nil is asserted, not merely present, because that is the condition the
+binary tests. `server:` with nothing under it satisfies hasKey and fails
+raw["server"] != nil.
+
+hack/verify.sh asserts the same property from the rendered output, in every
+permutation. Two checks, on purpose: this one is the one config.extra cannot get
+past, that one is the one a template change cannot get past.
+
+The six keys below are nested under server: in V1ServerConfig. A file that
+places any of them at the top level parses, installs, and is silently not read.
+*/}}
+{{- if not (hasKey $doc "server") }}
+{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0 it was fully live, and not because no settings.yaml existed: the hub seeds one from embedded defaults that carry no server key (cmd/server_foreground.go:104-109, pkg/config/init.go:588-599), and the loader tests the key, not the file (:1344-1347). Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
+{{- end }}
+{{- if not (kindIs "map" (get $doc "server")) }}
+{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, live there, and silently accepted and ignored only while this chart emits this key as a map - returns to live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
+{{- end }}
+{{- range $key := list "notification_channels" "message_broker" "native_chat" "plugins" "scheduler" "github_app" }}
+{{- if hasKey $doc $key }}
+{{- fail (printf "rendered settings.yaml has %s at the top level. It belongs under server: - the top-level position parses and is silently ignored. If this came from config.extra, move it to config.extra.server.%s." $key $key) }}
+{{- end }}
+{{- end }}
+
+{{- /* Hosted mode. Not a tuning knob: without it the server applies workstation
+defaults, takes auth-enabled from a development flag and binds 127.0.0.1. */}}
+{{- if ne (dig "server" "mode" "" $doc) "hosted" }}
+{{- fail (printf "rendered settings.yaml must set server.mode: hosted, got %s. Hosted mode cannot be disabled through this chart, config.extra included." (include "scion-hub.diagValue" (dig "server" "mode" "" $doc))) }}
+{{- end }}
+
+{{- /* HA preflight block 1, part 1: an explicit, operator-supplied hub ID. */}}
+{{- $emittedHubId := dig "server" "hub" "hub_id" "" $doc }}
+{{- if ne $emittedHubId .hubId }}
+{{- fail (printf "rendered settings.yaml has server.hub.hub_id: %s, which is not the value supplied in hub.hubId (%s). The hub ID is emitted verbatim and nothing, config.extra included, may substitute it." (include "scion-hub.diagValue" $emittedHubId) (include "scion-hub.diagValue" .hubId)) }}
+{{- end }}
+
+{{- /* HA preflight block 1, part 2: the store. */}}
+{{- $emittedDriver := dig "server" "database" "driver" "" $doc }}
+{{- if ne $emittedDriver $root.Values.database.driver }}
+{{- fail (printf "rendered settings.yaml has server.database.driver: %s but database.driver is %s. Overriding the driver through config.extra bypasses the schema rules that depend on it, including the requirement for a GCS bucket under Postgres." (include "scion-hub.diagValue" $emittedDriver) (include "scion-hub.diagValue" $root.Values.database.driver)) }}
+{{- end }}
+
+{{- /* HA preflight block 1, part 3: hub blob storage. GCS, and not the
+Filestore share - workspace storage is a different subsystem under
+server.workspace_storage and does not satisfy this. */}}
+{{- if eq (lower (toString $emittedDriver)) "postgres" }}
+{{- if ne (lower (toString (dig "server" "storage" "provider" "" $doc))) "gcs" }}
+{{- fail (printf "rendered settings.yaml must set server.storage.provider: gcs under Postgres, got %s. Local blob storage is not HA-safe and the hub refuses to start. This is the hub's own blob store; the Filestore workspace share does not satisfy it." (include "scion-hub.diagValue" (dig "server" "storage" "provider" "" $doc))) }}
+{{- end }}
+{{- if not (dig "server" "storage" "bucket" "" $doc) }}
+{{- fail "rendered settings.yaml must set a non-empty server.storage.bucket under Postgres" }}
+{{- end }}
+{{- end }}
+
+{{- /*
+server.hub.public_url is refused outright. This is the only assertion in this
+file that guards a channel the chart itself owns, and that is exactly why it was
+missing until someone went looking.
+
+The base URL has two consumers and they do not read the same source. Read from
+the hub rather than assumed, and every step verified independently by review:
+
+  settings_v1.go:517            PublicURL carries koanf:"public_url"
+  settings_v1.go:1404-1405      if v1.Hub.PublicURL != "" { gc.Hub.Endpoint = it }
+  server_foreground.go:1311-12  resolveHubEndpoint returns cfg.Hub.Endpoint - and
+                                this is its FIRST statement, ahead of --base-url
+                                at :1323 and SCION_SERVER_BASE_URL at :1331
+  server_foreground.go:2102-08  initWebServer never reads cfg.Hub.Endpoint
+
+So public_url outranks both other channels for the agent endpoint, and the OAuth
+side cannot see it at any precedence. SCION_SERVER_BASE_URL is the only source
+both consumers honour, which is why the chart sets that and nothing else - it
+makes the two agree by construction rather than by the operator keeping them in
+step.
+
+REFUSED OUTRIGHT, not merely when it disagrees with hub.baseUrl. Permitting an
+equal value would create a second source of truth that has to be kept in sync,
+and the failure of that sync IS the bug: set both equal today, change hub.baseUrl
+tomorrow, and you get the split - from a values file that passed the guard on the
+day it was written. The permissive rule guards the moment of authorship, not the
+lifetime of the file, and there is nothing on the other side of the trade. A
+public_url equal to baseUrl buys the operator nothing, so the only configurations
+it would admit are the ones that are useless now and dangerous later.
+
+Rendering public_url therefore does not override the base URL. It SPLITS it: the
+agent endpoint moves and the OAuth redirect does not, in one process, with both
+values looking correct from their own side and no line in any manifest that
+looks wrong. The failure surfaces later as redirects to the wrong host.
+
+Reachable today, not hypothetically: config.extra is deep-merged over this tree
+before these assertions run, so config.extra.server.hub.public_url renders. That
+is the path hack/verify.sh proves this assertion against. The argv channel is
+closed by the reserved-flag list and the environment channel by the schema; this
+is the third channel and the chart is the only thing that writes it.
+
+public_url is an ALIAS: a settings key that is a second name for a value the
+chart already sets through a different channel. That is the hazard, and it is
+not the server.hub prefix - nothing about that prefix is dangerous, and an alias
+need not live anywhere near the value it renames. The collision check below
+cannot see this one either, because the chart never writes public_url; the two
+rules cover disjoint halves.
+
+So this is a denylist of one, and Phase 5a owns replacing it with the alias
+enumeration: every settings key that is a second name for something the chart
+sets elsewhere, derived by walking what the chart sets and asking what else
+names each quantity. Small, closed, checkable from the chart side alone, and it
+narrows config.extra not at all. Phase 5a because it is the phase that wants a
+public hostname and will reach for this key first.
+
+Do not add a second key here instead of converting it. The failure mode of a
+denylist of one is not that it stays at one - it is that the second key goes in
+cheaply and the addition makes the list look adequate. Two entries read as a
+considered policy; one entry reads as a stub, and a stub is the only thing that
+ever gets converted.
+*/}}
+{{- if dig "server" "hub" "public_url" "" $doc }}
+{{- fail (printf "rendered settings.yaml sets server.hub.public_url: %s. The chart refuses this key. It does not override the hub's base URL, it splits it: the agent endpoint reads server.hub.public_url, the OAuth redirect resolver never reads the settings file, and the two then disagree inside one process while both look correct. Set the base URL through hub.baseUrl, which the chart renders as SCION_SERVER_BASE_URL - the only source both resolvers honour, so they agree by construction. If you reached this through config.extra, remove server.hub.public_url from it." (include "scion-hub.diagValue" (dig "server" "hub" "public_url" "" $doc))) }}
+{{- end }}
+
+{{- /* The discriminator for the two auth modes. The subtree it selects is not
+rendered yet; see the comment in the rendered file. */}}
+{{- if ne (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode }}
+{{- fail (printf "rendered settings.yaml has server.auth.mode: %s but auth.mode is %s." (include "scion-hub.diagValue" (dig "server" "auth" "mode" "" $doc)) (include "scion-hub.diagValue" $root.Values.auth.mode)) }}
+{{- end }}
+
+{{- /*
+The oauth acknowledgement, enforced here as well as in values.schema.json, and
+the duplication is the point: --skip-schema-validation is one flag away and it
+removes every schema-enforced rule at once. This is the layer that is left.
+
+THE HARM, VERIFIED OUTSIDE THE CHART, AND IT IS NOT "THE HUB WILL NOT START".
+That is what this chart used to claim and it is wrong in the direction that
+matters. Nothing validates the OAuth client credentials at startup - they are
+copied into the server config unchecked at cmd/server_foreground.go:1514-1544 -
+so a hub rendered in oauth mode with no credentials STARTS, binds, and passes
+/readyz. The failure arrives per request, at login: pkg/hub/web.go:1770-1776
+returns 503 "OAuth not configured" or 400 "OAuth provider %s is not configured".
+A deployment that is green in every Kubernetes signal and cannot be logged into
+by anybody is worse than one that crashloops, because nothing pages.
+
+Scoped to the rendered document on purpose. Under config.existingSecret this
+whole template is skipped, so the acknowledgement does not fire - correctly: the
+chart renders no auth mode there and the operator's file is theirs. The schema's
+copy of this rule carries the same exclusion for the same reason.
+*/}}
+{{- if and (eq (dig "server" "auth" "mode" "" $doc) "oauth") (not $root.Values.auth.acknowledgeOAuthUnlanded) }}
+{{- fail "settings.yaml renders server.auth.mode: oauth, but this chart does not render the OAuth client credentials that mode needs - that is Phase 3. Nothing catches it at runtime: the credentials are wired unvalidated (cmd/server_foreground.go:1514-1544), so the hub starts and passes its probes, and every human login fails with \"OAuth provider is not configured\" (pkg/hub/web.go:1770-1776). Set auth.acknowledgeOAuthUnlanded=true to render it anyway, or use auth.mode=proxy." }}
+{{- end }}
+{{- end }}
+
+{{/*
+The rendered settings.yaml.
+
+Built as a dictionary and marshalled, so the output is valid YAML by
+construction rather than by careful indentation, and so config.extra can be a
+real deep merge rather than a text append.
+*/}}
+{{- define "scion-hub.settings" -}}
+{{- $hubId := include "scion-hub.hubId" . }}
+{{- include "scion-hub.assertConfigSource" . }}
+{{- $driver := .Values.database.driver }}
+
+{{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
+{{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
+
+{{- /*
+server.database. The URL is Cloud SQL's, and lands with the proxy in the next
+change; the key for it is url, not dsn. Pool settings are here now because they
+are reachable no other way - SCION_SERVER_DATABASE_MAXOPENCONNS and its siblings
+have snake_case koanf tags with no camelCase entry, so mapper #1 produces
+database.max.open.conns and the variable never binds.
+*/}}
+{{- $database := dict "driver" $driver
+    "max_open_conns" (int .Values.database.maxOpenConns)
+    "max_idle_conns" (int .Values.database.maxIdleConns)
+    "conn_max_lifetime" .Values.database.connMaxLifetime
+    "conn_max_idle_time" .Values.database.connMaxIdleTime }}
+
+{{- /* server.storage: the HUB'S BLOB STORE. Not the Filestore workspace share. */}}
+{{- $storage := dict "provider" .Values.storage.provider }}
+{{- if eq (lower (toString .Values.storage.provider)) "gcs" }}
+{{- $bucket := .Values.storage.bucket }}
+{{- if not $bucket }}
+{{- fail "storage.bucket is required when storage.provider is gcs: a GCS storage provider cannot function without a bucket name." }}
+{{- end }}
+{{- $storage = set $storage "bucket" $bucket }}
+{{- end }}
+
+{{- $server := dict
+    "mode" "hosted"
+    "hub" $hub
+    "database" $database
+    "storage" $storage
+    "auth" (dict "mode" .Values.auth.mode)
+    "broker" (dict "host" "127.0.0.1" "port" 9800 "auto_provide" true) }}
+
+{{- /*
+LOAD-BEARING. schema_version is not boilerplate and it is not redundant with
+anything. Do not drop it, and do not let it be dropped by an override path that
+happens not to be covered.
+
+It is what stops the hub's lazy settings migration from ever firing.
+SetSettingValue auto-migrates when the file's format cannot be detected
+(pkg/config/settings.go:590-600), and the format detector keys on this field;
+with it present the hub delegates to the v1 handler and never migrates. The
+migration itself replaces the file with os.Rename
+(pkg/config/settings_v1.go:2694), which returns EBUSY against a bind-mounted
+path - and this file is delivered as a subPath bind mount.
+
+The hub deliberately does NOT guard this path in hosted mode. That decision was
+taken on the basis that the chart controls the input, which means this line is
+the guard. Every other write to settings.yaml under the mount is soft; this is
+the only one that turns into a hard failure.
+
+hack/verify.sh enforces it under the name migration-rename-hazard, across every
+values permutation rather than only the default one.
+*/}}
+{{- $doc := dict "schema_version" "1" "active_profile" "default" "server" $server }}
+{{- if .Values.agents.imageRegistry }}
+{{- $doc = set $doc "image_registry" .Values.agents.imageRegistry }}
+{{- end }}
+{{- $doc = set $doc "profiles" (dict "default" (dict "runtime" "kubernetes")) }}
+{{- $doc = set $doc "runtimes" (dict "kubernetes" (dict
+    "type" "kubernetes"
+    "namespace" (include "scion-hub.agentNamespace" .)
+    "gke" true
+    "list_all_namespaces" .Values.runtime.listAllNamespaces)) }}
+
+{{- /* config.extra, deep-merged over the tree, so an unmodelled setting never
+forces a chart fork. Merged before the assertions run, not after. */}}
+{{- $preMerge := deepCopy $doc }}
+{{- if .Values.config.extra }}
+{{- $doc = mergeOverwrite $doc (deepCopy .Values.config.extra) }}
+{{- end }}
+
+{{- $rendered := toYaml $doc }}
+{{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
+{{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
+{{- $rendered }}
+{{- end }}
+
+{{/*
+Every leaf path in a settings document, one per line, dotted.
+
+Recursive: it calls itself through include. Leaves only - an intermediate map is
+not emitted, because "server" and "server.hub" exist in every document and
+reporting those as collisions would flag every use of config.extra.
+
+Dots in a key name would produce an ambiguous path. No key in the settings
+surface has one, and if one ever does the failure is a false positive naming the
+right key, not a miss.
+*/}}
+{{- define "scion-hub.leafPaths" -}}
+{{- $prefix := .prefix }}
+{{- range $k, $v := .obj }}
+{{- $path := ternary $k (printf "%s.%s" $prefix $k) (eq $prefix "") }}
+{{- if and (kindIs "map" $v) (gt (len $v) 0) }}
+{{- include "scion-hub.leafPaths" (dict "obj" $v "prefix" $path) }}
+{{- else }}
+{{ $path }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+config.extra may add settings. It may not silently overwrite ones the chart
+itself wrote.
+
+This is the settings-file analogue of the reserved-flag list, and it is the same
+argument one channel over: a value the chart computes and an operator's override
+of it are indistinguishable in the rendered output, so the manifest keeps
+reporting the operator's intent and every assertion downstream of the merge
+still passes. The difference from the flag list is that this one needs no
+enumeration - both documents are in hand at merge time, so the rule is derived
+rather than listed, and it cannot be incomplete the way a list can.
+
+WHAT THIS DOES NOT CATCH, and it is deliberate rather than an oversight. It sees
+only keys the chart WRITES. It cannot see an ALIAS - a settings key that is a
+second name for a value the chart already sets through a different channel.
+server.hub.public_url is exactly that: the chart controls the base URL through
+hub.baseUrl -> SCION_SERVER_BASE_URL and never writes public_url, so this check
+is silent on it and the explicit refusal in assertSettings is what catches it.
+The two rules cover disjoint halves and neither can see the other's. Phase 5a
+owns enumerating the aliases; do not delete either rule believing the other
+covers it.
+
+Runs AFTER assertSettings so that a collision on a key with its own assertion -
+the hub ID, the driver, server.mode, schema_version - still reports that
+assertion's specific message. A generic "you overwrote a key" would be a
+regression in every one of those cases.
+*/}}
+{{- define "scion-hub.assertNoExtraCollision" -}}
+{{- if .extra }}
+{{- $chartKeys := splitList "\n" (trim (include "scion-hub.leafPaths" (dict "obj" .preMerge "prefix" ""))) }}
+{{- $collisions := list }}
+{{- range $path := splitList "\n" (trim (include "scion-hub.leafPaths" (dict "obj" .extra "prefix" ""))) }}
+{{- $p := trim $path }}
+{{- if $p }}
+{{- range $chartPath := $chartKeys }}
+{{- $c := trim $chartPath }}
+{{- if or (eq $p $c) (hasPrefix (printf "%s." $c) $p) (hasPrefix (printf "%s." $p) $c) }}
+{{- $collisions = append $collisions $p }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $collisions }}
+{{- fail (printf "config.extra overwrites %s, which the chart itself sets. config.extra is for settings the chart does not model; overriding one it does write is invisible afterwards, because the rendered file reports your value and every check downstream of the merge passes on it. If the chart's value is wrong for you, change the value that produces it - or say why it cannot, because that is a gap in the chart's own interface rather than a job for the escape hatch." (join ", " (uniq $collisions))) }}
+{{- end }}
+{{- end }}
 {{- end }}

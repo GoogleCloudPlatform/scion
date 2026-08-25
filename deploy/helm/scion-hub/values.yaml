@@ -16,11 +16,32 @@
 #
 # This chart is being built incrementally. Only the values below are understood
 # today; values.schema.json rejects anything else, so an unknown key is an error
-# rather than a silent no-op. Configuration intake (settings.yaml), Cloud SQL,
-# Filestore and Ingress are added by later changes and bring their own values.
+# rather than a silent no-op. Cloud SQL, Filestore and Ingress are added by
+# later changes and bring their own values.
 
 nameOverride: ""
 fullnameOverride: ""
+
+# A TEMPORARY KEY, AND ITS REMOVAL IS DEFINED RATHER THAN LEFT TO JUDGEMENT.
+#
+# database.driver: postgres, or storage.provider gcs with auth.mode proxy, or
+# hub.extraEnv setting K_SERVICE, each make the hub's isHADeployment test true
+# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and several
+# of that preflight's thirteen gates have no source in this chart, so the hub
+# aborts before serving. The chart refuses those value combinations unless you
+# set this, and the refusal names every one of them and the phase that lands
+# each. WHICH gates is derived rather than written down: see hack/ha-gates.txt.
+#
+# Set it to true when you are rendering to inspect the output, or when you are
+# supplying the missing configuration yourself through config.existingSecret.
+#
+# REMOVAL PREDICATE: this key is deleted when the Cloud SQL values (the database
+# URL) and the ingress/IAP values (the proxy and transport blocks) have both
+# landed, because at that point the chart can satisfy the preflight and there is
+# nothing left to acknowledge. Whoever lands the second of those two deletes this
+# key, the assertHAUnlanded helper, and the flag from ci/values-settings.yaml and
+# ci/values-settings-oauth.yaml, in that change.
+acknowledgeHAUnlanded: false
 
 # Single replica by default. More than one replica breaks the web terminal,
 # exec, log tailing and port forwarding for roughly (N-1)/N of requests: the
@@ -42,12 +63,45 @@ updateStrategy:
   # exec, log tailing and port forwarding hit the wrong pod about half the time
   # (see replicaCount above).
   #
-  # Neither is a data-safety question at this point in the chart: it renders no
-  # --db and mounts no volumes, so replicas share no mutable state at all and
-  # the hub's hosted HA preflight does not run at any replica count. That
-  # changes when the Cloud SQL and Filestore values arrive - a shared database
-  # and a shared volume are exactly what they add - and the hub coordinates
-  # concurrent instances through Postgres advisory locks when they do.
+  # IT IS A DATA-SAFETY QUESTION, AND THIS PARAGRAPH USED TO DENY IT. The denial
+  # read "it renders no --db and mounts no volumes, so replicas share no mutable
+  # state at all". Both halves are false, and the conclusion drawn from them was
+  # false in the unsafe direction, which is why it is corrected here rather than
+  # quietly deleted.
+  #
+  # MEASURED on the rendered deployment: two volumes are mounted, scion-home (an
+  # emptyDir, at /home/scion/.scion) and settings (the read-only Secret). And the
+  # hub does not need a --db to have a database - pkg/config/hub_config.go:691
+  # defaults an empty server.database.url to filepath.Join(globalDir, "hub.db"),
+  # which for this chart's home directory is /home/scion/.scion/hub.db. The
+  # default install therefore keeps a SQLite file inside an emptyDir.
+  #
+  # WHAT FOLLOWS FROM THAT. An emptyDir is per-pod and dies with the pod, so the
+  # hub's state does not survive a restart under either strategy - that is a
+  # property of this release, stated at replicaCount and at database.driver, not
+  # of this field. What this field decides is whether a SECOND pod exists at the
+  # same time. Under RollingUpdate the old and new pods each hold their own
+  # hub.db and serve writes concurrently for the length of the window, so the two
+  # diverge and whichever pod loses the race is discarded along with everything
+  # written to it. Recreate cannot produce that overlap. THIS IS NOT AN ARGUMENT
+  # FOR CHANGING THE DEFAULT: with no shared volume there is nothing to corrupt,
+  # only writes to lose, and the loss is bounded by the rollout window. It is an
+  # argument for not telling an operator that the choice is free of data
+  # consequences, because it is not.
+  #
+  # It changes again when the Cloud SQL and Filestore values arrive - a shared
+  # database and a shared volume are exactly what they add - and the hub
+  # coordinates concurrent instances through Postgres advisory locks when they do.
+  #
+  # THE HOSTED HA PREFLIGHT IS A SEPARATE QUESTION AND IT DOES RUN. This
+  # paragraph used to end "and the hub's hosted HA preflight does not run at any
+  # replica count", which was true at Phase 0 and is false now: the preflight
+  # keys off configuration, not replica count, and a rendered
+  # server.database.driver of postgres turns it on at one replica
+  # (cmd/server_foreground.go:931). It is still not a data-safety question - the
+  # preflight refuses to start, it does not corrupt anything - but "it does not
+  # run" was doing work here that it can no longer do. Whether it runs is
+  # governed by acknowledgeHAUnlanded at the top of this file.
   type: ""
 
 image:
@@ -95,9 +149,60 @@ hub:
   #   hubId: my-hub
   #
 
+  # Display name for the hub. Cosmetic; unlike hubId nothing is scoped by it.
+  name: Scion Hub
+
+  # REQUIRED, and deliberately without a default. The external URL the hub is
+  # reached at, scheme and host, no trailing path. Absence is not an error in
+  # the hub - it warns once and falls back to http://localhost:<port>, which
+  # agents cannot reach, and which makes the session cookie's Secure attribute
+  # false because that attribute is derived from the https:// prefix of this
+  # exact value. The chart requires it, and requires https://, so neither
+  # failure is reachable by omission.
+  #
+  #   baseUrl: https://scion.example.com
+  #
+
+  # The hub's home directory, and the only lever on where it keeps state:
+  # settings.yaml, storage/, templates/ and scion-token all live in
+  # <home>/.scion. There is no SCION_HOME and no config-path flag; the path is
+  # the process home directory plus /.scion and nothing else moves it. Must be
+  # a directory the container's uid can write.
+  home: /home/scion
+
   # Port the web frontend and the hub API listen on, and the port every probe
   # targets.
   webPort: 8080
+
+  # Optional. Truthy values are "true", "1" and "yes". Read by a literal
+  # os.Getenv, so no name mapper stands between this value and the hub's.
+  adminMode: ""
+
+  # Optional. Banner text shown to users. Empty means no banner.
+  maintenanceMessage: ""
+
+  # Extra environment variables for the hub container, as a list of Kubernetes
+  # EnvVar objects.
+  #
+  # This is an escape hatch and a sharp one. Whether a SCION_SERVER_* name binds
+  # is decided by a lookup table and nothing in the name tells you which way it
+  # went; one that misses is dropped without an error, a warning or a log line,
+  # so a variable set here that looks like it should work may do nothing at all
+  # and give you no way to tell.
+  # SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are rejected outright,
+  # and NOT because they are unreachable - some of them bind. That is the
+  # problem: a bound one is applied after settings.yaml is read and wins, so the
+  # hub runs a configuration this chart did not render and this chart's guards
+  # did not see. Configure those through config.extra, which lands in
+  # settings.yaml, where they are read and where the guards can see them.
+  #
+  # Do not put secret material in a literal "value". It lives in the Deployment
+  # object, which is readable by more people than the Secret would be. The render
+  # rejects a literal whose value looks like a credential, and one whose NAME
+  # ends in a credential word - SESSION_SECRET, ADMIN_TOKEN, DB_PASSWORD. The
+  # rule is on the trailing word, so TOKEN_TTL_SECONDS and MAX_TOKENS are fine.
+  # Use valueFrom.secretKeyRef, which neither check touches.
+  extraEnv: []
 
   # Extra arguments appended to the hub command. The chart always renders
   # --hosted and --host 0.0.0.0 and no value can remove them: without hosted
@@ -223,3 +328,223 @@ runtime:
   # true renders a ClusterRole/ClusterRoleBinding instead of the namespaced
   # Role/RoleBinding pair.
   listAllNamespaces: false
+
+agents:
+  # Optional. Registry prefix agent images are pulled from, rendered as the
+  # top-level image_registry key of settings.yaml. Empty leaves the key out and
+  # the hub uses its own default.
+  imageRegistry: ""
+
+# The hub's own configuration - the contents of settings.yaml.
+#
+# WHY THIS IS A FILE AND NOT ENVIRONMENT VARIABLES. There is no strict-env mode
+# and no unknown-variable warning, so a variable that does not bind produces no
+# error, no log line and no way to tell it did nothing.
+# Whether a name binds at all depends on a lookup table (camelCaseFields,
+# pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL works and
+# SCION_SERVER_DATABASE_MAX_OPEN_CONNS does not, and neither of them says which.
+# The ones that bind are applied on top of settings.yaml and win, which puts the
+# hub's real configuration out of reach of everything this chart can check. So
+# configuration goes in the file, and the chart emits exactly the three
+# environment variables that are known to work.
+config:
+  # Supply your own Secret holding a settings.yaml key instead of having the
+  # chart render one. Mutually exclusive with every value that feeds the
+  # rendered file - config.extra, storage.bucket and agents.imageRegistry - and
+  # supplying both fails the render rather than silently ignoring one of them.
+  #
+  # Nothing checks the contents of a Secret you bring yourself. Everything the
+  # chart asserts about the rendered file - the hosted mode, the explicit hub
+  # ID, the preflight keys, the refusal of server.hub.public_url - is yours to
+  # get right. The public_url one is the easiest to get wrong without noticing:
+  # setting it splits the base URL between the agent endpoint and the OAuth
+  # redirect, silently, and the chart cannot warn you here.
+  #
+  # AND THESE VALUES STOP MEANING ANYTHING, WITHOUT SAYING SO. Each one's only
+  # effect was on the settings.yaml that is now yours, so setting it here writes
+  # to a file the chart does not render. Your file has to carry the key on the
+  # right, or the hub uses its own default for it:
+  #
+  #   auth.mode                  ->  server.auth.mode
+  #   database.connMaxIdleTime   ->  server.database.conn_max_idle_time
+  #   database.connMaxLifetime   ->  server.database.conn_max_lifetime
+  #   database.maxIdleConns      ->  server.database.max_idle_conns
+  #   database.maxOpenConns      ->  server.database.max_open_conns
+  #   hub.hubId                  ->  server.hub.hub_id
+  #   hub.name                   ->  server.hub.hub_name
+  #   rbac.agentNamespace        ->  runtimes.kubernetes.namespace
+  #   runtime.listAllNamespaces  ->  runtimes.kubernetes.list_all_namespaces
+  #   runtime.namespace          ->  runtimes.kubernetes.namespace
+  #
+  # hub.hubId, rbac.agentNamespace, runtime.namespace and
+  # runtime.listAllNamespaces are the awkward ones, because they keep HALF their
+  # effect: they still name the pod annotation and still shape the RBAC the
+  # chart grants. Only their settings half disappears, so the failure is a hub
+  # whose RBAC and whose configuration disagree about which namespace it works
+  # in - and note that two different values above write the same settings key.
+  #
+  # The list is generated from the chart, not maintained by hand: hack/verify.sh
+  # mutates every value in this file, renders, and requires each one that only
+  # moves the settings document to appear here with the key it actually moved.
+  # If you are reading this in a fork whose chart has drifted, run that script
+  # rather than trusting these ten lines. The same list is printed on install by
+  # NOTES.txt, from a single definition in templates/_helpers.tpl.
+  #
+  # Not listed, because they refuse rather than go quiet: config.extra,
+  # storage.bucket and agents.imageRegistry fail the render when set together
+  # with this.
+  existingSecret: ""
+
+  # Arbitrary additional settings.yaml content, deep-merged over what the chart
+  # renders. Use it for keys the chart has no value for yet.
+  #
+  # It is a merge over the whole document, so it can reach anything. Two
+  # consequences follow from that and only the first is usually noticed.
+  #
+  # The invariants are re-checked AFTER the merge, on the merged document, so an
+  # override that would disable hosted mode, substitute the hub ID, contradict
+  # the database driver, drop schema_version, move a server key to the top
+  # level, or split the base URL through server.hub.public_url fails the render
+  # instead of installing. Overwriting a key the chart itself wrote fails too,
+  # by comparison rather than by list.
+  #
+  # But that guard surface is a NAMED LIST, not a schema. Every settings key the
+  # chart does not write and does not name above is reachable through here and
+  # unchecked - by design, because this exists so an unmodelled setting never
+  # forces a chart fork. Use it for keys the chart has no value for yet; if you
+  # find yourself reaching for one it does model, that is a gap in the chart's
+  # own interface and worth reporting as one.
+  extra: {}
+
+database:
+  # sqlite is the hub's own default and is single-pod only: it is a file in the
+  # hub's home directory, so replicas do not share it.
+  #
+  # postgres is what the hosted deployment runs, and selecting it turns on the
+  # hub's HA preflight (cmd/server_foreground.go:931). That preflight has
+  # THIRTEEN gates, and this release cannot satisfy all of them - the database
+  # URL, a durable session secret, and keys in the proxy and transport subtrees -
+  # so selecting postgres today means the hub aborts before serving unless you
+  # set acknowledgeHAUnlanded. Measured by walking the preflight gate by gate on
+  # the settings.yaml this chart renders (hack/ha-gates.txt); the unsatisfied
+  # gates are enumerated in the refusal itself.
+  #
+  # An earlier version of this comment listed four requirements - hub ID,
+  # database URL, GCS storage with a bucket, session secret. Those are four of
+  # the thirteen, and the chart already satisfies two of them. Naming a subset
+  # of a guard's conditions reads as naming all of them.
+  #
+  # The connection URL itself is not a value here yet; it arrives with Cloud
+  # SQL support.
+  driver: sqlite
+
+  # Connection pool. Rendered into settings.yaml, and not settable by
+  # environment variable here: SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded
+  # by the loader with no error - the koanf tag is max_open_conns and the
+  # underscores become dots before anything can rejoin them - while the names in
+  # this block that DO bind would override the rendered file and win. See the
+  # configuration-intake section of templates/_helpers.tpl.
+  #
+  # Keep maxOpenConns comfortably above the number of background workers, and
+  # the total across replicas below the Cloud SQL tier's connection limit.
+  maxOpenConns: 25
+  maxIdleConns: 5
+  connMaxLifetime: 30m
+  connMaxIdleTime: 5m
+
+storage:
+  # The hub's blob store: task artifacts, uploads, agent output. This is NOT the
+  # workspace share that agent pods mount - that is a separate subsystem, on
+  # Filestore, added by a later change.
+  #
+  # local keeps blobs in the hub's home directory, which no other replica can
+  # read. gcs is required for a multi-replica or hosted deployment and is
+  # checked by the HA preflight.
+  provider: local
+
+  # Required when database.driver is postgres, and the schema enforces that.
+  # The preflight checks provider and bucket separately, so a gcs provider with
+  # no bucket fails at hub startup rather than at install; requiring it here
+  # moves that failure to helm template.
+  bucket: ""
+
+auth:
+  # proxy is the hosted shape: an identity-aware proxy in front of the hub
+  # authenticates the user and the hub trusts a signed header. oauth is the
+  # hub's own OAuth login.
+  #
+  # This value selects which configuration subtree is rendered, and the five
+  # Block-1 keys the preflight requires render identically in both modes.
+  #
+  # "AND NOTHING ELSE" WAS TOO STRONG AND THIS COMMENT USED TO SAY IT. The two
+  # modes reach DIFFERENT hosted-HA preflights, and since 1b3c9418 the gap is
+  # much wider than one gate: the hub's seven IAP gates sit inside
+  # `if cfg.Auth.Mode == "proxy"` in validateHostedHAPreflight, so oauth never
+  # reaches them. Measured by walking the real preflight on each rendered
+  # settings.yaml; both arms are recorded in hack/ha-gates.txt.
+  #
+  #     proxy   8 gates      oauth   2 gates
+  #
+  # 🛑 [HISTORY 2026-08-17] THIS COMMENT PREVIOUSLY READ "auth.mode is itself a
+  # preflight gate: cmd/server_foreground.go:980 requires proxy, so the oauth
+  # permutation is refused by one gate MORE than the proxy one." That was true
+  # when written and 1b3c9418 deleted the gate it named, inverting the
+  # direction. The line number did not go stale in the way that announces
+  # itself - :980 still resolves, to the storage.provider gate, so a reader
+  # checking it lands on a real line about something else and comes away
+  # reassured. That is why source references in this chart are cut as quoted
+  # strings now.
+  #
+  # The claim that survives unchanged is the narrow one about the Block-1
+  # five, which is what the paired ci fixtures actually diff.
+  mode: proxy
+
+  # The oauth mode's supporting configuration - the client credentials - is not
+  # rendered by the chart yet; it lands with the session and client secrets.
+  #
+  # It does not fail loudly. The credentials are wired without validation
+  # (cmd/server_foreground.go:1514-1544), so the hub starts, binds and passes
+  # /readyz, and the failure arrives once per login attempt as "OAuth provider
+  # is not configured" (pkg/hub/web.go:1770-1776) - a deployment that is green
+  # in every Kubernetes signal and that nobody can log in to.
+  #
+  # Set this to true to acknowledge that and render anyway. Both the schema and
+  # the template enforce it, and neither applies under config.existingSecret,
+  # where the chart renders no auth mode at all.
+  acknowledgeOAuthUnlanded: false
+
+  # When true the hub refuses to start rather than fall back to a signing key
+  # generated per process. That fallback is fatal across replicas - each pod
+  # signs tokens the others reject - and it is silent, so it presents as
+  # intermittent logouts rather than as a configuration error.
+  #
+  # DEFAULTED false, AND IT WILL BECOME true IN THE SESSION-SECRET PHASE. Not a
+  # judgement that the protection is unwanted - it is that in THIS release
+  # nothing can satisfy it. The hub resolves a stable key from, in order: a
+  # pre-configured key, SharedSigningSecret, a secret backend, then the store
+  # (pkg/hub/server.go:1445). SharedSigningSecret is resolveSessionSecret()
+  # (cmd/server_foreground.go:1556), which reads only --session-secret,
+  # SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
+  # (cmd/server_foreground.go:1452-1462) - it has no settings-file source at
+  # all, and this chart renders none of the three. On a first boot the store is
+  # empty too. So with true there is no key to find, and pkg/hub/server.go:1634
+  # returns an error that pkg/hub/server.go:1008 makes fatal and
+  # cmd/server_foreground.go:259 turns into log.Fatalf.
+  #
+  # MEASURED through the real hub.New, not read: ServerConfig{RequireStableSigningKey:
+  # true} refuses; adding only SharedSigningSecret makes the same call succeed.
+  # The missing session secret is the entire difference. Four of the five ci
+  # permutations rendered "true" and none rendered a secret, so four of five
+  # could not start - including minimal, which the rest of this chart's prose
+  # points at as the safe one.
+  #
+  # The harm the true setting prevents - replicas signing tokens each other
+  # reject - needs a replica set this release cannot start one member of. It
+  # arrives with the secret, so the two should arrive together. A guard that
+  # nothing can satisfy is worse than no guard, because it teaches operators to
+  # turn guards off.
+  #
+  # tests/chart-integrity.sh asserts the flip: the day the default render gains
+  # a session-secret source, the LANDING limb fails and stays failing until this
+  # line reads true.
+  requireStableSigningKey: false

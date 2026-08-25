@@ -4,7 +4,7 @@
   "description": "Values understood by the scion-hub chart. Unknown keys are rejected rather than ignored, so a misspelled key is an error and not a silent no-op.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime"],
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "storage", "auth", "acknowledgeHAUnlanded"],
   "properties": {
     "global": {
       "type": "object",
@@ -15,6 +15,10 @@
     },
     "fullnameOverride": {
       "type": "string"
+    },
+    "acknowledgeHAUnlanded": {
+      "type": "boolean",
+      "description": "Acknowledge that these values describe an HA deployment this release cannot start. database.driver=postgres, or storage.provider=gcs with auth.mode=proxy, or hub.extraEnv setting K_SERVICE, each satisfy the hub's isHADeployment test (cmd/server_foreground.go:927); the hosted HA preflight then runs and several of its thirteen gates have no source in this chart (which ones is derived, not asserted here: see deploy/helm/scion-hub/hack/ha-gates.txt), so the hub aborts at cmd/server_foreground.go:151-153 before serving. Temporary key: it is removed when the Cloud SQL and ingress/IAP values have both landed."
     },
     "replicaCount": {
       "type": "integer",
@@ -28,7 +32,7 @@
         "type": {
           "type": "string",
           "enum": ["", "Recreate", "RollingUpdate"],
-          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count. This chart renders no --db and mounts no volumes, so replicas share no mutable state and there is nothing for a strategy choice to corrupt; when the Cloud SQL and Filestore values add shared state, concurrent instances are coordinated by the hub's Postgres advisory locks rather than by this field. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count. It is not free of data consequences, though: with no server.database.url the hub defaults its SQLite file to /home/scion/.scion/hub.db (pkg/config/hub_config.go:691), which lands in the scion-home emptyDir this chart mounts, so RollingUpdate's two-pod window has each pod writing its own copy and the loser's writes are discarded. Recreate cannot produce that overlap. Nothing is shared, so nothing is corrupted - writes are lost, bounded by the rollout window. When the Cloud SQL and Filestore values add shared state, concurrent instances are coordinated by the hub's Postgres advisory locks rather than by this field. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
         }
       }
     },
@@ -75,8 +79,37 @@
     "hub": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hubId", "webPort"],
+      "required": ["hubId", "webPort", "baseUrl", "home"],
       "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name for the hub. Cosmetic."
+        },
+        "baseUrl": {
+          "type": "string",
+          "pattern": "^https://[^\\s/]+(/[^\\s]*)?$",
+          "description": "REQUIRED, with no default. External URL the hub is reached at. Must be https://: the session cookie's Secure attribute is derived from this prefix, so an http:// value serves session cookies without Secure. Omitting it is not an error in the hub - it warns and falls back to http://localhost, which agents cannot reach - so the chart requires it."
+        },
+        "home": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/",
+          "description": "The hub's home directory. settings.yaml, storage/, templates/ and scion-token all live in <home>/.scion, and this is the only lever on that path: there is no SCION_HOME and no config-path flag. Must be writable by the container's uid."
+        },
+        "adminMode": {
+          "type": "string",
+          "description": "Truthy values are true, 1 and yes. Empty leaves the variable unset."
+        },
+        "maintenanceMessage": {
+          "type": "string"
+        },
+        "extraEnv": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Extra container environment variables as Kubernetes EnvVar objects. Whether a SCION_SERVER_* name binds depends on a lookup table (camelCaseFields, pkg/config/hub_config.go:919): SCION_SERVER_DATABASE_URL binds, SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error, and nothing in the name says which. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are rejected by the render because both outcomes are wrong here - a name that binds is applied after settings.yaml and wins, so the hub runs a configuration this chart never rendered and its guards never saw, and a name that is discarded is still reported to the admin server-config view as an active override. Configure those through config.extra."
+        },
         "hubId": {
           "type": "string",
           "minLength": 1,
@@ -279,6 +312,166 @@
           "type": "boolean"
         }
       }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "imageRegistry": {
+          "type": "string",
+          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml."
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The hub's own configuration, delivered as a rendered settings.yaml rather than as environment variables: whether a SCION_SERVER_* name binds is decided by a lookup table (camelCaseFields, pkg/config/hub_config.go:919), the ones that miss it are discarded with no error, and the ones that hit it override the rendered file and win.",
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of a Secret with a settings.yaml key, used instead of the chart's rendered one. Mutually exclusive with config.extra, storage.bucket and agents.imageRegistry; supplying both fails the render. Nothing validates the contents of a Secret you bring yourself."
+        },
+        "extra": {
+          "type": "object",
+          "description": "Additional settings.yaml content, deep-merged over the rendered document. The chart's invariants are re-checked on the merged result, so an override that disables hosted mode or contradicts the rendered database driver fails the render."
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver"],
+      "description": "Rendered into settings.yaml in full. Setting these through the environment instead is refused: driver and url do bind as SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL, are applied after the rendered file and win, and would leave the chart's HA guards reasoning about a driver the hub is not using; maxOpenConns does not bind at all, because its koanf tag contains an underscore.",
+      "properties": {
+        "driver": {
+          "type": "string",
+          "enum": ["sqlite", "postgres"],
+          "description": "sqlite is single-pod only: it is a file in the hub's home directory. postgres turns on the hub's HA preflight, which additionally requires the hub ID, a database URL, GCS storage with a bucket and a durable session secret."
+        },
+        "maxOpenConns": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Keep above the number of background workers, and keep the total across replicas below the database tier's connection limit."
+        },
+        "maxIdleConns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "connMaxLifetime": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*$",
+          "description": "Go duration string, e.g. 30m."
+        },
+        "connMaxIdleTime": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*$"
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "description": "The hub's blob store. Not the workspace share agent pods mount, which is a separate subsystem.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["local", "gcs"],
+          "description": "local keeps blobs in the hub's home directory, which no other replica can read. gcs is required for postgres."
+        },
+        "bucket": {
+          "type": "string",
+          "description": "GCS bucket name, no gs:// prefix. Required when database.driver is postgres."
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["proxy", "oauth"],
+          "description": "Selects which configuration subtree is rendered and nothing else. Every key the HA preflight requires renders identically in both modes."
+        },
+        "acknowledgeOAuthUnlanded": {
+          "type": "boolean",
+          "description": "The oauth mode's client credentials are not rendered by the chart yet. An oauth install starts and passes its probes; every human login fails. Set true to render it anyway."
+        },
+        "requireStableSigningKey": {
+          "type": "boolean",
+          "description": "When true the hub refuses to start rather than fall back to a per-process signing key. That fallback is fatal across replicas and silent: each pod signs tokens the others reject, which presents as intermittent logouts."
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "postgres implies the HA preflight, which requires a GCS bucket. Without this the install succeeds and the hub then refuses to start, so the failure is moved forward to helm template. Skipped when the settings file is supplied wholesale, since the chart is not rendering storage in that case.",
+      "if": {
+        "properties": {
+          "database": {
+            "properties": {
+              "driver": {"const": "postgres"}
+            }
+          },
+          "config": {
+            "properties": {
+              "existingSecret": {"const": ""}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "storage": {
+            "required": ["bucket"],
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Required because database.driver is postgres."
+              },
+              "provider": {"const": "gcs"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "oauth mode has no supporting configuration in the chart yet. Requiring an explicit acknowledgement keeps it from being selected by accident. Not applied under config.existingSecret: the chart renders no auth mode there, so auth.mode selects nothing and there is nothing to acknowledge. The same rule is enforced again in the template, on the rendered document, because --skip-schema-validation removes this one.",
+      "if": {
+        "properties": {
+          "auth": {
+            "properties": {
+              "mode": {"const": "oauth"}
+            },
+            "required": ["mode"]
+          },
+          "config": {
+            "properties": {
+              "existingSecret": {"const": ""}
+            },
+            "required": ["existingSecret"]
+          }
+        },
+        "required": ["auth", "config"]
+      },
+      "then": {
+        "properties": {
+          "auth": {
+            "required": ["acknowledgeOAuthUnlanded"],
+            "properties": {
+              "acknowledgeOAuthUnlanded": {
+                "const": true,
+                "description": "auth.mode oauth requires auth.acknowledgeOAuthUnlanded true: the client credentials that mode needs are not rendered by this chart yet, and nothing catches that at runtime - the hub starts, passes its probes, and refuses every login."
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

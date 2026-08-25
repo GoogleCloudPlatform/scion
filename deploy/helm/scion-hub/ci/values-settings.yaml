@@ -1,0 +1,68 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The hosted shape: Postgres, GCS, proxy authentication. This is the case the
+# hub's HA preflight applies to, so it is the case where every one of the five
+# Block-1 keys that preflight requires has to be present in the rendered
+# settings.yaml.
+#
+# Five is the Block-1 set, not the size of the preflight. The preflight has
+# thirteen gates and this release cannot satisfy all of them, which is what
+# acknowledgeHAUnlanded below is acknowledging; the unsatisfied ones are
+# enumerated in the refusal and in the assertHAUnlanded comment in _helpers.tpl,
+# and both are checked against the walk in hack/ha-gates.txt.
+#
+# Paired with values-settings-oauth.yaml, which differs from this file in
+# auth.mode and nothing else. The two renders are diffed against each other to
+# prove that switching authentication mode leaves the preflight keys untouched.
+
+# SET BECAUSE THIS FIXTURE IS EXACTLY THE SHAPE THE FLAG EXISTS FOR. Postgres
+# alone makes the hub's isHADeployment test true, so without this the chart
+# refuses to render this file at all. The fixture's job is to exercise the
+# rendered settings.yaml, not to install, and the acknowledgement is how it says
+# so. Deleted with the flag when Cloud SQL and ingress/IAP land.
+acknowledgeHAUnlanded: true
+
+hub:
+  hubId: ci-settings
+  name: CI Settings Hub
+  baseUrl: https://ci-settings.example.com
+
+image:
+  repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
+  tag: ci
+
+database:
+  driver: postgres
+
+storage:
+  provider: gcs
+  bucket: ci-settings-hub-blobs
+
+auth:
+  mode: proxy
+
+agents:
+  imageRegistry: us-docker.pkg.dev/scion-ci/scion
+
+config:
+  # A deep merge over the rendered document, exercised here so the golden files
+  # cover it. These are keys the chart has no value for; an override that
+  # contradicts something the chart asserts fails the render instead, and
+  # hack/verify.sh checks that separately.
+  extra:
+    server:
+      log_level: debug
+      scheduler:
+        interval_seconds: 30
