@@ -731,7 +731,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							}
 						} else if agentHB.ExitCode == nil {
 							// Legacy fallback: parse from ContainerStatus string (old broker)
-							if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+							if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
 								hbPhase = state.PhaseError
 								agentHB.Phase = string(state.PhaseError)
 								c := code
@@ -792,7 +792,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					case strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped":
 						// A non-zero exit code means the agent crashed → error
 						// (restartable); a zero/absent code is a clean stop.
-						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
 							statusUpdate.Phase = string(state.PhaseError)
 							c := code
 							statusUpdate.ExitCode = &c
