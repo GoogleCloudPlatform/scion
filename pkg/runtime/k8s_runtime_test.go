@@ -182,6 +182,25 @@ func TestKubernetesRuntime_List_TerminalPhases(t *testing.T) {
 	if got["failed-agent"].ContainerStatus != "Failed (Error)" {
 		t.Errorf("failed-agent container status = %q, want %q", got["failed-agent"].ContainerStatus, "Failed (Error)")
 	}
+
+	// Verify structured ExitCode and ExitReason fields (Phase 1 of #1257).
+	if got["completed-agent"].ExitCode == nil {
+		t.Error("completed-agent ExitCode should be set for terminated pod")
+	} else if *got["completed-agent"].ExitCode != 0 {
+		t.Errorf("completed-agent ExitCode = %d, want 0", *got["completed-agent"].ExitCode)
+	}
+	if got["completed-agent"].ExitReason != "" {
+		t.Errorf("completed-agent ExitReason = %q, want empty (clean exit)", got["completed-agent"].ExitReason)
+	}
+
+	if got["failed-agent"].ExitCode == nil {
+		t.Error("failed-agent ExitCode should be set for terminated pod")
+	} else if *got["failed-agent"].ExitCode != 1 {
+		t.Errorf("failed-agent ExitCode = %d, want 1", *got["failed-agent"].ExitCode)
+	}
+	if got["failed-agent"].ExitReason != "crashed" {
+		t.Errorf("failed-agent ExitReason = %q, want %q", got["failed-agent"].ExitReason, "crashed")
+	}
 }
 
 func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
