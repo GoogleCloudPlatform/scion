@@ -1934,7 +1934,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					ec := int(cs.State.Terminated.ExitCode)
 					exitCode = &ec
 					if ec != 0 {
-						exitReason = string(state.ActivityCrashed)
+						exitReason = string(state.ExitReasonCrashed)
 					}
 					if agentStatus == "" {
 						if cs.State.Terminated.ExitCode == 0 {

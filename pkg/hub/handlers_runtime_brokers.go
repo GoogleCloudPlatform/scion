@@ -723,6 +723,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							statusUpdate.ExitCode = agentHB.ExitCode
 							if isValidExitReason(agentHB.ExitReason) {
 								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
 							if statusUpdate.Message == "" {
 								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
@@ -743,6 +745,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							statusUpdate.ExitCode = agentHB.ExitCode
 							if isValidExitReason(agentHB.ExitReason) {
 								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
 						}
 					}
@@ -917,8 +921,6 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 }
 
 // isValidExitReason reports whether reason is a valid ExitReason value.
-// Only terminal activities ("crashed", "limits_exceeded") are valid exit reasons.
-// An empty string is also valid (no reason given).
 func isValidExitReason(reason string) bool {
-	return reason == "" || state.Activity(reason).IsTerminal()
+	return state.ExitReason(reason).IsValid()
 }

@@ -226,7 +226,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				c := code
 				info.ExitCode = &c
 				if code != 0 {
-					info.ExitReason = string(state.ActivityCrashed)
+					info.ExitReason = string(state.ExitReasonCrashed)
 				}
 			}
 			agents = append(agents, info)

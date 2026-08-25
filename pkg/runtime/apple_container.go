@@ -246,7 +246,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			ec := code
 			info.ExitCode = &ec
 			if code != 0 {
-				info.ExitReason = string(state.ActivityCrashed)
+				info.ExitReason = string(state.ExitReasonCrashed)
 			}
 		}
 		agents = append(agents, info)
