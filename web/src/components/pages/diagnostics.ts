@@ -32,7 +32,6 @@ interface HealthResponse {
   version?: string;
   brokerCount?: number;
   agentCount?: number;
-  deploymentWarnings?: string[];
   [key: string]: unknown;
 }
 
@@ -195,34 +194,6 @@ export class ScionPageDiagnostics extends LitElement {
       align-items: center;
       gap: 0.375rem;
     }
-
-    .deployment-warnings {
-      background: var(--scion-warning-50, #fffbeb);
-      border: 1px solid var(--scion-warning-200, #fde68a);
-      border-radius: var(--sl-border-radius-medium, 0.5rem);
-      padding: 0.75rem 1rem;
-      margin-bottom: 1rem;
-      font-size: 0.875rem;
-      color: var(--scion-warning-800, #92400e);
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-    }
-
-    .deployment-warnings sl-icon {
-      flex-shrink: 0;
-      margin-top: 0.125rem;
-    }
-
-    .deployment-warnings ul {
-      margin: 0;
-      padding: 0;
-      list-style: none;
-    }
-
-    .deployment-warnings li {
-      line-height: 1.5;
-    }
   `;
 
   override async connectedCallback(): Promise<void> {
@@ -303,7 +274,6 @@ export class ScionPageDiagnostics extends LitElement {
             `
           : nothing}
       </div>
-      ${this.renderDeploymentWarnings()}
       ${this.renderStatusBanner()}
       ${this.cloudLoggingChecked
         ? this.cloudLoggingAvailable
@@ -314,20 +284,6 @@ export class ScionPageDiagnostics extends LitElement {
               <sl-spinner style="font-size: 1.5rem;"></sl-spinner>
             </div>
           `}
-    `;
-  }
-
-  private renderDeploymentWarnings() {
-    const warnings = this.hubHealth?.deploymentWarnings;
-    if (!warnings || warnings.length === 0) return nothing;
-
-    return html`
-      <div class="deployment-warnings">
-        <sl-icon name="exclamation-triangle"></sl-icon>
-        <ul>
-          ${warnings.map((w) => html`<li>${w}</li>`)}
-        </ul>
-      </div>
     `;
   }
 

@@ -217,6 +217,25 @@ Two related deploy-time consequences of the missing `K_SERVICE`:
 (§7.1), not by a placeholder. Reusing the name would conflate the two. The existing
 stubs are the sibling's landing pad and must not be repurposed.
 
+**The sibling has since landed as a real PR, which settles this.** Upstream
+`GoogleCloudPlatform/scion#1302`, "Cloud Run Instances runtime", opened 2026-08-26,
+dispatches *each agent as its own Cloud Run service* via
+`pkg/runtime/cloudrun_runtime.go` and `pkg/runtime/cloudrun/iap_exec.go`. This tier
+dispatches *all agents as sandboxes inside one Instance* via
+`pkg/runtime/cloudrun_sandbox_runtime.go`. Verified by intersecting the two file
+lists: neither touches the other's runtime implementation.
+
+The two are complements, not competitors, and the difference is the durability trade
+in §5. A per-agent service survives its neighbours and scales independently; a
+sandbox on a shared Instance is cheaper, starts faster, and shares one filesystem
+(§3.2) — and dies with the Instance.
+
+The two changesets do share three files — `pkg/runtime/factory.go`,
+`cmd/server_foreground.go`, `pkg/config/settings_v1.go`. `factory.go` is the one that
+matters: both register a runtime, so whichever lands second reconciles the
+registration. That is expected, and it is the ordinary cost of the two runtimes being
+genuinely separate rather than one overloaded implementation.
+
 ### 4.5 Every address handed into a sandbox needs an explicit decision
 
 A sandbox is not on the launcher's network, and it is not on the public internet's
