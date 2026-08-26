@@ -15,10 +15,13 @@
 package runtimebroker
 
 import (
+	"fmt"
 	"net"
 	"net/url"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 )
 
 const redactedEnvValue = "<redacted>"
@@ -160,6 +163,51 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 		return nil
 	}
 	return []string{host + ":host-gateway"}
+}
+
+// cloudrunSandboxHubEndpoint computes the hub endpoint for a sandbox on the
+// cloudrun-sandbox runtime. Sandboxes cannot reach the hub's public IAP-fronted
+// URL (no IAP credential), but the hub is on the same Instance, listening on
+// 0.0.0.0, and reachable from the sandbox via the launcher's link-local address.
+//
+// When SCION_METADATA_BIND_ADDRESS is set to an explicit IP, that value is used
+// directly instead of scanning interfaces. This is required on Cloud Run
+// Instances that have multiple 169.254.x.x addresses, where auto-discovery is
+// ambiguous. The value "link-local" triggers auto-discovery, same as empty.
+//
+// hubListenPort is the port the co-located hub HTTP server is listening on,
+// plumbed from the server's configuration (--web-port or --port). This is the
+// actual listen port, not parsed from an external URL which may have an
+// implicit port (443 via HTTPS).
+//
+// Returns an error if link-local discovery fails (and no explicit address is
+// set) or hubListenPort is zero (non-colocated broker) — the agent start must
+// fail rather than fall back to a URL that will 302 from the IAP edge.
+func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
+	if hubListenPort == 0 {
+		return "", fmt.Errorf("cloudrun-sandbox hub endpoint: hub listen port is not " +
+			"configured (non-colocated broker cannot serve sandboxes)")
+	}
+
+	// SCION_METADATA_BIND_ADDRESS may specify an explicit link-local IP
+	// when auto-discovery is ambiguous (multiple 169.254.x.x addresses on
+	// Cloud Run Instances). The same address the metadata server binds to
+	// is reachable by sandboxes — use it as the hub endpoint host.
+	//
+	// "link-local" means "auto-discover", same as empty. Any other non-empty
+	// value is treated as an explicit IP.
+	var linkLocal string
+	if addr := os.Getenv("SCION_METADATA_BIND_ADDRESS"); addr != "" && addr != "link-local" {
+		linkLocal = addr
+	} else {
+		var err error
+		linkLocal, err = metadata.DiscoverLinkLocalAddress()
+		if err != nil {
+			return "", fmt.Errorf("cloudrun-sandbox hub endpoint: %w", err)
+		}
+	}
+
+	return fmt.Sprintf("http://%s", net.JoinHostPort(linkLocal, fmt.Sprintf("%d", hubListenPort))), nil
 }
 
 func redactEnvValueForLog(key, value string) string {

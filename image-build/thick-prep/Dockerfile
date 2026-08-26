@@ -37,11 +37,14 @@ RUN userdel -r ubuntu 2>/dev/null || true && \
     groupdel ubuntu 2>/dev/null || true
 
 # Install packages that scion-base and harnesses expect but the thick base lacks.
+# tmux: required by sandbox entrypoint (buildEntrypoint in cloudrun_sandbox_runtime.go)
+# for agent session management. Without it, every sandbox dies on launch (exit 127).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     zsh \
     fzf \
     gh \
     ripgrep \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Create the npm-global directory that scion-base expects to chown.

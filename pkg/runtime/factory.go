@@ -45,7 +45,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
 			// Fallback to legacy behavior for now if profileName matches a known type
-			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" {
+			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" {
 				runtimeType = profileName
 				util.Debugf("GetRuntime: using profileName as runtimeType: %s", runtimeType)
 			} else {
@@ -89,7 +89,19 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			// On Linux, check for Cloud Run environment first. On Cloud Run
 			// the docker daemon is never available even when the CLI binary
 			// is present in the image, so cloudrun must take precedence.
-			if os.Getenv("K_SERVICE") != "" {
+
+			// Cloud Run Instance detection: CLOUD_RUN_INSTANCE is set on Instances
+			// (unlike K_SERVICE, which is NOT set). Probe the sandbox binary to
+			// distinguish cloudrun-sandbox from cloudrun-instances.
+			if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+				if SandboxLauncherAvailable() {
+					runtimeType = "cloudrun-sandbox"
+					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher, using cloudrun-sandbox runtime")
+				} else {
+					runtimeType = "cloudrun-instances"
+					util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher, using cloudrun-instances runtime")
+				}
+			} else if os.Getenv("K_SERVICE") != "" {
 				runtimeType = "cloudrun"
 				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
 			} else if _, err := exec.LookPath("podman"); err == nil {
@@ -115,6 +127,20 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "container":
 		return NewAppleContainerRuntime()
 	case "docker":
+		// On Cloud Run Instances the docker daemon is unavailable.
+		// CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is NOT).
+		if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+			if SandboxLauncherAvailable() {
+				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
+				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
+			}
+			util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher (docker override), using cloudrun-instances runtime")
+			rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
+			if vs != nil && vs.Server != nil {
+				rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+			}
+			return rt
+		}
 		// On Cloud Run the docker daemon is unavailable regardless of
 		// whether the CLI binary exists in the container image.
 		if os.Getenv("K_SERVICE") != "" {
@@ -191,6 +217,9 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: failed to create cloudrun-instances runtime: %v", err)
 			return &ErrorRuntime{Err: err}
 		}
+		return rt
+	case "cloudrun-sandbox":
+		rt := NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
 		return rt
 	}
 

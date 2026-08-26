@@ -68,6 +68,9 @@ Options:
                           common      - scion-base + harnesses + hub (skip core-base)
                           all         - full rebuild including core-base
                           thick-prep  - just the thick base prep layer (amd64 only)
+                          omni        - omni image chain for Cloud Run Instances
+                                        single-node deployment (amd64 only,
+                                        needs scion-base pre-built or in registry)
                           thick       - full thick rebuild: thick-prep + scion-base +
                                         harnesses + hub (amd64 only, uses Cloud
                                         Workstations base instead of core-base)
@@ -107,11 +110,20 @@ REGISTRY="${REGISTRY%/}"
 
 # Set THICK_BUILD flag when building the thick target, so step descriptors
 # in targets.sh route scion-base to thick-prep instead of core-base.
+# The omni target also implies thick build (thick base has no arm64 variant).
 THICK_BUILD="${THICK_BUILD:-false}"
-if [[ "${TARGET}" == "thick" || "${TARGET}" == "thick-prep" ]]; then
+if [[ "${TARGET}" == "thick" || "${TARGET}" == "thick-prep" || "${TARGET}" == "omni" ]]; then
   THICK_BUILD="true"
 fi
 export THICK_BUILD
+
+# Set OMNI_BUILD flag when building the omni target, so step descriptors
+# in targets.sh chain harnesses instead of branching from scion-base.
+OMNI_BUILD="${OMNI_BUILD:-false}"
+if [[ "${TARGET}" == "omni" ]]; then
+  OMNI_BUILD="true"
+fi
+export OMNI_BUILD
 
 # Validate builder against allow-list.
 builder_ok="false"

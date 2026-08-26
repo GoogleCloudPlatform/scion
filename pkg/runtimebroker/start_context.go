@@ -289,6 +289,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			runtimeName,
 		)
 	}
+	// On the cloudrun-sandbox runtime, sandboxes cannot reach the hub's
+	// public IAP-fronted URL (they hold no IAP credential). The hub is on the
+	// same Instance, listening on 0.0.0.0, and reachable via the launcher's
+	// link-local address. Override the endpoint so the sandbox's sciontool
+	// init (and the metadata emulator's FetchGCPToken) can reach the hub.
+	if runtimeName == "cloudrun-sandbox" {
+		sandboxEndpoint, err := cloudrunSandboxHubEndpoint(s.config.HubListenPort)
+		if err != nil {
+			return nil, &startContextError{
+				Status:  http.StatusInternalServerError,
+				Message: fmt.Sprintf("cannot resolve hub endpoint for sandbox: %v", err),
+			}
+		}
+		hubEndpoint = sandboxEndpoint
+	}
 	if hubEndpoint != "" {
 		env["SCION_HUB_ENDPOINT"] = hubEndpoint
 		env["SCION_HUB_URL"] = hubEndpoint // legacy compat
@@ -381,9 +396,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_METADATA_SA_EMAIL"] = in.Config.GCPIdentity.SAEmail
 			env["SCION_METADATA_PROJECT_ID"] = in.Config.GCPIdentity.ProjectID
 		}
+		// The metadata emulator runs inside the sandbox (started by
+		// sciontool init), so localhost is correct — the emulator and the
+		// harness share the same network namespace.
 		env["GCE_METADATA_HOST"] = "localhost:18380"
 		// gcloud CLI uses GCE_METADATA_ROOT (not GCE_METADATA_HOST) to locate
 		// the metadata server during its initial configuration detection.
+		// Both must point at the same address.
 		env["GCE_METADATA_ROOT"] = "localhost:18380"
 	case store.GCPMetadataModePassthrough:
 		// Deliberately no redirect: passthrough means the agent is meant to

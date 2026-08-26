@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -364,6 +365,67 @@ func TestColocatedExtraHosts(t *testing.T) {
 				t.Errorf("colocatedExtraHosts()[0] = %q, want %q", got[0], tt.wantFirst)
 			}
 		})
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_ZeroPort(t *testing.T) {
+	// Zero listen port means the hub's listen port is not known
+	// (non-colocated broker). Must error, not guess.
+	_, err := cloudrunSandboxHubEndpoint(0)
+	if err == nil {
+		t.Fatal("expected error when hub listen port is zero")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("expected 'not configured' error, got: %v", err)
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_NeverRunApp(t *testing.T) {
+	// Even if DiscoverLinkLocalAddress fails (no link-local in CI), the
+	// function must never return a public *.run.app URL.
+	ep, err := cloudrunSandboxHubEndpoint(8080)
+	if err != nil {
+		// Expected in CI — no link-local address.
+		return
+	}
+	if strings.Contains(ep, "run.app") {
+		t.Fatalf("cloudrunSandboxHubEndpoint must never return a run.app URL, got %q", ep)
+	}
+	if !strings.HasPrefix(ep, "http://169.254.") {
+		t.Fatalf("expected http://169.254.x.x:<port>, got %q", ep)
+	}
+	if !strings.HasSuffix(ep, ":8080") {
+		t.Fatalf("expected port 8080, got %q", ep)
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_ExplicitBindAddress(t *testing.T) {
+	// When SCION_METADATA_BIND_ADDRESS is set to an explicit IP, the function
+	// must use it directly instead of calling DiscoverLinkLocalAddress. This
+	// is required on Cloud Run Instances with multiple link-local addresses.
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "169.254.8.1")
+
+	ep, err := cloudrunSandboxHubEndpoint(8080)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep != "http://169.254.8.1:8080" {
+		t.Fatalf("expected http://169.254.8.1:8080, got %q", ep)
+	}
+}
+
+func TestCloudrunSandboxHubEndpoint_LinkLocalFallback(t *testing.T) {
+	// "link-local" means auto-discover, same as empty. The function should
+	// fall back to DiscoverLinkLocalAddress (which may fail in CI).
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "link-local")
+
+	ep, err := cloudrunSandboxHubEndpoint(8080)
+	if err != nil {
+		// Expected in CI — no link-local address.
+		return
+	}
+	if !strings.HasPrefix(ep, "http://169.254.") {
+		t.Fatalf("expected http://169.254.x.x:8080, got %q", ep)
 	}
 }
 

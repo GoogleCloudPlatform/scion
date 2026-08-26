@@ -30,12 +30,15 @@ on:
           - scion-base
           - harnesses
           - hub
+          - omni
+          - thick
+          - thick-prep
         default: 'common'
       tag:
         description: 'Image tag'
         default: 'latest'
       platform:
-        description: 'Target platform(s)'
+        description: 'Target platform(s). Omni is amd64-only; the script enforces this.'
         type: choice
         options:
           - all
@@ -50,7 +53,7 @@ on:
         required: true
         type: string
       target:
-        description: 'Build target (common, all, core-base, scion-base, harnesses, hub)'
+        description: 'Build target (common, all, core-base, scion-base, harnesses, hub, omni, thick, thick-prep)'
         type: string
         default: 'common'
       tag:

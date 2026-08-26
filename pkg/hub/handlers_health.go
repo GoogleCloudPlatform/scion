@@ -26,14 +26,15 @@ import (
 )
 
 type HealthResponse struct {
-	Status       string            `json:"status"`
-	Version      string            `json:"version"`
-	ScionVersion string            `json:"scionVersion"`
-	HubID        string            `json:"hub_id,omitempty"`
-	HubName      string            `json:"hub_name,omitempty"`
-	Uptime       string            `json:"uptime"`
-	Checks       map[string]string `json:"checks,omitempty"`
-	Stats        *HealthStats      `json:"stats,omitempty"`
+	Status             string            `json:"status"`
+	Version            string            `json:"version"`
+	ScionVersion       string            `json:"scionVersion"`
+	HubID              string            `json:"hub_id,omitempty"`
+	HubName            string            `json:"hub_name,omitempty"`
+	Uptime             string            `json:"uptime"`
+	Checks             map[string]string `json:"checks,omitempty"`
+	Stats              *HealthStats      `json:"stats,omitempty"`
+	DeploymentWarnings []string          `json:"deploymentWarnings,omitempty"`
 }
 
 type HealthStats struct {
@@ -78,7 +79,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
-	return &HealthResponse{
+	resp := &HealthResponse{
 		Status:       status,
 		Version:      "0.1.0", // TODO: Get from build info
 		ScionVersion: version.Short(),
@@ -88,6 +89,14 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Checks:       checks,
 		Stats:        stats,
 	}
+
+	if isCloudRunInstance() {
+		resp.DeploymentWarnings = append(resp.DeploymentWarnings,
+			"Ephemeral deployment: workspaces, agent homes, databases, and project "+
+				"trees are lost on redeploy. Push to git remotes for durability.")
+	}
+
+	return resp
 }
 
 // HealthStatus returns the status string from the health response.

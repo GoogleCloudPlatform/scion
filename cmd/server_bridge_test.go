@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"net/url"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -332,4 +333,92 @@ func TestIAPAudienceToCloudRunURL(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestResolveHubListenPort_HostedTier pins the contract that
+// resolveHubListenPort returns a non-zero port in co-located hosted mode.
+// cloudrunSandboxHubEndpoint depends on this: it takes HubListenPort and
+// uses it to build http://<link-local>:<port>. If someone later changes
+// resolveHubListenPort to return 0 in hosted mode, every cloudrun-sandbox
+// agent start will 500 — and the failing test will be here, next to the
+// change, not in a distant package.
+func TestResolveHubListenPort_HostedTier(t *testing.T) {
+	origEnableHub := enableHub
+	origEnableWeb := enableWeb
+	origWebPort := webPort
+	defer func() {
+		enableHub = origEnableHub
+		enableWeb = origEnableWeb
+		webPort = origWebPort
+	}()
+
+	t.Run("combined web+API mode returns web port", func(t *testing.T) {
+		enableHub = true
+		enableWeb = true
+		webPort = 8080
+
+		cfg := &config.GlobalConfig{Hub: config.HubServerConfig{Port: 9810}}
+		port := resolveHubListenPort(cfg)
+		assert.Equal(t, 8080, port, "should use webPort in combined mode")
+	})
+
+	t.Run("standalone hub mode returns hub port", func(t *testing.T) {
+		enableHub = true
+		enableWeb = false
+		webPort = 8080
+
+		cfg := &config.GlobalConfig{Hub: config.HubServerConfig{Port: 9810}}
+		port := resolveHubListenPort(cfg)
+		assert.Equal(t, 9810, port, "should use cfg.Hub.Port in standalone mode")
+	})
+
+	t.Run("non-colocated returns zero", func(t *testing.T) {
+		enableHub = false
+		enableWeb = true
+		webPort = 8080
+
+		cfg := &config.GlobalConfig{Hub: config.HubServerConfig{Port: 9810}}
+		port := resolveHubListenPort(cfg)
+		assert.Equal(t, 0, port, "should be 0 when hub is not colocated")
+	})
+}
+
+// TestResolveHubEndpointForBroker_ExplicitPort pins the contract that the
+// broker's hub endpoint always carries an explicit port in co-located mode.
+// cloudrunSandboxHubEndpoint (in pkg/runtimebroker) parses this via
+// url.Port() to determine what port the hub is listening on. If
+// resolveHubEndpointForBroker ever emits a URL without an explicit port
+// (e.g. scheme-default), url.Port() returns "" and sandbox agent starts fail.
+func TestResolveHubEndpointForBroker_ExplicitPort(t *testing.T) {
+	origEnableHub := enableHub
+	origEnableWeb := enableWeb
+	origEnableDebug := enableDebug
+	origWebPort := webPort
+	defer func() {
+		enableHub = origEnableHub
+		enableWeb = origEnableWeb
+		enableDebug = origEnableDebug
+		webPort = origWebPort
+	}()
+
+	enableHub = true
+	enableWeb = true
+	enableDebug = false
+	webPort = 8080
+
+	cfg := &config.GlobalConfig{Hub: config.HubServerConfig{Port: 9810}}
+	settings := &config.Settings{}
+
+	endpoint := resolveHubEndpointForBroker(cfg, settings)
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("endpoint %q is not a valid URL: %v", endpoint, err)
+	}
+	if u.Port() == "" {
+		t.Fatalf("resolveHubEndpointForBroker returned %q which has no explicit port — "+
+			"cloudrunSandboxHubEndpoint depends on url.Port() returning a non-empty value "+
+			"in co-located mode", endpoint)
+	}
+	assert.Equal(t, "8080", u.Port(), "port should match webPort")
 }

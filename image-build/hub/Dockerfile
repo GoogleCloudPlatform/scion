@@ -32,4 +32,9 @@ RUN mkdir -p /home/scion/.scion && \
 # The scion-base ENTRYPOINT runs sciontool init -- <cmd>. Override the
 # default CMD so the container, when started without arguments, runs the
 # hub server in the foreground.
-CMD ["scion", "server", "start", "--foreground", "--host", "0.0.0.0", "--enable-hub"]
+#
+# WORKAROUND (B23): Observed behaviour — exec-form CMD daemonizes
+# (container exits 0); wrapping in /bin/sh -c exec runs foreground
+# correctly.  Same binary, same flags.  Root cause unresolved; see
+# .design/project-log/task15-b23-daemonize-investigation.md.
+CMD ["/bin/sh", "-c", "exec scion server start --foreground --host 0.0.0.0 --enable-hub"]

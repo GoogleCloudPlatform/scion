@@ -49,6 +49,12 @@ cloud_build_config_for_target() {
     scion-base) file="cloudbuild-scion-base.yaml" ;;
     harnesses)  file="cloudbuild-harnesses.yaml" ;;
     hub)        file="cloudbuild-hub.yaml" ;;
+    omni)
+      echo "cloud-build: no cloudbuild-*.yaml for target 'omni'." >&2
+      echo "The omni chain has no Cloud Build config. Use --builder local-docker" >&2
+      echo "(the default), which works both locally and in GitHub Actions CI." >&2
+      return 1
+      ;;
     thick-prep) file="cloudbuild-thick.yaml" ;;
     thick)      file="cloudbuild-thick.yaml" ;;
     *)

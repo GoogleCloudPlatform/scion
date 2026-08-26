@@ -60,6 +60,7 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 | `scion-base` | `scion-base` | Adds sciontool. Uses existing `core-base:<tag>`. |
 | `harnesses` | All catalog harness images with `harnesses/<name>/Dockerfile` | Uses existing `scion-base:<tag>`. Builds recipes from the root Harness-config catalog. |
 | `hub` | `scion-hub` | Hub server image. Uses existing `scion-base:<tag>`. |
+| `omni` | `scion-omni` | Hub + all harnesses (Cloud Run Instances single-node deployment). Uses existing `scion-base:<tag>`. |
 | `common` (default) | `scion-base` + catalog harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
 | `thick-prep` | `thick-prep` | Prep layer for thick base. amd64 only. |
@@ -132,6 +133,7 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `scion-base` | `cloudbuild-scion-base.yaml` |
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
+| `omni` | `cloudbuild-omni.yaml` |
 | `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
 | `thick` | `cloudbuild-thick.yaml` |
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -411,8 +412,14 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 	tpl, err := FindTemplateInProjectPath(name, projectPath)
 	if err != nil {
 		if name == "default" {
-			// When the default template is not found, proceed without it
-			// (e.g. hub-dispatched agents on brokers with no local templates)
+			// The default template was not found locally. This produces an
+			// empty template chain, which means no template home files
+			// (.tmux.conf, .zshrc, .gitconfig) will be copied into the agent
+			// home. ProvisionAgent falls back to embedded defaults, but log
+			// the miss so the resolution gap is visible.
+			slog.Warn("default template not found — template chain is empty; "+
+				"agent home will use embedded defaults only",
+				"projectPath", projectPath, "error", err)
 			return chain, nil
 		}
 		return nil, err

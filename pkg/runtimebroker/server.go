@@ -65,6 +65,11 @@ type ServerConfig struct {
 	// into agent containers. Used for local development where containers
 	// need a bridge address (e.g. host.containers.internal) instead of localhost.
 	ContainerHubEndpoint string
+	// HubListenPort is the port the co-located hub HTTP server is listening
+	// on (e.g. 8080 for the combined web+API server). Used by cloudrun-sandbox
+	// to construct the link-local hub endpoint for sandboxes. Zero means the
+	// hub listen port is not known (remote broker, non-colocated mode).
+	HubListenPort int
 
 	// BrokerID is a unique identifier for this runtime broker.
 	BrokerID string

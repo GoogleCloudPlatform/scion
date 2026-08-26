@@ -873,6 +873,176 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 	}
 }
 
+// newTestServerWithRuntime creates a test server like newTestServerForStartContext
+// but with a custom runtime name.
+func newTestServerWithRuntime(t *testing.T, cfg ServerConfig, runtimeName string) *Server {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := t.TempDir()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(origWd)
+	})
+
+	dotScion := filepath.Join(tmpDir, ".scion")
+	if err := os.Mkdir(dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: mock
+runtimes:
+    mock:
+        type: mock
+`
+	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	templatesDir := filepath.Join(dotScion, "templates")
+	if err := os.MkdirAll(templatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.ForceRuntime = "mock"
+	mgr := &envCapturingManager{}
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return runtimeName },
+	}
+	return New(cfg, mgr, rt)
+}
+
+// TestBuildStartContext_CloudrunSandboxHubEndpoint verifies hub endpoint
+// behaviour for the cloudrun-sandbox runtime. In CI (no link-local interface),
+// the start must fail rather than fall back to the public IAP URL — a 302
+// from the IAP edge is exactly the failure that this fix prevents.
+//
+// When a link-local address IS available (real Cloud Run Instance), the
+// endpoint must be http://<link-local>:<port> with the port read from the
+// broker's own hub endpoint config.
+func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.HubListenPort = 8080
+	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-sandbox",
+		HTTPRequest: r,
+	})
+
+	if err != nil {
+		// Expected in CI: no link-local address → start fails.
+		// Verify it is the right error and not some other failure.
+		if !strings.Contains(err.Error(), "hub endpoint") && !strings.Contains(err.Error(), "link-local") {
+			t.Fatalf("expected hub-endpoint/link-local error for cloudrun-sandbox, got: %v", err)
+		}
+		return
+	}
+
+	// If we get here, a link-local address was found (real Instance).
+	ep := sc.Opts.Env["SCION_HUB_ENDPOINT"]
+
+	// Guard: SCION_HUB_ENDPOINT must never contain a run.app URL for
+	// cloudrun-sandbox — that would route through IAP, which the sandbox
+	// cannot authenticate against.
+	if strings.Contains(ep, "run.app") {
+		t.Fatalf("SCION_HUB_ENDPOINT must never be a run.app URL for cloudrun-sandbox, got %q", ep)
+	}
+
+	// Must be http (not https) on the link-local address.
+	if !strings.HasPrefix(ep, "http://169.254.") {
+		t.Fatalf("expected http://169.254.x.x:<port>, got %q", ep)
+	}
+
+	// Port must come from the broker config, not hardcoded.
+	if !strings.HasSuffix(ep, ":8080") {
+		t.Fatalf("expected port 8080 from broker hub endpoint, got %q", ep)
+	}
+
+	// Metadata vars must still be localhost — emulator runs inside sandbox.
+	host := sc.Opts.Env["GCE_METADATA_HOST"]
+	root := sc.Opts.Env["GCE_METADATA_ROOT"]
+	if host != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380', got %q", host)
+	}
+	if root != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_ROOT='localhost:18380', got %q", root)
+	}
+}
+
+// TestBuildStartContext_CloudrunSandboxHubNeverRunApp is a durable guard:
+// assert the negative so the test survives refactoring and catches the
+// shipped defect pattern. If buildStartContext succeeds for cloudrun-sandbox,
+// the hub endpoint must NEVER be a public IAP-fronted URL.
+func TestBuildStartContext_CloudrunSandboxHubNeverRunApp(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.HubListenPort = 8080
+	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	// Simulate a hub-dispatched agent whose resolvedEnv carries the public URL.
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-sandbox-iap",
+		ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": "https://my-instance-xyz.run.app"},
+		HTTPRequest: r,
+	})
+	if err != nil {
+		// In CI this fails (no link-local) — that is correct.
+		return
+	}
+	ep := sc.Opts.Env["SCION_HUB_ENDPOINT"]
+	if strings.Contains(ep, "run.app") {
+		t.Fatalf("cloudrun-sandbox SCION_HUB_ENDPOINT must never contain run.app, got %q", ep)
+	}
+}
+
+// TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch guards the invariant
+// that GCE_METADATA_HOST and GCE_METADATA_ROOT are always set to the same
+// value. A mismatch means gcloud (ROOT) and language SDKs (HOST) would talk
+// to different servers. Only tests non-cloudrun-sandbox runtimes since
+// cloudrun-sandbox may fail in CI (no link-local).
+func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerWithRuntime(t, cfg, "mock")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-both-vars",
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	host := sc.Opts.Env["GCE_METADATA_HOST"]
+	root := sc.Opts.Env["GCE_METADATA_ROOT"]
+	if host != root {
+		t.Errorf("GCE_METADATA_HOST=%q GCE_METADATA_ROOT=%q — must match", host, root)
+	}
+}
+
 // --- resolveWorktreeProvision tests ---
 
 func TestResolveWorktreeProvision_Eligible(t *testing.T) {

@@ -107,6 +107,44 @@ func TestWorkspaceWriteBlocked_NotOnCloudRun(t *testing.T) {
 	assert.False(t, srv.workspaceWriteBlocked())
 }
 
+// ============================================================================
+// Cloud Run Instance (Tier 0 ephemeral) Tests
+// ============================================================================
+
+func TestIsCloudRunInstance_Set(t *testing.T) {
+	t.Setenv("CLOUD_RUN_INSTANCE", "my-instance")
+	assert.True(t, isCloudRunInstance())
+}
+
+func TestIsCloudRunInstance_Unset(t *testing.T) {
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+	assert.False(t, isCloudRunInstance())
+}
+
+func TestWorkspaceWriteBlocked_CloudRunInstance(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Cloud Run Instance: CLOUD_RUN_INSTANCE is set, K_SERVICE is NOT set.
+	// Writes should be explicitly permitted (ephemeral storage, Tier 0).
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("CLOUD_RUN_INSTANCE", "my-instance")
+
+	assert.False(t, srv.workspaceWriteBlocked())
+}
+
+func TestWorkspaceWriteBlocked_CloudRunInstanceEvenWithLocalBackend(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Even with an explicit "local" backend config, CRI should permit writes.
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("CLOUD_RUN_INSTANCE", "my-instance")
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "local",
+	}
+	assert.False(t, srv.workspaceWriteBlocked())
+}
+
 func TestSafetyGate_Write503OnCloudRunLocalBackend(t *testing.T) {
 	srv, _ := testServer(t)
 	t.Setenv("K_SERVICE", "hub-service")
@@ -628,6 +666,35 @@ func TestHealthCheck_NoWorkspaceStorage(t *testing.T) {
 	// No workspace_storage check when backend is local/unset
 	_, hasCheck := resp.Checks["workspace_storage"]
 	assert.False(t, hasCheck, "local backend should not have workspace_storage health check")
+}
+
+func TestHealthCheck_DeploymentWarnings_CloudRunInstance(t *testing.T) {
+	srv, _ := testServer(t)
+	t.Setenv("CLOUD_RUN_INSTANCE", "my-instance")
+
+	rec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp HealthResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	require.Len(t, resp.DeploymentWarnings, 1)
+	assert.Contains(t, resp.DeploymentWarnings[0], "Ephemeral deployment")
+	assert.Contains(t, resp.DeploymentWarnings[0], "lost on redeploy")
+	assert.Contains(t, resp.DeploymentWarnings[0], "git remotes")
+}
+
+func TestHealthCheck_DeploymentWarnings_NotOnCloudRunInstance(t *testing.T) {
+	srv, _ := testServer(t)
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+
+	rec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp HealthResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Empty(t, resp.DeploymentWarnings)
 }
 
 func TestHealthCheck_NFSHealthy(t *testing.T) {

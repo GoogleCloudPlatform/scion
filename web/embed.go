@@ -19,7 +19,7 @@ package web
 import "embed"
 
 // ClientAssets contains the built web client assets embedded at compile time.
-// Build the client first (cd web && npm run build:client) before compiling
+// Build the client first (cd web && npm run build) before compiling
 // without the no_embed_web tag.
 //
 //go:embed all:dist/client
