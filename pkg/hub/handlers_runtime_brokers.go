@@ -299,6 +299,29 @@ func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	// Authorize: broker self-access or user with CheckAccess
+	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
+		// Broker accessing its own record — allowed
+	} else {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			Unauthorized(w)
+			return
+		}
+		if userIdent, ok := identity.(UserIdentity); ok {
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				Resource{Type: "runtime_broker", ID: id}, ActionRead)
+			if !decision.Allowed {
+				Forbidden(w)
+				return
+			}
+		} else {
+			Forbidden(w)
+			return
+		}
+	}
+
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -625,6 +648,29 @@ type brokerAgentHeartbeat struct {
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
+	// Authorize: broker self-access or user with CheckAccess (ActionUpdate —
+	// heartbeats modify agent state and broker liveness).
+	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
+		// Broker sending its own heartbeat — allowed
+	} else {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			Unauthorized(w)
+			return
+		}
+		if userIdent, ok := identity.(UserIdentity); ok {
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				Resource{Type: "runtime_broker", ID: id}, ActionUpdate)
+			if !decision.Allowed {
+				Forbidden(w)
+				return
+			}
+		} else {
+			Forbidden(w)
+			return
+		}
+	}
+
 	var heartbeat brokerHeartbeatRequest
 	if err := readJSON(r, &heartbeat); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -648,7 +694,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 
-			// Security check: ensure the agent belongs to this broker
+			// Defense in depth: skip agents not assigned to the targeted broker.
+			// Caller authorization is handled above at the handler level.
 			if agent.RuntimeBrokerID != id {
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
@@ -901,6 +948,28 @@ type ListBrokerProjectsResponse struct {
 
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
+
+	// Authorize: broker self-access or user with CheckAccess
+	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
+		// Broker accessing its own project list — allowed
+	} else {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			Unauthorized(w)
+			return
+		}
+		if userIdent, ok := identity.(UserIdentity); ok {
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				Resource{Type: "runtime_broker", ID: brokerID}, ActionRead)
+			if !decision.Allowed {
+				Forbidden(w)
+				return
+			}
+		} else {
+			Forbidden(w)
+			return
+		}
+	}
 
 	// Verify broker exists
 	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
