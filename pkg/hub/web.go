@@ -110,6 +110,20 @@ func getWebSessionUser(ctx context.Context) *webSessionUser {
 	return nil
 }
 
+// AccessSettingsProvider supplies the operational access settings that can
+// change at runtime (e.g. via the admin UI or ApplySnapshot). WebServer
+// reads these through the provider instead of holding its own snapshot.
+// Implementations must be safe for concurrent use.
+type AccessSettingsProvider interface {
+	// AdminEmails returns the current list of bootstrap/admin-UI admin emails.
+	AdminEmails() []string
+	// AuthorizedDomains returns the current list of allowed email domains.
+	AuthorizedDomains() []string
+	// UserAccessMode returns the current login-time access mode
+	// ("open", "domain_restricted", "invite_only").
+	UserAccessMode() string
+}
+
 // WebServerConfig holds configuration for the web frontend server.
 type WebServerConfig struct {
 	// Port is the HTTP port to listen on (default 8080).
@@ -130,12 +144,6 @@ type WebServerConfig struct {
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	// In proxy mode, OAuth providers are not shown and logout behavior changes.
 	AuthMode string
-	// AuthorizedDomains is the list of allowed email domains (empty = all allowed).
-	AuthorizedDomains []string
-	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
-	AdminEmails []string
-	// UserAccessMode controls login-time access evaluation ("open", "domain_restricted", "invite_only").
-	UserAccessMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
@@ -158,8 +166,9 @@ type WebServerConfig struct {
 
 // WebServer serves the web frontend SPA shell and static assets.
 type WebServer struct {
-	config       WebServerConfig
-	httpServer   *http.Server
+	config         WebServerConfig
+	accessSettings AccessSettingsProvider // live operational settings (nil-safe: falls back to zero values)
+	httpServer     *http.Server
 	mux          *http.ServeMux
 	assets       fs.FS  // embedded or nil
 	assetsDisk   string // filesystem override path, or ""
@@ -558,6 +567,40 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
 func (ws *WebServer) SetEventPublisher(pub EventPublisher) {
 	ws.events = pub
+}
+
+// adminEmails returns the live admin email list from the access settings
+// provider. Returns nil when no provider is configured.
+func (ws *WebServer) adminEmails() []string {
+	if ws.accessSettings == nil {
+		return nil
+	}
+	return ws.accessSettings.AdminEmails()
+}
+
+// authorizedDomains returns the live authorized domains list from the access
+// settings provider. Returns nil when no provider is configured.
+func (ws *WebServer) authorizedDomains() []string {
+	if ws.accessSettings == nil {
+		return nil
+	}
+	return ws.accessSettings.AuthorizedDomains()
+}
+
+// userAccessMode returns the live user access mode from the access settings
+// provider. Returns "" when no provider is configured.
+func (ws *WebServer) userAccessMode() string {
+	if ws.accessSettings == nil {
+		return ""
+	}
+	return ws.accessSettings.UserAccessMode()
+}
+
+// SetAccessSettingsProvider sets the live operational access settings provider.
+// When set, WebServer reads AdminEmails, AuthorizedDomains, and UserAccessMode
+// through this provider rather than from its static config snapshot.
+func (ws *WebServer) SetAccessSettingsProvider(p AccessSettingsProvider) {
+	ws.accessSettings = p
 }
 
 // SetAuthzService sets the authorization service for SSE subject-level checks.
@@ -1533,7 +1576,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 							"email", email, "error", err)
 					}
 				}
-				expectedRole := determineUserRole(email, ws.config.AdminEmails, storedRole)
+				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole)
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -1604,7 +1647,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if !checkUserAuthorized(ctx, proxyUser.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
+		if !checkUserAuthorized(ctx, proxyUser.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
 			ws.logger().Warn("Proxy auth: user not authorized", "email", proxyUser.Email)
 			http.Error(w, "access denied: email not authorized", http.StatusForbidden)
 			return
@@ -1620,7 +1663,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.config.AdminEmails, "")
+			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "")
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -1650,7 +1693,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				user.DisplayName = proxyUser.DisplayName
 			}
 			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-			if newRole := determineUserRole(proxyUser.Email, ws.config.AdminEmails, user.Role); user.Role != newRole {
+			if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role); user.Role != newRole {
 				ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole
 			}
@@ -1893,7 +1936,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !checkUserAuthorized(ctx, userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
+	if !checkUserAuthorized(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
 		ws.logger().Warn("Unauthorized user", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
@@ -1904,7 +1947,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.config.AdminEmails, "")
+		role := determineUserRole(userInfo.Email, ws.adminEmails(), "")
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -1941,7 +1984,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.AvatarURL = userInfo.AvatarURL
 			}
 			user.LastLogin = time.Now()
-			user.Role = determineUserRole(userInfo.Email, ws.config.AdminEmails, user.Role)
+			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role)
 			// Log the activation via slog (WebServer does not have a structured
 			// audit logger; the hub.Server audit path covers API/CLI auth).
 			ws.logger().Info("invite audit: user_activated", "email", userInfo.Email, "user_id", user.ID)
@@ -1955,7 +1998,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.DisplayName = userInfo.DisplayName
 			}
 			// Re-evaluate admin status on every login
-			newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails, user.Role)
+			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role)
 			if user.Role != newRole {
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole

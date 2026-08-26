@@ -94,6 +94,18 @@ func (s *proxyAuthStore) GetUser(_ context.Context, id string) (*store.User, err
 	return nil, store.ErrNotFound
 }
 
+// staticAccessSettings is a test implementation of AccessSettingsProvider
+// with mutable fields for simulating live config changes in tests.
+type staticAccessSettings struct {
+	adminEmails       []string
+	authorizedDomains []string
+	userAccessMode    string
+}
+
+func (s *staticAccessSettings) AdminEmails() []string       { return s.adminEmails }
+func (s *staticAccessSettings) AuthorizedDomains() []string { return s.authorizedDomains }
+func (s *staticAccessSettings) UserAccessMode() string      { return s.userAccessMode }
+
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 	t.Helper()
 	ws := NewWebServer(cfg)
@@ -2867,8 +2879,10 @@ func TestProxyAuthMiddleware_KeepsAdminWhenNotInList(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		// AdminEmails does NOT include ui-admin@example.com
-		AdminEmails: []string{"other-admin@example.com"},
+	})
+	// AdminEmails does NOT include ui-admin@example.com
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"other-admin@example.com"},
 	})
 	ws.SetStore(st)
 
@@ -2910,7 +2924,9 @@ func TestProxyAuthMiddleware_PromotesToAdminWhenAddedToList(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		AdminEmails:        []string{"new-admin@example.com"},
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"new-admin@example.com"},
 	})
 	ws.SetStore(st)
 
@@ -2940,12 +2956,13 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnPromotion(t *testi
 	}
 
 	st := newProxyAuthStore()
+	// Initially NOT an admin
+	accessCfg := &staticAccessSettings{adminEmails: []string{}}
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		// Initially NOT an admin
-		AdminEmails: []string{},
 	})
+	ws.SetAccessSettingsProvider(accessCfg)
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -2966,7 +2983,7 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnPromotion(t *testi
 	assert.Equal(t, "member", created.Role)
 
 	// Now add user to admin list (simulates config change)
-	ws.config.AdminEmails = []string{"user@example.com"}
+	accessCfg.adminEmails = []string{"user@example.com"}
 
 	// Second request: re-uses the session cookie
 	req2 := httptest.NewRequest("GET", "/projects", nil)
@@ -3008,12 +3025,13 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnUIDemotion(t *test
 	}
 
 	st := newProxyAuthStore()
+	// Initially IS an admin
+	accessCfg := &staticAccessSettings{adminEmails: []string{"admin@example.com"}}
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		// Initially IS an admin
-		AdminEmails: []string{"admin@example.com"},
 	})
+	ws.SetAccessSettingsProvider(accessCfg)
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -3034,7 +3052,7 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnUIDemotion(t *test
 	assert.Equal(t, "admin", created.Role)
 
 	// Remove from the config list AND demote through the UI (explicit action).
-	ws.config.AdminEmails = []string{}
+	accessCfg.adminEmails = []string{}
 	created.Role = "member"
 	require.NoError(t, st.UpdateUser(context.Background(), created))
 
@@ -3076,11 +3094,12 @@ func TestProxyAuthMiddleware_ExistingSession_KeepsRoleWhenRemovedFromList(t *tes
 	}
 
 	st := newProxyAuthStore()
+	accessCfg := &staticAccessSettings{adminEmails: []string{"admin@example.com"}}
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		AdminEmails:        []string{"admin@example.com"},
 	})
+	ws.SetAccessSettingsProvider(accessCfg)
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -3099,7 +3118,7 @@ func TestProxyAuthMiddleware_ExistingSession_KeepsRoleWhenRemovedFromList(t *tes
 	require.Equal(t, "admin", created.Role)
 
 	// Config change only — no UI demotion.
-	ws.config.AdminEmails = []string{}
+	accessCfg.adminEmails = []string{}
 
 	req2 := httptest.NewRequest("GET", "/projects", nil)
 	req2.Header.Set("Accept", "text/html")
@@ -3135,8 +3154,8 @@ func TestProxyAuthMiddleware_ExistingSession_PicksUpUIPromotion(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		AdminEmails:        []string{},
 	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -3193,8 +3212,8 @@ func TestProxyAuthMiddleware_ExistingSession_SuspendedUserRejected(t *testing.T)
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		AdminEmails:        []string{},
 	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -3246,8 +3265,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		AdminEmails:        []string{}, // not an admin by config
 	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}}) // not an admin by config
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -3311,8 +3330,8 @@ func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testin
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		AdminEmails:        []string{},
 	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
 	ws.SetStore(st)
 
 	handler := ws.Handler()
@@ -3346,4 +3365,79 @@ func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testin
 		}
 	}
 	assert.False(t, sessionReSet, "session cookie should NOT be re-set when role is unchanged")
+}
+
+// ---------------------------------------------------------------------------
+// Live operational settings propagation — regression tests for issue #1270
+// ---------------------------------------------------------------------------
+
+func TestWebServer_AccessSettings_LivePropagation(t *testing.T) {
+	// Verify that WebServer reads operational settings through the
+	// AccessSettingsProvider rather than holding its own snapshot.
+	// When the provider's values change (e.g. via ApplySnapshot on the
+	// Server), WebServer immediately sees the new values.
+
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.config.AdminEmails = []string{"initial-admin@example.com"}
+	srv.config.AuthorizedDomains = []string{"example.com"}
+	srv.config.UserAccessMode = "open"
+
+	ws := NewWebServer(WebServerConfig{})
+	ws.SetAccessSettingsProvider(srv)
+
+	// Verify initial values
+	assert.Equal(t, []string{"initial-admin@example.com"}, ws.adminEmails())
+	assert.Equal(t, []string{"example.com"}, ws.authorizedDomains())
+	assert.Equal(t, "open", ws.userAccessMode())
+
+	// Simulate runtime update via ApplySnapshot
+	ApplySnapshot(srv, Layer1Snapshot{
+		AdminEmails:    []string{"new-admin@example.com", "other@example.com"},
+		UserAccessMode: "domain_restricted",
+	})
+
+	// WebServer must see the UPDATED values immediately — no restart needed
+	assert.Equal(t, []string{"new-admin@example.com", "other@example.com"}, ws.adminEmails(),
+		"AdminEmails must reflect live update after ApplySnapshot")
+	assert.Equal(t, "domain_restricted", ws.userAccessMode(),
+		"UserAccessMode must reflect live update after ApplySnapshot")
+}
+
+func TestWebServer_AccessSettings_NilProviderSafe(t *testing.T) {
+	// When no AccessSettingsProvider is configured (e.g. web-only mode
+	// without a Hub), the accessors return zero values rather than panicking.
+	ws := NewWebServer(WebServerConfig{})
+
+	assert.Nil(t, ws.adminEmails(), "nil provider should return nil AdminEmails")
+	assert.Nil(t, ws.authorizedDomains(), "nil provider should return nil AuthorizedDomains")
+	assert.Equal(t, "", ws.userAccessMode(), "nil provider should return empty UserAccessMode")
+}
+
+func TestServer_ImplementsAccessSettingsProvider(t *testing.T) {
+	// Verify the Server type satisfies the AccessSettingsProvider interface
+	// at compile time and with correct locking behavior.
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.config.AdminEmails = []string{"a@b.com"}
+	srv.config.AuthorizedDomains = []string{"b.com"}
+	srv.config.UserAccessMode = "invite_only"
+
+	var provider AccessSettingsProvider = srv // compile-time check
+
+	// Accessors return defensive copies — mutating the result must not
+	// affect the server state.
+	emails := provider.AdminEmails()
+	emails[0] = "MUTATED"
+	assert.Equal(t, "a@b.com", provider.AdminEmails()[0],
+		"AdminEmails must return a defensive copy")
+
+	domains := provider.AuthorizedDomains()
+	domains[0] = "MUTATED"
+	assert.Equal(t, "b.com", provider.AuthorizedDomains()[0],
+		"AuthorizedDomains must return a defensive copy")
+
+	assert.Equal(t, "invite_only", provider.UserAccessMode())
 }
