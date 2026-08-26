@@ -207,7 +207,7 @@ func TestNFSProvision_SharedPlain_GitClone(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 	})
 	if err != nil {
@@ -255,7 +255,7 @@ func TestNFSProvision_Idempotent(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 	}
 
@@ -344,7 +344,7 @@ func TestNFSProvision_WorktreePerAgent(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0, // full clone needed for worktrees
+			Depth:  intPtr(0), // full clone needed for worktrees
 		},
 	})
 	if err != nil {
@@ -392,7 +392,7 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0,
+			Depth:  intPtr(0),
 		},
 	})
 	if err != nil {
@@ -410,7 +410,7 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0,
+			Depth:  intPtr(0),
 		},
 	})
 	if err != nil {
@@ -641,7 +641,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 	}
 
@@ -698,7 +698,7 @@ func TestNFSWorktreePerAgent_E2E_FullValidation(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0,
+			Depth:  intPtr(0),
 		},
 	})
 	if err != nil {
@@ -818,7 +818,7 @@ func TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	gitClone := &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0}
+	gitClone := &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)}
 
 	// First agent: triggers base clone + worktree.
 	err = ProvisionShared(ProvisionInput{
@@ -938,7 +938,7 @@ func TestNFSWorktreePerAgent_E2E_WorktreeNestedNoEscape(t *testing.T) {
 		AgentName: "nested-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -1059,7 +1059,7 @@ func TestNFSWorktreePerAgent_E2E_SentinelLayoutMatchesNFS(t *testing.T) {
 		AgentName: "sentinel-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -1097,7 +1097,7 @@ func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	gitClone := &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0}
+	gitClone := &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)}
 
 	// First agent: clone + worktree.
 	err = ProvisionShared(ProvisionInput{
@@ -1151,3 +1151,5 @@ func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
 
 	_ = gitModTime // mtime check is informational; git worktree add may touch .git/
 }
+
+func intPtr(i int) *int { return &i }

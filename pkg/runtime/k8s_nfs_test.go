@@ -196,7 +196,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		GitCloneForInit: &api.GitCloneConfig{
 			URL:    "https://github.com/example/repo.git",
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 	}
 
@@ -316,7 +316,7 @@ func TestNFSProvisionCommand_ShallowClone(t *testing.T) {
 	gc := &api.GitCloneConfig{
 		URL:    "https://github.com/example/repo.git",
 		Branch: "main",
-		Depth:  1,
+		Depth:  intPtr(1),
 	}
 
 	cmd := nfsProvisionCommand(gc)
@@ -338,10 +338,10 @@ func TestNFSProvisionCommand_NilConfig(t *testing.T) {
 	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
 }
 
-func TestNFSProvisionCommand_FullClone(t *testing.T) {
+func TestNFSProvisionCommand_DefaultDepth(t *testing.T) {
 	gc := &api.GitCloneConfig{
-		URL:   "https://github.com/example/repo.git",
-		Depth: -1,
+		URL: "https://github.com/example/repo.git",
+		// Depth nil → default shallow (depth 1)
 	}
 
 	cmd := nfsProvisionCommand(gc)
@@ -349,7 +349,18 @@ func TestNFSProvisionCommand_FullClone(t *testing.T) {
 	assert.Equal(t, "sciontool", cmd[0])
 	assert.Equal(t, "provision", cmd[1])
 	assert.Contains(t, cmd, "--depth")
-	assert.Contains(t, cmd, "-1")
+	assert.Contains(t, cmd, "1")
+}
+
+func TestNFSProvisionCommand_FullClone(t *testing.T) {
+	gc := &api.GitCloneConfig{
+		URL:   "https://github.com/example/repo.git",
+		Depth: intPtr(0),
+	}
+
+	cmd := nfsProvisionCommand(gc)
+
+	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
 }
 
 func TestNFSProvisionEnv(t *testing.T) {
@@ -421,7 +432,7 @@ func nfsBaseConfig(name string) RunConfig {
 		GitCloneForInit: &api.GitCloneConfig{
 			URL:    "https://github.com/example/repo.git",
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 	}
 }

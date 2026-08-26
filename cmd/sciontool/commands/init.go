@@ -1550,8 +1550,9 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 	}
 	depthStr := os.Getenv("SCION_GIT_DEPTH")
 	if depthStr == "" {
-		depthStr = "1"
+		depthStr = "1" // default: shallow clone
 	}
+	depth, _ := strconv.Atoi(depthStr) // 0 on parse error = full clone
 	agentName := os.Getenv("SCION_AGENT_NAME")
 
 	// Helper to configure a git command: run as the scion user and disable
@@ -1599,10 +1600,16 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 		return fmt.Errorf("git remote add failed: %s", sanitizeGitOutput(string(out), token))
 	}
 
-	// fetchBranch attempts a shallow fetch of a single branch from origin.
+	// fetchBranch attempts to fetch a single branch from origin.
+	// When depth > 0, a shallow fetch is performed; depth 0 means full clone (no --depth flag).
 	// Returns sanitized stderr and whether the fetch succeeded.
 	fetchBranch := func(branchToFetch string) (string, bool) {
-		fetchCmd := exec.Command("git", "-C", workspacePath, "fetch", "--depth", depthStr, "origin", branchToFetch)
+		fetchArgs := []string{"-C", workspacePath, "fetch"}
+		if depth > 0 {
+			fetchArgs = append(fetchArgs, "--depth", depthStr)
+		}
+		fetchArgs = append(fetchArgs, "origin", branchToFetch)
+		fetchCmd := exec.Command("git", fetchArgs...)
 		setupGitCmd(fetchCmd)
 		var stderr bytes.Buffer
 		fetchCmd.Stderr = &stderr

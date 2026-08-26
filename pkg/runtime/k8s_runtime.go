@@ -2473,15 +2473,17 @@ func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
 		return []string{"sciontool", "provision"}
 	}
 
-	depth := gc.Depth
-	if depth == 0 {
-		depth = 1
+	depth := 1 // default: shallow
+	if gc.Depth != nil {
+		depth = *gc.Depth
 	}
 
-	return []string{
-		"sciontool", "provision",
-		"--depth", fmt.Sprintf("%d", depth),
+	cmd := []string{"sciontool", "provision"}
+	if depth > 0 {
+		cmd = append(cmd, "--depth", fmt.Sprintf("%d", depth))
 	}
+	// depth == 0 means full clone: no --depth flag
+	return cmd
 }
 
 // nfsProvisionEnv returns the environment variables for the NFS init

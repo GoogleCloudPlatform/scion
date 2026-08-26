@@ -1761,7 +1761,7 @@ func TestCreateAgent_GitAnchoredProjectPopulatesGitClone(t *testing.T) {
 	require.NotNil(t, persisted.AppliedConfig.GitClone, "GitClone should be populated for git-anchored project")
 	assert.Equal(t, "https://github.com/example/myrepo.git", persisted.AppliedConfig.GitClone.URL)
 	assert.Equal(t, "develop", persisted.AppliedConfig.GitClone.Branch)
-	assert.Equal(t, 1, persisted.AppliedConfig.GitClone.Depth)
+	assert.Equal(t, intPtr(1), persisted.AppliedConfig.GitClone.Depth)
 }
 
 func TestCreateAgent_NonGitProjectNoGitClone(t *testing.T) {
@@ -1836,7 +1836,7 @@ func TestCreateProjectAgent_GitAnchoredProjectPopulatesGitClone(t *testing.T) {
 	require.NotNil(t, persisted.AppliedConfig.GitClone, "GitClone should be populated for git-anchored project")
 	assert.Equal(t, "https://github.com/example/myrepo.git", persisted.AppliedConfig.GitClone.URL)
 	assert.Equal(t, "develop", persisted.AppliedConfig.GitClone.Branch)
-	assert.Equal(t, 1, persisted.AppliedConfig.GitClone.Depth)
+	assert.Equal(t, intPtr(1), persisted.AppliedConfig.GitClone.Depth)
 }
 
 func TestCreateProjectAgent_NonGitProjectNoGitClone(t *testing.T) {
@@ -1912,7 +1912,7 @@ func TestCreateAgent_GitProjectCloneURLFallback(t *testing.T) {
 	assert.Equal(t, "https://github.com/example/fallback-repo.git", persisted.AppliedConfig.GitClone.URL,
 		"clone URL should be constructed from gitRemote when scion.dev/clone-url label is absent")
 	assert.Equal(t, "develop", persisted.AppliedConfig.GitClone.Branch)
-	assert.Equal(t, 1, persisted.AppliedConfig.GitClone.Depth)
+	assert.Equal(t, intPtr(1), persisted.AppliedConfig.GitClone.Depth)
 }
 
 func TestCreateAgent_GitProjectSchemelessCloneURL(t *testing.T) {
@@ -1963,7 +1963,7 @@ func TestCreateAgent_GitProjectSchemelessCloneURL(t *testing.T) {
 	assert.Equal(t, "https://github.com/example/schemeless-repo.git", persisted.AppliedConfig.GitClone.URL,
 		"schemeless clone-url label should be normalized to https:// with .git suffix")
 	assert.Equal(t, "main", persisted.AppliedConfig.GitClone.Branch)
-	assert.Equal(t, 1, persisted.AppliedConfig.GitClone.Depth)
+	assert.Equal(t, intPtr(1), persisted.AppliedConfig.GitClone.Depth)
 }
 
 func TestCreateAgent_GitProjectDefaultBranchFallback(t *testing.T) {
@@ -2014,7 +2014,7 @@ func TestCreateAgent_GitProjectDefaultBranchFallback(t *testing.T) {
 	// default-branch label is missing, so branch should default to "main"
 	assert.Equal(t, "main", persisted.AppliedConfig.GitClone.Branch,
 		"branch should default to 'main' when scion.dev/default-branch label is absent")
-	assert.Equal(t, 1, persisted.AppliedConfig.GitClone.Depth)
+	assert.Equal(t, intPtr(1), persisted.AppliedConfig.GitClone.Depth)
 }
 
 func TestCreateAgent_ProfileStoredInAppliedConfig(t *testing.T) {
