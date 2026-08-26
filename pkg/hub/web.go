@@ -169,21 +169,21 @@ type WebServer struct {
 	config         WebServerConfig
 	accessSettings AccessSettingsProvider // live operational settings (nil-safe: falls back to zero values)
 	httpServer     *http.Server
-	mux          *http.ServeMux
-	assets       fs.FS  // embedded or nil
-	assetsDisk   string // filesystem override path, or ""
-	shellTmpl    *template.Template
-	sessionStore *sessions.CookieStore
-	oauthService *OAuthService
-	store        store.Store
-	userTokenSvc *UserTokenService
-	events       EventPublisher              // nil when no publisher configured
-	hubHandler   http.Handler                // mounted Hub API handler, or nil
-	hubShutdown  func(context.Context) error // Hub resource cleanup, or nil
-	maintenance  *MaintenanceState           // runtime maintenance mode state (shared with Hub)
-	authzService *AuthzService               // authorization service for SSE subject checks
-	startTime    time.Time
-	log          *slog.Logger // subsystem logger for hub.web
+	mux            *http.ServeMux
+	assets         fs.FS  // embedded or nil
+	assetsDisk     string // filesystem override path, or ""
+	shellTmpl      *template.Template
+	sessionStore   *sessions.CookieStore
+	oauthService   *OAuthService
+	store          store.Store
+	userTokenSvc   *UserTokenService
+	events         EventPublisher              // nil when no publisher configured
+	hubHandler     http.Handler                // mounted Hub API handler, or nil
+	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
+	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
+	authzService   *AuthzService               // authorization service for SSE subject checks
+	startTime      time.Time
+	log            *slog.Logger // subsystem logger for hub.web
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
