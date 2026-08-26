@@ -231,3 +231,288 @@ func TestPatchSecret_BrokerScope_AllowProgenyRejected(t *testing.T) {
 		t.Errorf("PATCH with allowProgeny at broker scope: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// =============================================================================
+// R1: File-type target path validation bypass
+// =============================================================================
+
+// TestPatchSecret_UserScope_PathTraversalOnFileSecret verifies that PATCH with
+// a path traversal target on an existing file-type secret (without type in
+// request) is rejected with 400.
+func TestPatchSecret_UserScope_PathTraversalOnFileSecret(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create a file-type secret at user scope
+	createBody := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("file-content")),
+		Type:   "file",
+		Target: "/tmp/safe-file.txt",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/FILE_TRAV_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with path traversal target (no type in request) — should be rejected
+	patchBody := PatchSecretRequest{
+		Target: "../../etc/shadow",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/FILE_TRAV_KEY", patchBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PATCH with path traversal on file secret: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSecret_UserScope_RelativeTargetOnFileSecret verifies that PATCH with
+// a relative (non-absolute) target on an existing file-type secret is rejected.
+func TestPatchSecret_UserScope_RelativeTargetOnFileSecret(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create a file-type secret at user scope
+	createBody := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("file-content")),
+		Type:   "file",
+		Target: "/tmp/safe-file.txt",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/FILE_REL_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with relative target (no type in request) — should be rejected
+	patchBody := PatchSecretRequest{
+		Target: "relative/path",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/FILE_REL_KEY", patchBody)
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Errorf("PATCH with relative target on file secret: expected 4xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSecret_ProjectScope_PathTraversalOnFileSecret verifies that PATCH
+// with a path traversal target on an existing file-type project secret is rejected.
+func TestPatchSecret_ProjectScope_PathTraversalOnFileSecret(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_file_trav"),
+		Name:    "File Traversal Project",
+		Slug:    "file-trav-project",
+		OwnerID: DevUserID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a file-type secret at project scope
+	createBody := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("file-content")),
+		Type:   "file",
+		Target: "/tmp/project-file.txt",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/PROJ_FILE_TRAV", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with path traversal target (no type) — should be rejected
+	patchBody := PatchSecretRequest{
+		Target: "../../etc/shadow",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+project.ID+"/secrets/PROJ_FILE_TRAV", patchBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PATCH with path traversal on project file secret: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSecret_BrokerScope_PathTraversalOnFileSecret verifies that PATCH
+// with a path traversal target on an existing file-type broker secret is rejected.
+func TestPatchSecret_BrokerScope_PathTraversalOnFileSecret(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:      tid("broker_file_trav"),
+		Name:    "File Traversal Broker",
+		Slug:    "file-trav-broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create broker: %v", err)
+	}
+
+	// Create a file-type secret at broker scope
+	createBody := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("file-content")),
+		Type:   "file",
+		Target: "/tmp/broker-file.txt",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/runtime-brokers/"+broker.ID+"/secrets/BROKER_FILE_TRAV", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with path traversal target (no type) — should be rejected
+	patchBody := PatchSecretRequest{
+		Target: "../../etc/shadow",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID+"/secrets/BROKER_FILE_TRAV", patchBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PATCH with path traversal on broker file secret: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// =============================================================================
+// R2: Missing injectionMode validation
+// =============================================================================
+
+// TestPatchSecret_UserScope_InvalidInjectionMode verifies that PATCH with an
+// invalid injectionMode is rejected.
+func TestPatchSecret_UserScope_InvalidInjectionMode(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create a secret at user scope
+	createBody := SetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("secret-value")),
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/INJ_INVALID_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with invalid injectionMode — should be rejected
+	patchBody := PatchSecretRequest{
+		InjectionMode: "invalid",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/INJ_INVALID_KEY", patchBody)
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Errorf("PATCH with invalid injectionMode: expected 4xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSecret_UserScope_ValidInjectionMode verifies that PATCH with a
+// valid injectionMode succeeds.
+func TestPatchSecret_UserScope_ValidInjectionMode(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create a secret at user scope
+	createBody := SetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("secret-value")),
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/INJ_VALID_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with valid injectionMode "always" — should succeed
+	patchBody := PatchSecretRequest{
+		InjectionMode: "always",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/INJ_VALID_KEY", patchBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH with valid injectionMode: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result store.Secret
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if result.InjectionMode != "always" {
+		t.Errorf("expected injectionMode %q, got %q", "always", result.InjectionMode)
+	}
+}
+
+// TestPatchSecret_ProjectScope_InvalidInjectionMode verifies that PATCH with an
+// invalid injectionMode at project scope is rejected.
+func TestPatchSecret_ProjectScope_InvalidInjectionMode(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_inj_invalid"),
+		Name:    "Injection Invalid Project",
+		Slug:    "inj-invalid-project",
+		OwnerID: DevUserID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a secret at project scope
+	createBody := SetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("secret-value")),
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/PROJ_INJ_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with invalid injectionMode — should be rejected
+	patchBody := PatchSecretRequest{
+		InjectionMode: "invalid",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+project.ID+"/secrets/PROJ_INJ_KEY", patchBody)
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Errorf("PATCH with invalid injectionMode at project scope: expected 4xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSecret_BrokerScope_InvalidInjectionMode verifies that PATCH with an
+// invalid injectionMode at broker scope is rejected.
+func TestPatchSecret_BrokerScope_InvalidInjectionMode(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:      tid("broker_inj_invalid"),
+		Name:    "Injection Invalid Broker",
+		Slug:    "inj-invalid-broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create broker: %v", err)
+	}
+
+	// Create a secret at broker scope
+	createBody := SetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("secret-value")),
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/runtime-brokers/"+broker.ID+"/secrets/BROKER_INJ_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with invalid injectionMode — should be rejected
+	patchBody := PatchSecretRequest{
+		InjectionMode: "invalid",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID+"/secrets/BROKER_INJ_KEY", patchBody)
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Errorf("PATCH with invalid injectionMode at broker scope: expected 4xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

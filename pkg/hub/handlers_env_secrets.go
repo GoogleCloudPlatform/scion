@@ -997,16 +997,16 @@ func (s *Server) patchSecret(w http.ResponseWriter, r *http.Request, key string)
 		}
 	}
 
-	// Validate target for file type constraints if both are provided
-	if req.Target != "" && req.Type == store.SecretTypeFile {
-		if strings.Contains(req.Target, "..") {
-			BadRequest(w, "target path must not contain '..'")
-			return
-		}
-		if !strings.HasPrefix(req.Target, "/") && !strings.HasPrefix(req.Target, "~/") {
-			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
-				"field": "target",
-				"value": req.Target,
+	// Validate injectionMode if provided
+	if req.InjectionMode != "" {
+		switch req.InjectionMode {
+		case store.InjectionModeAlways, store.InjectionModeAsNeeded:
+			// valid
+		default:
+			ValidationError(w, "injectionMode must be \"always\" or \"as_needed\"", map[string]interface{}{
+				"field":   "injectionMode",
+				"value":   req.InjectionMode,
+				"allowed": []string{"always", "as_needed"},
 			})
 			return
 		}
@@ -1020,6 +1020,33 @@ func (s *Server) patchSecret(w http.ResponseWriter, r *http.Request, key string)
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, r.URL.Query().Get("scopeId"), true)
 	if !ok {
 		return
+	}
+
+	// Determine the effective secret type for target validation
+	effectiveType := req.Type
+	if effectiveType == "" && req.Target != "" {
+		// Fetch stored type to validate target against it
+		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		effectiveType = existing.SecretType
+	}
+
+	// Validate file-specific target constraints
+	if req.Target != "" && effectiveType == store.SecretTypeFile {
+		if strings.Contains(req.Target, "..") {
+			BadRequest(w, "target path must not contain '..'")
+			return
+		}
+		if !strings.HasPrefix(req.Target, "/") && !strings.HasPrefix(req.Target, "~/") {
+			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
+				"field": "target",
+				"value": req.Target,
+			})
+			return
+		}
 	}
 
 	// allowProgeny is only valid on user-scoped secrets
@@ -2015,7 +2042,33 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-		if req.Target != "" && req.Type == store.SecretTypeFile {
+		// Validate injectionMode if provided
+		if req.InjectionMode != "" {
+			switch req.InjectionMode {
+			case store.InjectionModeAlways, store.InjectionModeAsNeeded:
+				// valid
+			default:
+				ValidationError(w, "injectionMode must be \"always\" or \"as_needed\"", map[string]interface{}{
+					"field":   "injectionMode",
+					"value":   req.InjectionMode,
+					"allowed": []string{"always", "as_needed"},
+				})
+				return
+			}
+		}
+		// Determine the effective secret type for target validation
+		effectiveType := req.Type
+		if effectiveType == "" && req.Target != "" {
+			// Fetch stored type to validate target against it
+			existing, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			effectiveType = existing.SecretType
+		}
+		// Validate file-specific target constraints
+		if req.Target != "" && effectiveType == store.SecretTypeFile {
 			if strings.Contains(req.Target, "..") {
 				BadRequest(w, "target path must not contain '..'")
 				return
@@ -2743,7 +2796,33 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 				return
 			}
 		}
-		if req.Target != "" && req.Type == store.SecretTypeFile {
+		// Validate injectionMode if provided
+		if req.InjectionMode != "" {
+			switch req.InjectionMode {
+			case store.InjectionModeAlways, store.InjectionModeAsNeeded:
+				// valid
+			default:
+				ValidationError(w, "injectionMode must be \"always\" or \"as_needed\"", map[string]interface{}{
+					"field":   "injectionMode",
+					"value":   req.InjectionMode,
+					"allowed": []string{"always", "as_needed"},
+				})
+				return
+			}
+		}
+		// Determine the effective secret type for target validation
+		effectiveType := req.Type
+		if effectiveType == "" && req.Target != "" {
+			// Fetch stored type to validate target against it
+			existing, err := s.secretBackend.GetMeta(ctx, key, store.ScopeRuntimeBroker, brokerID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			effectiveType = existing.SecretType
+		}
+		// Validate file-specific target constraints
+		if req.Target != "" && effectiveType == store.SecretTypeFile {
 			if strings.Contains(req.Target, "..") {
 				BadRequest(w, "target path must not contain '..'")
 				return
