@@ -2174,9 +2174,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			authType = req.Config.HarnessAuth
 		}
 
-		// Determine if a GCP service account is assigned via identity config.
+		// Determine if GCP credentials are available via identity config.
+		// Both "assign" (broker-managed SA) and "passthrough" (ambient GCE
+		// metadata) provide credentials, so either satisfies GCP auth needs.
 		gcpSAAssigned := req.Config != nil && req.Config.GCPIdentity != nil &&
-			req.Config.GCPIdentity.MetadataMode == "assign"
+			(req.Config.GCPIdentity.MetadataMode == "assign" || req.Config.GCPIdentity.MetadataMode == "passthrough")
 
 		// When auth type is unset (auto-detect), check if resolved file secrets
 		// or a GCP service account can satisfy an alternative auth method before
