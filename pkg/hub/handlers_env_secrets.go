@@ -991,12 +991,13 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 
 // AgentSetSecretRequest is the request body for agent-initiated secret creation.
 type AgentSetSecretRequest struct {
-	Value    string `json:"value"`              // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
-	Encoding string `json:"encoding,omitempty"` // "base64" (default) or "raw" (value is literal text, no decoding)
-	Type     string `json:"type,omitempty"`     // environment (default), variable, file
-	Target   string `json:"target,omitempty"`   // Injection target path
-	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
-	Scope    string `json:"scope,omitempty"`    // "project" (default) or "user"
+	Value        string `json:"value"`                  // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
+	Encoding     string `json:"encoding,omitempty"`     // "base64" (default) or "raw" (value is literal text, no decoding)
+	Type         string `json:"type,omitempty"`         // environment (default), variable, file
+	Target       string `json:"target,omitempty"`       // Injection target path
+	Force        bool   `json:"force,omitempty"`        // Overwrite existing secret
+	Scope        string `json:"scope,omitempty"`        // "project" (default) or "user"
+	AllowProgeny bool   `json:"allowProgeny,omitempty"` // Allow creator's progeny agents to access (user scope only)
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -1131,6 +1132,15 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
+	// allowProgeny is only valid on user-scoped secrets
+	if req.AllowProgeny && scope != store.ScopeUser {
+		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
+			"field": "allowProgeny",
+			"scope": scope,
+		})
+		return
+	}
+
 	var decoded []byte
 	if req.Encoding == "raw" {
 		// Caller explicitly opted in to raw text — store the value as-is.
@@ -1202,14 +1212,15 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	input := &secret.SetSecretInput{
-		Name:       key,
-		Value:      string(decoded),
-		SecretType: secretType,
-		Target:     target,
-		Scope:      scope,
-		ScopeID:    scopeID,
-		CreatedBy:  fmt.Sprintf("agent:%s", agentID),
-		UpdatedBy:  fmt.Sprintf("agent:%s", agentID),
+		Name:         key,
+		Value:        string(decoded),
+		SecretType:   secretType,
+		Target:       target,
+		Scope:        scope,
+		ScopeID:      scopeID,
+		AllowProgeny: req.AllowProgeny,
+		CreatedBy:    fmt.Sprintf("agent:%s", agentID),
+		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
 	}
 
 	created, _, err := s.secretBackend.Set(ctx, input)
