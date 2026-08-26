@@ -752,7 +752,7 @@ profiles:
 		"id": "agent-uuid-noauth",
 		"gatherEnv": true,
 		"noAuth": true,
-		"grovePath": "` + projectDir + `",
+		"projectPath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
