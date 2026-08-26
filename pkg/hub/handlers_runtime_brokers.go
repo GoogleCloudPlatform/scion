@@ -306,6 +306,7 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
+			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionRead, "no identity")
 			Unauthorized(w)
 			return
 		}
@@ -313,10 +314,12 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 			decision := s.authzService.CheckAccess(ctx, userIdent,
 				Resource{Type: "runtime_broker", ID: id}, ActionRead)
 			if !decision.Allowed {
+				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionRead, decision.Reason)
 				Forbidden(w)
 				return
 			}
 		} else {
+			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionRead, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
@@ -655,6 +658,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
+			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "no identity")
 			Unauthorized(w)
 			return
 		}
@@ -662,10 +666,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			decision := s.authzService.CheckAccess(ctx, userIdent,
 				Resource{Type: "runtime_broker", ID: id}, ActionUpdate)
 			if !decision.Allowed {
+				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, decision.Reason)
 				Forbidden(w)
 				return
 			}
 		} else {
+			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
@@ -955,6 +961,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
+			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "no identity")
 			Unauthorized(w)
 			return
 		}
@@ -962,10 +969,12 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 			decision := s.authzService.CheckAccess(ctx, userIdent,
 				Resource{Type: "runtime_broker", ID: brokerID}, ActionRead)
 			if !decision.Allowed {
+				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, decision.Reason)
 				Forbidden(w)
 				return
 			}
 		} else {
+			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
