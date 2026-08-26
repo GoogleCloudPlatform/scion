@@ -45,7 +45,7 @@ func TestSettingsOverlay_Update_Apply(t *testing.T) {
 	dbRuntimes := map[string]V1RuntimeConfig{
 		"cloudrun": {
 			Type: "cloudrun-instances",
-			CloudRun: &CloudRunInstancesConfig{
+			CloudRun: &CloudRunConfig{
 				ProjectID: "my-project",
 				Location:  "us-central1",
 			},
@@ -102,7 +102,7 @@ func TestSettingsOverlay_DeepCopy(t *testing.T) {
 	original := map[string]V1RuntimeConfig{
 		"cloudrun": {
 			Type: "cloudrun-instances",
-			CloudRun: &CloudRunInstancesConfig{
+			CloudRun: &CloudRunConfig{
 				ProjectID: "project-a",
 				Location:  "us-central1",
 			},

@@ -85,7 +85,7 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	privKeyPath := filepath.Join(tempDir, "id_rsa")
 	err = os.WriteFile(privKeyPath, privKeyPEM, 0600)
@@ -109,7 +109,7 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	if err != nil {
 		return fmt.Errorf("failed to start local TCP proxy: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	localPort := strings.Split(listener.Addr().String(), ":")[1]
 
 	baseURL := "wss://tunnel.cloudproxy.app/v4"
@@ -142,13 +142,13 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	wsConn, resp, err := dialer.Dial(wsURL, headers)
 	if err != nil {
 		if resp != nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			return fmt.Errorf("failed to connect to IAP WebSocket tunnel: %v (Status: %s, Body: %q)", err, resp.Status, string(body))
 		}
 		return fmt.Errorf("failed to connect to IAP WebSocket tunnel: %v", err)
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 	slog.Debug("negotiated IAP tunnel websocket subprotocol", "subprotocol", resp.Header.Get("Sec-Websocket-Protocol"))
 
 	iapConn := NewIapConn(wsConn)
@@ -162,7 +162,7 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 		if err != nil {
 			return
 		}
-		defer localConn.Close()
+		defer func() { _ = localConn.Close() }()
 
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -232,7 +232,7 @@ func fetchProjectNumber(ctx context.Context, projectID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	req := &resourcemanagerpb.GetProjectRequest{
 		Name: fmt.Sprintf("projects/%s", projectID),
@@ -294,7 +294,7 @@ func requestSignedCertificate(ctx context.Context, projectID, region, instanceID
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -383,7 +383,9 @@ func (c *IapConn) Read(b []byte) (int, error) {
 			ackBuf := new(bytes.Buffer)
 			_ = binary.Write(ackBuf, binary.BigEndian, uint16(0x0007))
 			_ = binary.Write(ackBuf, binary.BigEndian, uint64(c.bytesReceived))
+			c.writeMutex.Lock()
 			_ = c.ws.WriteMessage(websocket.BinaryMessage, ackBuf.Bytes())
+			c.writeMutex.Unlock()
 
 		case 0x0007:
 		}

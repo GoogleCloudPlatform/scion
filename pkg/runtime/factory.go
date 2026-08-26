@@ -175,7 +175,11 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		return rt
 	case "cloudrun-instances":
-		rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
+		rt, err := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create cloudrun-instances runtime: %v", err)
+			return &ErrorRuntime{Err: err}
+		}
 		return rt
 	}
 

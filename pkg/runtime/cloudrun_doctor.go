@@ -23,21 +23,21 @@ func (r *CloudRunRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport {
 	check := CheckResult{
 		Name: "Cloud Run API & Configuration",
 	}
-	
+
 	c, err := r.client(ctx)
 	if err != nil {
 		check.Status = "fail"
 		check.Message = fmt.Sprintf("Failed to initialize Cloud Run client: %v", err)
 		check.Remediation = "Verify GCP credentials (e.g., gcloud auth application-default login)."
 	} else {
-		defer c.Close()
-		
+		defer func() { _ = c.Close() }()
+
 		parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
 		req := &runpb.ListInstancesRequest{
 			Parent:   parent,
 			PageSize: 1,
 		}
-		
+
 		it := c.ListInstances(ctx, req, defaultCallOpts...)
 		_, err := it.Next()
 		if err != nil && err != iterator.Done {

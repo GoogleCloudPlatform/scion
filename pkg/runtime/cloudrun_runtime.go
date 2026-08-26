@@ -32,7 +32,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	runapi "cloud.google.com/go/run/apiv2"
@@ -48,7 +47,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const nfsSuperMagic = 0x6969
 const cloudRunInstanceIDMaxLength = 63
 
 var defaultCallOpts = []gax.CallOption{
@@ -65,13 +63,13 @@ var defaultCallOpts = []gax.CallOption{
 }
 
 type CloudRunRuntime struct {
-	config *config.CloudRunInstancesConfig
+	config *config.CloudRunConfig
 	exec   cloudrun.ExecConnector
 }
 
-func NewCloudRunRuntime(cfg *config.CloudRunInstancesConfig) (*CloudRunRuntime, error) {
+func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("CloudRunInstancesConfig cannot be nil")
+		return nil, fmt.Errorf("CloudRunConfig cannot be nil")
 	}
 	if cfg.ProjectID == "" {
 		return nil, fmt.Errorf("cloudrun: ProjectID must be non-empty")
@@ -87,16 +85,22 @@ func NewCloudRunRuntime(cfg *config.CloudRunInstancesConfig) (*CloudRunRuntime, 
 // NewCloudRunRuntimeFromInstances returns a new CloudRunRuntime from the
 // Cloud Run Instances configuration. The instances variant uses ProjectID
 // and Region from V1CloudRunInstancesConfig, mapping Region to Location.
-func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) *CloudRunRuntime {
+func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*CloudRunRuntime, error) {
 	if cfg == nil {
-		return &CloudRunRuntime{}
+		return nil, fmt.Errorf("cloudrun-instances: config cannot be nil")
+	}
+	if cfg.ProjectID == "" {
+		return nil, fmt.Errorf("cloudrun-instances: ProjectID must be non-empty")
+	}
+	if cfg.Region == "" {
+		return nil, fmt.Errorf("cloudrun-instances: Region must be non-empty")
 	}
 	return &CloudRunRuntime{
-		config: &config.CloudRunInstancesConfig{
+		config: &config.CloudRunConfig{
 			ProjectID: cfg.ProjectID,
 			Location:  cfg.Region,
 		},
-	}
+	}, nil
 }
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
@@ -137,7 +141,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err != nil {
 		return "", fmt.Errorf("failed to create client: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	// Check if the instance already exists
 	getReq := &runpb.GetInstanceRequest{
@@ -491,30 +495,6 @@ func validateUnixPathBelowRoot(child, root string) error {
 	return nil
 }
 
-func requireNFSFilesystem(hostBase string) error {
-	info, err := os.Stat(hostBase)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("cloudrun: Hub cannot access NFS export at %s; "+
-				"mount the Filestore export into the Hub Cloud Run service at this path or run an external provisioner", hostBase)
-		}
-		return fmt.Errorf("cloudrun: cannot inspect Hub NFS mount %s: %w", hostBase, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("cloudrun: Hub NFS mount path %s is not a directory", hostBase)
-	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(hostBase, &stat); err != nil {
-		return fmt.Errorf("cloudrun: cannot stat filesystem for Hub NFS mount %s: %w", hostBase, err)
-	}
-	if stat.Type != nfsSuperMagic {
-		return fmt.Errorf("cloudrun: Hub path %s exists but is not an NFS filesystem (statfs type %#x); "+
-			"mount the Filestore export into the Hub Cloud Run service or run an external provisioner",
-			hostBase, stat.Type)
-	}
-	return nil
-}
-
 func mkdirNFSAgentDir(dir string, uid, gid int) error {
 	if err := os.MkdirAll(dir, 0770); err != nil {
 		return err
@@ -528,7 +508,7 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", r.config.ProjectID, r.config.Location, id)
 	req := &runpb.StopInstanceRequest{
@@ -552,7 +532,7 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", r.config.ProjectID, r.config.Location, id)
 	req := &runpb.DeleteInstanceRequest{
@@ -576,7 +556,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
 	req := &runpb.ListInstancesRequest{
@@ -628,7 +608,7 @@ func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("initializing log client: %w", err)
 	}
-	defer logClient.Close()
+	defer func() { _ = logClient.Close() }()
 
 	entries, err := logClient.GetLogs(ctx, id, cloudrun.LogOptions{Lines: 100}) // default lines
 	if err != nil {
@@ -695,14 +675,14 @@ func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, o
 
 	ch, err := logClient.StreamLogs(ctx, instanceName, opts)
 	if err != nil {
-		logClient.Close()
+		_ = logClient.Close()
 		return nil, fmt.Errorf("streaming logs: %w", err)
 	}
 
 	// Create a wrapper channel to close the client when context is done or channel is closed
 	outCh := make(chan cloudrun.LogEntry)
 	go func() {
-		defer logClient.Close()
+		defer func() { _ = logClient.Close() }()
 		defer close(outCh)
 		for entry := range ch {
 			select {

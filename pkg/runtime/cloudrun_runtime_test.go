@@ -25,7 +25,7 @@ import (
 )
 
 func TestCloudRunRuntime_Name(t *testing.T) {
-	rt, err := NewCloudRunRuntime(&config.CloudRunInstancesConfig{
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
 		ProjectID: "p", Location: "us-central1",
 	})
 	if err != nil {
@@ -37,7 +37,7 @@ func TestCloudRunRuntime_Name(t *testing.T) {
 }
 
 func TestCloudRunRuntime_ExecUser(t *testing.T) {
-	rt, err := NewCloudRunRuntime(&config.CloudRunInstancesConfig{
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
 		ProjectID: "p", Location: "us-central1",
 	})
 	if err != nil {
@@ -49,7 +49,7 @@ func TestCloudRunRuntime_ExecUser(t *testing.T) {
 }
 
 func TestCloudRunRuntime_NewWithConfig(t *testing.T) {
-	cfg := &config.CloudRunInstancesConfig{
+	cfg := &config.CloudRunConfig{
 		ProjectID: "my-gcp-project",
 		Location:  "us-central1",
 	}
@@ -74,21 +74,42 @@ func TestCloudRunRuntime_NewFromInstances(t *testing.T) {
 		ProjectID: "instances-project",
 		Region:    "us-west1",
 	}
-	rt := NewCloudRunRuntimeFromInstances(cfg)
+	rt, err := NewCloudRunRuntimeFromInstances(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if rt.Name() != "cloudrun" {
 		t.Errorf("Name() = %q, want %q", rt.Name(), "cloudrun")
 	}
 }
 
 func TestCloudRunRuntime_NewFromInstancesNil(t *testing.T) {
-	rt := NewCloudRunRuntimeFromInstances(nil)
-	if rt.Name() != "cloudrun" {
-		t.Errorf("Name() = %q, want %q", rt.Name(), "cloudrun")
+	_, err := NewCloudRunRuntimeFromInstances(nil)
+	if err == nil {
+		t.Error("expected error for nil config")
 	}
 }
 
-func TestCloudRunRuntime_LifecycleMethodsReturnNotImplemented(t *testing.T) {
-	rt, err := NewCloudRunRuntime(&config.CloudRunInstancesConfig{
+func TestCloudRunRuntime_NewFromInstancesMissingProjectID(t *testing.T) {
+	_, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		Region: "us-west1",
+	})
+	if err == nil {
+		t.Error("expected error for empty ProjectID")
+	}
+}
+
+func TestCloudRunRuntime_NewFromInstancesMissingRegion(t *testing.T) {
+	_, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		ProjectID: "my-project",
+	})
+	if err == nil {
+		t.Error("expected error for empty Region")
+	}
+}
+
+func TestCloudRunRuntime_LifecycleMethods(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
 		ProjectID: "test-project", Location: "us-central1",
 	})
 	if err != nil {
@@ -96,61 +117,58 @@ func TestCloudRunRuntime_LifecycleMethodsReturnNotImplemented(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	methods := []struct {
+	// Methods that make real GCP API calls — expect errors in a test
+	// environment without valid credentials / API access.
+	apiMethods := []struct {
 		name string
 		fn   func() error
 	}{
 		{"Stop", func() error { return rt.Stop(ctx, "x") }},
 		{"Delete", func() error { return rt.Delete(ctx, "x") }},
 		{"Attach", func() error { return rt.Attach(ctx, "x") }},
-		{"PullImage", func() error { return rt.PullImage(ctx, "x") }},
-		{"Sync", func() error { return rt.Sync(ctx, "x", SyncTo) }},
+		{"Exec", func() error { _, e := rt.Exec(ctx, "x", []string{"ls"}); return e }},
+		{"List", func() error { _, e := rt.List(ctx, nil); return e }},
+		{"GetLogs", func() error { _, e := rt.GetLogs(ctx, "x"); return e }},
 	}
-
-	for _, m := range methods {
+	for _, m := range apiMethods {
 		t.Run(m.name, func(t *testing.T) {
-			err := m.fn()
-			if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("%s() error = %v, want 'not yet implemented'", m.name, err)
+			if err := m.fn(); err == nil {
+				t.Errorf("%s() expected error in test env, got nil", m.name)
 			}
 		})
 	}
 
-	t.Run("List", func(t *testing.T) {
-		agents, err := rt.List(ctx, nil)
-		if err != nil {
-			t.Errorf("List() error = %v, want nil", err)
-		}
-		if agents != nil {
-			t.Errorf("List() agents = %v, want nil", agents)
+	// PullImage is a no-op for Cloud Run (images are pulled by the platform).
+	t.Run("PullImage", func(t *testing.T) {
+		if err := rt.PullImage(ctx, "gcr.io/test/image"); err != nil {
+			t.Errorf("PullImage() error = %v, want nil", err)
 		}
 	})
 
-	t.Run("GetLogs", func(t *testing.T) {
-		_, err := rt.GetLogs(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("GetLogs() error = %v, want 'not yet implemented'", err)
-		}
-	})
-
+	// ImageExists always returns true for Cloud Run (assumes valid image ref).
 	t.Run("ImageExists", func(t *testing.T) {
-		_, err := rt.ImageExists(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("ImageExists() error = %v, want 'not yet implemented'", err)
+		exists, err := rt.ImageExists(ctx, "gcr.io/test/image")
+		if err != nil {
+			t.Errorf("ImageExists() error = %v, want nil", err)
+		}
+		if !exists {
+			t.Error("ImageExists() = false, want true")
 		}
 	})
 
-	t.Run("Exec", func(t *testing.T) {
-		_, err := rt.Exec(ctx, "x", []string{"ls"})
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("Exec() error = %v, want 'not yet implemented'", err)
+	// Sync returns a specific unsupported-operation message.
+	t.Run("Sync", func(t *testing.T) {
+		err := rt.Sync(ctx, "x", SyncTo)
+		if err == nil || !strings.Contains(err.Error(), "sync is not supported") {
+			t.Errorf("Sync() error = %v, want 'sync is not supported'", err)
 		}
 	})
 
+	// GetWorkspacePath returns a specific unsupported-operation message.
 	t.Run("GetWorkspacePath", func(t *testing.T) {
 		_, err := rt.GetWorkspacePath(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("GetWorkspacePath() error = %v, want 'not yet implemented'", err)
+		if err == nil || !strings.Contains(err.Error(), "host workspace paths are not available") {
+			t.Errorf("GetWorkspacePath() error = %v, want 'host workspace paths are not available'", err)
 		}
 	})
 }
@@ -163,11 +181,11 @@ func TestCloudRunRuntime_Run_BrokerSideProvisioning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rt, err := NewCloudRunRuntime(&config.CloudRunInstancesConfig{
-		ProjectID:  "test-project",
-		Location:   "us-central1",
-		NFSServer:  "10.0.0.2",
-		NFSExport:  "/ws",
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project",
+		Location:  "us-central1",
+		NFSServer: "10.0.0.2",
+		NFSExport: "/ws",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +208,7 @@ func TestCloudRunRuntime_Run_BrokerSideProvisioning(t *testing.T) {
 }
 
 func TestCloudRunRuntime_Run_MissingAgentID(t *testing.T) {
-	rt, err := NewCloudRunRuntime(&config.CloudRunInstancesConfig{
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
 		ProjectID: "test-project",
 		Location:  "us-central1",
 	})
@@ -260,6 +278,30 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 
 	globalDir := filepath.Join(tmpHome, ".scion")
 	if err := os.MkdirAll(globalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Provide a settings file with a cloudrun profile and runtime so that
+	// NewCloudRunRuntime receives a valid config when "cloudrun" is
+	// passed as a direct profile name.
+	settings := `{
+		"schema_version": "1",
+		"runtimes": {
+			"cloudrun": {
+				"type": "cloudrun",
+				"cloudrun": {
+					"project_id": "my-project",
+					"location": "us-east1"
+				}
+			}
+		},
+		"profiles": {
+			"cloudrun": {
+				"runtime": "cloudrun"
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.json"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -389,7 +431,7 @@ func TestCloudRunNFSHostPathsRejectLocalAssumptions(t *testing.T) {
 }
 
 func TestCloudRunProvisionNFSRequiresWorkspaceHostPath(t *testing.T) {
-	r := &CloudRunRuntime{config: &config.CloudRunInstancesConfig{
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{
 		ProjectID: "gcp-project",
 		Location:  "us-central1",
 		NFSServer: "10.0.0.2",
@@ -412,7 +454,7 @@ func TestCloudRunProvisionNFSFailsWhenHubLacksNFSMount(t *testing.T) {
 	root := t.TempDir()
 	missingMount := filepath.Join(root, "missing-share")
 	workspace := filepath.Join(missingMount, "projects", "proj-123", "workspace")
-	r := &CloudRunRuntime{config: &config.CloudRunInstancesConfig{
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{
 		ProjectID: "gcp-project",
 		Location:  "us-central1",
 		NFSServer: "10.0.0.2",

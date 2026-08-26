@@ -852,8 +852,8 @@ type V1TelemetrySamplingConfig struct {
 	Rates   map[string]float64 `json:"rates,omitempty" yaml:"rates,omitempty" koanf:"rates"`
 }
 
-// CloudRunInstancesConfig holds Cloud Run runtime settings.
-type CloudRunInstancesConfig struct {
+// CloudRunConfig holds Cloud Run runtime settings.
+type CloudRunConfig struct {
 	ProjectID      string `json:"project_id,omitempty" koanf:"project_id"`
 	Location       string `json:"location,omitempty" koanf:"location"`
 	ServiceAccount string `json:"service_account,omitempty" koanf:"service_account"`
@@ -884,7 +884,7 @@ type V1RuntimeConfig struct {
 	GKE               bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
-	CloudRun *CloudRunInstancesConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
+	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
 }
