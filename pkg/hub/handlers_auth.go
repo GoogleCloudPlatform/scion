@@ -1235,7 +1235,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 	// Authorization check
 	if !s.isUserAuthorized(ctx, info.Email) {
 		reason := "not_on_allow_list"
-		if s.config.UserAccessMode != "invite_only" {
+		if s.UserAccessMode() != "invite_only" {
 			reason = "domain_not_authorized"
 		}
 		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email, reason)
@@ -1314,7 +1314,7 @@ func generateID() string {
 // isUserAuthorized checks whether a user is permitted to log in based on
 // admin_emails, authorized_domains, and user_access_mode (allow list).
 func (s *Server) isUserAuthorized(ctx context.Context, email string) bool {
-	return checkUserAuthorized(ctx, email, s.config.AuthorizedDomains, s.config.AdminEmails, s.config.UserAccessMode, s.store)
+	return checkUserAuthorized(ctx, email, s.AuthorizedDomains(), s.AdminEmails(), s.UserAccessMode(), s.store)
 }
 
 // checkUserAuthorized is a package-level authorization check used by both
@@ -1454,7 +1454,7 @@ func determineUserRole(email string, adminEmails []string, currentRole string) s
 
 // (s *Server) getUserRole is a convenience method to determine role using server config.
 func (s *Server) getUserRole(email, currentRole string) string {
-	return determineUserRole(email, s.config.AdminEmails, currentRole)
+	return determineUserRole(email, s.AdminEmails(), currentRole)
 }
 
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.
@@ -1489,8 +1489,9 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check authorized domains before allowing redemption
-	if len(s.config.AuthorizedDomains) > 0 {
-		if !isEmailInDomains(strings.ToLower(user.Email()), s.config.AuthorizedDomains) {
+	authorizedDomains := s.AuthorizedDomains()
+	if len(authorizedDomains) > 0 {
+		if !isEmailInDomains(strings.ToLower(user.Email()), authorizedDomains) {
 			writeError(w, http.StatusForbidden, "unauthorized_domain",
 				"your email domain is not authorized to join this hub", nil)
 			return

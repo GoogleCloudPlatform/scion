@@ -2108,6 +2108,35 @@ func (s *Server) HubName() string {
 	return s.config.HubName
 }
 
+// AdminEmails returns the current admin email list. The returned slice is a
+// defensive copy — callers may iterate safely without holding s.mu.
+// Implements AccessSettingsProvider.
+func (s *Server) AdminEmails() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]string, len(s.config.AdminEmails))
+	copy(result, s.config.AdminEmails)
+	return result
+}
+
+// AuthorizedDomains returns the current authorized domain list. The returned
+// slice is a defensive copy. Implements AccessSettingsProvider.
+func (s *Server) AuthorizedDomains() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]string, len(s.config.AuthorizedDomains))
+	copy(result, s.config.AuthorizedDomains)
+	return result
+}
+
+// UserAccessMode returns the current user access mode. Thread-safe.
+// Implements AccessSettingsProvider.
+func (s *Server) UserAccessMode() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.UserAccessMode
+}
+
 // SetSecretBackend sets the secret backend for pluggable secret storage.
 func (s *Server) SetSecretBackend(b secret.SecretBackend) {
 	s.mu.Lock()
