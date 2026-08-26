@@ -1552,7 +1552,11 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 	if depthStr == "" {
 		depthStr = "1" // default: shallow clone
 	}
-	depth, _ := strconv.Atoi(depthStr) // 0 on parse error = full clone
+	depth, err := strconv.Atoi(depthStr)
+	if err != nil {
+		log.Info("WARNING: SCION_GIT_DEPTH is not a valid integer (%q), defaulting to 1", depthStr)
+		depth = 1
+	}
 	agentName := os.Getenv("SCION_AGENT_NAME")
 
 	// Helper to configure a git command: run as the scion user and disable

@@ -2479,10 +2479,9 @@ func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
 	}
 
 	cmd := []string{"sciontool", "provision"}
-	if depth > 0 {
+	if gc.Depth != nil {
 		cmd = append(cmd, "--depth", fmt.Sprintf("%d", depth))
 	}
-	// depth == 0 means full clone: no --depth flag
 	return cmd
 }
 
