@@ -72,7 +72,6 @@ replicaCount: 2
 # Core Hub Configuration
 hub:
   baseUrl: "https://hub.scion.example.com"
-  sessionSecret: "your-long-secure-session-secret"
 
 # Database Configuration
 database:
