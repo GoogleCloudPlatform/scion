@@ -784,6 +784,18 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	// Global fallback: when no template name arrived from the request, the
+	// project annotation, or the hub operational defaults, try resolving a
+	// template named "default". This ensures a fresh hosted hub with no
+	// agent_defaults configured can still resolve its built-in template.
+	// Like templateFromHubDefault, a missing "default" template degrades
+	// (warn + continue with no template) rather than failing the create.
+	templateFromImplicitDefault := false
+	if req.Template == "" {
+		req.Template = "default"
+		templateFromImplicitDefault = true
+	}
+
 	// Resolve template if specified - the client may pass either a template ID or name
 	//
 	// DEGRADATION RULE (design §3.2.2) — when, and only when, the name came
@@ -859,6 +871,13 @@ func (s *Server) createAgentInProject(
 			case templateFromHubDefault:
 				s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "not found")
 				req.Template = ""
+			case templateFromImplicitDefault:
+				// The implicit "default" fallback template doesn't exist — this
+				// is normal on hubs that haven't created one. Continue with no
+				// template. No warning: unlike a hub default (which is operator-
+				// configured and should resolve), the implicit fallback is
+				// speculative.
+				req.Template = ""
 			default:
 				NotFound(w, "Template")
 				return
@@ -872,7 +891,7 @@ func (s *Server) createAgentInProject(
 			if name == "" {
 				name = resolvedTemplate.Name
 			}
-			if !templateFromHubDefault {
+			if !templateFromHubDefault && !templateFromImplicitDefault {
 				ValidationError(w, "template "+name+" has no files — sync template files first with: scion template sync "+name, nil)
 				return
 			}

@@ -629,6 +629,169 @@ func TestCreateAgent_HubDefaultTemplate_LosesToRequestAndAnnotation(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
+// implicit "default" template fallback — create path
+// ---------------------------------------------------------------------------
+
+// TestCreateAgent_ImplicitDefaultTemplate_ResolvesWhenNoDefaultsConfigured
+// pins the fix for issue #1273: on a hosted hub with no agent_defaults, a
+// POST /api/agents with no template should still attempt to resolve a
+// template named "default". When such a template exists, it must be stamped
+// (TemplateID, ContentHash) for broker hydration.
+func TestCreateAgent_ImplicitDefaultTemplate_ResolvesWhenNoDefaultsConfigured(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	createHarnessTemplate(t, s, "default", "default-hc")
+
+	// No hub agent defaults set, no template in request.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "implicit-default-agent",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "default", agent.Template,
+		"the implicit 'default' fallback template must be resolved and stamped")
+	require.NotNil(t, agent.AppliedConfig)
+	assert.NotEmpty(t, agent.AppliedConfig.TemplateID,
+		"TemplateID must be stamped for broker hydration")
+	assert.NotEmpty(t, agent.AppliedConfig.TemplateHash,
+		"TemplateHash must be stamped for broker hydration")
+}
+
+// TestCreateAgent_ImplicitDefaultTemplate_HC_FlowsFromTemplate verifies
+// that when the implicit "default" template supplies a DefaultHarnessConfig,
+// the harness config is resolved and its ID/hash are stamped on the agent.
+func TestCreateAgent_ImplicitDefaultTemplate_HC_FlowsFromTemplate(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	// Create the "default" template pointing to a harness config.
+	createHarnessTemplate(t, s, "default", "my-hc")
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-my-hc-" + t.Name()),
+		Name:        "my-hc",
+		Slug:        "my-hc",
+		Harness:     "claude",
+		ContentHash: "hchash1",
+		Scope:       store.HarnessConfigScopeGlobal,
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "implicit-hc-agent",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "my-hc", agent.AppliedConfig.HarnessConfig,
+		"HC name must flow from the implicit default template")
+	assert.NotEmpty(t, agent.AppliedConfig.HarnessConfigID,
+		"HarnessConfigID must be stamped for broker hydration")
+}
+
+// TestCreateAgent_ImplicitDefaultTemplate_MissingDoesNotFail verifies that
+// when no "default" template exists and no hub defaults are configured, the
+// create succeeds with no template (graceful degradation, not an error).
+func TestCreateAgent_ImplicitDefaultTemplate_MissingDoesNotFail(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, _, project := setupCreateAgentServer(t, disp)
+
+	// No template named "default" exists, no hub defaults.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "no-default-agent",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"missing implicit 'default' template must not fail the create; body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+	assert.Empty(t, resp.Agent.Template,
+		"the unresolvable 'default' fallback must be cleared, not carried to the broker")
+}
+
+// TestCreateAgent_ExplicitTemplate_StillWorks is the polarity control: an
+// explicit template in the request must bypass the implicit "default" fallback
+// and resolve normally.
+func TestCreateAgent_ExplicitTemplate_StillWorks(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	createHarnessTemplate(t, s, "my-explicit", "explicit-hc")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "explicit-template-agent",
+		ProjectID: project.ID,
+		Template:  "my-explicit",
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "my-explicit", agent.Template,
+		"explicit template must be resolved, not overridden by 'default' fallback")
+	require.NotNil(t, agent.AppliedConfig)
+	assert.NotEmpty(t, agent.AppliedConfig.TemplateID)
+}
+
+// TestCreateAgent_ExplicitTemplate_Missing_Still404s verifies that an
+// explicit template that doesn't exist still returns 404 (no degradation
+// for user-requested templates).
+func TestCreateAgent_ExplicitTemplate_Missing_Still404s(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, _, project := setupCreateAgentServer(t, disp)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "missing-explicit-agent",
+		ProjectID: project.ID,
+		Template:  "does-not-exist",
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"an explicitly requested missing template must 404; body: %s", rec.Body.String())
+}
+
+// TestCreateAgent_HubDefaultTemplate_BeatsImplicitDefault verifies the rank:
+// a hub operational default_template outranks the implicit "default" fallback.
+func TestCreateAgent_HubDefaultTemplate_BeatsImplicitDefault(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	createHarnessTemplate(t, s, "hub-tmpl", "hub-hc")
+	createHarnessTemplate(t, s, "default", "default-hc")
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "hub-beats-implicit",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "hub-tmpl", agent.Template,
+		"hub operational default_template must outrank the implicit 'default' fallback")
+}
+
+// ---------------------------------------------------------------------------
 // default_harness_config — create path
 // ---------------------------------------------------------------------------
 
