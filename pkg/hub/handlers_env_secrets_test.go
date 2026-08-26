@@ -18,9 +18,9 @@
 //
 // Contract under test:
 //   - Project-scope PATCH returns 200 with updated metadata
-//   - Project-scope PATCH with allowProgeny=true returns 422
+//   - Project-scope PATCH with allowProgeny=true returns 400
 //   - Broker-scope PATCH returns 200 with updated metadata
-//   - Broker-scope PATCH with allowProgeny=true returns 422
+//   - Broker-scope PATCH with allowProgeny=true returns 400
 
 package hub
 
@@ -95,7 +95,7 @@ func TestPatchSecret_ProjectScope_ReturnsUpdatedMetadata(t *testing.T) {
 }
 
 // TestPatchSecret_ProjectScope_AllowProgenyRejected verifies that PATCH with
-// allowProgeny=true at project scope returns 422.
+// allowProgeny=true at project scope returns 400.
 func TestPatchSecret_ProjectScope_AllowProgenyRejected(t *testing.T) {
 	srv, s := testServer(t)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
@@ -130,7 +130,7 @@ func TestPatchSecret_ProjectScope_AllowProgenyRejected(t *testing.T) {
 	}
 	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+project.ID+"/secrets/PROJ_PROGENY_KEY", patchBody)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("PATCH with allowProgeny at project scope: expected 422, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("PATCH with allowProgeny at project scope: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -193,7 +193,7 @@ func TestPatchSecret_BrokerScope_ReturnsUpdatedMetadata(t *testing.T) {
 }
 
 // TestPatchSecret_BrokerScope_AllowProgenyRejected verifies that PATCH with
-// allowProgeny=true at broker scope returns 422.
+// allowProgeny=true at broker scope returns 400.
 func TestPatchSecret_BrokerScope_AllowProgenyRejected(t *testing.T) {
 	srv, s := testServer(t)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
@@ -228,7 +228,7 @@ func TestPatchSecret_BrokerScope_AllowProgenyRejected(t *testing.T) {
 	}
 	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID+"/secrets/BROKER_PROGENY_KEY", patchBody)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("PATCH with allowProgeny at broker scope: expected 422, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("PATCH with allowProgeny at broker scope: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -372,6 +372,39 @@ func TestPatchSecret_BrokerScope_PathTraversalOnFileSecret(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID+"/secrets/BROKER_FILE_TRAV", patchBody)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("PATCH with path traversal on broker file secret: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// =============================================================================
+// R3-1: Type change to file bypasses stored-target validation
+// =============================================================================
+
+// TestPatchSecret_UserScope_TypeChangeToFileValidatesStoredTarget verifies that
+// changing type to "file" without providing a target validates the stored target
+// (which defaults to the key name, a relative path) and rejects it.
+func TestPatchSecret_UserScope_TypeChangeToFileValidatesStoredTarget(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create an environment-type secret (target defaults to key name "MY_KEY")
+	createBody := SetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("secret-value")),
+		Type:  "environment",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/MY_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with type=file but no target — stored target "MY_KEY" is relative,
+	// so validation should reject it.
+	patchBody := PatchSecretRequest{
+		Type: "file",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/MY_KEY", patchBody)
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Errorf("PATCH type change to file with relative stored target: expected 4xx, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

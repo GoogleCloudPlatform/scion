@@ -1034,16 +1034,25 @@ func (s *Server) patchSecret(w http.ResponseWriter, r *http.Request, key string)
 		effectiveType = existing.SecretType
 	}
 
-	// Validate file-specific target constraints
-	if req.Target != "" && effectiveType == store.SecretTypeFile {
-		if strings.Contains(req.Target, "..") {
+	// Validate file-specific target constraints (including stored target when type changes to file)
+	effectiveTarget := req.Target
+	if effectiveType == store.SecretTypeFile && effectiveTarget == "" {
+		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		effectiveTarget = existing.Target
+	}
+	if effectiveTarget != "" && effectiveType == store.SecretTypeFile {
+		if strings.Contains(effectiveTarget, "..") {
 			BadRequest(w, "target path must not contain '..'")
 			return
 		}
-		if !strings.HasPrefix(req.Target, "/") && !strings.HasPrefix(req.Target, "~/") {
+		if !strings.HasPrefix(effectiveTarget, "/") && !strings.HasPrefix(effectiveTarget, "~/") {
 			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
 				"field": "target",
-				"value": req.Target,
+				"value": effectiveTarget,
 			})
 			return
 		}
@@ -2067,14 +2076,23 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 			}
 			effectiveType = existing.SecretType
 		}
-		// Validate file-specific target constraints
-		if req.Target != "" && effectiveType == store.SecretTypeFile {
-			if strings.Contains(req.Target, "..") {
+		// Validate file-specific target constraints (including stored target when type changes to file)
+		effectiveTarget := req.Target
+		if effectiveType == store.SecretTypeFile && effectiveTarget == "" {
+			existing, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			effectiveTarget = existing.Target
+		}
+		if effectiveTarget != "" && effectiveType == store.SecretTypeFile {
+			if strings.Contains(effectiveTarget, "..") {
 				BadRequest(w, "target path must not contain '..'")
 				return
 			}
-			if !strings.HasPrefix(req.Target, "/") && !strings.HasPrefix(req.Target, "~/") {
-				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": req.Target})
+			if !strings.HasPrefix(effectiveTarget, "/") && !strings.HasPrefix(effectiveTarget, "~/") {
+				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": effectiveTarget})
 				return
 			}
 		}
@@ -2821,14 +2839,23 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 			}
 			effectiveType = existing.SecretType
 		}
-		// Validate file-specific target constraints
-		if req.Target != "" && effectiveType == store.SecretTypeFile {
-			if strings.Contains(req.Target, "..") {
+		// Validate file-specific target constraints (including stored target when type changes to file)
+		effectiveTarget := req.Target
+		if effectiveType == store.SecretTypeFile && effectiveTarget == "" {
+			existing, err := s.secretBackend.GetMeta(ctx, key, store.ScopeRuntimeBroker, brokerID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			effectiveTarget = existing.Target
+		}
+		if effectiveTarget != "" && effectiveType == store.SecretTypeFile {
+			if strings.Contains(effectiveTarget, "..") {
 				BadRequest(w, "target path must not contain '..'")
 				return
 			}
-			if !strings.HasPrefix(req.Target, "/") && !strings.HasPrefix(req.Target, "~/") {
-				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": req.Target})
+			if !strings.HasPrefix(effectiveTarget, "/") && !strings.HasPrefix(effectiveTarget, "~/") {
+				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": effectiveTarget})
 				return
 			}
 		}
