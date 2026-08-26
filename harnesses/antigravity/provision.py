@@ -73,6 +73,12 @@ ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
     "antigravity",
     [
         scion_harness.env_method(
+            "api-key",
+            any_of=["GEMINI_API_KEY"],
+            env_fallback=True,
+            hint="set GEMINI_API_KEY",
+        ),
+        scion_harness.env_method(
             "vertex-ai",
             all_of=["GOOGLE_CLOUD_PROJECT"],
             any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
@@ -163,6 +169,13 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
         ctx.info(f"vertex-ai ADC auth: AGY version {'.'.join(str(v) for v in ver)}")
 
+    elif method == "api-key":
+        api_key = ctx.read_secret("GEMINI_API_KEY", env_fallback=True)
+        if not api_key:
+            raise scion_harness.ProvisionError("GEMINI_API_KEY secret is empty")
+        env_overlay["GEMINI_API_KEY"] = api_key
+        ctx.info("api-key auth: GEMINI_API_KEY configured")
+
     elif method == "oauth-token":
         token_raw = _read_agy_token(ctx)
         if not token_raw:
@@ -237,7 +250,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     _generate_hooks_json(ctx.home)
     _prestage_onboarding(
         ctx.home, enterprise=is_enterprise, model=model,
-        thinking_tier=thinking_tier,
+        thinking_tier=thinking_tier, auth_method=method,
     )
     _apply_mcp(ctx)
 
@@ -520,6 +533,7 @@ def _copy_instructions(bundle: str, home: str, instructions_file: str) -> None:
 def _prestage_onboarding(
     home: str, workspace: str = "/workspace", enterprise: bool = False,
     model: str = "", thinking_tier: str | None = None,
+    auth_method: str = "",
 ) -> None:
     """Pre-stage AGY config files to skip interactive onboarding.
 
@@ -561,7 +575,20 @@ def _prestage_onboarding(
         }
         if model:
             settings["model"] = model
+        if auth_method == "api-key":
+            settings["modelProvider"] = "gemini"
         scion_harness.atomic_write_json(settings_path, settings)
+    elif auth_method == "api-key":
+        # settings.json already exists — ensure modelProvider is set.
+        try:
+            existing = scion_harness.load_json(settings_path) or {}
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        if existing.get("modelProvider") != "gemini":
+            existing["modelProvider"] = "gemini"
+            scion_harness.atomic_write_json(settings_path, existing)
 
     # cache/onboarding.json — marks onboarding complete.
     # Always set enterpriseOnboardingComplete=true regardless of auth mode:
