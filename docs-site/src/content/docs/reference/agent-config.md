@@ -22,6 +22,7 @@ Previous versions of Scion used `scion-agent.json`. The new versioned settings s
 | :--- | :--- | :--- |
 | `schema_version` | string | Should be `"1"`. |
 | `default_harness_config` | string | The name of the default harness config to use (e.g., `gemini`, `antigravity`). |
+| `default_harness_auth` | string | The default authentication type to use (e.g., `adc`, `service-account`, `none`). |
 | `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). |
 | `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). |
 | `image` | string | Override the container image defined in the harness config. |

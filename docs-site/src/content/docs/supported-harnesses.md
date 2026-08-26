@@ -247,19 +247,19 @@ interactively, then capture the credential with the container's `capture_auth.py
 |---|---|---|
 | API Key | `XAI_API_KEY` | Set env var with xAI API key |
 | Auth File | `~/.grok/auth.json` | `grok login --device-auth` + capture |
-| Vertex AI | `GOOGLE_CLOUD_PROJECT` | Set env var with GCP project ID |
+| Vertex AI | `SCION_METADATA_PROJECT_ID` or `GOOGLE_CLOUD_PROJECT` | Detected from GCP identity or env var |
 
 ### Configuration
 - **Config directory**: `~/.grok/` (settings in `config.toml`).
-- **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Grok has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
+- **Instructions**: `agent_instructions` are projected into `~/.grok/AGENTS.md`.
+- **System Prompt**: Supported natively via the `--system-prompt-override` flag during launch.
 - **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
-- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4`, `extra-large` → `grok-4`.
+- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4`, `extra-large` → `grok-4` (resolved and injected via `GROK_DEFAULT_MODEL`).
 - **Hooks**: 11 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect.
 - **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
 
 ### Known Limitations
 - **No max_model_calls** — Grok hooks do not expose model-call start/end events. `max_turns` and `max_duration` are supported.
-- **System Prompt**: approximated via `AGENTS.md` (no native override).
 - **No project-scoped MCP**.
 - **OAuth**: not supported — Grok uses xAI auth only.
 
@@ -280,7 +280,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Hooks** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ | ✅ |
-| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ◐ |
+| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ |

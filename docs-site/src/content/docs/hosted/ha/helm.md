@@ -32,6 +32,15 @@ When deploying Scion in multi-tenant or multi-namespace clusters, name collision
 - **The Challenge:** Kubernetes `ClusterRole` and `ClusterRoleBinding` resources must have cluster-unique names. In large environments, long generated names can exceed the 63-character limit and truncate. Truncated names can collide across namespaces, potentially repointing critical `pods/exec` and `secrets` authority to the wrong workspace.
 - **The Fix:** The Scion Helm chart automatically disambiguates truncated cluster-scoped resource names. If a name truncates to 63 bytes, it appends a short cryptographic digest over the fullname and namespace. This guarantees unique cluster-scoped bindings even under aggressive truncation.
 
+### 6. Read-Only `settings.yaml` Mount
+The chart automatically renders the hub's `settings.yaml` based on your `values.yaml` and mounts it read-only. This ensures configuration consistency and prevents runtime mutations.
+
+### 7. Credential Guards
+Credential guards are wired through shared helpers to strictly control environment variable injection. This ensures that arbitrary `extraEnv` configuration cannot be used to smuggle or expose sensitive secrets.
+
+### 8. Strict HTTPS Enforcement
+The `hub.baseUrl` setting is required and must strictly use HTTPS. The chart will actively refuse to render if this field is missing or configured with a non-HTTPS URL.
+
 ---
 
 ## 1. Prerequisites
@@ -62,7 +71,7 @@ replicaCount: 2
 
 # Core Hub Configuration
 hub:
-  publicUrl: "https://hub.scion.example.com"
+  baseUrl: "https://hub.scion.example.com"
   sessionSecret: "your-long-secure-session-secret"
 
 # Database Configuration
