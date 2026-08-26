@@ -1352,7 +1352,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	srv := newTestServerForStartContext(t, cfg)
 
 	bare := initBareRepoWithCommit(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", }
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
 
 	projectPath := filepath.Join(t.TempDir(), "proj")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
@@ -1438,7 +1438,7 @@ func TestWorktreeWorkspace_RepoRootDerivesToBase(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	bare := initBareRepoWithCommit(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", }
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
 
 	projectPath := filepath.Join(t.TempDir(), "proj")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {

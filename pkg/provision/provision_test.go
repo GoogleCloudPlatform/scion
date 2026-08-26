@@ -448,7 +448,7 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 		AgentName: "alpha-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepoA, Branch: "main", },
+		GitClone:  &api.GitCloneConfig{URL: bareRepoA, Branch: "main"},
 	})
 	if err != nil {
 		t.Fatalf("Provision project A: %v", err)
@@ -469,7 +469,7 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 		AgentName: "beta-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepoB, Branch: "main", },
+		GitClone:  &api.GitCloneConfig{URL: bareRepoB, Branch: "main"},
 	})
 	if err != nil {
 		t.Fatalf("Provision project B: %v", err)
@@ -525,7 +525,6 @@ func TestProvision_WorktreePerAgent_ConcurrentSameProject(t *testing.T) {
 				GitClone: &api.GitCloneConfig{
 					URL:    bareRepo,
 					Branch: "main",
-					
 				},
 			})
 		}(i)
