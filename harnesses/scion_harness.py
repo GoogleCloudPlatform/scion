@@ -1046,8 +1046,8 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--scope",
         choices=["project", "user"],
-        default="project",
-        help="Secret scope: project (default) or user",
+        default="user",
+        help="Secret scope: project or user (default)",
     )
     parser.add_argument(
         "--bundle",
@@ -1129,7 +1129,7 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
     return _CA_EXIT_OK
 
 
-def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "project") -> tuple[bool, str | None]:
+def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -> tuple[bool, str | None]:
     key = entry.get("key", "")
     source = expand_path(entry.get("source", ""))
     secret_type = entry.get("type", "file")
@@ -1144,6 +1144,8 @@ def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "project"
     cmd = ["sciontool", "secret", "set", key, f"@{source}",
            "--type", secret_type, "--target", target,
            "--scope", scope]
+    if scope == "user":
+        cmd.append("--allow-progeny")
     if force:
         cmd.append("--force")
 

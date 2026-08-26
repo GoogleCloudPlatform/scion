@@ -1420,7 +1420,7 @@ func TestClient_SetSecret_Created(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", "", false)
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", "", false, false)
 
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPut, receivedMethod)
@@ -1430,11 +1430,46 @@ func TestClient_SetSecret_Created(t *testing.T) {
 	assert.Equal(t, "file", receivedReq.Type)
 	assert.Equal(t, "~/.config/auth.json", receivedReq.Target)
 	assert.False(t, receivedReq.Force)
+	assert.False(t, receivedReq.AllowProgeny)
 
 	require.NotNil(t, resp)
 	assert.Equal(t, "MY_KEY", resp.Key)
 	assert.Equal(t, "project", resp.Scope)
 	assert.Equal(t, "project-123", resp.ScopeID)
+}
+
+func TestClient_SetSecret_AllowProgeny(t *testing.T) {
+	var receivedReq SetSecretRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&receivedReq); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(SetSecretResponse{
+			Key:     "MY_SECRET",
+			Scope:   "user",
+			ScopeID: "user-456",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	resp, err := client.SetSecret(context.Background(), "MY_SECRET", "c2VjcmV0", "environment", "", "user", false, true)
+
+	require.NoError(t, err)
+	assert.Equal(t, "c2VjcmV0", receivedReq.Value)
+	assert.Equal(t, "environment", receivedReq.Type)
+	assert.Equal(t, "user", receivedReq.Scope)
+	assert.True(t, receivedReq.AllowProgeny, "allowProgeny should be true in the serialized request")
+	assert.False(t, receivedReq.Force)
+
+	require.NotNil(t, resp)
+	assert.Equal(t, "MY_SECRET", resp.Key)
+	assert.Equal(t, "user", resp.Scope)
+	assert.Equal(t, "user-456", resp.ScopeID)
 }
 
 func TestClient_SetSecret_NoContent(t *testing.T) {
@@ -1444,7 +1479,7 @@ func TestClient_SetSecret_NoContent(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", true)
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", true, false)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -1460,7 +1495,7 @@ func TestClient_SetSecret_Conflict(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", false)
+	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", false, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
@@ -1468,7 +1503,7 @@ func TestClient_SetSecret_Conflict(t *testing.T) {
 
 func TestClient_SetSecret_NotConfigured(t *testing.T) {
 	client := &Client{}
-	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", "", false)
+	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", "", false, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not configured")
 }
@@ -1549,7 +1584,7 @@ func TestClient_SetSecret_ServerError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", "", false)
+	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", "", false, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
