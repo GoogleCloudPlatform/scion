@@ -12,10 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# values-settings.yaml with the authentication mode changed, and nothing else
-# changed. Keep it that way: the point of this file is that a diff of the two
-# renders shows the authentication subtree and nothing more. Anything else that
-# drifts between them makes that check stop meaning what it claims to mean.
+# values-settings.yaml with the authentication mode changed, and nothing that
+# is not entailed by that change. Keep it that way: the point of this file is
+# that a diff of the two renders shows the authentication subtree and nothing
+# more. Anything else that drifts between them makes that check stop meaning
+# what it claims to mean.
+#
+# "AND NOTHING ELSE CHANGED" IS WHAT THIS USED TO SAY, AND IT STOPPED BEING
+# TRUE when the OAuth client credentials landed. The values now differ by the
+# mode AND by auth.oauth.web.google, and the renders differ by server.auth.mode
+# AND server.oauth. That is not drift: oauth mode without credentials is a
+# deployment nobody can log in to, and the chart refuses to render it - so the
+# credentials are part of what selecting the mode means, not an extra. The
+# narrower claim is the one that survives and the one the diff should be read
+# against.
 #
 # THE FIVE BLOCK-1 KEYS RENDER IN EITHER AUTHENTICATION MODE, and that is what
 # the paired diff is for: the hub ID, the Postgres driver, the database URL, GCS
@@ -81,11 +91,29 @@ storage:
 
 auth:
   mode: oauth
-  sessionSecret: ci-settings-session-secret-not-real
-  # The client credentials oauth needs are not rendered by
-  # this chart yet, so this install would not start. The schema requires the
-  # acknowledgement rather than letting the mode be selected by accident.
-  acknowledgeOAuthUnlanded: true
+  sessionSecret: ci-oauth-session-secret-not-a-real-secret
+
+  # THIS FIXTURE USED TO CARRY acknowledgeOAuthUnlanded: true INSTEAD OF THESE.
+  # The key existed because the chart rendered oauth mode with no channel for
+  # the credentials that mode needs; the fixture set it to say "yes, I know this
+  # would not be usable". The credentials are rendered now, so the fixture
+  # supplies them and the acknowledgement is gone. A fixture that still opted
+  # out of a guard nothing needs would be the reason nobody noticed the guard
+  # had stopped guarding anything.
+  #
+  # google rather than github for no reason beyond needing one of them. The
+  # github pair is exercised by the render-guards suite, so both are covered
+  # without doubling this fixture.
+  #
+  # WEB, and the client type matters. Credentials under server.oauth.cli or
+  # server.oauth.device would render fine and satisfy nothing: the hub keys its
+  # login check by client type (pkg/hub/oauth.go:194) and a browser login reads
+  # the web client only. render-guards asserts that specific non-substitution.
+  oauth:
+    web:
+      google:
+        clientId: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
+        clientSecret: ci-oauth-web-google-client-secret-not-a-real-secret
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

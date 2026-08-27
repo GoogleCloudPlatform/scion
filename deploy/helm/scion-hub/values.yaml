@@ -710,19 +710,46 @@ auth:
   # `openssl rand -base64 48`.
   sessionSecret: ""
 
-  # The oauth mode's supporting configuration - the client credentials - is not
-  # rendered by the chart yet; it lands with the session and client secrets.
+  # THE OAUTH CLIENT CREDENTIALS. Required when auth.mode is oauth, and the
+  # render fails without them - which is what replaced the acknowledgement key
+  # that used to sit here.
   #
-  # It does not fail loudly. The credentials are wired without validation
-  # (cmd/server_foreground.go:1514-1544), so the hub starts, binds and passes
-  # /readyz, and the failure arrives once per login attempt as "OAuth provider
-  # is not configured" (pkg/hub/web.go:1770-1776) - a deployment that is green
-  # in every Kubernetes signal and that nobody can log in to.
+  # THE KEY THAT WAS HERE AND WHY IT IS GONE. auth.acknowledgeOAuthUnlanded was
+  # a required opt-in, added when this chart rendered oauth mode but had no
+  # channel for the credentials that mode needs. It asked the operator to
+  # confirm they understood the deployment would come up green and refuse every
+  # login. That was the right shape for a gap, and the wrong shape to keep once
+  # the gap closed: a permanent acknowledgement teaches operators to type true
+  # and move on. The chart now renders the credentials, so the honest guard is
+  # a refusal that names what is missing, not a checkbox.
   #
-  # Set this to true to acknowledge that and render anyway. Both the schema and
-  # the template enforce it, and neither applies under config.existingSecret,
-  # where the chart renders no auth mode at all.
-  acknowledgeOAuthUnlanded: false
+  # RENDERED INTO settings.yaml, WHICH IS A SECRET, NOT A ConfigMap. The client
+  # secret is secret material and never appears in args, in a ConfigMap or in an
+  # annotation. Like auth.sessionSecret, a value set here lives in your values
+  # file and in Helm's release storage; config.existingSecret is the shape where
+  # the whole settings file, credentials included, stays yours.
+  #
+  # WEB ONLY, DELIBERATELY. These are the credentials for the browser login
+  # flow. The hub also models cli and device clients; the chart does not model
+  # them. If you need them, set server.oauth.cli or server.oauth.device through
+  # config.extra.
+  #
+  # MIND THE SPELLING IF YOU GO THROUGH config.extra. These chart values are
+  # camelCase and the chart renders them into settings.yaml as client_id and
+  # client_secret, because that is what the settings schema binds
+  # (V1OAuthProviderConfig, pkg/config/settings_v1.go:635). The env-var mapper
+  # for the same values uses the OTHER spelling, clientId/clientSecret
+  # (pkg/config/hub_config.go:334) - so a clientId written into settings.yaml
+  # by hand binds nothing, silently. The chart refuses the camelCase spelling
+  # under server.oauth rather than letting it through.
+  oauth:
+    web:
+      google:
+        clientId: ""
+        clientSecret: ""
+      github:
+        clientId: ""
+        clientSecret: ""
 
   # When true the hub refuses to start rather than fall back to a signing key
   # generated per process. That fallback is fatal across replicas - each pod

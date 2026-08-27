@@ -119,7 +119,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=182   # 38 chart-integrity + 63 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
+EXPECTED_ASSERTIONS=196   # 38 chart-integrity + 77 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
@@ -139,7 +139,7 @@ EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 SCRIPTS=(
   reserved-flags.sh     # 31 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
-  render-guards.sh      # 57 - every other render-time refusal, incl. the HA-unlanded gate
+  render-guards.sh      # 77 - every other render-time refusal, incl. the HA-unlanded gate
   chart-integrity.sh    # 35 - .helmignore breadth, the packaged file set, base-url, signing key
   rbac-collision.sh     # 46 - the cluster-scoped RBAC name, and two pinned residuals
 )
@@ -343,7 +343,7 @@ done
 # gets its own committed number, failing in both directions like the others.
 # Phase 6 owns CI wiring and may move this; it must not delete it without
 # replacing the coverage.
-EXPECTED_VERIFY_ASSERTIONS=363
+EXPECTED_VERIFY_ASSERTIONS=364
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
 # NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Four
 # entries, all stated: verify.sh, gated below; run-all-mutations.sh, which is

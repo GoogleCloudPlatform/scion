@@ -1936,7 +1936,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password
+config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret
 {{- end }}
 
 {{/*
@@ -1949,9 +1949,16 @@ The names below are the settings values with an empty default, which is what
 makes them refusable at all; the reasoning is in the comment above the transfer
 list, and the two lists are checked together as one partition of the values
 tree. Later phases append their own inline values here as they are introduced
-(the session secret, the OAuth client secret). Phase 2 appended three database
-leaves and deliberately did not append the fourth; see the PHASE 2 DELTA note in
-the body.
+(the database password, the session secret).
+
+THE OAUTH WEB CLIENT CREDENTIALS ARE THE FIRST OF THOSE APPENDED, and they were
+appended here rather than added to the transfer list because they qualify: both
+halves default to empty, so a non-empty one was typed. That makes the stronger
+answer available, and where it is available it is the one to take - the transfer
+list tells an operator afterwards that their credential went nowhere, whereas
+this refuses the release. A credential silently discarded is the shape of
+failure this chart is least able to make visible later: the hub starts, passes
+its probes, and refuses every login.
 
 THE SAME NAMES ARE PRINTED TO OPERATORS, so they come from one define rather
 than from a second hand-written copy in NOTES.txt. hack/verify.sh checks that
@@ -2010,6 +2017,12 @@ companion instead; that pair is explained above.
 {{- if .Values.database.name }}{{- $inline = append $inline "database.name" }}{{- end }}
 {{- if .Values.database.user }}{{- $inline = append $inline "database.user" }}{{- end }}
 {{- if .Values.database.password }}{{- $inline = append $inline "database.password" }}{{- end }}
+{{- $web := .Values.auth.oauth.web }}
+{{- range $provider := list "github" "google" }}
+{{- $creds := index $web $provider }}
+{{- if $creds.clientId }}{{- $inline = append $inline (printf "auth.oauth.web.%s.clientId" $provider) }}{{- end }}
+{{- if $creds.clientSecret }}{{- $inline = append $inline (printf "auth.oauth.web.%s.clientSecret" $provider) }}{{- end }}
+{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
@@ -2443,27 +2456,105 @@ rendered yet; see the comment in the rendered file. */}}
 {{- end }}
 
 {{- /*
-The oauth acknowledgement, enforced here as well as in values.schema.json, and
-the duplication is the point: --skip-schema-validation is one flag away and it
-removes every schema-enforced rule at once. This is the layer that is left.
+The oauth client credentials. THIS REPLACED AN ACKNOWLEDGEMENT KEY, and the
+replacement is the point rather than an implementation detail.
 
-THE HARM, VERIFIED OUTSIDE THE CHART, AND IT IS NOT "THE HUB WILL NOT START".
-That is what this chart used to claim and it is wrong in the direction that
-matters. Nothing validates the OAuth client credentials at startup - they are
-copied into the server config unchecked at cmd/server_foreground.go:1514-1544 -
-so a hub rendered in oauth mode with no credentials STARTS, binds, and passes
-/readyz. The failure arrives per request, at login: pkg/hub/web.go:1770-1776
-returns 503 "OAuth not configured" or 400 "OAuth provider %s is not configured".
-A deployment that is green in every Kubernetes signal and cannot be logged into
-by anybody is worse than one that crashloops, because nothing pages.
+auth.acknowledgeOAuthUnlanded used to stand here: a required opt-in that made the
+operator confirm they understood oauth mode would render without the credentials
+it needs. That was correct while the chart had no channel for them. It is not
+correct now, and leaving it would have been the worse outcome of the two - a
+permanent required key that guards nothing teaches the reflex of setting
+acknowledgements to true, which is the reflex that makes the NEXT one useless.
 
-Scoped to the rendered document on purpose. Under config.existingSecret this
-whole template is skipped, so the acknowledgement does not fire - correctly: the
-chart renders no auth mode there and the operator's file is theirs. The schema's
-copy of this rule carries the same exclusion for the same reason.
+WHAT IS CHECKED IS THE RENDERED DOCUMENT, NOT THE VALUES. So config.extra
+satisfies it exactly as auth.oauth.web does, which is deliberate: an operator who
+supplies server.oauth through config.extra has met the requirement, and a guard
+that demanded the chart's own value instead would be demanding a spelling rather
+than a state.
+
+THE HARM IS SILENT, WHICH IS WHY THIS IS A REFUSAL. Nothing validates these
+credentials at startup - they are copied into the server config unchecked at
+cmd/server_foreground.go:1514-1545 - so a hub in oauth mode with no credentials
+STARTS, binds, and passes /readyz. The failure arrives per request, at login:
+pkg/hub/web.go:1770-1776 returns 503 "OAuth not configured" or 400 "OAuth
+provider %s is not configured". Green in every Kubernetes signal, and nobody can
+log in. That is worse than a crashloop, because nothing pages for it.
+
+WEB, NOT ANY CLIENT TYPE. The hub keys the login check by client type -
+IsProviderConfiguredForClient(OAuthClientTypeWeb, provider), pkg/hub/oauth.go:194
+- so credentials under server.oauth.cli or server.oauth.device satisfy nothing
+for a browser login. A check that accepted any client type would pass exactly the
+configuration that fails. cli and device are not refused; they are just not
+counted here.
+
+BOTH HALVES, PER PROVIDER. IsProviderConfigured tests the client ID alone
+(pkg/hub/oauth.go:51-58), so an ID with no secret makes the hub report the
+provider as configured, offer the login button, and fail at the token exchange.
+Half a credential is worse than none: none is caught here, half is caught by the
+user.
+
+Scoped to the rendered document, and therefore not evaluated under
+config.existingSecret - this whole template is skipped there, correctly, because
+the chart renders no auth mode in that shape and the operator's file is theirs.
 */}}
-{{- if and (eq (dig "server" "auth" "mode" "" $doc) "oauth") (not $root.Values.auth.acknowledgeOAuthUnlanded) }}
-{{- fail "settings.yaml renders server.auth.mode: oauth, but this chart does not render the OAuth client credentials that mode needs - that is Phase 3. Nothing catches it at runtime: the credentials are wired unvalidated (cmd/server_foreground.go:1514-1544), so the hub starts and passes its probes, and every human login fails with \"OAuth provider is not configured\" (pkg/hub/web.go:1770-1776). Set auth.acknowledgeOAuthUnlanded=true to render it anyway, or use auth.mode=proxy." }}
+{{- if eq (dig "server" "auth" "mode" "" $doc) "oauth" }}
+{{- $web := dig "server" "oauth" "web" (dict) $doc }}
+{{- $complete := list }}
+{{- $partial := list }}
+{{- range $provider, $creds := $web }}
+{{- $id := dig "client_id" "" $creds }}
+{{- $secret := dig "client_secret" "" $creds }}
+{{- if and $id $secret }}
+{{- $complete = append $complete $provider }}
+{{- else if or $id $secret }}
+{{- $partial = append $partial (printf "%s (has %s, missing %s)" $provider (ternary "client_id" "client_secret" (ne $id "")) (ternary "client_secret" "client_id" (ne $id ""))) }}
+{{- end }}
+{{- end }}
+{{- if $partial }}
+{{- fail (printf "rendered settings.yaml has an incomplete OAuth web client credential: %s. A provider needs both halves, and the two missing halves fail differently - neither of them loudly. With client_id and no client_secret the hub reports the provider as CONFIGURED, because IsProviderConfigured tests the client ID alone (pkg/hub/oauth.go:51-58); it offers the login button and fails at the token exchange. With client_secret and no client_id the provider is not offered at all, and the secret sits in the settings Secret doing nothing. Either way a half-set credential fails later, and less legibly, than an unset one. Set both auth.oauth.web.<provider>.clientId and .clientSecret, or neither." (join ", " $partial)) }}
+{{- end }}
+{{- if not $complete }}
+{{- fail "settings.yaml renders server.auth.mode: oauth, but no complete OAuth web client credential is present, so nobody would be able to log in to this deployment. Nothing catches this at runtime: the credentials are copied into the server config unvalidated (cmd/server_foreground.go:1514-1545), so the hub starts, binds and passes /readyz, and every login fails with \"OAuth provider is not configured\" (pkg/hub/web.go:1770-1776) - green in Kubernetes, unusable by humans. Set auth.oauth.web.google.clientId and auth.oauth.web.google.clientSecret (or the github pair), supply server.oauth.web through config.extra, or use auth.mode=proxy. Credentials under server.oauth.cli or server.oauth.device do NOT satisfy this: the hub keys the login check by client type (pkg/hub/oauth.go:194) and a browser login reads the web client only." }}
+{{- end }}
+{{- end }}
+
+{{- /*
+The camelCase trap, refused by name.
+
+settings.yaml binds client_id/client_secret (V1OAuthProviderConfig,
+pkg/config/settings_v1.go:635). The SCION_SERVER_* env mapper binds
+clientId/clientSecret (OAuthProviderConfig, pkg/config/hub_config.go:334). The
+doc comment on envKeyToConfigKey states the camelCase form explicitly, so it is
+the spelling a careful reader arrives at - and in this file it binds nothing.
+yaml.v3 drops the unknown key silently: no error, no warning, an empty field, a
+hub that starts and refuses every login.
+
+Reachable only through config.extra, because the chart's own render always emits
+snake_case. That makes it the same class of hazard as server.hub.public_url
+above - a key the chart cannot produce but an operator can - and it is checked
+for the same reason.
+
+Measured rather than reasoned: both spellings written into a real settings.yaml
+and read back through config.LoadGlobalConfig, snake_case populating
+cfg.OAuth.Web.Google and camelCase leaving it empty, each with the other as its
+twin. harness/zz_p3_oauth_settings_probe_test.go.
+
+Walks every client type, not just web. cli and device are not rendered by the
+chart and are not required by the check above, but they bind through the same
+struct, so the misspelling is silent there too.
+*/}}
+{{- range $clientType, $providers := (dig "server" "oauth" (dict) $doc) }}
+{{- if kindIs "map" $providers }}
+{{- range $provider, $creds := $providers }}
+{{- if kindIs "map" $creds }}
+{{- range $key, $_ := $creds }}
+{{- if or (eq $key "clientId") (eq $key "clientSecret") }}
+{{- fail (printf "rendered settings.yaml sets server.oauth.%s.%s.%s. That spelling binds nothing in a settings file and fails silently: settings.yaml reads client_id and client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go:635), while clientId and clientSecret are the SCION_SERVER_* environment mapper's spelling (pkg/config/hub_config.go:334). yaml.v3 drops the unknown key with no error, so the credential is simply absent and the hub starts and refuses every login. Rename it to %s. If you reached this through config.extra, that is the only way to reach it - the chart's own render emits snake_case." $clientType $provider $key (ternary "client_id" "client_secret" (eq $key "clientId"))) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
 
@@ -2516,6 +2607,52 @@ HA preflight as configured.
 {{- $storage = set $storage "bucket" $bucket }}
 {{- end }}
 
+{{- /*
+server.oauth: the web client credentials, and ONLY when they are set.
+
+SNAKE_CASE HERE, camelCase IN THE VALUES, AND THAT IS NOT AN INCONSISTENCY -
+it is two different schemas that happen to describe the same field. settings.yaml
+binds through V1OAuthProviderConfig (pkg/config/settings_v1.go:635), whose yaml
+tags are client_id and client_secret. The SCION_SERVER_* env mapper binds through
+OAuthProviderConfig (pkg/config/hub_config.go:334), whose koanf tags are clientId
+and clientSecret, reached via camelCaseFields["clientid"]. Same value, same hub,
+two spellings, selected by channel.
+
+MEASURED, BOTH SPELLINGS, ON A REAL LOAD. Written into a settings.yaml on disk
+and read back through config.LoadGlobalConfig: client_id/client_secret populate
+cfg.OAuth.Web.Google and make IsProviderConfiguredForClient(web, google) true;
+clientId/clientSecret leave both fields empty and it returns false. yaml.v3 drops
+the unknown key without an error, so the wrong spelling is not a failure the
+operator sees - it is a hub that starts and refuses every login. The probe is
+parked at harness/zz_p3_oauth_settings_probe_test.go with its negative twin.
+
+EMITTED ONLY WHEN NON-EMPTY. An empty client_id is not the same as no client_id
+to the collision check, and it is not the same to a reader of the rendered file:
+a rendered `client_id: ""` looks like a credential that failed to interpolate.
+Absent means absent.
+
+A provider needs BOTH halves to be emitted at all. Half a credential configures
+nothing - IsProviderConfigured tests ClientID alone (pkg/hub/oauth.go:51-58), so
+an ID with no secret reports the provider as CONFIGURED and then fails the token
+exchange at login. The assertion in assertSettings refuses that pairing by name;
+this is only the render.
+*/}}
+{{- $oauthWeb := dict }}
+{{- $webValues := .Values.auth.oauth.web }}
+{{- range $provider := list "google" "github" }}
+{{- $creds := index $webValues $provider }}
+{{- if or $creds.clientId $creds.clientSecret }}
+{{- $entry := dict }}
+{{- if $creds.clientId }}
+{{- $entry = set $entry "client_id" $creds.clientId }}
+{{- end }}
+{{- if $creds.clientSecret }}
+{{- $entry = set $entry "client_secret" $creds.clientSecret }}
+{{- end }}
+{{- $oauthWeb = set $oauthWeb $provider $entry }}
+{{- end }}
+{{- end }}
+
 {{- $server := dict
     "mode" "hosted"
     "hub" $hub
@@ -2523,6 +2660,9 @@ HA preflight as configured.
     "storage" $storage
     "auth" (dict "mode" .Values.auth.mode)
     "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
+{{- if $oauthWeb }}
+{{- $server = set $server "oauth" (dict "web" $oauthWeb) }}
+{{- end }}
 
 {{- /*
 LOAD-BEARING. schema_version is not boilerplate and it is not redundant with

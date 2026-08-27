@@ -462,8 +462,8 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally. It renders the hub's settings.yaml and
   it wires Cloud SQL and the database URL, but it does not yet configure GCS
-  credentials beyond the bucket name, Filestore, the session secret, the OAuth
-  client secret, Ingress or IAP. Do not treat this as a production install.
+  credentials beyond the bucket name, Filestore, the session secret, Ingress
+  or IAP. Do not treat this as a production install.
 
   The Cloud SQL wiring is RENDERED BUT UNRUN. No part of it has been applied to
   a cluster or dialled at a real instance: the deploying principal is refused by
