@@ -244,11 +244,17 @@ Using the resource path (`/projects/NUMBER/locations/REGION/services/NAME`) as t
 audience will fail with "Invalid JWT audience".
 :::
 
-:::caution[Always specify template and harnessConfig]
-An agent create that omits both `template` and `harnessConfig` will fail with a
-runtime error. Always pass them explicitly. This is a known issue
-([#37](https://github.com/GoogleCloudPlatform/scion/issues/37) /
-[#48](https://github.com/GoogleCloudPlatform/scion/issues/48)).
+:::caution[Always specify harnessConfig]
+An agent create that omits `harnessConfig` will fail with a 502 and an error
+naming a harness the operator never chose:
+
+```
+failed to find harness-config "antigravity": harness-config "antigravity" not found
+```
+
+This is the product-wide default harness resolving to a name that is not registered
+on the running hub. The error gives no indication that specifying `harnessConfig`
+is the fix. Always pass `template` and `harnessConfig` explicitly.
 :::
 
 ### Attach to the agent's terminal
@@ -390,8 +396,9 @@ curl -s -o /dev/null -w "%{http_code}" "https://INSTANCE_URL"
 
 Re-run the deploy command — it is idempotent and will re-enable IAP.
 
-### Agent create fails with runtime error
+### Agent create returns 502: `harness-config "antigravity" not found`
 
-If creating an agent without `template` or `harnessConfig` returns an error (e.g.
-"failed to find harness-config" or a 500), specify both explicitly. See the note
-in [Section 3](#3-create-a-project-and-start-an-agent).
+If creating an agent without `harnessConfig` returns a 502 with `failed to find
+harness-config "antigravity"`, the fix is to specify `harnessConfig` explicitly
+(e.g. `"harnessConfig": "claude"`). See the note in
+[Section 3](#3-create-a-project-and-start-an-agent).
