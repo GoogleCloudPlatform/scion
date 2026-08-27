@@ -465,7 +465,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
 			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
 			if sOK && rOK {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 			} else {
 				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
 					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
@@ -638,7 +638,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
 		} else if msg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
 			} else {
 				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
 					"sender", msg.Sender, "sender_id", msg.SenderID)

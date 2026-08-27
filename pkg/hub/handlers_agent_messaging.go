@@ -255,7 +255,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if req.ThreadID != "" {
 		convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, req.ThreadID, agent.ProjectID)
 	} else if agent.ID != "" && recipientID != "" {
-		convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, "agent", agent.ID, "user", recipientID)
+		convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "agent", agent.ID, "user", recipientID)
 	}
 	if convResult != nil {
 		storeMsg.ConversationID = convResult.ConversationID
@@ -789,7 +789,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
 		} else if structuredMsg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, structuredMsg.SenderID, "agent", agent.ID)
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, senderKind, structuredMsg.SenderID, "agent", agent.ID)
 			} else {
 				s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
 					"sender", structuredMsg.Sender, "sender_id", structuredMsg.SenderID)
@@ -1042,7 +1042,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var convResult *messaging.ConversationResult
 			if agentMsg.SenderID != "" && agent.ID != "" {
 				if senderKind, ok := messages.PrincipalKindFromAddress(agentMsg.Sender); ok {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, agentMsg.SenderID, "agent", agent.ID)
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, senderKind, agentMsg.SenderID, "agent", agent.ID)
 				} else {
 					s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
 						"sender", agentMsg.Sender, "sender_id", agentMsg.SenderID)
@@ -1165,7 +1165,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var convResult *messaging.ConversationResult
 			if userMsg.SenderID != "" && userID != "" {
 				if senderKind, ok := messages.PrincipalKindFromAddress(userMsg.Sender); ok {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, userMsg.SenderID, "user", userID)
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, senderKind, userMsg.SenderID, "user", userID)
 				} else {
 					s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
 						"sender", userMsg.Sender, "sender_id", userMsg.SenderID)
