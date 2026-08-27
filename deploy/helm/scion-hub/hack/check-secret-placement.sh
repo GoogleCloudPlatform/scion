@@ -141,7 +141,17 @@ for doc in docs:
     for i, ln in enumerate(lines):
         if not re.match(r'^(stringData|data):\s*$', ln):
             continue
-        entries = block_lines(lines, i)
+        # Build entries INCLUDING blank lines so that the span computation
+        # below counts them.  block_lines strips blank lines, which is fine
+        # for harvesting content but wrong for indexing: a blank inside a
+        # block scalar shortens len(body) relative to the true span, and
+        # trailing block content falls outside the consumed set.
+        _base_i = indent_of(lines[i])
+        entries = []
+        for _ln in lines[i+1:]:
+            if _ln.strip() and indent_of(_ln) <= _base_i:
+                break
+            entries.append(_ln)
         # Indices consumed by a block scalar's body. Without this the outer loop
         # also walks the embedded document's own lines and matches them as
         # top-level entries - which is how base_url became a needle even after
@@ -175,7 +185,22 @@ for doc in docs:
             # are not.
             if v in ("|", "|-", "|+", ">", ">-", ">+"):
                 body = block_lines(entries, j)
-                for k in range(j + 1, j + 1 + len(body)):
+                # Walk entries directly to count the TRUE span, including
+                # blank lines that block_lines skipped.  len(body) only
+                # counts non-blank lines, so it undercounts whenever the
+                # block scalar contains a blank line — and trailing block
+                # content falls outside consumed, gets misread as a
+                # top-level Secret key, and inflates the needle set.
+                _base = indent_of(entries[j])
+                _spanned = 0
+                for _idx, _ln in enumerate(entries[j+1:]):
+                    if not _ln.strip():
+                        _spanned = _idx + 1
+                        continue
+                    if indent_of(_ln) <= _base:
+                        break
+                    _spanned = _idx + 1
+                for k in range(j + 1, j + 1 + _spanned):
                     consumed.add(k)
                 for inner in body:
                     # COMMENTS ARE NOT KEYS, AND THIS IS NOT TIDINESS. Measured:
@@ -290,8 +315,10 @@ stringData:
     # The session secret is not here: it arrives as an environment variable
     server:
       base_url: https://selftest.example.invalid
+
       oauth:
         client_secret: selftest-embedded-credential-7c21
+      extra_setting: not-a-secret-just-config
 ---
 apiVersion: v1
 kind: ConfigMap
