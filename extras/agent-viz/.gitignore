@@ -1,4 +1,0 @@
-/agent-viz
-web/node_modules/
-internal/server/dist/*
-!internal/server/dist/.gitkeep

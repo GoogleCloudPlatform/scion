@@ -1,8 +1,0 @@
-{
-  "auth_candidates": {},
-  "harness_config": {
-    "no_auth": {
-      "behavior": "allow"
-    }
-  }
-}
