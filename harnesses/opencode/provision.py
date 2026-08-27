@@ -318,8 +318,13 @@ def _prefetch_models_catalog(ctx: sh.ProvisionContext) -> None:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = resp.read(10 * 1024 * 1024)  # 10MB cap
-        # Sanity-check: a real catalog is several KB of JSON.
+        # Sanity-check: a real catalog is several KB of valid JSON.
         if len(data) > 100:
+            try:
+                json.loads(data)
+            except ValueError:
+                ctx.info("models catalog response is not valid JSON, skipping")
+                return
             tmp_path = cache_path + ".tmp"
             with open(tmp_path, "wb") as f:
                 f.write(data)
