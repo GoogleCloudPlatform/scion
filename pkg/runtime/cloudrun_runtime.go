@@ -71,11 +71,17 @@ func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("CloudRunConfig cannot be nil")
 	}
-	if cfg.ProjectID == "" {
-		return nil, fmt.Errorf("cloudrun: ProjectID must be non-empty")
-	}
-	if cfg.Location == "" || len(strings.Split(cfg.Location, "-")) < 2 {
-		return nil, fmt.Errorf("cloudrun: Location must be a valid GCP region format (e.g., 'us-central1'), got %q", cfg.Location)
+	// When both ProjectID and Location are empty, this is an auto-detected
+	// Cloud Run environment (K_SERVICE set, no explicit settings). The
+	// runtime is valid — project/region will be discovered from GCP metadata
+	// when API calls are made. Validate only when fields are provided.
+	if cfg.ProjectID != "" || cfg.Location != "" {
+		if cfg.ProjectID == "" {
+			return nil, fmt.Errorf("cloudrun: ProjectID must be non-empty when Location is set")
+		}
+		if cfg.Location == "" || len(strings.Split(cfg.Location, "-")) < 2 {
+			return nil, fmt.Errorf("cloudrun: Location must be a valid GCP region format (e.g., 'us-central1'), got %q", cfg.Location)
+		}
 	}
 
 	execConn := cloudrun.NewIAPExecConnector("") // IapTunnelUrlOverride can be handled later if added to config
