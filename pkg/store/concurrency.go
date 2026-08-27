@@ -123,6 +123,14 @@ const (
 	// single-int form's key — Postgres treats them as separate namespaces,
 	// but keeping them visually distinct aids debugging.
 	LockWorkspaceProvision AdvisoryLockKey = 0x5C101001
+
+	// LockQuotaEnforcement is the CLASS ID for per-scope quota enforcement
+	// locks. It is used with the two-int advisory lock form
+	// pg_try_advisory_lock(classid, objid), where classid is this constant
+	// and objid is StableProjectHash(scopeID). This serializes concurrent
+	// quota checks for the same scope so that the "check count + reserve"
+	// sequence is atomic, preventing over-allocation.
+	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

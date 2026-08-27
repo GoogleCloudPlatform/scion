@@ -395,6 +395,19 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Quota enforcement: check projects-per-user limit before creation.
+	if s.quotaService != nil && project.CreatedBy != "" {
+		if err := s.quotaService.CheckAndReserve(ctx, "max_projects_per_user", project.CreatedBy, "system", "system", project.ID); err != nil {
+			if errors.Is(err, store.ErrQuotaExceeded) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota exceeded: max_projects_per_user", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+			return
+		}
+	}
+
 	if err := s.store.CreateProject(ctx, project); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1357,6 +1370,19 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				if _, exists := project.Annotations[projectSettingDefaultAgentRole]; !exists {
 					project.Annotations[projectSettingDefaultAgentRole] = defaults.DefaultAgentRole
 				}
+			}
+		}
+
+		// Quota enforcement: check projects-per-user limit before creation.
+		if s.quotaService != nil && project.CreatedBy != "" {
+			if err := s.quotaService.CheckAndReserve(ctx, "max_projects_per_user", project.CreatedBy, "system", "system", project.ID); err != nil {
+				if errors.Is(err, store.ErrQuotaExceeded) {
+					writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+						"quota exceeded: max_projects_per_user", nil)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+				return
 			}
 		}
 
@@ -2719,6 +2745,11 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	if err := s.store.DeleteProject(ctx, id); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Release quota reservation for the deleted project (best-effort).
+	if s.quotaService != nil {
+		s.quotaService.Release(ctx, "max_projects_per_user", id)
 	}
 
 	// For hub-native and shared-workspace projects, remove the filesystem directory

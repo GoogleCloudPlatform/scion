@@ -77,6 +77,9 @@ const (
 	ErrCodeInvalidSignature = "invalid_signature"
 	ErrCodeClockSkew        = "clock_skew"
 	ErrCodeReplayDetected   = "replay_detected"
+
+	// Quota enforcement error codes
+	ErrCodeQuotaExceeded = "quota_exceeded"
 )
 
 // writeError writes a JSON error response.

@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -706,6 +708,20 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		member.AddedBy = identity.ID()
 	}
 
+	// Quota enforcement: check members-per-group limit before addition.
+	if s.quotaService != nil {
+		membershipID := fmt.Sprintf("%s:%s:%s", groupID, member.MemberType, member.MemberID)
+		if err := s.quotaService.CheckAndReserve(ctx, "max_members_per_group", groupID, "group", groupID, membershipID); err != nil {
+			if errors.Is(err, store.ErrQuotaExceeded) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota exceeded: max_members_per_group", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+			return
+		}
+	}
+
 	if err := s.store.AddGroupMember(ctx, member); err != nil {
 		if err == store.ErrAlreadyExists {
 			Conflict(w, "Member already exists in this group")
@@ -825,6 +841,12 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 	if err := s.store.RemoveGroupMember(ctx, group.ID, memberType, memberID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Release quota reservation for the removed member (best-effort).
+	if s.quotaService != nil {
+		membershipID := fmt.Sprintf("%s:%s:%s", group.ID, memberType, memberID)
+		s.quotaService.Release(ctx, "max_members_per_group", membershipID)
 	}
 
 	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
