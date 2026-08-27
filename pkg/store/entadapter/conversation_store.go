@@ -407,11 +407,13 @@ func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context,
 		if existing != nil {
 			// Update the existing row.
 			update := s.client.Conversation.UpdateOneID(existing.ID).
-				SetParentRef(conv.ParentRef).
 				SetLastActivityAt(time.Now())
 
-			// Only update display name if a non-empty value is provided,
-			// preventing accidental clobber of existing names.
+			// Only update optional fields if a non-empty value is provided,
+			// preventing accidental clobber of existing values.
+			if conv.ParentRef != "" {
+				update.SetParentRef(conv.ParentRef)
+			}
 			if conv.DisplayName != "" {
 				update.SetDisplayName(conv.DisplayName)
 			}

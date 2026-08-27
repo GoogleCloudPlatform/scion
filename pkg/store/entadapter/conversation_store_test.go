@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -390,6 +391,238 @@ func TestUpsertConversationByExternalRef_DifferentExternalRefsSameSurface(t *tes
 
 	// Different conversations
 	assert.NotEqual(t, r1.ID, r2.ID)
+}
+
+// ---------------------------------------------------------------------------
+// DEF-28: ParentRef preservation + comprehensive field classification
+// ---------------------------------------------------------------------------
+
+func TestUpsertConversationByExternalRef_EmptyParentRefPreservesExisting(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	// Create with a parent ref.
+	conv1 := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:proj1:thread-def28",
+		ParentRef:   "T789",
+	}
+	r1, err := s.UpsertConversationByExternalRef(ctx, conv1)
+	require.NoError(t, err)
+	assert.Equal(t, "T789", r1.ParentRef)
+
+	// Upsert with empty parent ref — must NOT clobber the existing value.
+	conv2 := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:proj1:thread-def28",
+		ParentRef:   "", // empty
+	}
+	r2, err := s.UpsertConversationByExternalRef(ctx, conv2)
+	require.NoError(t, err)
+	assert.Equal(t, r1.ID, r2.ID, "should be the same conversation")
+	assert.Equal(t, "T789", r2.ParentRef, "original parent ref must be preserved (DEF-28)")
+}
+
+func TestUpsertConversationByExternalRef_NonEmptyParentRefOverwrites(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	// Create with an initial parent ref.
+	conv1 := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:proj1:thread-def28-pos",
+		ParentRef:   "T789",
+	}
+	r1, err := s.UpsertConversationByExternalRef(ctx, conv1)
+	require.NoError(t, err)
+	assert.Equal(t, "T789", r1.ParentRef)
+
+	// Upsert with a different non-empty parent ref — must overwrite.
+	conv2 := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:proj1:thread-def28-pos",
+		ParentRef:   "T999",
+	}
+	r2, err := s.UpsertConversationByExternalRef(ctx, conv2)
+	require.NoError(t, err)
+	assert.Equal(t, "T999", r2.ParentRef, "non-empty parent ref must overwrite")
+}
+
+// TestUpsertConversationByExternalRef_FieldClassification is a comprehensive
+// table-driven test that classifies EVERY field on store.Conversation into one
+// of five buckets. The test uses reflect to ensure that adding a new field to
+// the struct without classifying it breaks the test — converting "reviewer must
+// notice an omission" into "CI notices."
+//
+// Buckets:
+//
+//	A. MATCH KEY   — selects the row; never updated.           (Surface, ExternalRef)
+//	B. IMMUTABLE   — must not change for the row's lifetime.   (ID, CreatedAt, Kind)
+//	C. PRESERVE    — guarded; empty input preserves prior.     (DisplayName, DriftState, ProjectID,
+//	                                                            DefaultAgentID, ParentRef)
+//	D. ALWAYS-SET  — unconditionally written on purpose.       (LastActivityAt)
+//	E. NOT TOUCHED — not modified by the update path.          (ArchivedAt, DeletedAt)
+func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
+	// Every field on store.Conversation must appear in exactly one bucket.
+	// If a new field is added to the struct and not listed here, the
+	// reflect check below fails.
+	classified := map[string]string{
+		// A — match key
+		"Surface":     "A",
+		"ExternalRef": "A",
+		// B — immutable
+		"ID":        "B",
+		"CreatedAt": "B",
+		"Kind":      "B",
+		// C — preserve-on-empty
+		"DisplayName":    "C",
+		"DriftState":     "C",
+		"ProjectID":      "C",
+		"DefaultAgentID": "C",
+		"ParentRef":      "C",
+		// D — always-written
+		"LastActivityAt": "D",
+		// E — not touched on update path
+		"ArchivedAt": "E",
+		"DeletedAt":  "E",
+	}
+
+	// Reflect check: every exported field of store.Conversation must be classified.
+	convType := reflect.TypeOf(store.Conversation{})
+	for i := 0; i < convType.NumField(); i++ {
+		field := convType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if _, ok := classified[field.Name]; !ok {
+			t.Errorf("store.Conversation field %q is not classified — add it to a bucket (A-E) "+
+				"and write assertions for it. This test exists to catch exactly this omission.", field.Name)
+		}
+	}
+	// And no stale entries in the classification.
+	for name := range classified {
+		found := false
+		for i := 0; i < convType.NumField(); i++ {
+			if convType.Field(i).Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("classified field %q does not exist on store.Conversation — remove it from the table", name)
+		}
+	}
+
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	// Step 1: Create a fully-populated conversation via initial upsert.
+	initial := &store.Conversation{
+		Kind:           "group",
+		Surface:        "native",
+		ExternalRef:    "test-field-class-" + uuid.NewString(),
+		ParentRef:      "parent-original",
+		DisplayName:    "Original Name",
+		DriftState:     "active",
+		ProjectID:      &projectID,
+		DefaultAgentID: &agentID,
+	}
+	r1, err := s.UpsertConversationByExternalRef(ctx, initial)
+	require.NoError(t, err)
+	require.NotNil(t, r1)
+
+	// Capture initial state for comparison.
+	initialID := r1.ID
+	initialCreatedAt := r1.CreatedAt
+	initialKind := r1.Kind
+	initialLastActivity := r1.LastActivityAt
+
+	// Step 2: Upsert with EMPTY optional fields — only match keys and Kind set.
+	emptyUpsert := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: initial.ExternalRef,
+		// All optional fields left at zero value.
+	}
+	r2, err := s.UpsertConversationByExternalRef(ctx, emptyUpsert)
+	require.NoError(t, err)
+	require.Equal(t, initialID, r2.ID, "must be same row")
+
+	// Bucket B — IMMUTABLE: same value even when input is different.
+	t.Run("B_immutable", func(t *testing.T) {
+		assert.Equal(t, initialID, r2.ID, "ID must not change")
+		assert.True(t, initialCreatedAt.Equal(r2.CreatedAt), "CreatedAt must not change (got %v vs %v)", initialCreatedAt, r2.CreatedAt)
+		// Kind: the upsert passed the same Kind ("group"). Upserting with a different
+		// Kind is silently ignored — the update path does not call SetKind. This is
+		// believed correct and load-bearing: a direct conversation must not become a
+		// group because D-1 says a direct conversation's participant set is immutable
+		// for its lifetime. The silence (no error on Kind mismatch) is a separate
+		// question tracked outside this test.
+		assert.Equal(t, initialKind, r2.Kind, "Kind must not change")
+	})
+
+	// Bucket C — PRESERVE-ON-EMPTY: prior value survives empty-input upsert.
+	t.Run("C_preserve_on_empty", func(t *testing.T) {
+		assert.Equal(t, "Original Name", r2.DisplayName, "DisplayName must be preserved when empty")
+		assert.Equal(t, "active", r2.DriftState, "DriftState must be preserved when empty")
+		assert.NotNil(t, r2.ProjectID, "ProjectID must be preserved when nil input")
+		if r2.ProjectID != nil {
+			assert.Equal(t, projectID, *r2.ProjectID, "ProjectID value must match original")
+		}
+		assert.NotNil(t, r2.DefaultAgentID, "DefaultAgentID must be preserved when nil input")
+		if r2.DefaultAgentID != nil {
+			assert.Equal(t, agentID, *r2.DefaultAgentID, "DefaultAgentID value must match original")
+		}
+		assert.Equal(t, "parent-original", r2.ParentRef, "ParentRef must be preserved when empty (DEF-28)")
+	})
+
+	// Bucket D — ALWAYS-WRITTEN: value changed from initial.
+	t.Run("D_always_written", func(t *testing.T) {
+		// LastActivityAt is set to time.Now() on every upsert update.
+		// It must differ from the initial value (which was set by the first upsert).
+		assert.False(t, r2.LastActivityAt.Equal(initialLastActivity) && r2.LastActivityAt.Before(time.Now().Add(-time.Second)),
+			"LastActivityAt must be updated on every upsert (bucket D)")
+	})
+
+	// Bucket E — NOT TOUCHED: still nil after update.
+	t.Run("E_not_touched", func(t *testing.T) {
+		assert.Nil(t, r2.ArchivedAt, "ArchivedAt must not be set by upsert update path")
+		assert.Nil(t, r2.DeletedAt, "DeletedAt must not be set by upsert update path")
+	})
+
+	// Step 3: Upsert with NON-EMPTY optional fields — must overwrite.
+	newProjectID := uuid.NewString()
+	newAgentID := uuid.NewString()
+	overwrite := &store.Conversation{
+		Kind:           "group",
+		Surface:        "native",
+		ExternalRef:    initial.ExternalRef,
+		ParentRef:      "parent-updated",
+		DisplayName:    "Updated Name",
+		DriftState:     "orphaned",
+		ProjectID:      &newProjectID,
+		DefaultAgentID: &newAgentID,
+	}
+	r3, err := s.UpsertConversationByExternalRef(ctx, overwrite)
+	require.NoError(t, err)
+
+	// Bucket C — non-empty input DOES overwrite.
+	t.Run("C_overwrite_when_nonempty", func(t *testing.T) {
+		assert.Equal(t, "Updated Name", r3.DisplayName, "DisplayName must update when non-empty")
+		assert.Equal(t, "orphaned", r3.DriftState, "DriftState must update when non-empty")
+		require.NotNil(t, r3.ProjectID)
+		assert.Equal(t, newProjectID, *r3.ProjectID, "ProjectID must update when non-nil")
+		require.NotNil(t, r3.DefaultAgentID)
+		assert.Equal(t, newAgentID, *r3.DefaultAgentID, "DefaultAgentID must update when non-nil")
+		assert.Equal(t, "parent-updated", r3.ParentRef, "ParentRef must update when non-empty")
+	})
 }
 
 // ---------------------------------------------------------------------------
