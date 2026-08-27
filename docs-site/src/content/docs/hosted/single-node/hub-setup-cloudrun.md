@@ -47,12 +47,13 @@ gcloud services enable \
 
 | Tool | Verify |
 |------|--------|
-| `gcloud` (recent version, with `beta` component) | `gcloud beta run instances deploy --help` |
+| `gcloud` 582.0.0 or later (verified; 575.0.0 does not have `beta run instances`) | `gcloud version` and `gcloud beta run instances deploy --help` |
 | `git` | `git --version` |
 
 :::caution[gcloud version]
-`gcloud beta run instances deploy` requires a recent gcloud SDK. If `beta run
-instances` returns "Invalid choice: 'instances'", update your SDK:
+`gcloud beta run instances deploy --sandbox-launcher` requires Cloud SDK 582.0.0
+or later. Version 575.0.0 does not have `beta run instances` at all. If the
+command returns "Invalid choice: 'instances'", update your SDK:
 `sudo apt-get update && sudo apt-get --only-upgrade install google-cloud-cli`.
 :::
 
