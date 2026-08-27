@@ -10,6 +10,7 @@ import (
 // handleAdminResetAuthAll handles POST /api/v1/admin/agents/reset-auth-all.
 // It lists all running agents and dispatches an auth reset for each one,
 // returning a summary of successes and failures.
+// Authorization: enforced by routeGuard via hub.auth_reset.execute permission.
 func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -17,10 +18,6 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 	}
 
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	ctx := r.Context()
 

@@ -88,18 +88,9 @@ func TestBypassCensus(t *testing.T) {
 
 		// User management (PR-A3) — converted to permission-based checks
 
-		// Operations (PR-A4)
-		{file: "admin_maintenance.go", lineSubstr: `user.Role() != "admin"`, description: "list maintenance (PR-A4)"},
-		{file: "admin_maintenance.go", lineSubstr: `user.Role() != "admin"`, description: "run maintenance (PR-A4)"},
-		{file: "admin_maintenance.go", lineSubstr: `user.Role() != "admin"`, description: "check updates (PR-A4)"},
-		{file: "admin_maintenance.go", lineSubstr: `user.Role() != "admin"`, description: "restart (PR-A4)"},
-		{file: "admin_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "admin mode read bypass (PR-A4)"},
-		{file: "admin_mode.go", lineSubstr: `user.Role() != "admin"`, description: "admin mode update (PR-A4)"},
-		{file: "admin_mode.go", lineSubstr: `user.Role() != "admin"`, description: "admin mode status (PR-A4)"},
-		{file: "admin_reset_auth.go", lineSubstr: `user.Role() != "admin"`, description: "reset auth (PR-A4)"},
-		{file: "handlers_diagnostics.go", lineSubstr: `user.Role() != "admin"`, description: "get logs (PR-A4)"},
-		{file: "handlers_diagnostics.go", lineSubstr: `user.Role() != "admin"`, description: "stream logs (PR-A4)"},
-		{file: "handlers_health_summary.go", lineSubstr: `user.Role() != "admin"`, description: "health summary (PR-A4)"},
+		// Operations (PR-A4) — 10 handler bypass sites converted to permission-based route guards.
+		// The AdminModeMiddleware bypass at admin_mode.go:113 remains as infrastructure.
+		{file: "admin_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AdminModeMiddleware admin bypass (infrastructure, KEEP)"},
 
 		// Integrations and hooks (PR-A5)
 		{file: "handlers_integrations.go", lineSubstr: `user.Role() != "admin"`, description: "update integration (PR-A5)"},

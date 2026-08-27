@@ -180,15 +180,8 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 
 // handleAdminMaintenance handles GET and PUT /api/v1/admin/maintenance.
 // GET returns the current maintenance state; PUT updates it.
-// Both require admin role.
+// Authorization: enforced by routeGuard via hub.admin_mode.update permission.
 func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
-	// Require admin user.
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	// In postgres mode, delegate to DB-backed handlers: maintenance becomes
 	// durable (persisted in hub_settings) and cluster-wide (propagated via
 	// LISTEN/NOTIFY). File/SQLite mode keeps the exact current behavior
@@ -239,14 +232,9 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 
 // handleAdminScheduler handles GET /api/v1/admin/scheduler.
 // Returns the scheduler's current status including recurring handlers,
-// event handlers, and active one-shot timer count. Requires admin role.
+// event handlers, and active one-shot timer count.
+// Authorization: enforced by routeGuard via hub.scheduler.read permission.
 func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return

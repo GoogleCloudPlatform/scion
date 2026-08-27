@@ -491,35 +491,10 @@ func TestHandleAdminMaintenance_Put(t *testing.T) {
 	}
 }
 
-func TestHandleAdminMaintenance_NonAdmin(t *testing.T) {
-	srv := &Server{
-		maintenance: NewMaintenanceState(false, ""),
-	}
-
-	user := NewAuthenticatedUser("u2", "user@example.com", "User", "member", "cli")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), user))
-	rr := httptest.NewRecorder()
-	srv.handleAdminMaintenance(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("non-admin should get 403, got %d", rr.Code)
-	}
-}
-
-func TestHandleAdminMaintenance_Unauthenticated(t *testing.T) {
-	srv := &Server{
-		maintenance: NewMaintenanceState(false, ""),
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance", nil)
-	rr := httptest.NewRecorder()
-	srv.handleAdminMaintenance(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("unauthenticated should get 403, got %d", rr.Code)
-	}
-}
+// TestHandleAdminMaintenance_NonAdmin and TestHandleAdminMaintenance_Unauthenticated
+// were removed: authorization is now enforced by the routeGuard via the
+// hub.admin_mode.update permission (PR-A4). The handler no longer performs
+// inline admin checks. Authorization is tested in TestRouteGuardOpsPermissions.
 
 func TestHandleAdminMaintenance_MethodNotAllowed(t *testing.T) {
 	srv := &Server{

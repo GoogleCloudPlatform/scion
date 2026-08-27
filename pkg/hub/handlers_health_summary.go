@@ -101,18 +101,10 @@ type HealthSummaryStall struct {
 
 // handleHealthSummary handles GET /api/v1/admin/health/summary.
 // Returns a composite health summary aggregating all subsystems.
-// Requires admin role.
+// Authorization: enforced by routeGuard via hub.health.read permission.
 func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	// Enforce admin authorization — this endpoint exposes sensitive infrastructure
-	// details (DB pool stats, broker hostnames, agent states, dispatch status).
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
 		return
 	}
 

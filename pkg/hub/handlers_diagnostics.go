@@ -26,16 +26,10 @@ import (
 
 // handleDiagnosticsLogs handles GET /api/v1/admin/diagnostics/logs
 // It returns recent log entries from all system log IDs with source classification.
+// Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	// Require admin user
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
 		return
 	}
 
@@ -112,16 +106,10 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleDiagnosticsLogsStream handles GET /api/v1/admin/diagnostics/logs/stream
 // It streams log entries from all system log IDs via SSE with source classification.
+// Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	// Require admin user
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
 		return
 	}
 

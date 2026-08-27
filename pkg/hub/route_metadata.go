@@ -570,30 +570,37 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/maintenance": {
 		Pattern: "/api/v1/admin/maintenance", RouteID: "admin.maintenance",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.admin_mode.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/admin/maintenance/operations": {
 		Pattern: "/api/v1/admin/maintenance/operations", RouteID: "admin.maintenance.operations",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/maintenance/operations/": {
 		Pattern: "/api/v1/admin/maintenance/operations/", RouteID: "admin.maintenance.operations.byId",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/maintenance/migrations/": {
 		Pattern: "/api/v1/admin/maintenance/migrations/", RouteID: "admin.maintenance.migrations.byId",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/maintenance/check-updates": {
 		Pattern: "/api/v1/admin/maintenance/check-updates", RouteID: "admin.maintenance.checkUpdates",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/scheduler": {
 		Pattern: "/api/v1/admin/scheduler", RouteID: "admin.scheduler",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.scheduler.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/allow-list": {
 		Pattern: "/api/v1/admin/allow-list", RouteID: "admin.allowList",
@@ -648,6 +655,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/gcp-quota": {
 		Pattern: "/api/v1/admin/gcp-quota", RouteID: "admin.gcpQuota",
@@ -681,22 +689,27 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/diagnostics/logs/stream": {
 		Pattern: "/api/v1/admin/diagnostics/logs/stream", RouteID: "admin.diagnostics.logsStream",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.diagnostics.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/diagnostics/logs": {
 		Pattern: "/api/v1/admin/diagnostics/logs", RouteID: "admin.diagnostics.logs",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.diagnostics.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/health/summary": {
 		Pattern: "/api/v1/admin/health/summary", RouteID: "admin.health.summary",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/metrics/": {
 		Pattern: "/api/v1/metrics/", RouteID: "admin.metricsDashboard",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.metrics.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/metrics-dashboard": {
 		Pattern: "/api/v1/admin/metrics-dashboard", RouteID: "admin.metricsDashboard.legacy",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.metrics.read", Resource: "hub", Action: "read",
 	},
 
 	// -------------------------------------------------------------------------

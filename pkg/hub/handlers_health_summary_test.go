@@ -33,21 +33,10 @@ import (
 func TestHandleHealthSummary_AdminAccess(t *testing.T) {
 	srv, _ := testServer(t)
 
-	t.Run("Unauthenticated returns 403", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
-		rr := httptest.NewRecorder()
-		srv.handleHealthSummary(rr, req)
-		assert.Equal(t, http.StatusForbidden, rr.Code)
-	})
-
-	t.Run("Non-admin user returns 403", func(t *testing.T) {
-		member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
-		req = req.WithContext(contextWithIdentity(req.Context(), member))
-		rr := httptest.NewRecorder()
-		srv.handleHealthSummary(rr, req)
-		assert.Equal(t, http.StatusForbidden, rr.Code)
-	})
+	// Authorization subtests (Unauthenticated returns 403, Non-admin returns 403)
+	// were removed: authorization is now enforced by the routeGuard via
+	// hub.health.read permission (PR-A4). The handler no longer performs inline
+	// admin checks. Authorization is tested in TestRouteGuardOpsPermissions.
 
 	t.Run("Admin user returns 200", func(t *testing.T) {
 		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
