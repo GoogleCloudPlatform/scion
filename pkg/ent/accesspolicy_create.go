@@ -186,6 +186,20 @@ func (_c *AccessPolicyCreate) SetNillableOrigin(v *string) *AccessPolicyCreate {
 	return _c
 }
 
+// SetPolicyKind sets the "policy_kind" field.
+func (_c *AccessPolicyCreate) SetPolicyKind(v accesspolicy.PolicyKind) *AccessPolicyCreate {
+	_c.mutation.SetPolicyKind(v)
+	return _c
+}
+
+// SetNillablePolicyKind sets the "policy_kind" field if the given value is not nil.
+func (_c *AccessPolicyCreate) SetNillablePolicyKind(v *accesspolicy.PolicyKind) *AccessPolicyCreate {
+	if v != nil {
+		_c.SetPolicyKind(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AccessPolicyCreate) SetID(v uuid.UUID) *AccessPolicyCreate {
 	_c.mutation.SetID(v)
@@ -270,6 +284,10 @@ func (_c *AccessPolicyCreate) defaults() {
 		v := accesspolicy.DefaultOrigin
 		_c.mutation.SetOrigin(v)
 	}
+	if _, ok := _c.mutation.PolicyKind(); !ok {
+		v := accesspolicy.DefaultPolicyKind
+		_c.mutation.SetPolicyKind(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := accesspolicy.DefaultID()
 		_c.mutation.SetID(v)
@@ -321,6 +339,14 @@ func (_c *AccessPolicyCreate) check() error {
 	}
 	if _, ok := _c.mutation.Updated(); !ok {
 		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "AccessPolicy.updated"`)}
+	}
+	if _, ok := _c.mutation.PolicyKind(); !ok {
+		return &ValidationError{Name: "policy_kind", err: errors.New(`ent: missing required field "AccessPolicy.policy_kind"`)}
+	}
+	if v, ok := _c.mutation.PolicyKind(); ok {
+		if err := accesspolicy.PolicyKindValidator(v); err != nil {
+			return &ValidationError{Name: "policy_kind", err: fmt.Errorf(`ent: validator failed for field "AccessPolicy.policy_kind": %w`, err)}
+		}
 	}
 	return nil
 }
@@ -421,6 +447,10 @@ func (_c *AccessPolicyCreate) createSpec() (*AccessPolicy, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.Origin(); ok {
 		_spec.SetField(accesspolicy.FieldOrigin, field.TypeString, value)
 		_node.Origin = value
+	}
+	if value, ok := _c.mutation.PolicyKind(); ok {
+		_spec.SetField(accesspolicy.FieldPolicyKind, field.TypeEnum, value)
+		_node.PolicyKind = value
 	}
 	if nodes := _c.mutation.BindingsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -721,6 +751,18 @@ func (u *AccessPolicyUpsert) UpdateOrigin() *AccessPolicyUpsert {
 // ClearOrigin clears the value of the "origin" field.
 func (u *AccessPolicyUpsert) ClearOrigin() *AccessPolicyUpsert {
 	u.SetNull(accesspolicy.FieldOrigin)
+	return u
+}
+
+// SetPolicyKind sets the "policy_kind" field.
+func (u *AccessPolicyUpsert) SetPolicyKind(v accesspolicy.PolicyKind) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldPolicyKind, v)
+	return u
+}
+
+// UpdatePolicyKind sets the "policy_kind" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdatePolicyKind() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldPolicyKind)
 	return u
 }
 
@@ -1045,6 +1087,20 @@ func (u *AccessPolicyUpsertOne) UpdateOrigin() *AccessPolicyUpsertOne {
 func (u *AccessPolicyUpsertOne) ClearOrigin() *AccessPolicyUpsertOne {
 	return u.Update(func(s *AccessPolicyUpsert) {
 		s.ClearOrigin()
+	})
+}
+
+// SetPolicyKind sets the "policy_kind" field.
+func (u *AccessPolicyUpsertOne) SetPolicyKind(v accesspolicy.PolicyKind) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetPolicyKind(v)
+	})
+}
+
+// UpdatePolicyKind sets the "policy_kind" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdatePolicyKind() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdatePolicyKind()
 	})
 }
 
@@ -1536,6 +1592,20 @@ func (u *AccessPolicyUpsertBulk) UpdateOrigin() *AccessPolicyUpsertBulk {
 func (u *AccessPolicyUpsertBulk) ClearOrigin() *AccessPolicyUpsertBulk {
 	return u.Update(func(s *AccessPolicyUpsert) {
 		s.ClearOrigin()
+	})
+}
+
+// SetPolicyKind sets the "policy_kind" field.
+func (u *AccessPolicyUpsertBulk) SetPolicyKind(v accesspolicy.PolicyKind) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetPolicyKind(v)
+	})
+}
+
+// UpdatePolicyKind sets the "policy_kind" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdatePolicyKind() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdatePolicyKind()
 	})
 }
 

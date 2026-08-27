@@ -505,6 +505,10 @@ func (m *mockScheduledEventStore) CreateAgent(_ context.Context, agent *store.Ag
 	return nil
 }
 
+func (m *mockScheduledEventStore) CreateDelegationEdge(_ context.Context, _ *store.DelegationEdge) error {
+	return nil // no-op for mock
+}
+
 func (m *mockScheduledEventStore) GetTemplate(_ context.Context, _ string) (*store.Template, error) {
 	return nil, store.ErrNotFound
 }

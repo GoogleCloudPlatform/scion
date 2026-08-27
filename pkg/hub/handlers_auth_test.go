@@ -940,10 +940,11 @@ func TestProvisionUser(t *testing.T) {
 	// admin_emails is additive-only: it can promote a user to admin but must
 	// never demote one. A user promoted through the admin UI (or an admin whose
 	// email was removed from the config) keeps their role across logins.
-	t.Run("keeps admin role when not in admin emails", func(t *testing.T) {
+	t.Run("D11: demotes admin when removed from admin emails", func(t *testing.T) {
 		srv, s := testServer(t)
+		srv.demotionSafe.Store(true) // reconciler says demotion is safe
 
-		// Pre-create user as admin (e.g. promoted via the admin UI)
+		// Pre-create user as admin (e.g. promoted via the admin UI or config)
 		original := &store.User{
 			ID:      generateID(),
 			Email:   "ui-admin@example.com",
@@ -955,7 +956,7 @@ func TestProvisionUser(t *testing.T) {
 			t.Fatalf("failed to create user: %v", err)
 		}
 
-		// Admin emails list does NOT include this user
+		// Admin emails list does NOT include this user — D11 requires demotion.
 		srv.config.AdminEmails = []string{"other-admin@example.com"}
 
 		info := &ExternalUserInfo{Email: "ui-admin@example.com"}
@@ -964,8 +965,8 @@ func TestProvisionUser(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if user.Role != "admin" {
-			t.Errorf("expected role 'admin' to be retained, got %q", user.Role)
+		if user.Role != "member" {
+			t.Errorf("expected role 'member' after D11 demotion, got %q", user.Role)
 		}
 
 		// Verify persisted in store
@@ -973,8 +974,8 @@ func TestProvisionUser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("user not found in store: %v", err)
 		}
-		if stored.Role != "admin" {
-			t.Errorf("expected stored role 'admin', got %q", stored.Role)
+		if stored.Role != "member" {
+			t.Errorf("expected stored role 'member' after D11 demotion, got %q", stored.Role)
 		}
 	})
 
@@ -1113,4 +1114,96 @@ func TestProvisionUser(t *testing.T) {
 			t.Error("store user ID does not match")
 		}
 	})
+}
+
+// D11-fix2: After login-time demotion (admin removed from AdminEmails),
+// IsSystemAdmin must return false because the super-admin binding is deleted.
+func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
+	ctx := context.Background()
+
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		if strings.Contains(err.Error(), "sqlite driver not registered") {
+			t.Skip("Skipping test because sqlite driver is not registered")
+		}
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = "test-token"
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	}
+	// AdminEmails does NOT include the user we will test.
+	cfg.AdminEmails = []string{"real-admin@test.com"}
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	srv.SetHubID("test-hub-id")
+	t.Cleanup(func() {
+		_ = srv.Shutdown(ctx)
+		_ = s.Close()
+	})
+	// The reconciler at startup found no user matching AdminEmails (the user is
+	// created below), so demotionSafe is false. Override to test login-time
+	// demotion behaviour in isolation from the guard (tested separately).
+	srv.demotionSafe.Store(true)
+
+	// Pre-create a user with Role="admin" and a super-admin binding.
+	userID := generateID()
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "demoted@test.com",
+		DisplayName: "Demoted",
+		Role:        "admin",
+		Status:      "active",
+		Created:     time.Now().Add(-time.Hour),
+		LastLogin:   time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get role definition: %v", err)
+	}
+	if _, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	}); err != nil {
+		t.Fatalf("create role binding: %v", err)
+	}
+
+	// Sanity: IsSystemAdmin returns true before login.
+	if !srv.authzService.IsSystemAdmin(ctx, userID) {
+		t.Fatal("pre-condition: user should be system admin before login")
+	}
+
+	// Trigger login (provisionUser), which should demote and delete binding.
+	user, err := srv.provisionUser(ctx, &ExternalUserInfo{
+		Email:       "demoted@test.com",
+		DisplayName: "Demoted",
+	})
+	if err != nil {
+		t.Fatalf("provisionUser: %v", err)
+	}
+	if user.Role != "member" {
+		t.Fatalf("expected role 'member' after demotion, got %q", user.Role)
+	}
+
+	// Key assertion: IsSystemAdmin must be false AFTER login.
+	if srv.authzService.IsSystemAdmin(ctx, userID) {
+		t.Fatal("IsSystemAdmin must return false after login-time demotion (binding should be deleted)")
+	}
 }

@@ -250,6 +250,37 @@ func decodeCursor(cursor string) (time.Time, uuid.UUID, error) {
 	return ts, id, nil
 }
 
+// encodeListCursor extends the ordinary keyset cursor with an optional binding.
+// A binding is supplied by endpoint callers that must reject cursors reused
+// across different resources or filters.
+func encodeListCursor(created time.Time, id, binding string) string {
+	raw := created.Format(time.RFC3339Nano) + "," + id
+	if binding != "" {
+		raw += "," + binding
+	}
+	return base64.URLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
+	raw, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+	}
+	parts := strings.SplitN(string(raw), ",", 3)
+	if len(parts) < 2 || (binding == "" && len(parts) != 2) || (binding != "" && (len(parts) != 3 || parts[2] != binding)) {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("cursor does not match this list")
+	}
+	ts, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse timestamp: %w", err)
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+	}
+	return ts, id, nil
+}
+
 // ListMessages returns messages matching the given filter, ordered by
 // created_at DESC.
 func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {

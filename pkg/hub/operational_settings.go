@@ -905,9 +905,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 	}
 
-	// Admin emails
+	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match
+	// the normalization the user store applies (D11-fix).
 	if len(snap.AdminEmails) > 0 {
-		s.config.AdminEmails = snap.AdminEmails
+		s.config.AdminEmails = config.SanitizeEmailList(snap.AdminEmails)
 		applied = append(applied, "admin_emails")
 	}
 

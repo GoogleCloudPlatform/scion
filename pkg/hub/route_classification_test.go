@@ -25,6 +25,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
 var routePermissionClassifications = map[string]string{
@@ -84,7 +86,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/injected-skills/":         "authenticated:injected-skills",
 	"/api/v1/users/me/templates":                "authenticated:user-templates",
 	"/api/v1/users/me/templates/":               "authenticated:user-templates",
-	"/api/v1/hub/settings/injected-skills":      "hub-admin:injected-skills",
+	"/api/v1/hub/settings/injected-skills":      "authenticated:injected-skills",
 	"/api/v1/brokers":                           "broker-hmac:registration",
 	"/api/v1/brokers/join":                      "broker-hmac:registration",
 	"/api/v1/brokers/":                          "broker-hmac:broker",
@@ -177,6 +179,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/system/fs/list":                    "workstation:filesystem",
 	"/api/v1/system/fs/mkdir":                   "workstation:filesystem",
 	"/api/v1/system/fs/validate-path":           "workstation:filesystem",
+	"/api/v1/authz/explain":                     "authenticated:authz-explain",
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {
@@ -216,6 +219,154 @@ func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {
 	sort.Strings(stale)
 	if len(stale) > 0 {
 		t.Fatalf("permission classifications for unregistered routes: %v", stale)
+	}
+}
+
+func TestRegisteredRoutesHaveRouteMetadata(t *testing.T) {
+	source, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`s\.mux\.Handle(?:Func)?\("([^"]+)"`)
+	matches := re.FindAllStringSubmatch(string(source), -1)
+	if len(matches) == 0 {
+		t.Fatal("no registered routes found in server.go")
+	}
+
+	registered := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		registered[match[1]] = true
+	}
+
+	var missing []string
+	for route := range registered {
+		meta, ok := routeMetadataTable[route]
+		if !ok {
+			missing = append(missing, route)
+			continue
+		}
+		if meta.Classification == "" {
+			missing = append(missing, route+" (empty classification)")
+		}
+		if meta.RouteID == "" {
+			missing = append(missing, route+" (empty routeID)")
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("registered routes missing route metadata: %v", missing)
+	}
+
+	var stale []string
+	for route := range routeMetadataTable {
+		if !registered[route] {
+			stale = append(stale, route)
+		}
+	}
+	sort.Strings(stale)
+	if len(stale) > 0 {
+		t.Fatalf("route metadata for unregistered routes: %v", stale)
+	}
+}
+
+func TestRouteMetadataPermissionsAreValid(t *testing.T) {
+	// Build set of valid permission IDs from the registry.
+	validPermissions := make(map[string]bool)
+	for _, perm := range permissions.Registry {
+		validPermissions[perm.ID] = true
+	}
+
+	var invalid []string
+	for pattern, meta := range routeMetadataTable {
+		if meta.Classification != RoutePolicy {
+			continue
+		}
+		if meta.Permission == "" {
+			invalid = append(invalid, pattern+": empty permission")
+			continue
+		}
+		if !validPermissions[meta.Permission] {
+			invalid = append(invalid, pattern+": unknown permission "+meta.Permission)
+		}
+		if meta.Resource == "" {
+			invalid = append(invalid, pattern+": empty resource")
+		}
+		if meta.Action == "" {
+			invalid = append(invalid, pattern+": empty action")
+		}
+	}
+	sort.Strings(invalid)
+	if len(invalid) > 0 {
+		t.Fatalf("invalid route metadata permissions:\n%s", strings.Join(invalid, "\n"))
+	}
+}
+
+func TestRouteGuardsDenyUnauthorized(t *testing.T) {
+	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux()}
+	srv.registerRoutes()
+
+	// Test representative routes from each classification.
+	tests := []struct {
+		name           string
+		route          string
+		classification RouteClassification
+		identity       Identity
+		wantStatus     int
+	}{
+		// RouteAuthenticated: no identity → 401
+		{
+			name:           "authenticated route denies unauthenticated",
+			route:          "/api/v1/auth/logout",
+			classification: RouteAuthenticated,
+			identity:       nil,
+			wantStatus:     http.StatusUnauthorized,
+		},
+		// RouteHubAdmin: non-admin user → 403
+		{
+			name:           "hub-admin route denies non-admin",
+			route:          "/api/v1/admin/scheduler",
+			classification: RouteHubAdmin,
+			identity:       NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api"),
+			wantStatus:     http.StatusForbidden,
+		},
+		// RouteHubAdmin: no identity → 401
+		{
+			name:           "hub-admin route denies unauthenticated",
+			route:          "/api/v1/admin/scheduler",
+			classification: RouteHubAdmin,
+			identity:       nil,
+			wantStatus:     http.StatusUnauthorized,
+		},
+		// RouteAgentToken: no identity → 401
+		{
+			name:           "agent-token route denies unauthenticated",
+			route:          "/api/v1/agent/gcp-token",
+			classification: RouteAgentToken,
+			identity:       nil,
+			wantStatus:     http.StatusUnauthorized,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.identity != nil {
+				ctx = contextWithIdentity(ctx, tt.identity)
+			}
+			ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			defer cancel()
+
+			req := httptest.NewRequest(http.MethodGet, tt.route, nil)
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("route %s returned %d, want %d: %s", tt.route, rr.Code, tt.wantStatus, rr.Body.String())
+			}
+		})
 	}
 }
 

@@ -12,6 +12,9 @@ type AccessPolicy func(*sql.Selector)
 // Agent is the predicate function for agent builders.
 type Agent func(*sql.Selector)
 
+// AgentCredential is the predicate function for agentcredential builders.
+type AgentCredential func(*sql.Selector)
+
 // AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
 type AgentSessionMetrics func(*sql.Selector)
 
@@ -32,6 +35,12 @@ type BrokerSecret func(*sql.Selector)
 
 // ChatLinkCode is the predicate function for chatlinkcode builders.
 type ChatLinkCode func(*sql.Selector)
+
+// DecisionAudit is the predicate function for decisionaudit builders.
+type DecisionAudit func(*sql.Selector)
+
+// DelegationEdge is the predicate function for delegationedge builders.
+type DelegationEdge func(*sql.Selector)
 
 // EnvVar is the predicate function for envvar builders.
 type EnvVar func(*sql.Selector)
@@ -81,6 +90,9 @@ type MaintenanceOperationRun func(*sql.Selector)
 // Message is the predicate function for message builders.
 type Message func(*sql.Selector)
 
+// MutationAudit is the predicate function for mutationaudit builders.
+type MutationAudit func(*sql.Selector)
+
 // NonceCache is the predicate function for noncecache builders.
 type NonceCache func(*sql.Selector)
 
@@ -104,6 +116,12 @@ type ProjectPreStartHook func(*sql.Selector)
 
 // ProjectSyncState is the predicate function for projectsyncstate builders.
 type ProjectSyncState func(*sql.Selector)
+
+// RoleBinding is the predicate function for rolebinding builders.
+type RoleBinding func(*sql.Selector)
+
+// RoleDefinition is the predicate function for roledefinition builders.
+type RoleDefinition func(*sql.Selector)
 
 // RuntimeBroker is the predicate function for runtimebroker builders.
 type RuntimeBroker func(*sql.Selector)

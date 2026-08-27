@@ -28,7 +28,31 @@ var (
 	ErrVersionConflict  = errors.New("version conflict")
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
+
+	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
+	// attempts to create a role binding for the super-admin role definition.
+	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
+	// and the system reconciler; the F1.5 role-binding machinery must not be a
+	// second grant path.
+	ErrSuperAdminBindingRestricted = errors.New("super-admin role bindings can only be created by the system reconciler")
 )
+
+// SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
+// system reconciler as the caller of CreateRoleBinding. Only bindings
+// with this CreatedBy value (or SystemBackfillCreatedBy) may target the
+// super-admin role definition.
+const SystemReconcileCreatedBy = "system-reconcile"
+
+// SystemBackfillCreatedBy is the CreatedBy sentinel for the one-time
+// startup backfill that migrates existing User.Role values into role bindings.
+const SystemBackfillCreatedBy = "system-backfill"
+
+// IsSuperAdminBindingAllowed reports whether the given CreatedBy value is
+// permitted to create a super-admin role binding. Only the system reconciler
+// and the startup backfill are allowed.
+func IsSuperAdminBindingAllowed(createdBy string) bool {
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+}
 
 // Store defines the interface for Hub data persistence.
 // Implementations may use SQLite, PostgreSQL, Firestore, or other backends.
@@ -134,6 +158,21 @@ type Store interface {
 
 	// AgentSessionMetrics operations (Hub Metrics Reporting)
 	AgentSessionMetricsStore
+
+	// Role operations (Permissions Foundation Phase 1E)
+	RoleStore
+
+	// Delegation Edge operations (Permissions Foundation Phase 1G)
+	DelegationEdgeStore
+
+	// Agent Credential operations (Permissions Foundation Phase 1H)
+	AgentCredentialStore
+
+	// Decision Audit operations (Authorization Decision Audit Phase 1I)
+	DecisionAuditStore
+
+	// Mutation Audit operations (Authorization Mutation Audit Phase 1I)
+	MutationAuditStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1546,4 +1585,145 @@ type AgentSessionMetricsStore interface {
 	// CountDistinctAgentsByProject returns the number of distinct agents with
 	// session metrics in a project.
 	CountDistinctAgentsByProject(ctx context.Context, projectID string) (int, error)
+}
+
+// =============================================================================
+// Role Definitions and Bindings (Permissions Foundation Phase 1E)
+// =============================================================================
+
+// RoleStore defines role definition and role binding persistence operations.
+type RoleStore interface {
+	// GetRoleDefinition retrieves a role definition by ID.
+	// Returns ErrNotFound if the role definition doesn't exist.
+	GetRoleDefinition(ctx context.Context, id string) (*RoleDefinition, error)
+
+	// GetRoleDefinitionByName retrieves a role definition by name and scope type.
+	// Returns ErrNotFound if the role definition doesn't exist.
+	GetRoleDefinitionByName(ctx context.Context, name string, scopeType string) (*RoleDefinition, error)
+
+	// ListRoleDefinitions returns all role definitions.
+	ListRoleDefinitions(ctx context.Context) ([]*RoleDefinition, error)
+
+	// CreateRoleDefinition creates a new role definition.
+	// Returns ErrAlreadyExists if a role definition with the same name+scopeType exists.
+	CreateRoleDefinition(ctx context.Context, rd *RoleDefinition) (*RoleDefinition, error)
+
+	// GetRoleBinding retrieves a role binding by ID.
+	// Returns ErrNotFound if the role binding doesn't exist.
+	GetRoleBinding(ctx context.Context, id string) (*RoleBinding, error)
+
+	// ListRoleBindingsForPrincipal returns all role bindings for a given principal.
+	ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*RoleBinding, error)
+
+	// ListRoleBindingsForScope returns all role bindings for a given scope.
+	ListRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) ([]*RoleBinding, error)
+
+	// CreateRoleBinding creates a new role binding.
+	// Returns ErrAlreadyExists if the exact binding already exists.
+	CreateRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
+
+	// DeleteRoleBinding deletes a role binding by ID.
+	// Returns ErrNotFound if the role binding doesn't exist.
+	DeleteRoleBinding(ctx context.Context, id string) error
+
+	// GetProjectMembership returns the project membership for a user in a project.
+	// Returns ErrNotFound if the user is not a member of the project.
+	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)
+
+	// ListProjectMembers returns all members of a project via role bindings.
+	ListProjectMembers(ctx context.Context, projectID string) ([]*ProjectMembership, error)
+
+	// IsProjectMember returns true if the user has any project-scoped role binding
+	// for the given project.
+	IsProjectMember(ctx context.Context, projectID, userID string) (bool, error)
+}
+
+// =============================================================================
+// Delegation Edge Store (Permissions Foundation Phase 1G)
+// =============================================================================
+
+// DelegationEdgeStore defines delegation edge persistence operations.
+// Delegation edges record every authority-delegating relationship and are
+// used by the live delegation ceiling to verify ancestor authority at
+// decision time.
+type DelegationEdgeStore interface {
+	// CreateDelegationEdge records a new delegation edge.
+	CreateDelegationEdge(ctx context.Context, edge *DelegationEdge) error
+
+	// GetDelegationEdgesForDelegate returns active delegation edges where
+	// the given principal is the delegate (receiving authority).
+	GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*DelegationEdge, error)
+
+	// GetDelegationEdgesForDelegator returns active delegation edges where
+	// the given principal is the delegator (granting authority).
+	GetDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string) ([]*DelegationEdge, error)
+
+	// DeactivateDelegationEdge marks an edge as inactive.
+	// Returns ErrNotFound if the edge doesn't exist.
+	DeactivateDelegationEdge(ctx context.Context, edgeID string) error
+}
+
+// =============================================================================
+// Agent Credential Store (Permissions Foundation Phase 1H)
+// =============================================================================
+
+// AgentCredentialStore defines agent credential persistence operations.
+type AgentCredentialStore interface {
+	// CreateAgentCredential records a newly issued agent token.
+	CreateAgentCredential(ctx context.Context, cred *AgentCredential) error
+
+	// GetAgentCredentialByJTIHash looks up a credential by its JTI hash.
+	// Returns ErrNotFound if no credential exists with that hash.
+	GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*AgentCredential, error)
+
+	// RevokeAgentCredential marks a credential as revoked.
+	// Returns ErrNotFound if the credential doesn't exist.
+	RevokeAgentCredential(ctx context.Context, id string, revokedBy string, reason string) error
+
+	// RevokeAgentCredentialsByAgent revokes all active credentials for an agent.
+	// Returns the number of credentials revoked.
+	RevokeAgentCredentialsByAgent(ctx context.Context, agentID string, revokedBy string, reason string) (int, error)
+
+	// UpdateAgentCredentialLastSeen updates the last_seen_at timestamp.
+	UpdateAgentCredentialLastSeen(ctx context.Context, id string, lastSeen time.Time) error
+
+	// PurgeExpiredAgentCredentials removes expired credentials older than cutoff.
+	// Returns the number of credentials purged.
+	PurgeExpiredAgentCredentials(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// =============================================================================
+// Decision Audit Store (Authorization Decision Audit Phase 1I)
+// =============================================================================
+
+// DecisionAuditStore defines persistence operations for authorization decision audit records.
+type DecisionAuditStore interface {
+	// CreateDecisionAudit stores a new decision audit record.
+	CreateDecisionAudit(ctx context.Context, record *DecisionAuditRecord) error
+
+	// ListDecisionAudits returns decision audit records matching the filter.
+	// Returns (records, total count, error).
+	ListDecisionAudits(ctx context.Context, filter DecisionAuditFilter) ([]*DecisionAuditRecord, int, error)
+
+	// DeleteDecisionAuditsBefore removes decision audit records older than the given time.
+	// Returns the number of records deleted.
+	DeleteDecisionAuditsBefore(ctx context.Context, before time.Time) (int, error)
+}
+
+// =============================================================================
+// Mutation Audit Store (Authorization Mutation Audit Phase 1I)
+// =============================================================================
+
+// MutationAuditStore defines persistence operations for authorization mutation audit records.
+type MutationAuditStore interface {
+	// CreateMutationAudit stores a new mutation audit record.
+	CreateMutationAudit(ctx context.Context, record *MutationAuditRecord) error
+
+	// ListMutationAudits returns mutation audit records matching the filter.
+	// Returns (records, total count, error).
+	ListMutationAudits(ctx context.Context, filter MutationAuditFilter) ([]*MutationAuditRecord, int, error)
+
+	// DeleteMutationAuditsBefore removes mutation audit records older than the given time.
+	// Returns the number of records deleted.
+	DeleteMutationAuditsBefore(ctx context.Context, before time.Time) (int, error)
 }

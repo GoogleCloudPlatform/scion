@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -183,6 +184,7 @@ type WebServer struct {
 	hubHandler     http.Handler                // mounted Hub API handler, or nil
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
+	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
@@ -571,6 +573,21 @@ func (ws *WebServer) SetMaintenanceState(ms *MaintenanceState) {
 	ws.maintenance = ms
 }
 
+// SetDemotionSafe shares the Hub's demotionSafe flag with the web server
+// so that proxy-auth login paths refuse demotion when the reconciler did.
+func (ws *WebServer) SetDemotionSafe(flag *atomic.Bool) {
+	ws.demotionSafe = flag
+}
+
+// isDemotionSafe returns whether login-time demotion is permitted.
+// Nil-safe: returns false (don't demote) when the flag was never set.
+func (ws *WebServer) isDemotionSafe() bool {
+	if ws.demotionSafe == nil {
+		return false
+	}
+	return ws.demotionSafe.Load()
+}
+
 // SetOAuthService sets the OAuth service for web OAuth flows.
 func (ws *WebServer) SetOAuthService(svc *OAuthService) {
 	ws.oauthService = svc
@@ -663,6 +680,10 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 	// (hub + web on the same port). Without this, the SPA catch-all "/"
 	// intercepts /.well-known/ requests and returns HTML instead of JSON.
 	ws.mux.Handle("/.well-known/", hubHandler)
+	// Forward /readyz to the hub handler so readiness checks work via the
+	// public URL. The hub mux already has handleReadyz registered, and
+	// /readyz is in isHealthEndpoint() so auth middleware allows it through.
+	ws.mux.Handle("/readyz", hubHandler)
 }
 
 // sessionToBearerMiddleware bridges cookie-based web sessions to the
@@ -1388,7 +1409,7 @@ func isAllowedSubjectChar(c rune) bool {
 // isPublicRoute returns true for routes that do not require authentication.
 func isPublicRoute(path string) bool {
 	switch {
-	case path == "/healthz" || path == "/health":
+	case path == "/healthz" || path == "/health" || path == "/readyz":
 		return true
 	case strings.HasPrefix(path, "/assets/"):
 		return true
@@ -1598,7 +1619,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 							"email", email, "error", err)
 					}
 				}
-				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole)
+				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe())
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -1685,7 +1706,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "")
+			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe())
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -1715,7 +1736,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				user.DisplayName = proxyUser.DisplayName
 			}
 			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-			if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role); user.Role != newRole {
+			if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
 				ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole
 			}
@@ -1969,7 +1990,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.adminEmails(), "")
+		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe())
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -2006,7 +2027,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.AvatarURL = userInfo.AvatarURL
 			}
 			user.LastLogin = time.Now()
-			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role)
+			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
 			// Log the activation via slog (WebServer does not have a structured
 			// audit logger; the hub.Server audit path covers API/CLI auth).
 			ws.logger().Info("invite audit: user_activated", "email", userInfo.Email, "user_id", user.ID)
@@ -2020,7 +2041,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.DisplayName = userInfo.DisplayName
 			}
 			// Re-evaluate admin status on every login
-			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role)
+			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
 			if user.Role != newRole {
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole

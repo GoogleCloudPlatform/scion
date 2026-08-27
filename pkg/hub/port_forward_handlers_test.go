@@ -68,6 +68,96 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Empty(t, got.ExposedPorts)
 }
 
+func TestAuthorizePortRegistrationRejectsScopedHubAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := NewAuthenticatedUser(tid("scoped-port-admin"), "admin@example.com", "Scoped Port Admin", store.UserRoleAdmin, "api")
+	project := &store.Project{
+		ID:      tid("scoped-port-project"),
+		Name:    "Scoped Port Project",
+		Slug:    "scoped-port-project",
+		OwnerID: admin.ID(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID:        tid("scoped-port-agent"),
+		Slug:      "scoped-port-agent",
+		Name:      "Scoped Port Agent",
+		ProjectID: project.ID,
+		OwnerID:   admin.ID(),
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	scoped := NewScopedUserIdentity(admin, project.ID, []string{store.UATScopeAgentPortAccess})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), scoped))
+	w := httptest.NewRecorder()
+
+	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
+
+	assert.False(t, ok, "scoped hub-admin UAT must not use the raw admin port-management shortcut")
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "Scoped access tokens cannot manage exposed ports")
+}
+
+func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	caller := newBindableFederatedAdmin(tid("federated-port-admin"))
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: caller.ID(), Email: caller.Email(), DisplayName: caller.DisplayName(), Role: store.UserRoleMember, Status: "active",
+	}))
+	project := &store.Project{
+		ID: tid("federated-port-project"), Name: "Federated Port Project", Slug: "federated-port-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("federated-port-agent"), Slug: "federated-port-agent", Name: "Federated Port Agent",
+		ProjectID: project.ID, OwnerID: tid("different-owner"), Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	policy := &store.Policy{
+		ID: tid("federated-port-access"), Name: "Federated port access", ScopeType: "project", ScopeID: project.ID,
+		ResourceType: "agent", Actions: []string{string(ActionPortAccess)}, Effect: "allow",
+	}
+	require.NoError(t, s.CreatePolicy(ctx, policy))
+	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID: policy.ID, PrincipalType: "user", PrincipalID: caller.ID(),
+	}))
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), caller))
+	w := httptest.NewRecorder()
+
+	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
+
+	assert.False(t, ok, "federated admins must not use the local-admin port-management shortcut")
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "Only the agent can manage its exposed ports")
+}
+
+func TestAuthorizePortRegistrationAllowsUnscopedLocalAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: tid("local-admin-port-project"), Name: "Local Admin Port Project", Slug: "local-admin-port-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("local-admin-port-agent"), Slug: "local-admin-port-agent", Name: "Local Admin Port Agent",
+		ProjectID: project.ID, OwnerID: tid("different-owner"), Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	localAdmin := NewAuthenticatedUser(tid("local-port-admin"), "admin@example.com", "Local Port Admin", store.UserRoleAdmin, "api")
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), localAdmin))
+	w := httptest.NewRecorder()
+
+	got, ok := srv.authorizePortRegistration(w, r, agent.ID)
+
+	require.True(t, ok)
+	assert.Equal(t, agent.ID, got.ID)
+}
+
 func TestAgentPortRegistrationRejectsNonLoopbackHost(t *testing.T) {
 	srv, s := testServer(t)
 	agent, token := createPortForwardAgent(t, srv, s)

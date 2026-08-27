@@ -72,6 +72,9 @@ func (AccessPolicy) Fields() []ent.Field {
 		field.String("origin").
 			Optional().
 			Default(""),
+		field.Enum("policy_kind").
+			Values("explicit", "default").
+			Default("explicit"),
 	}
 }
 
@@ -79,6 +82,8 @@ func (AccessPolicy) Fields() []ent.Field {
 func (AccessPolicy) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("name", "scope_type", "scope_id").Unique(),
+		// Composite index for deterministic total ordering in policy evaluation
+		index.Fields("scope_type", "priority", "policy_kind", "created", "id"),
 	}
 }
 

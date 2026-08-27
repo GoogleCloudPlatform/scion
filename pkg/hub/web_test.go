@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -2854,10 +2855,10 @@ func TestProxyAuthMiddleware_ExistingSession_SkipsVerification(t *testing.T) {
 	_ = callCount
 }
 
-func TestProxyAuthMiddleware_KeepsAdminWhenNotInList(t *testing.T) {
-	// AdminEmails is additive-only: an existing admin user whose email is not
-	// in AdminEmails (e.g. promoted through the admin UI) keeps the admin role
-	// on the next proxy-authenticated request.
+func TestProxyAuthMiddleware_DemotesAdminWhenNotInList(t *testing.T) {
+	// D11: AdminEmails is now the sole authority for the admin role. An existing
+	// admin user whose email is NOT in AdminEmails is demoted to "member" on
+	// the next proxy-authenticated request.
 	mockAuth := &mockProxyAuthenticator{
 		user: &ProxyUserInfo{
 			Subject: "99",
@@ -2886,6 +2887,10 @@ func TestProxyAuthMiddleware_KeepsAdminWhenNotInList(t *testing.T) {
 		adminEmails: []string{"other-admin@example.com"},
 	})
 	ws.SetStore(st)
+	// Simulate reconciler confirming demotion is safe.
+	var safe atomic.Bool
+	safe.Store(true)
+	ws.SetDemotionSafe(&safe)
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -2893,11 +2898,11 @@ func TestProxyAuthMiddleware_KeepsAdminWhenNotInList(t *testing.T) {
 
 	ws.Handler().ServeHTTP(rec, req)
 
-	// Verify user kept the admin role
+	// D11: verify user was demoted because email is not in AdminEmails.
 	updated, err := st.GetUserByEmail(context.Background(), "ui-admin@example.com")
 	assert.NoError(t, err)
-	assert.Equal(t, "admin", updated.Role,
-		"admin_emails must not demote an admin granted through the UI")
+	assert.Equal(t, "member", updated.Role,
+		"D11: admin not in admin_emails must be demoted to member")
 }
 
 func TestProxyAuthMiddleware_PromotesToAdminWhenAddedToList(t *testing.T) {

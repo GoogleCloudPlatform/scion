@@ -61,6 +61,7 @@ testdata/hub-v46-fixture.db-shm
 fixturegen
 
 # Agent state files
+.agents/
 .coordinator-state.md
 .eng-manager-state.md
 

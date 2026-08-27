@@ -187,10 +187,11 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, fmt.Errorf("failed to look up user: %w", err)
 	}
 
-	return NewScopedUserIdentity(
+	return NewScopedUserIdentityWithCredentialID(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
 		token.ProjectID,
 		token.Scopes,
+		token.ID,
 	), nil
 }
 

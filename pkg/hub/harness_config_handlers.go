@@ -21,7 +21,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -171,37 +170,56 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		filter.Status = store.HarnessConfigStatusActive
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	identity := GetIdentityFromContext(ctx)
+	limit, err := parseAuthorizedListLimit(query.Get("limit"))
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		BadRequest(w, err.Error())
 		return
 	}
-
-	// Compute per-item and scope capabilities (mirrors listTemplatesV2).
-	identity := GetIdentityFromContext(ctx)
-	items := make([]HarnessConfigWithCapabilities, len(result.Items))
-	if identity != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = harnessConfigResource(&result.Items[i])
+	cursor := query.Get("cursor")
+	cursorBinding := authorizedListCursorBinding("harness-configs", filter)
+	if cursor != "" {
+		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
+			BadRequest(w, err.Error())
+			return
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "harness_config")
-		for i := range result.Items {
-			items[i] = HarnessConfigWithCapabilities{HarnessConfig: result.Items[i], Cap: caps[i]}
+	}
+	var configs []store.HarnessConfig
+	var nextCursor string
+	var totalCount int
+	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
+		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.HarnessConfig], error) {
+			page, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
+			if err != nil {
+				return authorizedCandidatePage[store.HarnessConfig]{}, err
+			}
+			return authorizedCandidatePage[store.HarnessConfig]{Items: page.Items, NextCursor: page.NextCursor}, nil
+		}, harnessConfigResource, func(h *store.HarnessConfig) string { return authorizedListCursor(h.Created, h.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
+		if err != nil {
+			writeAuthorizedListError(w, err)
+			return
+		}
+		configs, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	} else {
+		result, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		configs, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	}
+	items := make([]HarnessConfigWithCapabilities, 0, len(configs))
+	if identity == nil {
+		for i := range configs {
+			items = append(items, HarnessConfigWithCapabilities{HarnessConfig: configs[i]})
 		}
 	} else {
-		for i := range result.Items {
-			items[i] = HarnessConfigWithCapabilities{HarnessConfig: result.Items[i]}
+		resources := make([]Resource, len(configs))
+		for i := range configs {
+			resources[i] = harnessConfigResource(&configs[i])
+		}
+		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "harness_config") {
+			items = append(items, HarnessConfigWithCapabilities{HarnessConfig: configs[i], Cap: cap})
 		}
 	}
 
@@ -209,11 +227,10 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "harness_config")
 	}
-
 	writeJSON(w, http.StatusOK, ListHarnessConfigsResponse{
 		HarnessConfigs: items,
-		NextCursor:     result.NextCursor,
-		TotalCount:     result.TotalCount,
+		NextCursor:     nextCursor,
+		TotalCount:     totalCount,
 		Capabilities:   scopeCap,
 	})
 }
