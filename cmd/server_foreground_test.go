@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -175,4 +177,69 @@ func TestValidateHostedHAPreflight(t *testing.T) {
 		assert.Equal(t, "123-abc.apps.googleusercontent.com", cfg.Auth.Transport.OIDCAudience,
 			"preflight should trim the transport audience so downstream token minting uses the canonical value")
 	})
+}
+
+func TestInitWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
+	tests := []struct {
+		name        string
+		host        string
+		devAuth     string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "dev auth with 0.0.0.0 rejected",
+			host:        "0.0.0.0",
+			devAuth:     "some-token",
+			wantErr:     true,
+			errContains: "dev auth cannot be enabled",
+		},
+		{
+			name:        "dev auth with empty host (defaults to 0.0.0.0) rejected",
+			host:        "",
+			devAuth:     "some-token",
+			wantErr:     true,
+			errContains: "non-loopback address",
+		},
+		{
+			name:        "dev auth with public IP rejected",
+			host:        "192.168.1.1",
+			devAuth:     "some-token",
+			wantErr:     true,
+			errContains: "non-loopback address",
+		},
+		{
+			name:    "dev auth with 127.0.0.1 allowed",
+			host:    "127.0.0.1",
+			devAuth: "some-token",
+			wantErr: false,
+		},
+		{
+			name:    "no dev auth with 0.0.0.0 allowed",
+			host:    "0.0.0.0",
+			devAuth: "",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.GlobalConfig{}
+			cfg.Hub.Host = tt.host
+
+			_, err := initWebServer(context.Background(), cfg, nil, tt.devAuth, false, "", nil, nil)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				// initWebServer may fail for other reasons (e.g., missing deps)
+				// but it should NOT fail with a dev-auth error.
+				if err != nil {
+					assert.NotContains(t, err.Error(), "dev auth cannot be enabled",
+						"should not reject dev auth on loopback host")
+				}
+			}
+		})
+	}
 }

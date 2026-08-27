@@ -122,6 +122,7 @@ func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *WebServer {
 	t.Helper()
 	cfg := WebServerConfig{
+		Host:         "127.0.0.1",
 		DevAuthToken: "test-dev-token-12345",
 	}
 	for _, fn := range overrides {
@@ -3367,7 +3368,6 @@ func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testin
 	assert.False(t, sessionReSet, "session cookie should NOT be re-set when role is unchanged")
 }
 
-// ---------------------------------------------------------------------------
 // Live operational settings propagation — regression tests for issue #1270
 // ---------------------------------------------------------------------------
 
@@ -3440,4 +3440,83 @@ func TestServer_ImplementsAccessSettingsProvider(t *testing.T) {
 		"AuthorizedDomains must return a defensive copy")
 
 	assert.Equal(t, "invite_only", provider.UserAccessMode())
+}
+
+// ---------------------------------------------------------------------------
+// isLoopbackHost
+// ---------------------------------------------------------------------------
+
+func TestIsLoopbackHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		// Safe: loopback addresses
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"localhost", true},
+
+		// Unsafe: all-interfaces addresses
+		{"0.0.0.0", false},
+		{"::", false},
+
+		// Unsafe: non-loopback IPs
+		{"192.168.1.1", false},
+		{"10.0.0.1", false},
+		{"172.16.0.1", false},
+
+		// Unsafe: empty string (not a valid loopback)
+		{"", false},
+
+		// Unsafe: unresolvable hostname (not "localhost")
+		{"example.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got := IsLoopbackHost(tt.host)
+			assert.Equal(t, tt.want, got, "IsLoopbackHost(%q)", tt.host)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewWebServer dev-auth + non-loopback guard
+// ---------------------------------------------------------------------------
+
+func TestNewWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
+	// NewWebServer calls log.Fatalf when dev auth is combined with a
+	// non-loopback host. We cannot easily intercept log.Fatalf in a unit
+	// test without replacing the default logger, so instead we validate
+	// that the guard logic (IsLoopbackHost) correctly identifies non-loopback
+	// addresses, and that constructing a WebServer with dev auth + loopback
+	// succeeds without panicking.
+
+	// Positive case: dev auth with loopback should succeed.
+	ws := NewWebServer(WebServerConfig{
+		Host:         "127.0.0.1",
+		DevAuthToken: "test-token",
+	})
+	assert.NotNil(t, ws)
+	assert.Equal(t, "127.0.0.1", ws.config.Host)
+
+	// Also verify localhost works.
+	ws2 := NewWebServer(WebServerConfig{
+		Host:         "localhost",
+		DevAuthToken: "test-token",
+	})
+	assert.NotNil(t, ws2)
+
+	// IPv6 loopback.
+	ws3 := NewWebServer(WebServerConfig{
+		Host:         "::1",
+		DevAuthToken: "test-token",
+	})
+	assert.NotNil(t, ws3)
+
+	// No dev auth token: any host should be fine.
+	ws4 := NewWebServer(WebServerConfig{
+		Host: "0.0.0.0",
+	})
+	assert.NotNil(t, ws4)
 }
