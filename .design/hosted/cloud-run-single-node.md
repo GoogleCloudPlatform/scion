@@ -205,9 +205,26 @@ degrades correctly if sandboxes ever ship on another platform.
 
 Two related deploy-time consequences of the missing `K_SERVICE`:
 
-- `hub_id` cannot derive from `K_SERVICE` and falls back to hostname. **Set
-  `server.hub.hub_id` explicitly in the deploy**; hostname stability across redeploys
-  is unverified.
+- `hub_id` cannot derive from `K_SERVICE` and falls back to hostname. That fallback is
+  now measured, and it is stable: the hostname inside an Instance is always `localhost`,
+  so `hub_id` is always `49960de5880e` — the first twelve hex digits of
+  `SHA-256("localhost")` — on every Instance in every project. **Do not set
+  `server.hub.hub_id` in the deploy.** An earlier revision of this document instructed
+  otherwise, on the assumption that the hostname was unstable; no deploy ever followed
+  the instruction, and the measurement says it would have bought nothing. `hub_id` is not
+  inert — it seeds the hub's signing key, so a change to it invalidates live JWTs — but
+  across four startups the signing keys differed every time while `hub_id` stayed
+  constant. Key material is regenerated per start on this tier regardless of `hub_id`,
+  because nothing persists it. Pinning `hub_id` therefore cannot stabilise anything that
+  is not already stable.
+
+  This conclusion is conditional, and here is the condition that overturns it: today
+  every Instance in every project shares one `hub_id`, which is harmless only because
+  the value is never used to tell two hubs apart. Give this tier a persistent secret
+  backend (GCS, Secret Manager) so keys survive a restart, or run more than one Instance
+  against shared state, and `hub_id` uniqueness starts to matter. At that point setting
+  it explicitly — to the Instance name, which is operator-chosen and already unique
+  within a project — becomes the correct design.
 - The logging paths conclude "not on Cloud Run" and stand up their own Cloud Logging
   client, but an Instance's stdout is already captured. Likely duplicate ingestion.
 
