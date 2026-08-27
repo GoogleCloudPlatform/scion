@@ -2017,9 +2017,11 @@ companion instead; that pair is explained above.
 {{- if .Values.database.name }}{{- $inline = append $inline "database.name" }}{{- end }}
 {{- if .Values.database.user }}{{- $inline = append $inline "database.user" }}{{- end }}
 {{- if .Values.database.password }}{{- $inline = append $inline "database.password" }}{{- end }}
-{{- $web := .Values.auth.oauth.web }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- $authOauth := $auth.oauth | default (dict) }}
+{{- $web := $authOauth.web | default (dict) }}
 {{- range $provider := list "github" "google" }}
-{{- $creds := index $web $provider }}
+{{- $creds := index $web $provider | default (dict) }}
 {{- if $creds.clientId }}{{- $inline = append $inline (printf "auth.oauth.web.%s.clientId" $provider) }}{{- end }}
 {{- if $creds.clientSecret }}{{- $inline = append $inline (printf "auth.oauth.web.%s.clientSecret" $provider) }}{{- end }}
 {{- end }}
@@ -2155,7 +2157,8 @@ with a parity check over the copies rather than a shared definition.
 {{- if eq (lower (toString .Values.database.driver)) "postgres" }}
 {{- $routes = append $routes "database.driver is postgres (cmd/server_foreground.go, isHADeployment: strings.EqualFold(cfg.Database.Driver, \"postgres\"))" }}
 {{- end }}
-{{- if and (eq (lower (toString .Values.storage.provider)) "gcs") (eq (toString .Values.auth.mode) "proxy") }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- if and (eq (lower (toString .Values.storage.provider)) "gcs") (eq (toString $auth.mode) "proxy") }}
 {{- $routes = append $routes "storage.provider is gcs and auth.mode is proxy (cmd/server_foreground.go, isHADeployment: strings.EqualFold(cfg.Storage.Provider, \"gcs\") && cfg.Auth.Mode == \"proxy\")" }}
 {{- end }}
 {{- end }}
@@ -2191,7 +2194,8 @@ minutes between 1b3c9418 landing and being noticed.
 {{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
 {{- $gates := "a durable session/signing secret, from the session-secret phase. That is the whole list for auth.mode oauth: the hub's IAP gates sit inside `if cfg.Auth.Mode == \"proxy\"` in validateHostedHAPreflight, so this shape never reaches them and the ingress/IAP phase lands nothing this release is waiting on" }}
 {{- $removal := "That flag stops being needed for auth.mode oauth when the session-secret phase has landed. The ingress/IAP phase is not on this shape's path and waiting for it would hold the flag one phase too long; Filestore lands none of them either" }}
-{{- if eq (toString .Values.auth.mode) "proxy" }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- if eq (toString $auth.mode) "proxy" }}
 {{- $gates = "a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase" }}
 {{- $removal = "That flag stops being needed for auth.mode proxy when the session-secret phase and the ingress/IAP phase have both landed. Filestore lands none of them" }}
 {{- end }}
@@ -2451,8 +2455,9 @@ ever gets converted.
 
 {{- /* The discriminator for the two auth modes. The subtree it selects is not
 rendered yet; see the comment in the rendered file. */}}
-{{- if ne (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode }}
-{{- fail (printf "rendered settings.yaml has server.auth.mode: %s but auth.mode is %s." (include "scion-hub.diagValue" (dig "server" "auth" "mode" "" $doc)) (include "scion-hub.diagValue" $root.Values.auth.mode)) }}
+{{- $rootAuth := $root.Values.auth | default (dict) }}
+{{- if ne (dig "server" "auth" "mode" "" $doc) $rootAuth.mode }}
+{{- fail (printf "rendered settings.yaml has server.auth.mode: %s but auth.mode is %s." (include "scion-hub.diagValue" (dig "server" "auth" "mode" "" $doc)) (include "scion-hub.diagValue" $rootAuth.mode)) }}
 {{- end }}
 
 {{- /*
@@ -2639,7 +2644,9 @@ exchange at login. The assertion in assertSettings refuses that pairing by name;
 this is only the render.
 */}}
 {{- $oauthWeb := dict }}
-{{- $webValues := .Values.auth.oauth.web }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- $authOauth := $auth.oauth | default (dict) }}
+{{- $webValues := $authOauth.web | default (dict) }}
 {{- range $provider := list "google" "github" }}
 {{- $creds := index $webValues $provider }}
 {{- if or $creds.clientId $creds.clientSecret }}
@@ -2659,7 +2666,7 @@ this is only the render.
     "hub" $hub
     "database" $database
     "storage" $storage
-    "auth" (dict "mode" .Values.auth.mode)
+    "auth" (dict "mode" $auth.mode)
     "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
 {{- if $oauthWeb }}
 {{- $server = set $server "oauth" (dict "web" $oauthWeb) }}
@@ -3301,8 +3308,9 @@ Two sources, never both, and the caller must have run assertSessionSecret first
 so that "neither" is already refused by the time this renders.
 */}}
 {{- define "scion-hub.sessionSecretName" -}}
-{{- if .Values.auth.existingSecret }}
-{{- .Values.auth.existingSecret }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- if $auth.existingSecret }}
+{{- $auth.existingSecret }}
 {{- else }}
 {{- printf "%s-session" (include "scion-hub.fullname" .) }}
 {{- end }}
@@ -3322,8 +3330,9 @@ which is what auth.existingSecretKey is for, and why that path cannot use
 envFrom. See assertSessionSecret.
 */}}
 {{- define "scion-hub.sessionSecretKey" -}}
-{{- if .Values.auth.existingSecret }}
-{{- default "SCION_SERVER_SESSION_SECRET" .Values.auth.existingSecretKey }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- if $auth.existingSecret }}
+{{- default "SCION_SERVER_SESSION_SECRET" $auth.existingSecretKey }}
 {{- else }}
 {{- print "SCION_SERVER_SESSION_SECRET" }}
 {{- end }}
@@ -3356,13 +3365,14 @@ two would be silently inert, and an inert secret value is indistinguishable from
 a working one until sessions start breaking.
 */}}
 {{- define "scion-hub.assertSessionSecret" -}}
-{{- if and .Values.auth.sessionSecret .Values.auth.existingSecret }}
+{{- $auth := .Values.auth | default (dict) }}
+{{- if and $auth.sessionSecret $auth.existingSecret }}
 {{- fail "auth.sessionSecret and auth.existingSecret are both set. The chart cannot use both: one would be silently ignored, and a session secret that is silently ignored presents as intermittent logouts rather than as an error. Set exactly one - auth.existingSecret to reference a Secret you manage, or auth.sessionSecret to have the chart render one." }}
 {{- end }}
-{{- if not (or .Values.auth.sessionSecret .Values.auth.existingSecret) }}
+{{- if not (or $auth.sessionSecret $auth.existingSecret) }}
 {{- fail "auth.sessionSecret is not set and neither is auth.existingSecret, so this release has no session secret. The chart will not generate one: a generated secret rotates on every helm upgrade, which silently invalidates every session and the shared JWT signing key, and it cannot be rendered reproducibly because lookup returns empty under helm template. Nor will the hub refuse to start without one - it logs a single warning (cmd/server_foreground.go:1460) and then derives a per-process signing key, so each replica signs tokens the others reject and users are logged out whenever the load balancer moves them. Set auth.existingSecret to the name of a Secret you manage (preferred - the value never enters your values file or Helm's release storage), or set auth.sessionSecret to have the chart render one." }}
 {{- end }}
-{{- if and .Values.auth.existingSecretKey (not .Values.auth.existingSecret) }}
+{{- if and $auth.existingSecretKey (not $auth.existingSecret) }}
 {{- fail "auth.existingSecretKey is set but auth.existingSecret is not. The key names an entry inside a Secret the chart is not being given, so it selects nothing. Set auth.existingSecret too, or remove the key." }}
 {{- end }}
 {{- end }}

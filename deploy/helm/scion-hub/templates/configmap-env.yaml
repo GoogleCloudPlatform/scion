@@ -88,7 +88,8 @@ data:
   # later phase ever makes the session secret optional again, this default must
   # go back to false in the same change - tests/chart-integrity.sh section E
   # asserts exactly that pairing, in both directions.
-  SCION_REQUIRE_STABLE_SIGNING_KEY: {{ ternary "true" "false" .Values.auth.requireStableSigningKey | quote }}
+  {{- $auth := .Values.auth | default (dict) }}
+  SCION_REQUIRE_STABLE_SIGNING_KEY: {{ ternary "true" "false" ($auth.requireStableSigningKey | default false) | quote }}
   {{- with .Values.hub.adminMode }}
 
   # Truthy values are true, 1 and yes.

@@ -291,7 +291,8 @@ spec:
             a per-key selector has no meaning under envFrom, which cannot select
             a key. So the existing-secret path binds one key by name, below.
             */}}
-            {{- if not .Values.auth.existingSecret }}
+            {{- $auth := .Values.auth | default (dict) }}
+            {{- if not $auth.existingSecret }}
             - secretRef:
                 name: {{ include "scion-hub.sessionSecretName" . }}
             {{- end }}
@@ -301,7 +302,7 @@ spec:
             so that nothing else in their Secret reaches the hub's environment -
             see the envFrom comment above for why that matters.
             */}}
-            {{- if .Values.auth.existingSecret }}
+            {{- if $auth.existingSecret }}
             - name: SCION_SERVER_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
