@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -37,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -63,6 +65,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -90,6 +93,7 @@ const (
 	TypeChatLinkCode             = "ChatLinkCode"
 	TypeDecisionAudit            = "DecisionAudit"
 	TypeDelegationEdge           = "DelegationEdge"
+	TypeEntitlementBinding       = "EntitlementBinding"
 	TypeEnvVar                   = "EnvVar"
 	TypeGCPServiceAccount        = "GCPServiceAccount"
 	TypeGitHubResolutionCache    = "GitHubResolutionCache"
@@ -103,6 +107,7 @@ const (
 	TypeInviteCode               = "InviteCode"
 	TypeLifecycleHook            = "LifecycleHook"
 	TypeLifecycleHookAgentPhase  = "LifecycleHookAgentPhase"
+	TypeLimitDefinition          = "LimitDefinition"
 	TypeMaintenanceOperation     = "MaintenanceOperation"
 	TypeMaintenanceOperationRun  = "MaintenanceOperationRun"
 	TypeMessage                  = "Message"
@@ -127,6 +132,7 @@ const (
 	TypeSkillVersion             = "SkillVersion"
 	TypeSubscriptionTemplate     = "SubscriptionTemplate"
 	TypeTemplate                 = "Template"
+	TypeUsageReservation         = "UsageReservation"
 	TypeUser                     = "User"
 	TypeUserAccessToken          = "UserAccessToken"
 )
@@ -13929,6 +13935,882 @@ func (m *DelegationEdgeMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown DelegationEdge edge %s", name)
 }
 
+// EntitlementBindingMutation represents an operation that mutates the EntitlementBinding nodes in the graph.
+type EntitlementBindingMutation struct {
+	config
+	op                      Op
+	typ                     string
+	id                      *uuid.UUID
+	subject_type            *entitlementbinding.SubjectType
+	subject_id              *string
+	scope_type              *entitlementbinding.ScopeType
+	scope_id                *string
+	value                   *int64
+	addvalue                *int64
+	created_by              *string
+	created_at              *time.Time
+	updated_at              *time.Time
+	clearedFields           map[string]struct{}
+	limit_definition        *uuid.UUID
+	clearedlimit_definition bool
+	done                    bool
+	oldValue                func(context.Context) (*EntitlementBinding, error)
+	predicates              []predicate.EntitlementBinding
+}
+
+var _ ent.Mutation = (*EntitlementBindingMutation)(nil)
+
+// entitlementbindingOption allows management of the mutation configuration using functional options.
+type entitlementbindingOption func(*EntitlementBindingMutation)
+
+// newEntitlementBindingMutation creates new mutation for the EntitlementBinding entity.
+func newEntitlementBindingMutation(c config, op Op, opts ...entitlementbindingOption) *EntitlementBindingMutation {
+	m := &EntitlementBindingMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeEntitlementBinding,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withEntitlementBindingID sets the ID field of the mutation.
+func withEntitlementBindingID(id uuid.UUID) entitlementbindingOption {
+	return func(m *EntitlementBindingMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *EntitlementBinding
+		)
+		m.oldValue = func(ctx context.Context) (*EntitlementBinding, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().EntitlementBinding.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withEntitlementBinding sets the old EntitlementBinding of the mutation.
+func withEntitlementBinding(node *EntitlementBinding) entitlementbindingOption {
+	return func(m *EntitlementBindingMutation) {
+		m.oldValue = func(context.Context) (*EntitlementBinding, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m EntitlementBindingMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m EntitlementBindingMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of EntitlementBinding entities.
+func (m *EntitlementBindingMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *EntitlementBindingMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *EntitlementBindingMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().EntitlementBinding.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetLimitDefinitionID sets the "limit_definition_id" field.
+func (m *EntitlementBindingMutation) SetLimitDefinitionID(u uuid.UUID) {
+	m.limit_definition = &u
+}
+
+// LimitDefinitionID returns the value of the "limit_definition_id" field in the mutation.
+func (m *EntitlementBindingMutation) LimitDefinitionID() (r uuid.UUID, exists bool) {
+	v := m.limit_definition
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLimitDefinitionID returns the old "limit_definition_id" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldLimitDefinitionID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLimitDefinitionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLimitDefinitionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLimitDefinitionID: %w", err)
+	}
+	return oldValue.LimitDefinitionID, nil
+}
+
+// ResetLimitDefinitionID resets all changes to the "limit_definition_id" field.
+func (m *EntitlementBindingMutation) ResetLimitDefinitionID() {
+	m.limit_definition = nil
+}
+
+// SetSubjectType sets the "subject_type" field.
+func (m *EntitlementBindingMutation) SetSubjectType(et entitlementbinding.SubjectType) {
+	m.subject_type = &et
+}
+
+// SubjectType returns the value of the "subject_type" field in the mutation.
+func (m *EntitlementBindingMutation) SubjectType() (r entitlementbinding.SubjectType, exists bool) {
+	v := m.subject_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectType returns the old "subject_type" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldSubjectType(ctx context.Context) (v entitlementbinding.SubjectType, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectType: %w", err)
+	}
+	return oldValue.SubjectType, nil
+}
+
+// ResetSubjectType resets all changes to the "subject_type" field.
+func (m *EntitlementBindingMutation) ResetSubjectType() {
+	m.subject_type = nil
+}
+
+// SetSubjectID sets the "subject_id" field.
+func (m *EntitlementBindingMutation) SetSubjectID(s string) {
+	m.subject_id = &s
+}
+
+// SubjectID returns the value of the "subject_id" field in the mutation.
+func (m *EntitlementBindingMutation) SubjectID() (r string, exists bool) {
+	v := m.subject_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectID returns the old "subject_id" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldSubjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectID: %w", err)
+	}
+	return oldValue.SubjectID, nil
+}
+
+// ResetSubjectID resets all changes to the "subject_id" field.
+func (m *EntitlementBindingMutation) ResetSubjectID() {
+	m.subject_id = nil
+}
+
+// SetScopeType sets the "scope_type" field.
+func (m *EntitlementBindingMutation) SetScopeType(et entitlementbinding.ScopeType) {
+	m.scope_type = &et
+}
+
+// ScopeType returns the value of the "scope_type" field in the mutation.
+func (m *EntitlementBindingMutation) ScopeType() (r entitlementbinding.ScopeType, exists bool) {
+	v := m.scope_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeType returns the old "scope_type" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldScopeType(ctx context.Context) (v entitlementbinding.ScopeType, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeType: %w", err)
+	}
+	return oldValue.ScopeType, nil
+}
+
+// ResetScopeType resets all changes to the "scope_type" field.
+func (m *EntitlementBindingMutation) ResetScopeType() {
+	m.scope_type = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *EntitlementBindingMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *EntitlementBindingMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *EntitlementBindingMutation) ResetScopeID() {
+	m.scope_id = nil
+}
+
+// SetValue sets the "value" field.
+func (m *EntitlementBindingMutation) SetValue(i int64) {
+	m.value = &i
+	m.addvalue = nil
+}
+
+// Value returns the value of the "value" field in the mutation.
+func (m *EntitlementBindingMutation) Value() (r int64, exists bool) {
+	v := m.value
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldValue returns the old "value" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldValue(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldValue is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldValue requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldValue: %w", err)
+	}
+	return oldValue.Value, nil
+}
+
+// AddValue adds i to the "value" field.
+func (m *EntitlementBindingMutation) AddValue(i int64) {
+	if m.addvalue != nil {
+		*m.addvalue += i
+	} else {
+		m.addvalue = &i
+	}
+}
+
+// AddedValue returns the value that was added to the "value" field in this mutation.
+func (m *EntitlementBindingMutation) AddedValue() (r int64, exists bool) {
+	v := m.addvalue
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetValue resets all changes to the "value" field.
+func (m *EntitlementBindingMutation) ResetValue() {
+	m.value = nil
+	m.addvalue = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *EntitlementBindingMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *EntitlementBindingMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *EntitlementBindingMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[entitlementbinding.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *EntitlementBindingMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[entitlementbinding.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *EntitlementBindingMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, entitlementbinding.FieldCreatedBy)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *EntitlementBindingMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *EntitlementBindingMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *EntitlementBindingMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *EntitlementBindingMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *EntitlementBindingMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the EntitlementBinding entity.
+// If the EntitlementBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *EntitlementBindingMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *EntitlementBindingMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// ClearLimitDefinition clears the "limit_definition" edge to the LimitDefinition entity.
+func (m *EntitlementBindingMutation) ClearLimitDefinition() {
+	m.clearedlimit_definition = true
+	m.clearedFields[entitlementbinding.FieldLimitDefinitionID] = struct{}{}
+}
+
+// LimitDefinitionCleared reports if the "limit_definition" edge to the LimitDefinition entity was cleared.
+func (m *EntitlementBindingMutation) LimitDefinitionCleared() bool {
+	return m.clearedlimit_definition
+}
+
+// LimitDefinitionIDs returns the "limit_definition" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// LimitDefinitionID instead. It exists only for internal usage by the builders.
+func (m *EntitlementBindingMutation) LimitDefinitionIDs() (ids []uuid.UUID) {
+	if id := m.limit_definition; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetLimitDefinition resets all changes to the "limit_definition" edge.
+func (m *EntitlementBindingMutation) ResetLimitDefinition() {
+	m.limit_definition = nil
+	m.clearedlimit_definition = false
+}
+
+// Where appends a list predicates to the EntitlementBindingMutation builder.
+func (m *EntitlementBindingMutation) Where(ps ...predicate.EntitlementBinding) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the EntitlementBindingMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *EntitlementBindingMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.EntitlementBinding, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *EntitlementBindingMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *EntitlementBindingMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (EntitlementBinding).
+func (m *EntitlementBindingMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *EntitlementBindingMutation) Fields() []string {
+	fields := make([]string, 0, 9)
+	if m.limit_definition != nil {
+		fields = append(fields, entitlementbinding.FieldLimitDefinitionID)
+	}
+	if m.subject_type != nil {
+		fields = append(fields, entitlementbinding.FieldSubjectType)
+	}
+	if m.subject_id != nil {
+		fields = append(fields, entitlementbinding.FieldSubjectID)
+	}
+	if m.scope_type != nil {
+		fields = append(fields, entitlementbinding.FieldScopeType)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, entitlementbinding.FieldScopeID)
+	}
+	if m.value != nil {
+		fields = append(fields, entitlementbinding.FieldValue)
+	}
+	if m.created_by != nil {
+		fields = append(fields, entitlementbinding.FieldCreatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, entitlementbinding.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, entitlementbinding.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *EntitlementBindingMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case entitlementbinding.FieldLimitDefinitionID:
+		return m.LimitDefinitionID()
+	case entitlementbinding.FieldSubjectType:
+		return m.SubjectType()
+	case entitlementbinding.FieldSubjectID:
+		return m.SubjectID()
+	case entitlementbinding.FieldScopeType:
+		return m.ScopeType()
+	case entitlementbinding.FieldScopeID:
+		return m.ScopeID()
+	case entitlementbinding.FieldValue:
+		return m.Value()
+	case entitlementbinding.FieldCreatedBy:
+		return m.CreatedBy()
+	case entitlementbinding.FieldCreatedAt:
+		return m.CreatedAt()
+	case entitlementbinding.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *EntitlementBindingMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case entitlementbinding.FieldLimitDefinitionID:
+		return m.OldLimitDefinitionID(ctx)
+	case entitlementbinding.FieldSubjectType:
+		return m.OldSubjectType(ctx)
+	case entitlementbinding.FieldSubjectID:
+		return m.OldSubjectID(ctx)
+	case entitlementbinding.FieldScopeType:
+		return m.OldScopeType(ctx)
+	case entitlementbinding.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case entitlementbinding.FieldValue:
+		return m.OldValue(ctx)
+	case entitlementbinding.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case entitlementbinding.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case entitlementbinding.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown EntitlementBinding field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *EntitlementBindingMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case entitlementbinding.FieldLimitDefinitionID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLimitDefinitionID(v)
+		return nil
+	case entitlementbinding.FieldSubjectType:
+		v, ok := value.(entitlementbinding.SubjectType)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectType(v)
+		return nil
+	case entitlementbinding.FieldSubjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectID(v)
+		return nil
+	case entitlementbinding.FieldScopeType:
+		v, ok := value.(entitlementbinding.ScopeType)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeType(v)
+		return nil
+	case entitlementbinding.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case entitlementbinding.FieldValue:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetValue(v)
+		return nil
+	case entitlementbinding.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case entitlementbinding.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case entitlementbinding.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown EntitlementBinding field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *EntitlementBindingMutation) AddedFields() []string {
+	var fields []string
+	if m.addvalue != nil {
+		fields = append(fields, entitlementbinding.FieldValue)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *EntitlementBindingMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case entitlementbinding.FieldValue:
+		return m.AddedValue()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *EntitlementBindingMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case entitlementbinding.FieldValue:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddValue(v)
+		return nil
+	}
+	return fmt.Errorf("unknown EntitlementBinding numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *EntitlementBindingMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(entitlementbinding.FieldCreatedBy) {
+		fields = append(fields, entitlementbinding.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *EntitlementBindingMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *EntitlementBindingMutation) ClearField(name string) error {
+	switch name {
+	case entitlementbinding.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown EntitlementBinding nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *EntitlementBindingMutation) ResetField(name string) error {
+	switch name {
+	case entitlementbinding.FieldLimitDefinitionID:
+		m.ResetLimitDefinitionID()
+		return nil
+	case entitlementbinding.FieldSubjectType:
+		m.ResetSubjectType()
+		return nil
+	case entitlementbinding.FieldSubjectID:
+		m.ResetSubjectID()
+		return nil
+	case entitlementbinding.FieldScopeType:
+		m.ResetScopeType()
+		return nil
+	case entitlementbinding.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case entitlementbinding.FieldValue:
+		m.ResetValue()
+		return nil
+	case entitlementbinding.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case entitlementbinding.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case entitlementbinding.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown EntitlementBinding field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *EntitlementBindingMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.limit_definition != nil {
+		edges = append(edges, entitlementbinding.EdgeLimitDefinition)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *EntitlementBindingMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case entitlementbinding.EdgeLimitDefinition:
+		if id := m.limit_definition; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *EntitlementBindingMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *EntitlementBindingMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *EntitlementBindingMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedlimit_definition {
+		edges = append(edges, entitlementbinding.EdgeLimitDefinition)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *EntitlementBindingMutation) EdgeCleared(name string) bool {
+	switch name {
+	case entitlementbinding.EdgeLimitDefinition:
+		return m.clearedlimit_definition
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *EntitlementBindingMutation) ClearEdge(name string) error {
+	switch name {
+	case entitlementbinding.EdgeLimitDefinition:
+		m.ClearLimitDefinition()
+		return nil
+	}
+	return fmt.Errorf("unknown EntitlementBinding unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *EntitlementBindingMutation) ResetEdge(name string) error {
+	switch name {
+	case entitlementbinding.EdgeLimitDefinition:
+		m.ResetLimitDefinition()
+		return nil
+	}
+	return fmt.Errorf("unknown EntitlementBinding edge %s", name)
+}
+
 // EnvVarMutation represents an operation that mutates the EnvVar nodes in the graph.
 type EnvVarMutation struct {
 	config
@@ -25739,6 +26621,950 @@ func (m *LifecycleHookAgentPhaseMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *LifecycleHookAgentPhaseMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown LifecycleHookAgentPhase edge %s", name)
+}
+
+// LimitDefinitionMutation represents an operation that mutates the LimitDefinition nodes in the graph.
+type LimitDefinitionMutation struct {
+	config
+	op                          Op
+	typ                         string
+	id                          *uuid.UUID
+	name                        *string
+	resource_type               *string
+	unit                        *string
+	description                 *string
+	default_value               *int64
+	adddefault_value            *int64
+	system                      *bool
+	created_at                  *time.Time
+	updated_at                  *time.Time
+	clearedFields               map[string]struct{}
+	entitlement_bindings        map[uuid.UUID]struct{}
+	removedentitlement_bindings map[uuid.UUID]struct{}
+	clearedentitlement_bindings bool
+	usage_reservations          map[uuid.UUID]struct{}
+	removedusage_reservations   map[uuid.UUID]struct{}
+	clearedusage_reservations   bool
+	done                        bool
+	oldValue                    func(context.Context) (*LimitDefinition, error)
+	predicates                  []predicate.LimitDefinition
+}
+
+var _ ent.Mutation = (*LimitDefinitionMutation)(nil)
+
+// limitdefinitionOption allows management of the mutation configuration using functional options.
+type limitdefinitionOption func(*LimitDefinitionMutation)
+
+// newLimitDefinitionMutation creates new mutation for the LimitDefinition entity.
+func newLimitDefinitionMutation(c config, op Op, opts ...limitdefinitionOption) *LimitDefinitionMutation {
+	m := &LimitDefinitionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeLimitDefinition,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withLimitDefinitionID sets the ID field of the mutation.
+func withLimitDefinitionID(id uuid.UUID) limitdefinitionOption {
+	return func(m *LimitDefinitionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *LimitDefinition
+		)
+		m.oldValue = func(ctx context.Context) (*LimitDefinition, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().LimitDefinition.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withLimitDefinition sets the old LimitDefinition of the mutation.
+func withLimitDefinition(node *LimitDefinition) limitdefinitionOption {
+	return func(m *LimitDefinitionMutation) {
+		m.oldValue = func(context.Context) (*LimitDefinition, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m LimitDefinitionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m LimitDefinitionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of LimitDefinition entities.
+func (m *LimitDefinitionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *LimitDefinitionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *LimitDefinitionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().LimitDefinition.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *LimitDefinitionMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *LimitDefinitionMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *LimitDefinitionMutation) ResetName() {
+	m.name = nil
+}
+
+// SetResourceType sets the "resource_type" field.
+func (m *LimitDefinitionMutation) SetResourceType(s string) {
+	m.resource_type = &s
+}
+
+// ResourceType returns the value of the "resource_type" field in the mutation.
+func (m *LimitDefinitionMutation) ResourceType() (r string, exists bool) {
+	v := m.resource_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResourceType returns the old "resource_type" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldResourceType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResourceType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResourceType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResourceType: %w", err)
+	}
+	return oldValue.ResourceType, nil
+}
+
+// ResetResourceType resets all changes to the "resource_type" field.
+func (m *LimitDefinitionMutation) ResetResourceType() {
+	m.resource_type = nil
+}
+
+// SetUnit sets the "unit" field.
+func (m *LimitDefinitionMutation) SetUnit(s string) {
+	m.unit = &s
+}
+
+// Unit returns the value of the "unit" field in the mutation.
+func (m *LimitDefinitionMutation) Unit() (r string, exists bool) {
+	v := m.unit
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUnit returns the old "unit" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldUnit(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUnit is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUnit requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUnit: %w", err)
+	}
+	return oldValue.Unit, nil
+}
+
+// ResetUnit resets all changes to the "unit" field.
+func (m *LimitDefinitionMutation) ResetUnit() {
+	m.unit = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *LimitDefinitionMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *LimitDefinitionMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ClearDescription clears the value of the "description" field.
+func (m *LimitDefinitionMutation) ClearDescription() {
+	m.description = nil
+	m.clearedFields[limitdefinition.FieldDescription] = struct{}{}
+}
+
+// DescriptionCleared returns if the "description" field was cleared in this mutation.
+func (m *LimitDefinitionMutation) DescriptionCleared() bool {
+	_, ok := m.clearedFields[limitdefinition.FieldDescription]
+	return ok
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *LimitDefinitionMutation) ResetDescription() {
+	m.description = nil
+	delete(m.clearedFields, limitdefinition.FieldDescription)
+}
+
+// SetDefaultValue sets the "default_value" field.
+func (m *LimitDefinitionMutation) SetDefaultValue(i int64) {
+	m.default_value = &i
+	m.adddefault_value = nil
+}
+
+// DefaultValue returns the value of the "default_value" field in the mutation.
+func (m *LimitDefinitionMutation) DefaultValue() (r int64, exists bool) {
+	v := m.default_value
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDefaultValue returns the old "default_value" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldDefaultValue(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDefaultValue is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDefaultValue requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDefaultValue: %w", err)
+	}
+	return oldValue.DefaultValue, nil
+}
+
+// AddDefaultValue adds i to the "default_value" field.
+func (m *LimitDefinitionMutation) AddDefaultValue(i int64) {
+	if m.adddefault_value != nil {
+		*m.adddefault_value += i
+	} else {
+		m.adddefault_value = &i
+	}
+}
+
+// AddedDefaultValue returns the value that was added to the "default_value" field in this mutation.
+func (m *LimitDefinitionMutation) AddedDefaultValue() (r int64, exists bool) {
+	v := m.adddefault_value
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDefaultValue resets all changes to the "default_value" field.
+func (m *LimitDefinitionMutation) ResetDefaultValue() {
+	m.default_value = nil
+	m.adddefault_value = nil
+}
+
+// SetSystem sets the "system" field.
+func (m *LimitDefinitionMutation) SetSystem(b bool) {
+	m.system = &b
+}
+
+// System returns the value of the "system" field in the mutation.
+func (m *LimitDefinitionMutation) System() (r bool, exists bool) {
+	v := m.system
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystem returns the old "system" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldSystem(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystem is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystem requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystem: %w", err)
+	}
+	return oldValue.System, nil
+}
+
+// ResetSystem resets all changes to the "system" field.
+func (m *LimitDefinitionMutation) ResetSystem() {
+	m.system = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *LimitDefinitionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *LimitDefinitionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *LimitDefinitionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *LimitDefinitionMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *LimitDefinitionMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the LimitDefinition entity.
+// If the LimitDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LimitDefinitionMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *LimitDefinitionMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// AddEntitlementBindingIDs adds the "entitlement_bindings" edge to the EntitlementBinding entity by ids.
+func (m *LimitDefinitionMutation) AddEntitlementBindingIDs(ids ...uuid.UUID) {
+	if m.entitlement_bindings == nil {
+		m.entitlement_bindings = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.entitlement_bindings[ids[i]] = struct{}{}
+	}
+}
+
+// ClearEntitlementBindings clears the "entitlement_bindings" edge to the EntitlementBinding entity.
+func (m *LimitDefinitionMutation) ClearEntitlementBindings() {
+	m.clearedentitlement_bindings = true
+}
+
+// EntitlementBindingsCleared reports if the "entitlement_bindings" edge to the EntitlementBinding entity was cleared.
+func (m *LimitDefinitionMutation) EntitlementBindingsCleared() bool {
+	return m.clearedentitlement_bindings
+}
+
+// RemoveEntitlementBindingIDs removes the "entitlement_bindings" edge to the EntitlementBinding entity by IDs.
+func (m *LimitDefinitionMutation) RemoveEntitlementBindingIDs(ids ...uuid.UUID) {
+	if m.removedentitlement_bindings == nil {
+		m.removedentitlement_bindings = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.entitlement_bindings, ids[i])
+		m.removedentitlement_bindings[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedEntitlementBindings returns the removed IDs of the "entitlement_bindings" edge to the EntitlementBinding entity.
+func (m *LimitDefinitionMutation) RemovedEntitlementBindingsIDs() (ids []uuid.UUID) {
+	for id := range m.removedentitlement_bindings {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// EntitlementBindingsIDs returns the "entitlement_bindings" edge IDs in the mutation.
+func (m *LimitDefinitionMutation) EntitlementBindingsIDs() (ids []uuid.UUID) {
+	for id := range m.entitlement_bindings {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetEntitlementBindings resets all changes to the "entitlement_bindings" edge.
+func (m *LimitDefinitionMutation) ResetEntitlementBindings() {
+	m.entitlement_bindings = nil
+	m.clearedentitlement_bindings = false
+	m.removedentitlement_bindings = nil
+}
+
+// AddUsageReservationIDs adds the "usage_reservations" edge to the UsageReservation entity by ids.
+func (m *LimitDefinitionMutation) AddUsageReservationIDs(ids ...uuid.UUID) {
+	if m.usage_reservations == nil {
+		m.usage_reservations = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.usage_reservations[ids[i]] = struct{}{}
+	}
+}
+
+// ClearUsageReservations clears the "usage_reservations" edge to the UsageReservation entity.
+func (m *LimitDefinitionMutation) ClearUsageReservations() {
+	m.clearedusage_reservations = true
+}
+
+// UsageReservationsCleared reports if the "usage_reservations" edge to the UsageReservation entity was cleared.
+func (m *LimitDefinitionMutation) UsageReservationsCleared() bool {
+	return m.clearedusage_reservations
+}
+
+// RemoveUsageReservationIDs removes the "usage_reservations" edge to the UsageReservation entity by IDs.
+func (m *LimitDefinitionMutation) RemoveUsageReservationIDs(ids ...uuid.UUID) {
+	if m.removedusage_reservations == nil {
+		m.removedusage_reservations = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.usage_reservations, ids[i])
+		m.removedusage_reservations[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedUsageReservations returns the removed IDs of the "usage_reservations" edge to the UsageReservation entity.
+func (m *LimitDefinitionMutation) RemovedUsageReservationsIDs() (ids []uuid.UUID) {
+	for id := range m.removedusage_reservations {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// UsageReservationsIDs returns the "usage_reservations" edge IDs in the mutation.
+func (m *LimitDefinitionMutation) UsageReservationsIDs() (ids []uuid.UUID) {
+	for id := range m.usage_reservations {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetUsageReservations resets all changes to the "usage_reservations" edge.
+func (m *LimitDefinitionMutation) ResetUsageReservations() {
+	m.usage_reservations = nil
+	m.clearedusage_reservations = false
+	m.removedusage_reservations = nil
+}
+
+// Where appends a list predicates to the LimitDefinitionMutation builder.
+func (m *LimitDefinitionMutation) Where(ps ...predicate.LimitDefinition) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the LimitDefinitionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *LimitDefinitionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.LimitDefinition, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *LimitDefinitionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *LimitDefinitionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (LimitDefinition).
+func (m *LimitDefinitionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *LimitDefinitionMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.name != nil {
+		fields = append(fields, limitdefinition.FieldName)
+	}
+	if m.resource_type != nil {
+		fields = append(fields, limitdefinition.FieldResourceType)
+	}
+	if m.unit != nil {
+		fields = append(fields, limitdefinition.FieldUnit)
+	}
+	if m.description != nil {
+		fields = append(fields, limitdefinition.FieldDescription)
+	}
+	if m.default_value != nil {
+		fields = append(fields, limitdefinition.FieldDefaultValue)
+	}
+	if m.system != nil {
+		fields = append(fields, limitdefinition.FieldSystem)
+	}
+	if m.created_at != nil {
+		fields = append(fields, limitdefinition.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, limitdefinition.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *LimitDefinitionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case limitdefinition.FieldName:
+		return m.Name()
+	case limitdefinition.FieldResourceType:
+		return m.ResourceType()
+	case limitdefinition.FieldUnit:
+		return m.Unit()
+	case limitdefinition.FieldDescription:
+		return m.Description()
+	case limitdefinition.FieldDefaultValue:
+		return m.DefaultValue()
+	case limitdefinition.FieldSystem:
+		return m.System()
+	case limitdefinition.FieldCreatedAt:
+		return m.CreatedAt()
+	case limitdefinition.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *LimitDefinitionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case limitdefinition.FieldName:
+		return m.OldName(ctx)
+	case limitdefinition.FieldResourceType:
+		return m.OldResourceType(ctx)
+	case limitdefinition.FieldUnit:
+		return m.OldUnit(ctx)
+	case limitdefinition.FieldDescription:
+		return m.OldDescription(ctx)
+	case limitdefinition.FieldDefaultValue:
+		return m.OldDefaultValue(ctx)
+	case limitdefinition.FieldSystem:
+		return m.OldSystem(ctx)
+	case limitdefinition.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case limitdefinition.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown LimitDefinition field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *LimitDefinitionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case limitdefinition.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case limitdefinition.FieldResourceType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResourceType(v)
+		return nil
+	case limitdefinition.FieldUnit:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUnit(v)
+		return nil
+	case limitdefinition.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case limitdefinition.FieldDefaultValue:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDefaultValue(v)
+		return nil
+	case limitdefinition.FieldSystem:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystem(v)
+		return nil
+	case limitdefinition.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case limitdefinition.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown LimitDefinition field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *LimitDefinitionMutation) AddedFields() []string {
+	var fields []string
+	if m.adddefault_value != nil {
+		fields = append(fields, limitdefinition.FieldDefaultValue)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *LimitDefinitionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case limitdefinition.FieldDefaultValue:
+		return m.AddedDefaultValue()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *LimitDefinitionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case limitdefinition.FieldDefaultValue:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDefaultValue(v)
+		return nil
+	}
+	return fmt.Errorf("unknown LimitDefinition numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *LimitDefinitionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(limitdefinition.FieldDescription) {
+		fields = append(fields, limitdefinition.FieldDescription)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *LimitDefinitionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *LimitDefinitionMutation) ClearField(name string) error {
+	switch name {
+	case limitdefinition.FieldDescription:
+		m.ClearDescription()
+		return nil
+	}
+	return fmt.Errorf("unknown LimitDefinition nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *LimitDefinitionMutation) ResetField(name string) error {
+	switch name {
+	case limitdefinition.FieldName:
+		m.ResetName()
+		return nil
+	case limitdefinition.FieldResourceType:
+		m.ResetResourceType()
+		return nil
+	case limitdefinition.FieldUnit:
+		m.ResetUnit()
+		return nil
+	case limitdefinition.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case limitdefinition.FieldDefaultValue:
+		m.ResetDefaultValue()
+		return nil
+	case limitdefinition.FieldSystem:
+		m.ResetSystem()
+		return nil
+	case limitdefinition.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case limitdefinition.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown LimitDefinition field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *LimitDefinitionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.entitlement_bindings != nil {
+		edges = append(edges, limitdefinition.EdgeEntitlementBindings)
+	}
+	if m.usage_reservations != nil {
+		edges = append(edges, limitdefinition.EdgeUsageReservations)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *LimitDefinitionMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case limitdefinition.EdgeEntitlementBindings:
+		ids := make([]ent.Value, 0, len(m.entitlement_bindings))
+		for id := range m.entitlement_bindings {
+			ids = append(ids, id)
+		}
+		return ids
+	case limitdefinition.EdgeUsageReservations:
+		ids := make([]ent.Value, 0, len(m.usage_reservations))
+		for id := range m.usage_reservations {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *LimitDefinitionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.removedentitlement_bindings != nil {
+		edges = append(edges, limitdefinition.EdgeEntitlementBindings)
+	}
+	if m.removedusage_reservations != nil {
+		edges = append(edges, limitdefinition.EdgeUsageReservations)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *LimitDefinitionMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case limitdefinition.EdgeEntitlementBindings:
+		ids := make([]ent.Value, 0, len(m.removedentitlement_bindings))
+		for id := range m.removedentitlement_bindings {
+			ids = append(ids, id)
+		}
+		return ids
+	case limitdefinition.EdgeUsageReservations:
+		ids := make([]ent.Value, 0, len(m.removedusage_reservations))
+		for id := range m.removedusage_reservations {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *LimitDefinitionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.clearedentitlement_bindings {
+		edges = append(edges, limitdefinition.EdgeEntitlementBindings)
+	}
+	if m.clearedusage_reservations {
+		edges = append(edges, limitdefinition.EdgeUsageReservations)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *LimitDefinitionMutation) EdgeCleared(name string) bool {
+	switch name {
+	case limitdefinition.EdgeEntitlementBindings:
+		return m.clearedentitlement_bindings
+	case limitdefinition.EdgeUsageReservations:
+		return m.clearedusage_reservations
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *LimitDefinitionMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown LimitDefinition unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *LimitDefinitionMutation) ResetEdge(name string) error {
+	switch name {
+	case limitdefinition.EdgeEntitlementBindings:
+		m.ResetEntitlementBindings()
+		return nil
+	case limitdefinition.EdgeUsageReservations:
+		m.ResetUsageReservations()
+		return nil
+	}
+	return fmt.Errorf("unknown LimitDefinition edge %s", name)
 }
 
 // MaintenanceOperationMutation represents an operation that mutates the MaintenanceOperation nodes in the graph.
@@ -50413,6 +52239,828 @@ func (m *TemplateMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *TemplateMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Template edge %s", name)
+}
+
+// UsageReservationMutation represents an operation that mutates the UsageReservation nodes in the graph.
+type UsageReservationMutation struct {
+	config
+	op                      Op
+	typ                     string
+	id                      *uuid.UUID
+	subject_id              *string
+	scope_type              *usagereservation.ScopeType
+	scope_id                *string
+	resource_id             *string
+	reserved                *int64
+	addreserved             *int64
+	created_at              *time.Time
+	released_at             *time.Time
+	clearedFields           map[string]struct{}
+	limit_definition        *uuid.UUID
+	clearedlimit_definition bool
+	done                    bool
+	oldValue                func(context.Context) (*UsageReservation, error)
+	predicates              []predicate.UsageReservation
+}
+
+var _ ent.Mutation = (*UsageReservationMutation)(nil)
+
+// usagereservationOption allows management of the mutation configuration using functional options.
+type usagereservationOption func(*UsageReservationMutation)
+
+// newUsageReservationMutation creates new mutation for the UsageReservation entity.
+func newUsageReservationMutation(c config, op Op, opts ...usagereservationOption) *UsageReservationMutation {
+	m := &UsageReservationMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUsageReservation,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUsageReservationID sets the ID field of the mutation.
+func withUsageReservationID(id uuid.UUID) usagereservationOption {
+	return func(m *UsageReservationMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UsageReservation
+		)
+		m.oldValue = func(ctx context.Context) (*UsageReservation, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UsageReservation.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUsageReservation sets the old UsageReservation of the mutation.
+func withUsageReservation(node *UsageReservation) usagereservationOption {
+	return func(m *UsageReservationMutation) {
+		m.oldValue = func(context.Context) (*UsageReservation, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UsageReservationMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UsageReservationMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UsageReservation entities.
+func (m *UsageReservationMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UsageReservationMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UsageReservationMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UsageReservation.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetLimitDefinitionID sets the "limit_definition_id" field.
+func (m *UsageReservationMutation) SetLimitDefinitionID(u uuid.UUID) {
+	m.limit_definition = &u
+}
+
+// LimitDefinitionID returns the value of the "limit_definition_id" field in the mutation.
+func (m *UsageReservationMutation) LimitDefinitionID() (r uuid.UUID, exists bool) {
+	v := m.limit_definition
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLimitDefinitionID returns the old "limit_definition_id" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldLimitDefinitionID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLimitDefinitionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLimitDefinitionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLimitDefinitionID: %w", err)
+	}
+	return oldValue.LimitDefinitionID, nil
+}
+
+// ResetLimitDefinitionID resets all changes to the "limit_definition_id" field.
+func (m *UsageReservationMutation) ResetLimitDefinitionID() {
+	m.limit_definition = nil
+}
+
+// SetSubjectID sets the "subject_id" field.
+func (m *UsageReservationMutation) SetSubjectID(s string) {
+	m.subject_id = &s
+}
+
+// SubjectID returns the value of the "subject_id" field in the mutation.
+func (m *UsageReservationMutation) SubjectID() (r string, exists bool) {
+	v := m.subject_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectID returns the old "subject_id" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldSubjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectID: %w", err)
+	}
+	return oldValue.SubjectID, nil
+}
+
+// ResetSubjectID resets all changes to the "subject_id" field.
+func (m *UsageReservationMutation) ResetSubjectID() {
+	m.subject_id = nil
+}
+
+// SetScopeType sets the "scope_type" field.
+func (m *UsageReservationMutation) SetScopeType(ut usagereservation.ScopeType) {
+	m.scope_type = &ut
+}
+
+// ScopeType returns the value of the "scope_type" field in the mutation.
+func (m *UsageReservationMutation) ScopeType() (r usagereservation.ScopeType, exists bool) {
+	v := m.scope_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeType returns the old "scope_type" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldScopeType(ctx context.Context) (v usagereservation.ScopeType, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeType: %w", err)
+	}
+	return oldValue.ScopeType, nil
+}
+
+// ResetScopeType resets all changes to the "scope_type" field.
+func (m *UsageReservationMutation) ResetScopeType() {
+	m.scope_type = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *UsageReservationMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *UsageReservationMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *UsageReservationMutation) ResetScopeID() {
+	m.scope_id = nil
+}
+
+// SetResourceID sets the "resource_id" field.
+func (m *UsageReservationMutation) SetResourceID(s string) {
+	m.resource_id = &s
+}
+
+// ResourceID returns the value of the "resource_id" field in the mutation.
+func (m *UsageReservationMutation) ResourceID() (r string, exists bool) {
+	v := m.resource_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResourceID returns the old "resource_id" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldResourceID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResourceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResourceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResourceID: %w", err)
+	}
+	return oldValue.ResourceID, nil
+}
+
+// ResetResourceID resets all changes to the "resource_id" field.
+func (m *UsageReservationMutation) ResetResourceID() {
+	m.resource_id = nil
+}
+
+// SetReserved sets the "reserved" field.
+func (m *UsageReservationMutation) SetReserved(i int64) {
+	m.reserved = &i
+	m.addreserved = nil
+}
+
+// Reserved returns the value of the "reserved" field in the mutation.
+func (m *UsageReservationMutation) Reserved() (r int64, exists bool) {
+	v := m.reserved
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReserved returns the old "reserved" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldReserved(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReserved is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReserved requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReserved: %w", err)
+	}
+	return oldValue.Reserved, nil
+}
+
+// AddReserved adds i to the "reserved" field.
+func (m *UsageReservationMutation) AddReserved(i int64) {
+	if m.addreserved != nil {
+		*m.addreserved += i
+	} else {
+		m.addreserved = &i
+	}
+}
+
+// AddedReserved returns the value that was added to the "reserved" field in this mutation.
+func (m *UsageReservationMutation) AddedReserved() (r int64, exists bool) {
+	v := m.addreserved
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetReserved resets all changes to the "reserved" field.
+func (m *UsageReservationMutation) ResetReserved() {
+	m.reserved = nil
+	m.addreserved = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *UsageReservationMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *UsageReservationMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *UsageReservationMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetReleasedAt sets the "released_at" field.
+func (m *UsageReservationMutation) SetReleasedAt(t time.Time) {
+	m.released_at = &t
+}
+
+// ReleasedAt returns the value of the "released_at" field in the mutation.
+func (m *UsageReservationMutation) ReleasedAt() (r time.Time, exists bool) {
+	v := m.released_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReleasedAt returns the old "released_at" field's value of the UsageReservation entity.
+// If the UsageReservation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageReservationMutation) OldReleasedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReleasedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReleasedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReleasedAt: %w", err)
+	}
+	return oldValue.ReleasedAt, nil
+}
+
+// ClearReleasedAt clears the value of the "released_at" field.
+func (m *UsageReservationMutation) ClearReleasedAt() {
+	m.released_at = nil
+	m.clearedFields[usagereservation.FieldReleasedAt] = struct{}{}
+}
+
+// ReleasedAtCleared returns if the "released_at" field was cleared in this mutation.
+func (m *UsageReservationMutation) ReleasedAtCleared() bool {
+	_, ok := m.clearedFields[usagereservation.FieldReleasedAt]
+	return ok
+}
+
+// ResetReleasedAt resets all changes to the "released_at" field.
+func (m *UsageReservationMutation) ResetReleasedAt() {
+	m.released_at = nil
+	delete(m.clearedFields, usagereservation.FieldReleasedAt)
+}
+
+// ClearLimitDefinition clears the "limit_definition" edge to the LimitDefinition entity.
+func (m *UsageReservationMutation) ClearLimitDefinition() {
+	m.clearedlimit_definition = true
+	m.clearedFields[usagereservation.FieldLimitDefinitionID] = struct{}{}
+}
+
+// LimitDefinitionCleared reports if the "limit_definition" edge to the LimitDefinition entity was cleared.
+func (m *UsageReservationMutation) LimitDefinitionCleared() bool {
+	return m.clearedlimit_definition
+}
+
+// LimitDefinitionIDs returns the "limit_definition" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// LimitDefinitionID instead. It exists only for internal usage by the builders.
+func (m *UsageReservationMutation) LimitDefinitionIDs() (ids []uuid.UUID) {
+	if id := m.limit_definition; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetLimitDefinition resets all changes to the "limit_definition" edge.
+func (m *UsageReservationMutation) ResetLimitDefinition() {
+	m.limit_definition = nil
+	m.clearedlimit_definition = false
+}
+
+// Where appends a list predicates to the UsageReservationMutation builder.
+func (m *UsageReservationMutation) Where(ps ...predicate.UsageReservation) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UsageReservationMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UsageReservationMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UsageReservation, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UsageReservationMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UsageReservationMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UsageReservation).
+func (m *UsageReservationMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UsageReservationMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.limit_definition != nil {
+		fields = append(fields, usagereservation.FieldLimitDefinitionID)
+	}
+	if m.subject_id != nil {
+		fields = append(fields, usagereservation.FieldSubjectID)
+	}
+	if m.scope_type != nil {
+		fields = append(fields, usagereservation.FieldScopeType)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, usagereservation.FieldScopeID)
+	}
+	if m.resource_id != nil {
+		fields = append(fields, usagereservation.FieldResourceID)
+	}
+	if m.reserved != nil {
+		fields = append(fields, usagereservation.FieldReserved)
+	}
+	if m.created_at != nil {
+		fields = append(fields, usagereservation.FieldCreatedAt)
+	}
+	if m.released_at != nil {
+		fields = append(fields, usagereservation.FieldReleasedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UsageReservationMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case usagereservation.FieldLimitDefinitionID:
+		return m.LimitDefinitionID()
+	case usagereservation.FieldSubjectID:
+		return m.SubjectID()
+	case usagereservation.FieldScopeType:
+		return m.ScopeType()
+	case usagereservation.FieldScopeID:
+		return m.ScopeID()
+	case usagereservation.FieldResourceID:
+		return m.ResourceID()
+	case usagereservation.FieldReserved:
+		return m.Reserved()
+	case usagereservation.FieldCreatedAt:
+		return m.CreatedAt()
+	case usagereservation.FieldReleasedAt:
+		return m.ReleasedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UsageReservationMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case usagereservation.FieldLimitDefinitionID:
+		return m.OldLimitDefinitionID(ctx)
+	case usagereservation.FieldSubjectID:
+		return m.OldSubjectID(ctx)
+	case usagereservation.FieldScopeType:
+		return m.OldScopeType(ctx)
+	case usagereservation.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case usagereservation.FieldResourceID:
+		return m.OldResourceID(ctx)
+	case usagereservation.FieldReserved:
+		return m.OldReserved(ctx)
+	case usagereservation.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case usagereservation.FieldReleasedAt:
+		return m.OldReleasedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown UsageReservation field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageReservationMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case usagereservation.FieldLimitDefinitionID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLimitDefinitionID(v)
+		return nil
+	case usagereservation.FieldSubjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectID(v)
+		return nil
+	case usagereservation.FieldScopeType:
+		v, ok := value.(usagereservation.ScopeType)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeType(v)
+		return nil
+	case usagereservation.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case usagereservation.FieldResourceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResourceID(v)
+		return nil
+	case usagereservation.FieldReserved:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReserved(v)
+		return nil
+	case usagereservation.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case usagereservation.FieldReleasedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReleasedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageReservation field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UsageReservationMutation) AddedFields() []string {
+	var fields []string
+	if m.addreserved != nil {
+		fields = append(fields, usagereservation.FieldReserved)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UsageReservationMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case usagereservation.FieldReserved:
+		return m.AddedReserved()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageReservationMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case usagereservation.FieldReserved:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddReserved(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageReservation numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UsageReservationMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(usagereservation.FieldReleasedAt) {
+		fields = append(fields, usagereservation.FieldReleasedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UsageReservationMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UsageReservationMutation) ClearField(name string) error {
+	switch name {
+	case usagereservation.FieldReleasedAt:
+		m.ClearReleasedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageReservation nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UsageReservationMutation) ResetField(name string) error {
+	switch name {
+	case usagereservation.FieldLimitDefinitionID:
+		m.ResetLimitDefinitionID()
+		return nil
+	case usagereservation.FieldSubjectID:
+		m.ResetSubjectID()
+		return nil
+	case usagereservation.FieldScopeType:
+		m.ResetScopeType()
+		return nil
+	case usagereservation.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case usagereservation.FieldResourceID:
+		m.ResetResourceID()
+		return nil
+	case usagereservation.FieldReserved:
+		m.ResetReserved()
+		return nil
+	case usagereservation.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case usagereservation.FieldReleasedAt:
+		m.ResetReleasedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageReservation field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UsageReservationMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.limit_definition != nil {
+		edges = append(edges, usagereservation.EdgeLimitDefinition)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UsageReservationMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case usagereservation.EdgeLimitDefinition:
+		if id := m.limit_definition; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UsageReservationMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UsageReservationMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UsageReservationMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedlimit_definition {
+		edges = append(edges, usagereservation.EdgeLimitDefinition)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UsageReservationMutation) EdgeCleared(name string) bool {
+	switch name {
+	case usagereservation.EdgeLimitDefinition:
+		return m.clearedlimit_definition
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UsageReservationMutation) ClearEdge(name string) error {
+	switch name {
+	case usagereservation.EdgeLimitDefinition:
+		m.ClearLimitDefinition()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageReservation unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UsageReservationMutation) ResetEdge(name string) error {
+	switch name {
+	case usagereservation.EdgeLimitDefinition:
+		m.ResetLimitDefinition()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageReservation edge %s", name)
 }
 
 // UserMutation represents an operation that mutates the User nodes in the graph.

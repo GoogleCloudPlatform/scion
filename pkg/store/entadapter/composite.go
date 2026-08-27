@@ -77,6 +77,7 @@ type CompositeStore struct {
 	*AgentCredentialStore
 	*DecisionAuditStore
 	*MutationAuditStore
+	*QuotaStore
 
 	client *ent.Client
 }
@@ -118,6 +119,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		AgentCredentialStore:     NewAgentCredentialStore(client),
 		DecisionAuditStore:       NewDecisionAuditStore(client),
 		MutationAuditStore:       NewMutationAuditStore(client),
+		QuotaStore:               NewQuotaStore(client),
 		client:                   client,
 	}
 }

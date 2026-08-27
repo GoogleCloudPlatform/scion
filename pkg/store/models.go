@@ -2559,3 +2559,67 @@ type MutationAuditFilter struct {
 	Limit              int
 	Offset             int
 }
+
+// =============================================================================
+// Limit Definitions and Quota Bindings (Permissions Phase 2B)
+// =============================================================================
+
+// LimitDefinition represents a configurable resource limit.
+type LimitDefinition struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`         // e.g. "max_agents_per_project"
+	ResourceType string    `json:"resourceType"` // e.g. "agent", "project", "group"
+	Unit         string    `json:"unit"`          // e.g. "count"
+	Description  string    `json:"description"`
+	DefaultValue int64     `json:"defaultValue"` // 0 = unlimited
+	System       bool      `json:"system"`       // true = seeded, not user-modifiable
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// EntitlementBinding associates a limit with a subject (user, group, or system default).
+type EntitlementBinding struct {
+	ID                string    `json:"id"`
+	LimitDefinitionID string    `json:"limitDefinitionId"`
+	SubjectType       string    `json:"subjectType"` // "user", "group", "system_default"
+	SubjectID         string    `json:"subjectId"`
+	ScopeType         string    `json:"scopeType"` // "system" or "project"
+	ScopeID           string    `json:"scopeId"`   // "" for system, project ID for project
+	Value             int64     `json:"value"`
+	CreatedBy         string    `json:"createdBy"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+// UsageReservation tracks a single unit of quota consumption.
+type UsageReservation struct {
+	ID                string     `json:"id"`
+	LimitDefinitionID string     `json:"limitDefinitionId"`
+	SubjectID         string     `json:"subjectId"`
+	ScopeType         string     `json:"scopeType"` // "system" or "project"
+	ScopeID           string     `json:"scopeId"`
+	ResourceID        string     `json:"resourceId"`
+	Reserved          int64      `json:"reserved"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	ReleasedAt        *time.Time `json:"releasedAt,omitempty"`
+}
+
+// Entitlement binding subject types
+const (
+	EntitlementSubjectUser          = "user"
+	EntitlementSubjectGroup         = "group"
+	EntitlementSubjectSystemDefault = "system_default"
+)
+
+// Quota scope types
+const (
+	QuotaScopeSystem  = "system"
+	QuotaScopeProject = "project"
+)
+
+// System limit definition names
+const (
+	LimitMaxAgentsPerProject = "max_agents_per_project"
+	LimitMaxProjectsPerUser  = "max_projects_per_user"
+	LimitMaxMembersPerGroup  = "max_members_per_group"
+)

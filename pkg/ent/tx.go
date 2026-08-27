@@ -36,6 +36,8 @@ type Tx struct {
 	DecisionAudit *DecisionAuditClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
 	DelegationEdge *DelegationEdgeClient
+	// EntitlementBinding is the client for interacting with the EntitlementBinding builders.
+	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -62,6 +64,8 @@ type Tx struct {
 	LifecycleHook *LifecycleHookClient
 	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
 	LifecycleHookAgentPhase *LifecycleHookAgentPhaseClient
+	// LimitDefinition is the client for interacting with the LimitDefinition builders.
+	LimitDefinition *LimitDefinitionClient
 	// MaintenanceOperation is the client for interacting with the MaintenanceOperation builders.
 	MaintenanceOperation *MaintenanceOperationClient
 	// MaintenanceOperationRun is the client for interacting with the MaintenanceOperationRun builders.
@@ -110,6 +114,8 @@ type Tx struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
+	// UsageReservation is the client for interacting with the UsageReservation builders.
+	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
@@ -257,6 +263,7 @@ func (tx *Tx) init() {
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
 	tx.DecisionAudit = NewDecisionAuditClient(tx.config)
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
+	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
 	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)
@@ -270,6 +277,7 @@ func (tx *Tx) init() {
 	tx.InviteCode = NewInviteCodeClient(tx.config)
 	tx.LifecycleHook = NewLifecycleHookClient(tx.config)
 	tx.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(tx.config)
+	tx.LimitDefinition = NewLimitDefinitionClient(tx.config)
 	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
 	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)
@@ -294,6 +302,7 @@ func (tx *Tx) init() {
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
+	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
 }
