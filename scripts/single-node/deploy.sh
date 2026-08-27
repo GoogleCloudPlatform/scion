@@ -677,8 +677,18 @@ di_main() {
 
   # ===================================================================
   # Step 3b: Enable IAP via REST v2 PATCH
-  # iapEnabled and invokerIamDisabled are v2-only fields. gcloud has no
-  # --iap flag, so we flip both booleans with a single REST PATCH.
+  # iapEnabled and invokerIamDisabled are v2-only fields, so we flip both
+  # booleans with a single REST PATCH.
+  #
+  # DO NOT replace this with a gcloud flag. A --iap flag DOES exist in
+  # gcloud 582, but it is registered on the SERVICES surface only
+  # ('gcloud run deploy', 'gcloud run services update') and NOT on the
+  # 'run instances' noun this script uses. Confusingly,
+  # 'gcloud beta run instances deploy --help' describes --public as
+  # "Equivalent to setting --no-invoker-iam-check and --no-iap", naming a
+  # flag that surface does not expose. Grepping the help text will suggest
+  # the PATCH is removable; it is not. The PATCH is the only way to enable
+  # IAP on an Instance, and without it the tier's whole auth model is off.
   #
   # This PATCH is safe because it uses updateMask to touch ONLY the IAP
   # booleans, leaving all v1-only fields (like sandboxLauncher) untouched.
