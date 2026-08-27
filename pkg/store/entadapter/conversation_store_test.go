@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -1106,10 +1107,12 @@ func TestParticipantDefaultRole(t *testing.T) {
 // AddParticipant immutability guard tests (DEF-8, WS-1c)
 //
 // Rule 10: Removing the guard from AddParticipant should make tests
-// TestAddParticipant_DM_SoftRemoveThenSubstitute and
-// TestAddParticipant_DM_ThirdPartyRejection fail.
-// TestAddParticipant_DM_EmptyExternalRefRejection now tests at the
-// CreateConversation level (DEF-29 catches keyless direct rows earlier).
+// TestAddParticipant_DM_SoftRemoveThenSubstitute,
+// TestAddParticipant_DM_ThirdPartyRejection, and
+// TestAddParticipant_DM_EmptyExternalRefRejection_BypassCreate fail.
+// TestAddParticipant_DM_EmptyExternalRefRejection tests the CreateConversation
+// layer (DEF-29); the _BypassCreate variant tests AddParticipant's own guard
+// independently by inserting the row via ent directly.
 // ---------------------------------------------------------------------------
 
 // TestAddParticipant_DM_SoftRemoveThenSubstitute is THE test that discriminates
@@ -1206,6 +1209,47 @@ func TestAddParticipant_DM_EmptyExternalRefRejection(t *testing.T) {
 	err := s.CreateConversation(ctx, conv)
 	require.Error(t, err, "CreateConversation must refuse a direct conversation without external_ref")
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+// TestAddParticipant_DM_EmptyExternalRefRejection_BypassCreate tests
+// AddParticipant's OWN guard for kind="direct" with empty external_ref,
+// independent of CreateConversation's DEF-29 guard.
+//
+// Why the bypass: DEF-29 makes CreateConversation refuse keyless direct
+// rows, which shadows AddParticipant's guard in normal flow. But
+// AddParticipant's guard is defense-in-depth: if a second create path is
+// ever added (the exact defect class DEF-29 closes), or if DEF-29 is
+// relaxed, AddParticipant must still reject the empty key. Each layer's
+// guard is independently tested.
+//
+// The row is constructed via the ent client directly, bypassing the store's
+// CreateConversation. Do not "simplify" this back through CreateConversation
+// — that would silently delete the AddParticipant-level coverage.
+func TestAddParticipant_DM_EmptyExternalRefRejection_BypassCreate(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	// Insert a kind="direct", external_ref="" row directly via ent,
+	// bypassing CreateConversation's DEF-29 guard.
+	convID := uuid.New()
+	_, err := s.client.Conversation.Create().
+		SetID(convID).
+		SetKind(conversation.KindDirect).
+		SetSurface(conversation.SurfaceNative).
+		SetExternalRef(""). // intentionally empty — the defect
+		SetDriftState(conversation.DriftStateActive).
+		Save(ctx)
+	require.NoError(t, err, "direct ent insert must succeed (bypasses store guard)")
+
+	// AddParticipant must reject this via its own ParseDMKey guard.
+	addErr := s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: convID.String(),
+		PrincipalKind:  "user",
+		PrincipalID:    uuid.NewString(),
+		Role:           "member",
+	})
+	require.Error(t, addErr, "AddParticipant must reject empty external_ref on direct conversation")
+	assert.ErrorIs(t, addErr, store.ErrInvalidInput)
 }
 
 // TestAddParticipant_DM_NamedParticipantAllowed verifies that a principal named
