@@ -118,7 +118,7 @@ func TestScriptAssertPerimeter_WrongRedirect(t *testing.T) {
 	assert.Contains(t, stderr, "not to accounts.google.com")
 }
 
-func TestScriptAssertPerimeter_IAPNoHeader(t *testing.T) {
+func TestScriptAssertPerimeter_MissingLocationHeader(t *testing.T) {
 	// 302 to accounts.google.com but missing the IAP header — still passes
 	// because the redirect alone proves IAP is enforcing; the header is
 	// a bonus check.
@@ -130,6 +130,30 @@ func TestScriptAssertPerimeter_IAPNoHeader(t *testing.T) {
 
 	_, stderr, exitCode := runBashFunc(t, "di_assert_perimeter", server.URL)
 	assert.Equal(t, 0, exitCode, "should pass even without IAP header if redirect is correct; stderr: %s", stderr)
+}
+
+func TestScriptAssertPerimeter_302NoLocationHeader(t *testing.T) {
+	// 302 with NO Location header at all. Under set -euo pipefail, grep
+	// for the header exits 1 and pipefail would kill the script before
+	// it reaches its own SECURITY FAILURE message. The "|| location=''"
+	// fix at :274 prevents this: the downstream check fires and fails
+	// closed with a diagnostic.
+	//
+	// This test MUST assert the message, not just the exit code — both
+	// the broken and fixed code exit 1, so an exit-code-only test would
+	// pass on broken code.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 302 but deliberately no Location header
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+
+	_, stderr, exitCode := runBashFunc(t, "di_assert_perimeter", server.URL)
+	assert.Equal(t, 1, exitCode, "must fail when 302 has no Location header")
+	assert.Contains(t, stderr, "SECURITY FAILURE",
+		"must print SECURITY FAILURE, not die silently from set -e")
+	assert.Contains(t, stderr, "not to accounts.google.com",
+		"must identify the problem as a wrong/missing redirect target")
 }
 
 func TestScriptAssertPerimeter_CloudRunErrorPage(t *testing.T) {
