@@ -84,12 +84,6 @@ func TestBypassCensus(t *testing.T) {
 
 		// ─── Handler-level bypasses (will be removed in PR-A2 through PR-A6) ──
 
-		// Settings and config (PR-A2)
-		{file: "admin_settings.go", lineSubstr: `user.Role() != "admin"`, description: "get settings (PR-A2)"},
-		{file: "admin_settings.go", lineSubstr: `user.Role() != "admin"`, description: "set settings (PR-A2)"},
-		{file: "admin_settings_db.go", lineSubstr: `user.Role() != "admin"`, description: "db settings (PR-A2)"},
-		{file: "admin_project_defaults.go", lineSubstr: `user.Role() != "admin"`, description: "project defaults (PR-A2)"},
-
 		// User management (PR-A3)
 		{file: "admin_allow_list.go", lineSubstr: `user.Role() != "admin"`, description: "get allow list (PR-A3)"},
 		{file: "admin_allow_list.go", lineSubstr: `user.Role() != "admin"`, description: "set allow list (PR-A3)"},

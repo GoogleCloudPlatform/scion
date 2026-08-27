@@ -125,12 +125,6 @@ type ServerConfigUpdateRequest struct {
 // GET: Returns the current global settings.yaml contents (sensitive fields masked).
 // PUT: Updates global settings.yaml and optionally reloads applicable runtime settings.
 func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	// In postgres mode, delegate to the DB-backed handlers that use
 	// OperationalSettings for Layer-1 reads/writes (design §3.8).
 	// File/SQLite mode keeps the exact current behavior (file read/write).
@@ -138,7 +132,25 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		switch r.Method {
 		case http.MethodGet:
 			s.handleGetServerConfigDB(w, r, ops)
-		case http.MethodPut:
+		case http.MethodPut, http.MethodPatch, http.MethodPost:
+			// Require write permission for mutating operations.
+			// The route guard already verified read access; this elevates to update.
+			if s.authzService != nil {
+				identity := GetIdentityFromContext(r.Context())
+				if user, ok := identity.(UserIdentity); ok {
+					decision := s.authzService.Decide(r.Context(), AuthzRequest{
+						Principal:  principalContextForIdentity(user),
+						Credential: credentialContextForIdentity(user),
+						Resource:   Resource{Type: "hub", ID: "hub"},
+						Action:     Action("update"),
+						Permission: "hub.config.update",
+					})
+					if !decision.Allowed {
+						Forbidden(w)
+						return
+					}
+				}
+			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
 			MethodNotAllowed(w)
@@ -149,7 +161,25 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetServerConfig(w)
-	case http.MethodPut:
+	case http.MethodPut, http.MethodPatch, http.MethodPost:
+		// Require write permission for mutating operations.
+		// The route guard already verified read access; this elevates to update.
+		if s.authzService != nil {
+			identity := GetIdentityFromContext(r.Context())
+			if user, ok := identity.(UserIdentity); ok {
+				decision := s.authzService.Decide(r.Context(), AuthzRequest{
+					Principal:  principalContextForIdentity(user),
+					Credential: credentialContextForIdentity(user),
+					Resource:   Resource{Type: "hub", ID: "hub"},
+					Action:     Action("update"),
+					Permission: "hub.config.update",
+				})
+				if !decision.Allowed {
+					Forbidden(w)
+					return
+				}
+			}
+		}
 		s.handlePutServerConfig(w, r)
 	default:
 		MethodNotAllowed(w)
@@ -162,10 +192,6 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 // Postgres mode only; admin-gated. Design §3.2.4.
 func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	if r.Method != http.MethodDelete {
 		MethodNotAllowed(w)

@@ -1324,11 +1324,6 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 // Returns JSON-schema fragments per section from the opsettings registry,
 // intended for UI form generation and CLI validation. Static metadata — no DB access.
 func (s *Server) handleAdminServerConfigSchema(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return

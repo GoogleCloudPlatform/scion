@@ -140,38 +140,16 @@ func TestHandleAdminProjectDefaults_PutInvalidPayload(t *testing.T) {
 	}
 }
 
-func TestHandleAdminProjectDefaults_Forbidden(t *testing.T) {
-	// Non-admin user should get 403.
-	srv := newAdminProjectDefaultsServer(t, newFakeHubSettingStore())
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/project-defaults", nil)
-	req = nonAdminContext(req)
-	rr := httptest.NewRecorder()
-	srv.handleAdminProjectDefaults(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("non-admin should get 403, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestHandleAdminProjectDefaults_Unauthenticated(t *testing.T) {
-	// No identity in context should get 403.
-	srv := newAdminProjectDefaultsServer(t, newFakeHubSettingStore())
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/project-defaults", nil)
-	rr := httptest.NewRecorder()
-	srv.handleAdminProjectDefaults(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("unauthenticated should get 403, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
+// NOTE: Auth gating for handleAdminProjectDefaults (non-admin and unauthenticated
+// rejection) is now enforced by routeGuard via Permission metadata, not by inline
+// checks. See TestRouteGuardSettingsConversion in routeguard_settings_test.go.
 
 func TestHandleAdminProjectDefaults_MethodNotAllowed(t *testing.T) {
-	// POST and DELETE should return 405.
+	// DELETE should return 405. POST is now handled as a mutating operation
+	// (same as PUT) for the inline write-permission check.
 	srv := newAdminProjectDefaultsServer(t, newFakeHubSettingStore())
 
-	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+	for _, method := range []string{http.MethodDelete} {
 		req := httptest.NewRequest(method, "/api/v1/admin/project-defaults", nil)
 		req = adminContext(req)
 		rr := httptest.NewRecorder()
