@@ -1,5 +1,7 @@
 # Scion Hub Cloud Run HA Deployment
 
+> For the **single-node** Cloud Run Instance tier (one Instance, sandbox-based agents, no external database), see [`scripts/single-node/`](../single-node/).
+
 This directory deploys the production Cloud Run shape described in
 `.design/hub-cloudrun-deployment.md`: a horizontally scalable Hub/Web service
 with a co-located stateless Runtime Broker, protected by Cloud Run native IAP.
