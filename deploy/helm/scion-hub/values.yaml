@@ -705,16 +705,61 @@ auth:
   # read access - a strictly wider audience than the Secret's own RBAC - and a
   # digest of a low-entropy secret is a secret you can recover offline.
   #
-  # Say the uncomfortable half out loud: checksum/settings, which the chart DOES
-  # render, is a digest over a document that now contains the OAuth client
-  # secret. It is not free of the same objection - it is a weaker version of it,
-  # because the attacker must also guess every other field in the rendered
-  # settings.yaml, and because that mount genuinely cannot be refreshed without
-  # it (a subPath mount is frozen for the container's lifetime, so omitting it
-  # makes upgrades silently do nothing). The session secret has neither excuse:
-  # env is equally unrefreshable, but a restart is a documented one-line remedy,
-  # and the digest would be over the one value with the least around it to
-  # guess. See templates/deployment.yaml for the checksum/settings reasoning.
+  # AND SAY THE UNCOMFORTABLE HALF FIRST, NOT LAST. The chart DOES render a
+  # checksum/settings annotation, and once auth.mode is oauth the document that
+  # annotation covers contains your OAuth client secret. Pod annotations are
+  # readable by anyone with pod read access - the same strictly wider audience
+  # named above, wider than the Secret's own RBAC.
+  #
+  # THAT DIGEST IS TAKEN OVER A REDACTED PROJECTION, NOT OVER THE DOCUMENT.
+  # scion-hub.settingsChecksum replaces every credential leaf in the rendered
+  # settings document with a constant before hashing, so rotating an OAuth
+  # client secret does not move the annotation, and the annotation is therefore
+  # not an offline verification oracle for the credential.
+  # tests/chart-integrity.sh section E9 asserts both halves: the digest is
+  # unchanged by rotating the client secret, AND it still moves when a
+  # non-secret settings field changes. Either half alone is satisfiable by a
+  # broken chart - a deleted annotation passes the first, the old un-redacted
+  # digest passes the second - so both are committed.
+  #
+  # THIS WAS AN ACCEPTED EXPOSURE UNTIL SOMEBODY MEASURED IT, AND THE
+  # MEASUREMENT IS WHY IT IS NOW FIXED. The text that stood here argued the
+  # residual protection was that an attacker must also guess every other field
+  # in the rendered settings.yaml. That argument is false for this chart. The
+  # rest of the document is chart-rendered and predictable from public values,
+  # so the preimage was reconstructed byte for byte and then used to predict the
+  # annotation for three client secrets that had never been rendered - 3 of 3,
+  # at roughly 300,000 candidates per second on one core. Against a
+  # provider-issued secret that is CONFIRMATION of a candidate an attacker
+  # already holds rather than recovery from nothing, including confirmation
+  # against superseded values still sitting in the ReplicaSet revision history.
+  # A lower bar than recovery, and the one that matters.
+  #
+  # WHAT THE ANNOTATION IS STILL FOR. It cannot simply be dropped: settings.yaml
+  # is a subPath mount, frozen for the container's lifetime, so with no pod
+  # annotation that moves, a settings upgrade would report success and change
+  # nothing. Redacting the credential leaves keeps that mechanism working for
+  # every non-credential change - and see auth.oauth below for what you must do
+  # yourself for the credential ones, which is the price of this fix and is not
+  # optional.
+  #
+  # TWO LIMITS, STATED RATHER THAN LEFT TO BE DISCOVERED. First, the projection
+  # redacts BY PATH, so a credential written to a path the helper does not know
+  # about would still be digested; a value-based backstop re-checks the finished
+  # projection for the credentials it just redacted and for any
+  # scheme://user:password@host URL, and fails the render rather than publishing
+  # one. Path to act, value to prove - the two fail in opposite directions and
+  # neither alone is sufficient. Second, because the digest is now taken over a
+  # re-serialised projection rather than over the raw rendered Secret, its value
+  # differs from the pre-fix value for every fixture, so the first upgrade
+  # across this change rolls the pods once. The chart is unreleased, so that
+  # roll costs nothing; it is called out here so it is not read as a regression.
+  #
+  # The session secret is treated differently rather than consistently, and it
+  # has no annotation at all: env is equally unrefreshable, but a restart IS a
+  # documented one-line remedy, and a digest over that one value would have the
+  # least around it to guess. See templates/deployment.yaml for the
+  # checksum/settings reasoning.
   #
   # PREFERRED. The name of a Secret you create and manage yourself. The chart
   # renders no Secret in this shape, and the value never enters this file, your
@@ -760,6 +805,32 @@ auth:
   # flow. The hub also models cli and device clients; the chart does not model
   # them. If you need them, set server.oauth.cli or server.oauth.device through
   # config.extra.
+  #
+  # ROTATING A CLIENT SECRET REQUIRES A RESTART AND THE CHART WILL NOT DO IT FOR
+  # YOU. THIS IS THE PRICE OF THE checksum/settings REDACTION DESCRIBED UNDER
+  # auth.sessionSecret ABOVE, AND IT IS PAID HERE. settings.yaml reaches the
+  # container as a subPath mount, which the kubelet resolves once at container
+  # start and never refreshes. So a helm upgrade that changes clientId or
+  # clientSecret rewrites the Secret, reports success, and leaves every running
+  # replica using the old credential. The checksum/settings annotation does not
+  # rescue you, because it is now deliberately blind to credential changes:
+  # rotating a client secret is exactly the change that no longer moves it.
+  # Before the redaction the pods rolled by accident, as a side effect of the
+  # credential being inside the digest - and that same side effect was the
+  # verification oracle. The two were one mechanism and they are gone together.
+  #
+  # So after any upgrade that changes a value under auth.oauth:
+  #
+  #   kubectl rollout restart deploy/<release>-scion-hub
+  #
+  # Until you run it the rotation has not happened, and if you are rotating
+  # because the old secret leaked then the leaked secret is still the live one.
+  # FORGETTING IS SILENT IN BOTH DIRECTIONS. Logins keep working on the old
+  # credential, so nothing looks wrong - until the provider revokes it, at which
+  # point every login fails at once and the pods are still green, because a
+  # broken OAuth credential is not something /readyz can see. NOTES.txt prints
+  # this reminder on every install and upgrade that sets OAuth credentials, for
+  # the operator who reads release notes and not values.yaml.
   #
   # MIND THE SPELLING IF YOU GO THROUGH config.extra. These chart values are
   # camelCase and the chart renders them into settings.yaml as client_id and

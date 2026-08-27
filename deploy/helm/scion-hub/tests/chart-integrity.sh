@@ -73,7 +73,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=39
+EXPECTED_TOTAL=45
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -824,6 +824,192 @@ if [ -z "$_e8_bad" ]; then
 else
   fail "a pod annotation names or digests the session secret:${_e8_bad} -- see values.yaml on why checksum/session is deliberately absent"
 fi
+
+# ---------------------------------------------------------------------------
+# E9. checksum/settings digests a REDACTED PROJECTION, not the document.
+# ---------------------------------------------------------------------------
+#
+# E8 guards the annotation surface on the NAME axis: no annotation KEY may name
+# the session secret. It cannot see this one, because checksum/settings names
+# nothing - the credential is in what the digest was TAKEN OVER, not in the key.
+# That is the derivation axis and until this check it had no guard at all, on the
+# one surface where the chart digests a Secret.
+#
+# The exposure was measured rather than argued: the digest preimage was recovered
+# byte for byte and then used to predict helm's digest for three client secrets
+# that had never been rendered, 3 of 3, at ~300k guesses/sec on one core. Against
+# a provider-issued secret that is CONFIRMATION of a candidate an attacker
+# already holds, not recovery - including against superseded values still in the
+# ReplicaSet revision history. Lower bar than recovery, and the real one.
+#
+# WHY ARM 0 EXISTS, AND IT IS THE ONLY ARM THAT MATTERS. Arms 1 and 2 ask whether
+# two digests are equal. If the two renders were IDENTICAL, the digests would be
+# equal for a reason that has nothing to do with redaction, and this check would
+# print PASS forever while measuring nothing. That is not hypothetical: the
+# author's first run of this comparison by hand used a --set that changed a value
+# to what it already was, and read the resulting "unchanged" as a defect in the
+# projection. An inert arm renders exactly like a working one. So arm 0 asserts
+# the two inputs really do differ, BY VALUE, in both directions, and it is a
+# META-FAILURE rather than an assertion: if the inputs did not differ, nothing
+# was analysed and a green line here would be a lie rather than a wrong answer.
+#
+# Arm 2 is the positive control for arm 1. Deleting the annotation, or hashing a
+# constant, would satisfy arm 1 perfectly - and would silently break every
+# settings upgrade, because settings.yaml is a subPath mount frozen for the
+# container's lifetime. Arm 1 alone cannot tell "the secret is redacted" from
+# "the digest is dead". Arm 2 can, and it is why both are here.
+_e9_fx="$CHART/ci/values-settings-oauth.yaml"
+_e9_run() { "$HELM" template t "$CHART" -f "$_e9_fx" "$@" 2>&1; }
+_e9_dig() { printf '%s\n' "$1" | sed -n 's/^[[:space:]]*checksum\/settings:[[:space:]]*//p'; }
+_e9_A="$(_e9_run --set-string auth.oauth.web.google.clientSecret=E9-ARM-A-SECRET)"
+_e9_B="$(_e9_run --set-string auth.oauth.web.google.clientSecret=E9-ARM-B-SECRET)"
+_e9_C="$(_e9_run --set-string auth.oauth.web.google.clientSecret=E9-ARM-A-SECRET --set-string hub.name=E9ArmCRename)"
+# Arm 0a: each arm must render exactly one checksum/settings, non-empty. Zero
+# would make every equality below vacuously true; two would make "the digest"
+# ambiguous and the comparison meaningless.
+for _e9_n in A B C; do
+  eval "_e9_v=\"\$_e9_${_e9_n}\""
+  _e9_d="$(_e9_dig "$_e9_v")"
+  _e9_c="$(printf '%s\n' "$_e9_d" | grep -c . || true)"
+  if [ "$_e9_c" -ne 1 ]; then
+    echo "META-FAILURE: E9 arm ${_e9_n} rendered ${_e9_c} checksum/settings annotations, expected exactly 1." >&2
+    echo "  Nothing was analysed: the comparisons below would be over an absent or ambiguous value." >&2
+    exit 2
+  fi
+done
+_e9_dA="$(_e9_dig "$_e9_A")"; _e9_dB="$(_e9_dig "$_e9_B")"; _e9_dC="$(_e9_dig "$_e9_C")"
+# Arm 0b: the inputs really differ, in both directions. Checked by value, on the
+# rendered Secret, so a --set that silently failed to apply cannot pass as a
+# collapse.
+_e9_ina="$(printf '%s\n' "$_e9_A" | grep -cF -- 'E9-ARM-A-SECRET' || true)"
+_e9_inb="$(printf '%s\n' "$_e9_B" | grep -cF -- 'E9-ARM-B-SECRET' || true)"
+_e9_xa="$(printf '%s\n' "$_e9_A" | grep -cF -- 'E9-ARM-B-SECRET' || true)"
+_e9_xb="$(printf '%s\n' "$_e9_B" | grep -cF -- 'E9-ARM-A-SECRET' || true)"
+if [ "$_e9_ina" -ne 1 ] || [ "$_e9_inb" -ne 1 ] || [ "$_e9_xa" -ne 0 ] || [ "$_e9_xb" -ne 0 ]; then
+  echo "META-FAILURE: E9's two arms were supposed to differ by exactly the client secret." >&2
+  echo "  Expected A:own=1 B:own=1 A:other=0 B:other=0; got A:own=${_e9_ina} B:own=${_e9_inb} A:other=${_e9_xa} B:other=${_e9_xb}." >&2
+  echo "  The --set did not land, so the two renders are not distinguishable and NOTHING WAS ANALYSED." >&2
+  exit 2
+fi
+if [ "$_e9_dA" = "$_e9_dB" ]; then
+  pass "checksum/settings is unchanged by rotating the OAuth client secret (the digest is a projection, not an oracle)"
+else
+  fail "checksum/settings CHANGED when only the OAuth client secret changed (${_e9_dA} -> ${_e9_dB}). The annotation is a digest over the credential again, which publishes an offline verification oracle for it to everyone with pod read access - a wider audience than the Secret's RBAC. See scion-hub.settingsChecksum."
+fi
+if [ "$_e9_dA" != "$_e9_dC" ]; then
+  pass "checksum/settings still moves when a non-secret settings field changes (the projection did not kill the annotation)"
+else
+  fail "checksum/settings did NOT move when hub.name changed. The redaction has gone too far or the digest is a constant - and settings.yaml is a subPath mount the kubelet never refreshes, so every configuration upgrade would now report success and change nothing."
+fi
+
+# ---------------------------------------------------------------------------
+# E10. A SHORT client secret must not be REFUSED, and must still be redacted.
+# ---------------------------------------------------------------------------
+#
+# THIS IS A REGRESSION TEST FOR A DEFECT THIS HARNESS DID NOT FIND. The value
+# half of scion-hub.settingsChecksum searches the finished projection for each
+# credential it redacted, and the search is a plain substring test. A client
+# secret of "def" is a substring of the word "default" in the rendered settings,
+# so the chart REFUSED a perfectly valid install and told the maintainer to add
+# a redaction path that does not exist. Found by an arm run for an unrelated
+# reason - rendering NOTES.txt with credentials set - not by E9, which uses
+# long values and could never have exhibited it.
+#
+# Both assertions are needed and they pull against each other. The first says
+# the render is not refused; on its own, deleting the whole value check passes
+# it. The second says a short secret is still absent from the digest, which is
+# the property the value check exists to protect - and it is asserted the only
+# way it can be from outside: two different short secrets must produce ONE
+# digest. E9's arm 2 remains the control that the digest is not simply dead.
+_e10_run() { "$HELM" template t "$CHART" "${BASE[@]}" --set auth.mode=oauth \
+  --set-string auth.oauth.web.google.clientId=e10-client-id \
+  --set-string auth.oauth.web.google.clientSecret="$1" 2>&1; }
+_e10_a="$(_e10_run def)"
+_e10_b="$(_e10_run ghi)"
+if printf '%s\n' "$_e10_a" | grep -qE '^Error:'; then
+  fail "a three-character OAuth client secret was REFUSED: $(printf '%s\n' "$_e10_a" | head -1). The value-based backstop in scion-hub.settingsChecksum is colliding with ordinary rendered text - see the floor documented there. A refusal an operator cannot act on is worse than the check being absent."
+else
+  pass "a short OAuth client secret renders (the value backstop's substring test does not collide with ordinary settings text)"
+fi
+_e10_da="$(_e9_dig "$_e10_a")"; _e10_db="$(_e9_dig "$_e10_b")"
+_e10_ca="$(printf '%s\n' "$_e10_da" | grep -c . || true)"
+if [ "$_e10_ca" -ne 1 ] || [ "$(printf '%s\n' "$_e10_db" | grep -c . || true)" -ne 1 ]; then
+  echo "META-FAILURE: E10 did not render exactly one checksum/settings per arm (got ${_e10_ca} and $(printf '%s\n' "$_e10_db" | grep -c . || true))." >&2
+  echo "  Nothing was analysed: the equality below would be over an absent value." >&2
+  exit 2
+fi
+if [ "$_e10_da" = "$_e10_db" ]; then
+  pass "two different short OAuth client secrets produce one checksum/settings (the length floor narrowed the check, not the redaction)"
+else
+  fail "checksum/settings differs between two SHORT client secrets (${_e10_da} -> ${_e10_db}). The redaction is length-dependent, so the oracle is restored for exactly the credentials with the least entropy to guess."
+fi
+
+# ---------------------------------------------------------------------------
+# E11. The rotation restart NOTES.txt owes the operator, because E9 removed it.
+# ---------------------------------------------------------------------------
+#
+# E9 asserts that rotating an OAuth client secret does NOT move
+# checksum/settings. That is the fix, and it deletes a real behaviour: before the
+# redaction, a credential rotation rolled the pods, as a side effect of the
+# credential being inside the digest. The same side effect was the verification
+# oracle. They were one mechanism and they are gone together.
+#
+# The replacement is prose - values.yaml next to auth.oauth.web.*.clientSecret,
+# and NOTES.txt, which is the only one of the two an operator sees without going
+# looking. scion-hub.settingsChecksum's comment says "delete either of those and
+# you have deleted the behaviour, not the annotation." That was an unasserted
+# claim about a file nothing tested, which is the shape of every stale comment in
+# this chart's history, so it is asserted here.
+#
+# RENDERING NOTES.txt WITHOUT A CLUSTER. `helm template` evaluates NOTES.txt but
+# never prints it, and this helm has no --notes. The technique is hack/verify.sh's
+# and is copied deliberately rather than reinvented: copy the chart, rename
+# templates/NOTES.txt to a .txt manifest name, --show-only that file with --debug
+# (helm exits non-zero because the prose is not YAML; --debug renders it anyway).
+# The copy is compared byte-for-byte against the original first - otherwise this
+# section could be measuring a file that is not the chart's NOTES.
+_e11_render() { # $1 = out file, rest = helm args
+  local _o="$1"; shift
+  local _d; _d="$(mktemp -d)"
+  cp -a "$CHART" "$_d/c"
+  mv "$_d/c/templates/NOTES.txt" "$_d/c/templates/zz-notes-probe.txt"
+  if ! cmp -s "$CHART/templates/NOTES.txt" "$_d/c/templates/zz-notes-probe.txt"; then
+    rm -rf "$_d"
+    echo "META-FAILURE: E11's NOTES probe is not byte-identical to templates/NOTES.txt." >&2
+    exit 2
+  fi
+  "$HELM" template t "$_d/c" --debug --show-only templates/zz-notes-probe.txt "$@" 2>/dev/null \
+    | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p' >"$_o"
+  rm -rf "$_d"
+}
+_e11_on="$(mktemp)"; _e11_off="$(mktemp)"
+_e11_render "$_e11_on" "${BASE[@]}" --set auth.mode=oauth \
+  --set-string auth.oauth.web.google.clientId=e11-client-id \
+  --set-string auth.oauth.web.google.clientSecret=e11-client-secret-value
+_e11_render "$_e11_off" "${BASE[@]}"
+# Arm 0: BOTH renders must be non-empty and must contain a section that is in
+# NOTES.txt unconditionally. Without this the "absent" assertion below is
+# satisfied by a probe that rendered nothing at all, which is the standing defect
+# in every absence check: a broken harness and a clean chart look identical.
+for _e11_f in "$_e11_on" "$_e11_off"; do
+  if [ ! -s "$_e11_f" ] || ! grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' "$_e11_f"; then
+    echo "META-FAILURE: E11's NOTES probe rendered nothing usable ($(wc -c <"$_e11_f") bytes, unconditional anchor $(grep -cF 'SCHEMA_VERSION IS LOAD-BEARING' "$_e11_f" || true))." >&2
+    echo "  Nothing was analysed: the absence assertion below would pass against an empty file." >&2
+    rm -f "$_e11_on" "$_e11_off"
+    exit 2
+  fi
+done
+if grep -qF 'ROTATING AN OAUTH CLIENT SECRET' "$_e11_on"; then
+  pass "NOTES.txt tells the operator to restart after an OAuth credential rotation"
+else
+  fail "NOTES.txt does NOT print the rotation restart when OAuth credentials are set. checksum/settings is deliberately blind to credential changes (E9), so this paragraph is the only thing that tells an operator their rotation has not taken effect - and the pods stay green while serving the old credential."
+fi
+if grep -qF 'ROTATING AN OAUTH CLIENT SECRET' "$_e11_off"; then
+  fail "NOTES.txt prints the OAuth rotation restart for a release that sets no OAuth credentials. It is advice the operator cannot act on, and a NOTES that warns about everything is read as warning about nothing."
+else
+  pass "NOTES.txt omits the OAuth rotation restart when no OAuth credentials are set (the condition is a condition, not a constant)"
+fi
+rm -f "$_e11_on" "$_e11_off"
 
 # ---------------------------------------------------------------------------
 # Fail closed.

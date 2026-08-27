@@ -445,6 +445,43 @@ THE SETTINGS FILE IS READ-ONLY. THIS IS DELIBERATE.
   separate hazard that a hub which has already run against Postgres keeps some
   settings in database rows that shadow the file entirely; see VALIDATION.md.
 
+{{- $oauthConfigured := false }}
+{{- range $provider, $creds := .Values.auth.oauth.web }}
+{{- if or $creds.clientId $creds.clientSecret }}
+{{- $oauthConfigured = true }}
+{{- end }}
+{{- end }}
+{{- if $oauthConfigured }}
+
+ROTATING AN OAUTH CLIENT SECRET REQUIRES A RESTART YOU HAVE TO RUN YOURSELF
+
+  This release sets OAuth client credentials, so this applies to you. A
+  helm upgrade that changes the client secret rewrites the settings Secret
+  and reports success - and every running pod keeps using the old credential
+  until something restarts them. If you rotated because the old secret
+  leaked, it is still live at that point.
+
+  The pods do NOT roll automatically. checksum/settings is deliberately
+  blind to credential changes: a digest that moves when the credential
+  moves is a verification oracle for it, and pod annotations are readable
+  by anyone with pod read access. The trade-off is real and is not papered
+  over: automatic rotation and zero-knowledge annotation are the same
+  requirement with opposite signs. This chart chose zero-knowledge, and
+  the cost is one command:
+
+    kubectl rollout restart deploy/{{ include "scion-hub.fullname" . }} -n {{ .Release.Namespace }}
+
+  Expect it to log everyone out. That is the rotation working: the old
+  sessions are signed with the old OAuth state, and the new pods do not
+  honour them. If nobody is logged out, the old pods are still running.
+
+  What happens if you forget: nothing, visibly, until the provider revokes
+  the old client secret. At that point every login fails and the hub looks
+  healthy - /readyz passes, the pod is Ready, and Kubernetes reports no
+  event. The failure is at the OAuth token exchange, which is an HTTP 401
+  from the provider, logged but not surfaced.
+{{- end }}
+
 SCHEMA_VERSION IS LOAD-BEARING
 
   The rendered file carries schema_version: "1", and it is not boilerplate.

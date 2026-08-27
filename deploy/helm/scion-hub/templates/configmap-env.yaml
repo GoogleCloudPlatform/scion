@@ -95,5 +95,11 @@ data:
   SCION_SERVER_ADMIN_MODE: {{ . | quote }}
   {{- end }}
   {{- with .Values.hub.maintenanceMessage }}
+  {{- /* Free operator text, and this is a ConfigMap - readable by a wider
+  audience than any Secret, and digested into checksum/env-config on top. The
+  guard only refuses credential SHAPES (a user:password@ URL, a credential query
+  parameter, a known token prefix), so an ordinary status-page link is
+  unaffected. */}}
+  {{- include "scion-hub.assertNoCredential" (dict "value" . "source" "hub.maintenanceMessage") }}
   SCION_SERVER_MAINTENANCE_MESSAGE: {{ . | quote }}
   {{- end }}

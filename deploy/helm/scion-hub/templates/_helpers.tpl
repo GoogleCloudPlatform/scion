@@ -2571,6 +2571,7 @@ real deep merge rather than a text append.
 {{- $driver := .Values.database.driver }}
 
 {{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
+{{- include "scion-hub.assertNoCredential" (dict "value" .Values.hub.name "source" "hub.name") }}
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
 
 {{- /*
@@ -2706,6 +2707,12 @@ forces a chart fork. Merged before the assertions run, not after. */}}
 {{- $rendered := toYaml $doc }}
 {{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
 {{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
+{{- /* config.extra is an arbitrary subtree the operator controls, so it can put
+a credential at a path no redaction list names - a DSN at server.database.url
+was measured doing exactly that, landing in the Secret AND moving the
+checksum/settings digest. The projection cannot enumerate its way out of an
+open-ended surface; this turns the injection into a render failure instead. */}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.config.extra "source" "config.extra") }}
 {{- $rendered }}
 {{- end }}
 
