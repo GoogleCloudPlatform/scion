@@ -104,7 +104,15 @@ gcloud builds submit \
   .
 ```
 
-The build takes roughly ten minutes. Only `scion-omni` is pushed to your registry.
+The build runs eight images in a chain (thick-prep → scion-base → claude → codex →
+opencode → antigravity → grok-build → omni). Each step builds in the Cloud Build
+worker and feeds the next. Only the final `scion-omni` image is pushed to your
+registry. Workers start fresh each run — there is no warm cache between builds.
+
+Monitor progress in the
+[Cloud Build console](https://console.cloud.google.com/cloud-build/builds) or with
+`gcloud builds list --project=$PROJECT_ID`.
+
 When it completes, your image is:
 
 ```
