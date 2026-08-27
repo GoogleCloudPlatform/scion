@@ -156,6 +156,10 @@ and target `omni`:
 image-build/scripts/build-images.sh --target omni --registry $YOUR_REGISTRY --push
 ```
 
+The deploy derives the agent image registry from `--image` automatically; if
+derivation fails, the error names `--image-registry` as the explicit override.
+When this value is wrong, agent creation fails — not the deploy itself.
+
 ---
 
 ## 1. Deploy
@@ -209,6 +213,7 @@ Instance is open to the internet with only Hub session auth in front of it.
 | `--memory` | `8Gi` | Memory allocation |
 | `--admin-email` | deployer's gcloud account | Override the Hub admin email |
 | `--service-account` | (default compute SA) | GCP service account for the Instance |
+| `--image-registry` | derived from `--image` | Override the image registry the broker uses to pull agent images |
 
 ---
 
