@@ -3,7 +3,7 @@ title: Deploy via Helm (GKE)
 description: Complete guide to deploying the Scion HA Hub to Google Kubernetes Engine (GKE) using the official Helm chart.
 ---
 
-Scion supports deploying the **Scion HA Hub** directly to Google Kubernetes Engine (GKE) using the official Scion Helm chart. This Helm-based deployment (introduced in Phase 0) provides a robust, standardized path for provisioning and upgrading the control plane in highly available enterprise environments.
+Scion supports deploying the **Scion HA Hub** directly to Google Kubernetes Engine (GKE) using the official Scion Helm chart. This Helm-based deployment provides a robust, standardized path for provisioning and upgrading the control plane in highly available enterprise environments.
 
 :::note[Availability Tier]
 Helm-based deployment is designed for **HA hosted** mode, utilizing external managed services (such as Cloud SQL PostgreSQL and Google Cloud Storage) to ensure multi-replica scalability, zero-downtime rolling upgrades, and cluster-wide consistency.
@@ -19,26 +19,32 @@ The Scion Helm chart incorporates several operator-facing validation checks and 
 The chart includes a complete `values.schema.json` file. Helm validates your configuration at install/upgrade time against this schema, catching syntax errors, missing fields, or invalid types before sending resources to the Kubernetes API.
 
 ### 2. Guardrails Against Unsupported Shapes
-To prevent runtime configuration mismatches or silent data loss, the Helm templates implement **16 operator-facing validation claims**. If your configuration defines an unsupported architectural shape (e.g., mismatching storage backends, invalid database configurations, or invalid auth modes), the chart will actively refuse to render, printing a clear explanation of the requirement.
+To prevent runtime configuration mismatches or silent data loss, the Helm templates implement **operator-facing validation claims**. If your configuration defines an unsupported architectural shape (e.g., mismatching storage backends, invalid database configurations, or invalid auth modes), the chart will actively refuse to render, printing a clear explanation of the requirement.
 
-### 3. Stable `hub.hubId` Across Upgrades
+### 3. Cloud SQL Auth Proxy Integration (Phase 2)
+The chart natively supports deploying the Cloud SQL Auth Proxy as a sidecar. This includes IAM and password-based DSN construction, as well as minimum connection pool floor enforcement, ensuring secure and stable database connectivity.
+
+### 4. Strict Secret Management (Phase 3)
+Session secrets are sourced exclusively from Kubernetes Secrets (never via argv or annotations) to prevent leakage in pod specs. The chart includes a credential placement scanner and supports OAuth client credentials with redacted-projection checksum hashing to securely trigger rollouts when secrets change.
+
+### 5. Stable `hub.hubId` Across Upgrades
 The Hub's identity (`hub.hubId`) remains completely stable and immutable across Helm upgrades and container rescheduling. This avoids identity loss, prevents JWT signature validation issues, and ensures that active agent communication is never disrupted during platform maintenance.
 
-### 4. Re-Engineered `/readyz` Multi-Backend Probe
+### 6. Re-Engineered `/readyz` Multi-Backend Probe
 The Hub exposes a detailed readiness endpoint at `/readyz` targeted by GKE readiness probes. This endpoint handles check-resolution for all configured backend services, including the newly supported `gke-shared-volume` workspace backend. If any critical dependency (database, object storage, or shared volumes) becomes unreachable, the pod is automatically marked unready to prevent bad traffic routing.
 
-### 5. Deterministic Cluster-Scoped RBAC Names
+### 7. Deterministic Cluster-Scoped RBAC Names
 When deploying Scion in multi-tenant or multi-namespace clusters, name collisions can present severe security risks.
 - **The Challenge:** Kubernetes `ClusterRole` and `ClusterRoleBinding` resources must have cluster-unique names. In large environments, long generated names can exceed the 63-character limit and truncate. Truncated names can collide across namespaces, potentially repointing critical `pods/exec` and `secrets` authority to the wrong workspace.
 - **The Fix:** The Scion Helm chart automatically disambiguates truncated cluster-scoped resource names. If a name truncates to 63 bytes, it appends a short cryptographic digest over the fullname and namespace. This guarantees unique cluster-scoped bindings even under aggressive truncation.
 
-### 6. Read-Only `settings.yaml` Mount
+### 8. Read-Only `settings.yaml` Mount
 The chart automatically renders the hub's `settings.yaml` based on your `values.yaml` and mounts it read-only. This ensures configuration consistency and prevents runtime mutations.
 
-### 7. Credential Guards
+### 9. Credential Guards
 Credential guards are wired through shared helpers to strictly control environment variable injection. This ensures that arbitrary `extraEnv` configuration cannot be used to smuggle or expose sensitive secrets.
 
-### 8. Strict HTTPS Enforcement
+### 10. Strict HTTPS Enforcement
 The `hub.baseUrl` setting is required and must strictly use HTTPS. The chart will actively refuse to render if this field is missing or configured with a non-HTTPS URL.
 
 ---

@@ -3,11 +3,28 @@ title: Permissions & Policy
 description: Designing access control for Scion projects and agents.
 ---
 
-Scion is implementing a robust, principal-based access control system to manage resources across distributed projects and teams. While currently in the design and early implementation phase, this document outlines the core concepts and policy model.
+Scion implements a robust, principal-based access control system to manage resources across distributed projects and teams. The system is built on the **Permissions Foundation Phase 1** architecture, providing deterministic policy evaluation, declarative route guards, and comprehensive auditing.
 
 For a detailed technical specification of the policy language and agent identity claims, see the [Policy & Permissions Reference](/scion/reference/permissions-policy/).
 
 ## Core Concepts
+
+### Unified Authorization
+Scion uses a `UnifiedAuthMiddleware` to enforce declarative route guards across the Hub. Every request undergoes deterministic policy evaluation before reaching the handler, ensuring no resource can be accessed without explicit permission.
+
+### Roles and Bindings
+Access is granted through explicit role assignments:
+- **RoleDefinition**: A named collection of permissions (e.g., `developer`, `viewer`, `admin`).
+- **RoleBinding**: A grant of a `RoleDefinition` to a principal (user, group, or agent) within a specific scope (Hub or Project).
+- **Project Membership**: Users gain access to project resources by being bound to a role within that project.
+
+### Delegation and Revocation
+- **CanDelegate Admission Gate**: Prevents lateral privilege escalation by ensuring a principal can only grant roles or permissions they themselves possess.
+- **Credential Revocation**: Agent credentials and User Access Tokens can be instantly revoked, terminating access system-wide.
+
+### Observability
+- **Decision & Mutation Audit**: All authorization decisions and role mutations are captured in a structured audit log.
+- **Explain API**: Administrators can use the Explain API to query why a specific permission was granted or denied for a principal on a given resource.
 
 ### Principals
 A **Principal** is an identity that can be granted permissions.
