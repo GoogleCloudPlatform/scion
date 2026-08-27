@@ -7,10 +7,11 @@ This guide deploys a single-node Scion Hub on a **Cloud Run Instance**. Agents r
 as Cloud Run Sandboxes inside the same Instance — one container image, one deploy
 command, no external database or storage to provision.
 
-:::danger[Workspaces are ephemeral]
-Agent workspaces live on the Instance's ephemeral disk. **A redeploy destroys all
-workspaces and the SQLite control plane.** There is no persistence layer. Push work
-to a git remote before redeploying. If you need durable workspaces, use the
+:::danger[All state is ephemeral]
+Agent workspaces and the SQLite control plane live on the Instance's ephemeral
+disk. **Any container restart — planned redeploy or unplanned crash — destroys all
+of them.** There is no persistence layer. Push work to a git remote early and
+often. If you need durable workspaces, use the
 [VM (GCE) path](/scion/hosted/single-node/hub-setup-gce/) or the
 [HA tier](/scion/hosted/ha/overview/).
 :::
@@ -282,18 +283,35 @@ accordingly until per-agent limits are available.
 
 This tier is **Tier 0: pure ephemeral**.
 
-- **Workspaces** live on the Instance's ephemeral filesystem. A redeploy loses
-  them.
+- **Workspaces** live on the Instance's ephemeral filesystem.
 - **The SQLite database** (projects, agent metadata) lives on the same ephemeral
-  filesystem. A redeploy loses it.
+  filesystem.
 - **The admin seed** (your email) is set by an environment variable in the deploy
-  command, so it is re-established on every deploy.
+  command, so it is re-established automatically.
+
+All state on the Instance is destroyed when the container restarts — whether by a
+planned redeploy, an overload that crashes the container, or any other restart. A
+redeploy you can plan for; a crash you cannot. **The only durable copy of any
+agent's work is what it has pushed to a git remote.**
 
 This is a deliberate design trade for fast, cheap, disposable deployments — not an
-oversight. Treat the Instance as a workspace, not as infrastructure.
+oversight. Treat the Instance as a workspace, not as infrastructure. If you need
+durable workspaces, use the [VM (GCE) path](/scion/hosted/single-node/hub-setup-gce/)
+or the [HA tier](/scion/hosted/ha/overview/).
 
-**Before redeploying:** ensure every agent has pushed its work to a git remote.
-Anything only on the Instance's local disk is gone after redeploy.
+:::danger[Overloading the Instance destroys all work]
+If too many agents are started on a single Instance, the container can run out of
+memory and be terminated. When this happens, the Hub restarts into a clean state —
+**every agent, every project, and every workspace is lost**. There is no warning
+before the crash, and there is no way to recover afterward. The request that starts
+the agent past the limit returns success; the operator's last signal before losing
+everything is a success message.
+
+There are no per-agent resource limits on this tier and no memory or CPU instrument
+visible to the operator. The only defence is conservative use. Sizing guidance is
+pending (see [Section 4](#4-sizing)); until it is published, start agents
+incrementally and push work to a remote frequently.
+:::
 
 :::note[Shallow clones]
 Agent workspaces are depth-1 shallow clones and can only push to `origin`. Pushes
