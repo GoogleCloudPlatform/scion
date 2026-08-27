@@ -2183,18 +2183,9 @@ func TestGetServerConfigSchema_Shape(t *testing.T) {
 	}
 }
 
-func TestGetServerConfigSchema_AuthGating(t *testing.T) {
-	srv, _, _ := newTestDBServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/server-config/schema", nil)
-	// No identity in context → unauthenticated.
-	rr := httptest.NewRecorder()
-	srv.handleAdminServerConfigSchema(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("expected 403 for unauthenticated request, got %d", rr.Code)
-	}
-}
+// NOTE: Auth gating for handleAdminServerConfigSchema (unauthenticated rejection)
+// is now enforced by routeGuard via Permission metadata, not by inline checks.
+// See TestRouteGuardSettingsConversion in routeguard_settings_test.go.
 
 func TestGetServerConfigSchema_StableOutput(t *testing.T) {
 	srv, _, _ := newTestDBServer(t)
@@ -2455,21 +2446,9 @@ func TestResetSection_RejectsUnknownSection(t *testing.T) {
 	}
 }
 
-func TestResetSection_RequiresAdmin(t *testing.T) {
-	srv, _, _ := newTestDBServer(t)
-
-	// Non-admin request.
-	r := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/access", nil)
-	viewer := NewAuthenticatedUser("u2", "viewer@example.com", "Viewer", "viewer", "cli")
-	r = r.WithContext(contextWithIdentity(r.Context(), viewer))
-
-	rr := httptest.NewRecorder()
-	srv.handleAdminServerConfigSectionReset(rr, r)
-
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", rr.Code)
-	}
-}
+// NOTE: Auth gating for handleAdminServerConfigSectionReset (non-admin rejection)
+// is now enforced by routeGuard via Permission metadata, not by inline checks.
+// See TestRouteGuardSettingsConversion in routeguard_settings_test.go.
 
 // --- Phase 5: Propagation verification ---
 

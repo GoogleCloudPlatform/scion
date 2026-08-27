@@ -1009,6 +1009,10 @@ func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resourc
 		}
 	} else if resource.ParentType == "project" && resource.ParentID != projectID {
 		return &Decision{Allowed: false, Reason: "token not scoped for this project"}
+	} else if resource.Type != "" && resource.Type != "project" && resource.ParentType != "project" {
+		// Resource has no project association (hub-level).
+		// UATs are project-scoped and must not access hub-level resources.
+		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources"}
 	}
 
 	// Enforce scope constraint: the resource:action must be in the token's scopes.

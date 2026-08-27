@@ -125,12 +125,6 @@ type ServerConfigUpdateRequest struct {
 // GET: Returns the current global settings.yaml contents (sensitive fields masked).
 // PUT: Updates global settings.yaml and optionally reloads applicable runtime settings.
 func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	// In postgres mode, delegate to the DB-backed handlers that use
 	// OperationalSettings for Layer-1 reads/writes (design §3.8).
 	// File/SQLite mode keeps the exact current behavior (file read/write).
@@ -162,10 +156,6 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 // Postgres mode only; admin-gated. Design §3.2.4.
 func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	if r.Method != http.MethodDelete {
 		MethodNotAllowed(w)

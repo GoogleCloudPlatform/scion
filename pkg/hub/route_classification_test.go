@@ -371,7 +371,7 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 }
 
 func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
-	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux()}
+	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
 	srv.registerRoutes()
 
 	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")

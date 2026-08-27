@@ -23,31 +23,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-func TestHandleAdminServerConfig_NonAdmin(t *testing.T) {
-	srv := &Server{}
-
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/server-config", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
-	rr := httptest.NewRecorder()
-	srv.handleAdminServerConfig(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
-	}
-}
-
-func TestHandleAdminServerConfig_Unauthenticated(t *testing.T) {
-	srv := &Server{}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/server-config", nil)
-	rr := httptest.NewRecorder()
-	srv.handleAdminServerConfig(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
-	}
-}
+// NOTE: Auth gating for handleAdminServerConfig (non-admin and unauthenticated
+// rejection) is now enforced by routeGuard via Permission metadata, not by inline
+// checks. See TestRouteGuardSettingsConversion in routeguard_settings_test.go.
 
 func TestHandleAdminServerConfig_MethodNotAllowed(t *testing.T) {
 	srv := &Server{}

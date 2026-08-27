@@ -30,13 +30,6 @@ import (
 // The section follows the maintenance pattern: DB-only, no settings.yaml
 // representation, with a dedicated admin API endpoint.
 func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Request) {
-	// Require admin user.
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetProjectDefaults(w)
