@@ -3,13 +3,9 @@ title: Policy & Permissions Reference
 description: Technical reference for the Scion policy language and permission system.
 ---
 
-:::caution[Draft Specification]
-The policy and permissions system described here is currently in **active design and development**. Interfaces and data structures are subject to change.
-:::
-
 ## Overview
 
-Scion employs a rigorous, claim-based access control system to secure the interactions between Agents, Users, and the Hub. This system goes beyond simple role-based access control (RBAC) by allowing policies to evaluate cryptographically signed claims embedded in an agent's identity token.
+Scion employs a rigorous, claim-based access control system to secure the interactions between Agents, Users, and the Hub. Built on the **Permissions Foundation Phase 1** architecture, this system goes beyond simple role-based access control (RBAC) by evaluating cryptographically signed claims embedded in an agent's identity token and enforcing deterministic, policy-driven route guards via a unified authentication middleware.
 
 This enables sophisticated security postures, such as:
 *   "An agent can only read secrets belonging to the user who created it."

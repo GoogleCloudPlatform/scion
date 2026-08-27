@@ -51,7 +51,7 @@ Agents running inside containers must report status back to the Hub without poss
 Runtime Brokers represent high-trust infrastructure. They use HMAC-based request signing for bidirectional authentication with the Hub.
 
 - **Shared Secret**: Established during initial registration via a short-lived `joinToken`.
-- **Signing**: Every request includes headers for `X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, and `X-Scion-Signature`.
+- **Signing & Verification**: Every request includes headers for `X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, and `X-Scion-Signature`. The Hub strictly verifies that the authenticated caller identity matches any target broker paths to prevent cross-tenant escalation.
 - **Replay Protection**: Nonce-based tracking and timestamp validation (5-minute clock skew tolerance) prevent replay attacks.
 - **NAT Traversal**: Brokers establish a persistent WebSocket control channel. The initial upgrade request is HMAC-authenticated, establishing a trusted session for subsequent commands.
 
@@ -182,5 +182,5 @@ These are infrastructure-level secrets established during broker registration an
 
 To facilitate local development, Scion provides a **Development Authentication** mode.
 - **Developer Token**: A persistent token starting with `scion_dev_` stored in `~/.scion/dev-token`.
-- **Constraints**: Dev mode is disabled by default and requires `localhost` binding if TLS is not used.
+- **Constraints & Safeguards**: Dev mode is disabled by default. Startup validation strictly prohibits binding the `devAuthMiddleware` to non-loopback interfaces (e.g., `0.0.0.0`). Because this middleware automatically logs in every cookieless request as an admin, refusing it on public interfaces prevents the accidental exposure of an unauthenticated admin UI.
 - **Warning**: The server logs clear warnings when operating in Dev Mode.

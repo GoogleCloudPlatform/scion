@@ -104,7 +104,7 @@ runtimes:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `type` | string | The runtime type: `docker`, `podman`, `container` (Apple), or `kubernetes`. |
+| `type` | string | The runtime type: `docker`, `podman`, `container` (Apple), `kubernetes`, or `cloudrun` (Cloud Run Instances). |
 | `host` | string | (Docker/Podman) The daemon socket or TCP address. Optional for Podman (defaults to CLI). |
 | `context` | string | (Kubernetes) The kubectl context name. |
 | `namespace` | string | (Kubernetes) The target namespace. |
