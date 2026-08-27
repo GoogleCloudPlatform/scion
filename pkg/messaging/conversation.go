@@ -103,11 +103,18 @@ func ResolveOrCreateDMConversation(
 	// Errors are logged but not returned — participant registration is a listing
 	// concern, not an access concern (the DM key IS the access authority).
 	//
+	// This registration runs on EVERY resolve, not only on first create, and
+	// ErrAlreadyExists is swallowed. Registration is therefore idempotent and
+	// self-repairing: if one of the two AddParticipant calls fails transiently,
+	// the next message in the same DM retries it. Do not "fix" the swallowed
+	// error by returning it — that would make participant failure kill delivery,
+	// which is exactly backwards.
+	//
 	// Race note: concurrent ResolveOrCreateDMConversation calls may both
 	// attempt AddParticipant. This is benign: AddParticipant's immutability
 	// guard reads Kind and ExternalRef, which are immutable for a conversation's
 	// lifetime (set at creation, never updated by UpsertConversationByExternalRef).
-	// Worst case is ErrAlreadyExists, which is swallowed above.
+	// Worst case is ErrAlreadyExists, which is swallowed below.
 	for _, pp := range []struct{ kind, id string }{
 		{senderKind, senderID},
 		{recipientKind, recipientID},
