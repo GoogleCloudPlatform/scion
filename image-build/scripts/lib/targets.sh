@@ -97,7 +97,7 @@ resolve_targets() {
       echo scion-hub
       ;;
     omni)
-      printf '%s\n' scion-claude scion-codex scion-opencode scion-antigravity scion-grok-build scion-omni
+      printf '%s\n' "${_OMNI_CHAIN[@]}"
       ;;
     common)
       printf '%s\n' scion-base
@@ -171,8 +171,12 @@ step_context_dir() {
   esac
 }
 
-# Omni chain order. When OMNI_BUILD is true, harnesses chain to each other
-# instead of all branching from scion-base:
+# Omni chain order — single source for the harness subset included in the
+# single-node omni image. resolve_targets (above) and step_build_args (below)
+# both consume this array. cloudbuild-omni.yaml has a static copy that must
+# be kept in sync manually.
+# When OMNI_BUILD is true, harnesses chain to each other instead of all
+# branching from scion-base:
 #   scion-base -> claude -> codex -> opencode -> antigravity -> grok-build -> omni
 _OMNI_CHAIN=(scion-claude scion-codex scion-opencode scion-antigravity scion-grok-build scion-omni)
 

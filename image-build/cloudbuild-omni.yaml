@@ -1,22 +1,39 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Omni image chain for Cloud Run Instances single-node deployment.
 # Architecture: amd64 only.
 #
 # Chain: thick-prep -> scion-base -> claude -> codex -> opencode ->
 #        antigravity -> grok-build -> omni
+# This is a deliberate subset of harnesses for single-node deployment;
+# the full catalog is built by cloudbuild-thick.yaml. The chain must
+# match _OMNI_CHAIN in scripts/lib/targets.sh.
 #
 # Each step builds in the local daemon so the next step can use it as
 # BASE_IMAGE. Only scion-omni is pushed (via the images: section).
 #
-# INVOCATION (exact working command):
+# INVOCATION (manual gcloud builds submit):
 #
 #   CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=<sa-email> \
-#   CLOUDSDK_BILLING_QUOTA_PROJECT=ptone-experiments \
+#   CLOUDSDK_BILLING_QUOTA_PROJECT=<your-project> \
 #     gcloud builds submit \
-#       --project=ptone-experiments \
+#       --project=<your-project> \
 #       --config=image-build/cloudbuild-omni.yaml \
-#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_REGISTRY=us-central1-docker.pkg.dev/ptone-experiments/scion" \
+#       --substitutions="_TAG=dev-$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_REGISTRY=us-central1-docker.pkg.dev/<your-project>/scion" \
 #       --ignore-file=image-build/gcloudignore-omni \
-#       --gcs-source-staging-dir=gs://ptone-experiments_cloudbuild/source \
+#       --gcs-source-staging-dir=gs://<your-project>_cloudbuild/source \
 #       --async .
 #
 # WHY CLOUDSDK_BILLING_QUOTA_PROJECT: When impersonating a SA from a
@@ -33,6 +50,12 @@
 #   the custom ignore file, step 8 (build-scion-omni) fails with
 #   ENOENT on web/package.json.
 steps:
+  # Pre-flight: verify push access to catch permission errors early
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'verify-registry'
+    entrypoint: 'bash'
+    args: ['image-build/scripts/verify-registry.sh', '$_REGISTRY']
+
   # Stage 1: Build thick-prep
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-thick-prep'
@@ -55,7 +78,7 @@ steps:
       - '--build-arg'
       - 'BASE_IMAGE=$_REGISTRY/thick-prep:$_TAG'
       - '--build-arg'
-      - 'GIT_COMMIT=$COMMIT_SHA'
+      - 'GIT_COMMIT=$_COMMIT_SHA'
       - '-t'
       - '$_REGISTRY/scion-base:$_TAG'
       - '-f'
@@ -146,7 +169,9 @@ steps:
       - '--build-arg'
       - 'BASE_IMAGE=$_REGISTRY/scion-grok-build:$_TAG'
       - '--build-arg'
-      - 'GIT_COMMIT=$COMMIT_SHA'
+      - 'GIT_COMMIT=$_COMMIT_SHA'
+      - '-t'
+      - '$_REGISTRY/scion-omni:$_SHORT_SHA'
       - '-t'
       - '$_REGISTRY/scion-omni:$_TAG'
       - '-f'
@@ -155,12 +180,14 @@ steps:
 
 # Push only scion-omni (the final deliverable).
 images:
+  - '$_REGISTRY/scion-omni:$_SHORT_SHA'
   - '$_REGISTRY/scion-omni:$_TAG'
 
 substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/scion'
   _TAG: 'latest'
+  _COMMIT_SHA: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 7200s
+timeout: 14400s

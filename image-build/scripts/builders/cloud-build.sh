@@ -49,12 +49,7 @@ cloud_build_config_for_target() {
     scion-base) file="cloudbuild-scion-base.yaml" ;;
     harnesses)  file="cloudbuild-harnesses.yaml" ;;
     hub)        file="cloudbuild-hub.yaml" ;;
-    omni)
-      echo "cloud-build: no cloudbuild-*.yaml for target 'omni'." >&2
-      echo "The omni chain has no Cloud Build config. Use --builder local-docker" >&2
-      echo "(the default), which works both locally and in GitHub Actions CI." >&2
-      return 1
-      ;;
+    omni)      file="cloudbuild-omni.yaml" ;;
     thick-prep) file="cloudbuild-thick.yaml" ;;
     thick)      file="cloudbuild-thick.yaml" ;;
     *)
@@ -136,8 +131,17 @@ builder_run_target() {
     --project="${project}"
     --substitutions="${subs}"
     --config="${config}"
-    "${REPO_ROOT}"
   )
+
+  # When a target-specific gcloudignore file exists, use it instead of the
+  # default .gcloudignore. This allows targets like omni (which need web
+  # source files excluded by the default) to override upload filtering.
+  local ignore_file="${IMAGE_BUILD_DIR}/gcloudignore-${target}"
+  if [[ -f "${ignore_file}" ]]; then
+    cmd+=(--ignore-file="${ignore_file}")
+  fi
+
+  cmd+=("${REPO_ROOT}")
 
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
     printf '[dry-run]'
