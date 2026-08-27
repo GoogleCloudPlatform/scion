@@ -115,6 +115,13 @@ func (s *ConversationStore) CreateConversation(ctx context.Context, conv *store.
 	if conv == nil {
 		return fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
 	}
+	// A direct conversation's external_ref IS the access control basis: the DM
+	// key names who is entitled to see the messages. A keyless direct row has no
+	// ACL at all. Group conversations may legitimately omit the external ref
+	// (native groups have no upstream surface to point at).
+	if conv.Kind == "direct" && conv.ExternalRef == "" {
+		return fmt.Errorf("direct conversation requires a non-empty external_ref (the DM key is the access authority): %w", store.ErrInvalidInput)
+	}
 	if conv.ID == "" {
 		return fmt.Errorf("conversation ID is required: %w", store.ErrInvalidInput)
 	}

@@ -152,11 +152,13 @@ func TestConversationListFilters(t *testing.T) {
 	ctx := context.Background()
 
 	projectID := uuid.NewString()
+	dmKey := "dm:agent:" + uuid.NewString() + ":user:" + uuid.NewString()
 	conv1 := &store.Conversation{
-		ID:        uuid.NewString(),
-		ProjectID: &projectID,
-		Kind:      "direct",
-		Surface:   "native",
+		ID:          uuid.NewString(),
+		ProjectID:   &projectID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
 	}
 	conv2 := &store.Conversation{
 		ID:      uuid.NewString(),
@@ -189,11 +191,13 @@ func TestConversationListPagination(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
 
-	// Create 5 conversations with staggered activity times
+	// Create 5 conversations with staggered activity times.
+	// Uses kind="group" because pagination is kind-agnostic, avoiding the
+	// need for unique DM keys on each fixture.
 	for i := 0; i < 5; i++ {
 		conv := &store.Conversation{
 			ID:             uuid.NewString(),
-			Kind:           "direct",
+			Kind:           "group",
 			Surface:        "native",
 			LastActivityAt: time.Now().Add(time.Duration(i) * time.Second),
 		}
@@ -681,6 +685,55 @@ func TestUpsertConversationByExternalRef_ValidInput(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DEF-29: Direct conversation requires non-empty external_ref
+// ---------------------------------------------------------------------------
+
+func TestCreateConversation_DirectWithEmptyExternalRef_Refused(t *testing.T) {
+	s := newTestConversationStore(t)
+	conv := &store.Conversation{
+		ID:      uuid.NewString(),
+		Kind:    "direct",
+		Surface: "native",
+		// ExternalRef intentionally empty — this is the defect.
+	}
+	err := s.CreateConversation(context.Background(), conv)
+	require.Error(t, err, "direct conversation with empty external_ref must be refused")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	assert.Contains(t, err.Error(), "external_ref", "error message must name the missing field")
+}
+
+func TestCreateConversation_GroupWithEmptyExternalRef_Allowed(t *testing.T) {
+	// A guard that rejects ALL empty external_refs would break native group
+	// creation. Only kind=="direct" requires a key.
+	s := newTestConversationStore(t)
+	conv := &store.Conversation{
+		ID:      uuid.NewString(),
+		Kind:    "group",
+		Surface: "native",
+		// ExternalRef intentionally empty — valid for groups.
+	}
+	err := s.CreateConversation(context.Background(), conv)
+	require.NoError(t, err, "group conversation with empty external_ref must succeed")
+}
+
+func TestCreateConversation_DirectWithValidDMKey_Succeeds(t *testing.T) {
+	s := newTestConversationStore(t)
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+	extRef, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+
+	conv := &store.Conversation{
+		ID:          uuid.NewString(),
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: extRef,
+	}
+	err = s.CreateConversation(context.Background(), conv)
+	require.NoError(t, err, "direct conversation with valid DM key must succeed")
+}
+
+// ---------------------------------------------------------------------------
 // Participant operations
 // ---------------------------------------------------------------------------
 
@@ -972,11 +1025,9 @@ func TestConversationNilProjectID(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
 
-	conv := &store.Conversation{
-		ID:      uuid.NewString(),
-		Kind:    "direct",
-		Surface: "native",
-	}
+	// DM conversations are global — ProjectID is intentionally nil.
+	// Must include a valid DM key because DEF-29 rejects keyless direct rows.
+	conv := newTestDMConversation("agent", uuid.NewString(), "user", uuid.NewString())
 	require.NoError(t, s.CreateConversation(ctx, conv))
 
 	got, err := s.GetConversation(ctx, conv.ID)
@@ -1055,9 +1106,10 @@ func TestParticipantDefaultRole(t *testing.T) {
 // AddParticipant immutability guard tests (DEF-8, WS-1c)
 //
 // Rule 10: Removing the guard from AddParticipant should make tests
-// TestAddParticipant_DM_SoftRemoveThenSubstitute,
-// TestAddParticipant_DM_ThirdPartyRejection, and
-// TestAddParticipant_DM_EmptyExternalRefRejection fail.
+// TestAddParticipant_DM_SoftRemoveThenSubstitute and
+// TestAddParticipant_DM_ThirdPartyRejection fail.
+// TestAddParticipant_DM_EmptyExternalRefRejection now tests at the
+// CreateConversation level (DEF-29 catches keyless direct rows earlier).
 // ---------------------------------------------------------------------------
 
 // TestAddParticipant_DM_SoftRemoveThenSubstitute is THE test that discriminates
@@ -1137,8 +1189,10 @@ func TestAddParticipant_DM_ThirdPartyRejection(t *testing.T) {
 }
 
 // TestAddParticipant_DM_EmptyExternalRefRejection verifies that a direct
-// conversation with an empty/unparseable external_ref rejects all AddParticipant
-// calls.
+// conversation with an empty external_ref is caught at the CreateConversation
+// layer (DEF-29). Before DEF-29, this hole was only caught at AddParticipant
+// time; CreateConversation now refuses keyless direct rows outright, making
+// the AddParticipant guard defense-in-depth.
 func TestAddParticipant_DM_EmptyExternalRefRejection(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
@@ -1147,14 +1201,10 @@ func TestAddParticipant_DM_EmptyExternalRefRejection(t *testing.T) {
 		ID:          uuid.NewString(),
 		Kind:        "direct",
 		Surface:     "native",
-		ExternalRef: "", // unparseable
+		ExternalRef: "", // unparseable — DEF-29 guard catches this
 	}
-	require.NoError(t, s.CreateConversation(ctx, conv))
-
-	err := s.AddParticipant(ctx, &store.ConversationParticipant{
-		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString(), Role: "member",
-	})
-	require.Error(t, err, "direct conversation with empty external_ref must reject AddParticipant")
+	err := s.CreateConversation(ctx, conv)
+	require.Error(t, err, "CreateConversation must refuse a direct conversation without external_ref")
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
