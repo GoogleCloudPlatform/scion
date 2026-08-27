@@ -1793,7 +1793,7 @@ func TestUpdateConfig_NonHA_NeedsConfigFile(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	// selfManaged is false → non-HA path
 
-	srv := &Server{dbDriver: "postgres"}
+	srv := &Server{dbDriver: "postgres", authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")

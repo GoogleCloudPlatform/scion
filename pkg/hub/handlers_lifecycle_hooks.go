@@ -87,25 +87,8 @@ func (s *Server) handleAdminLifecycleHooks(w http.ResponseWriter, r *http.Reques
 		s.listLifecycleHooks(w, r)
 	case http.MethodPost:
 		// Inline authorization for write — route guard only checks read.
-		identity := GetIdentityFromContext(r.Context())
-		if identity == nil {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-			return
-		}
-		user, ok := identity.(UserIdentity)
+		user, ok := s.requireWritePermission(w, r, "hub.lifecycle_hooks.update")
 		if !ok {
-			Forbidden(w)
-			return
-		}
-		decision := s.authzService.Decide(r.Context(), AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "hub", ID: "hub"},
-			Action:     Action("update"),
-			Permission: "hub.lifecycle_hooks.update",
-		})
-		if !decision.Allowed {
-			Forbidden(w)
 			return
 		}
 		s.createLifecycleHook(w, r, user)
@@ -130,25 +113,8 @@ func (s *Server) handleAdminLifecycleHookByID(w http.ResponseWriter, r *http.Req
 		s.getLifecycleHook(w, r, id)
 	case http.MethodPut, http.MethodDelete:
 		// Inline authorization for write — route guard only checks read.
-		identity := GetIdentityFromContext(r.Context())
-		if identity == nil {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-			return
-		}
-		user, ok := identity.(UserIdentity)
+		user, ok := s.requireWritePermission(w, r, "hub.lifecycle_hooks.update")
 		if !ok {
-			Forbidden(w)
-			return
-		}
-		decision := s.authzService.Decide(r.Context(), AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "hub", ID: "hub"},
-			Action:     Action("update"),
-			Permission: "hub.lifecycle_hooks.update",
-		})
-		if !decision.Allowed {
-			Forbidden(w)
 			return
 		}
 		if r.Method == http.MethodPut {

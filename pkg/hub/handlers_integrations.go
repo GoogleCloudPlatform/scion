@@ -218,25 +218,7 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 	// checks the read permission. Writes need hub.integrations.update.
 	switch r.Method {
 	case http.MethodPut, http.MethodPost, http.MethodDelete:
-		identity := GetIdentityFromContext(r.Context())
-		if identity == nil {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-			return
-		}
-		user, ok := identity.(UserIdentity)
-		if !ok {
-			Forbidden(w)
-			return
-		}
-		decision := s.authzService.Decide(r.Context(), AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "hub", ID: "hub"},
-			Action:     Action("update"),
-			Permission: "hub.integrations.update",
-		})
-		if !decision.Allowed {
-			Forbidden(w)
+		if _, ok := s.requireWritePermission(w, r, "hub.integrations.update"); !ok {
 			return
 		}
 	}
