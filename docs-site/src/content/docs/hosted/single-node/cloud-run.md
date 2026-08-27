@@ -54,6 +54,14 @@ The `deploy-instance` subcommand is part of the single-node Cloud Run tier and m
 not be in earlier `scion` releases. Build from source if your installed binary does
 not include it:
 
+:::caution[Temporary workaround — check before you build]
+Building from source is a stopgap, accurate as of 2026-08-27. It stops being
+necessary the moment a published `scion` release ships `deploy-instance`. Run
+`scion deploy-instance --help` against your installed binary first — if it
+succeeds, skip the build. This section should be deleted once a release includes
+the subcommand.
+:::
+
 ```bash
 go build -tags no_embed_web -o ./scion ./cmd/scion/
 ```

@@ -34,6 +34,12 @@
 #   --memory          Memory limit (default: 8Gi)
 #   --cpu             CPU limit (default: 4)
 #
+# Environment:
+#   SCION_BIN     Path to, or name of, the scion binary to run. Overrides the
+#                 default search order (repo-root ./scion, then ./scion in the
+#                 current directory, then `scion` on $PATH). Must resolve to an
+#                 executable command or the script exits with an error.
+#
 # What it does:
 #   1. Creates or updates a Cloud Run Instance with the sandbox launcher enabled.
 #   2. Enables IAP on the Instance (iapEnabled + invokerIamDisabled via REST v2).
