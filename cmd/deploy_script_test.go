@@ -142,7 +142,7 @@ func gcloudArgvLog(t *testing.T) string {
 // test if the stub was never invoked at all.
 func readGcloudArgvLog(t *testing.T, path string) string {
 	t.Helper()
-	data, err := os.ReadFile(path) //nolint:gosec // path is from t.TempDir()
+	data, err := os.ReadFile(path)
 	require.NoError(t, err, "the gcloud stub recorded nothing — gcloud was never called")
 	return string(data)
 }
@@ -194,7 +194,7 @@ func newPreflightStub(t *testing.T, tokeninfoJSON string, apiStatus int, apiBody
 		}
 		w.WriteHeader(apiStatus)
 		_, _ = io.WriteString(w, apiBody)
-	})) //nolint:bodyclose // httptest server handler, not a client response
+	}))
 	t.Cleanup(server.Close)
 	return server, &hits
 }
