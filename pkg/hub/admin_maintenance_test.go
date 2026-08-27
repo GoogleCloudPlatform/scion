@@ -73,33 +73,10 @@ func TestListMaintenanceOperations(t *testing.T) {
 	}
 }
 
-func TestListMaintenanceOperations_NonAdmin(t *testing.T) {
-	srv, _ := newTestServerWithStore(t)
-
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance/operations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
-	rr := httptest.NewRecorder()
-	srv.handleAdminMaintenanceOps(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
-	}
-}
-
-func TestExecuteMigration_NonAdmin(t *testing.T) {
-	srv, _ := newTestServerWithStore(t)
-
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/secret-hub-id-migration/run", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
-	rr := httptest.NewRecorder()
-	srv.handleAdminMaintenanceMigrations(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
-	}
-}
+// TestListMaintenanceOperations_NonAdmin and TestExecuteMigration_NonAdmin were
+// removed: authorization is now enforced by the routeGuard via
+// hub.maintenance.execute permission (PR-A4). The handler no longer performs
+// inline admin checks. Authorization is tested in TestRouteGuardOpsPermissions.
 
 func TestExecuteMigration_NotFound(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)
@@ -234,19 +211,10 @@ func TestExecuteMigration_InvalidPath(t *testing.T) {
 // Phase 3: Operation execution tests
 // ────────────────────────────────────────────────────────────────────────────
 
-func TestExecuteOperation_NonAdmin(t *testing.T) {
-	srv, _ := newTestServerWithStore(t)
-
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/pull-images/run", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
-	rr := httptest.NewRecorder()
-	srv.handleAdminMaintenanceOps(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
-	}
-}
+// TestExecuteOperation_NonAdmin was removed: authorization is now enforced by
+// the routeGuard via hub.maintenance.execute permission (PR-A4). The handler no
+// longer performs inline admin checks. Authorization is tested in
+// TestRouteGuardOpsPermissions.
 
 func TestExecuteOperation_NotFound(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)
@@ -593,47 +561,19 @@ func TestCheckForUpdates_WrongMethod(t *testing.T) {
 	}
 }
 
-func TestCheckForUpdates_NonAdmin(t *testing.T) {
-	srv, _ := newTestServerWithStore(t)
-
-	viewer := NewAuthenticatedUser("u1", "viewer@example.com", "Viewer", "viewer", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/check-updates", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), viewer))
-	rr := httptest.NewRecorder()
-	srv.handleCheckForUpdates(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
+// TestCheckForUpdates_NonAdmin was removed: authorization is now enforced by
+// the routeGuard via hub.maintenance.execute permission (PR-A4). The handler no
+// longer performs inline admin checks. Authorization is tested in
+// TestRouteGuardOpsPermissions.
 
 // ────────────────────────────────────────────────────────────────────────────
 // handleAdminRestart tests
 // ────────────────────────────────────────────────────────────────────────────
 
-func TestHandleAdminRestart_Forbidden(t *testing.T) {
-	srv, _ := newTestServerWithStore(t)
-
-	// Non-admin user should receive 403.
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
-	rr := httptest.NewRecorder()
-	srv.handleAdminRestart(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	// Nil user (unauthenticated) should also receive 403.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
-	rr2 := httptest.NewRecorder()
-	srv.handleAdminRestart(rr2, req2)
-
-	if rr2.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for nil user, got %d: %s", rr2.Code, rr2.Body.String())
-	}
-}
+// TestHandleAdminRestart_Forbidden was removed: authorization is now enforced
+// by the routeGuard via hub.maintenance.execute permission (PR-A4). The handler
+// no longer performs inline admin checks. Authorization is tested in
+// TestRouteGuardOpsPermissions.
 
 func TestHandleAdminRestart_MethodNotAllowed(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)

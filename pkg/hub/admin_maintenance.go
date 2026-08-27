@@ -36,12 +36,9 @@ func maintenanceLogAttrs(key string, extra ...any) []any {
 }
 
 // handleAdminMaintenanceOps handles routes under /api/v1/admin/maintenance/operations.
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	// Extract sub-path: /api/v1/admin/maintenance/operations/{key}[/run|/runs|/runs/{runId}]
 	subPath := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/maintenance/operations")
@@ -95,12 +92,14 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 
 // handleAdminMaintenanceMigrations handles routes under /api/v1/admin/maintenance/migrations/.
 // Supports POST /api/v1/admin/maintenance/migrations/{key}/run to execute a migration.
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminMaintenanceMigrations(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
 		return
 	}
+
+	user := GetUserIdentityFromContext(r.Context())
 
 	// Extract sub-path: /api/v1/admin/maintenance/migrations/{key}/run
 	subPath := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/maintenance/migrations/")
@@ -111,11 +110,6 @@ func (s *Server) handleAdminMaintenanceMigrations(w http.ResponseWriter, r *http
 	}
 
 	key := parts[0]
-
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
 
 	s.executeMigration(w, r, key, user)
 }
@@ -643,13 +637,8 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
 // It fetches from origin and compares the local HEAD against origin/main.
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -676,17 +665,14 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 // It initiates a graceful systemd restart of the hub service. The
 // --no-block flag lets systemd schedule the restart asynchronously,
 // so the response is sent before the restart takes effect.
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
+
+	user := GetUserIdentityFromContext(r.Context())
 
 	serviceName := s.config.MaintenanceConfig.ServiceName
 	if serviceName == "" {

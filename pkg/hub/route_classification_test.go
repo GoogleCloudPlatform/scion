@@ -323,9 +323,12 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 			wantStatus:     http.StatusUnauthorized,
 		},
 		// RouteHubAdmin: non-admin user → 403
+		// Uses a route without Permission (requireAdmin fallback) so this test
+		// works without an authzService. Permission-based routes are tested in
+		// TestRouteGuardOpsPermissions with a full server.
 		{
 			name:           "hub-admin route denies non-admin",
-			route:          "/api/v1/admin/scheduler",
+			route:          "/api/v1/admin/allow-list",
 			classification: RouteHubAdmin,
 			identity:       NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api"),
 			wantStatus:     http.StatusForbidden,
@@ -333,7 +336,7 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 		// RouteHubAdmin: no identity → 401
 		{
 			name:           "hub-admin route denies unauthenticated",
-			route:          "/api/v1/admin/scheduler",
+			route:          "/api/v1/admin/allow-list",
 			classification: RouteHubAdmin,
 			identity:       nil,
 			wantStatus:     http.StatusUnauthorized,
@@ -370,13 +373,8 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 	}
 }
 
-func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
-	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
-	srv.registerRoutes()
-
-	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")
-	scopedAdmin := NewScopedUserIdentity(admin, "project-1", []string{"agent:create", "project:read", "policy:manage"})
-
+// allHubAdminRoutes returns all routes classified as hub-admin, sorted.
+func allHubAdminRoutes() []string {
 	routes := make([]string, 0)
 	for route, classification := range routePermissionClassifications {
 		if strings.HasPrefix(classification, "hub-admin:") {
@@ -384,9 +382,28 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 		}
 	}
 	sort.Strings(routes)
+	return routes
+}
+
+func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
+	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
+	srv.registerRoutes()
+
+	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")
+	scopedAdmin := NewScopedUserIdentity(admin, "project-1", []string{"agent:create", "project:read", "policy:manage"})
+
+	routes := allHubAdminRoutes()
 
 	for _, route := range routes {
 		t.Run(route, func(t *testing.T) {
+			// Skip routes that have Permission set — they require an authzService
+			// to exercise the Decide path. These are tested in
+			// TestRouteGuardOpsPermissions with a full server.
+			if meta, ok := routeMetadataTable[route]; ok && meta.Permission != "" {
+				t.Skipf("skipping permission-based route %s (tested in TestRouteGuardOpsPermissions)", route)
+				return
+			}
+
 			method, path, body := scopedAdminUATRouteRequest(route)
 			ctx, cancel := context.WithTimeout(contextWithIdentity(context.Background(), scopedAdmin), 200*time.Millisecond)
 			defer cancel()
