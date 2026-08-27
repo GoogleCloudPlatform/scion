@@ -1143,7 +1143,28 @@ func (s *Server) createAgentInProject(
 
 	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 
+	// Quota enforcement: check agent-per-project limit before creation.
+	if s.quotaService != nil {
+		if err := s.quotaService.CheckAndReserve(ctx, "max_agents_per_project", createdBy, "project", projectID, agent.ID); err != nil {
+			if errors.Is(err, store.ErrQuotaExceeded) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota exceeded: max_agents_per_project", nil)
+				return
+			}
+			if errors.Is(err, ErrQuotaLockContention) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota check temporarily unavailable, please retry", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+			return
+		}
+	}
+
 	if err := s.store.CreateAgent(ctx, agent); err != nil {
+		if s.quotaService != nil {
+			s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -2414,6 +2435,11 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			writeErrorFromErr(w, err, "")
 			return
 		}
+	}
+
+	// Release quota reservation for the deleted agent (best-effort).
+	if s.quotaService != nil {
+		s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
 	}
 
 	// A deleted agent must not remain a thread's default — the binding would

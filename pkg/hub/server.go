@@ -763,6 +763,10 @@ type Server struct {
 	// Single-node only; see design §4.5 HA limitation.
 	presenceManager *PresenceManager
 
+	// Quota enforcement service (Permissions Phase 2B). Nil-safe — callers
+	// must nil-check before invoking; nil means quota enforcement is disabled.
+	quotaService *QuotaService
+
 	// Per-sender token-bucket limiter for the chat send paths (#1054).
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
@@ -1018,6 +1022,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token metrics
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
+
+	// Initialize quota enforcement service (Permissions Phase 2B).
+	srv.quotaService = &QuotaService{
+		store:  s,
+		logger: slog.Default().With("component", "quota"),
+	}
 
 	// Per-sender chat send rate limiter (#1054).
 	srv.chatSendLimiter = newChatSendLimiter()
