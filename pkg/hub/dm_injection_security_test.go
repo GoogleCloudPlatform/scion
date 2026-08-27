@@ -216,10 +216,8 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 	// be rejected; on the current defective code it succeeds.
 	// ---------------------------------------------------------------
 	rr = sendOutbound(agentA, p1.ID, "INJECTED by attacker agent A", "web", dmKey)
-
-	// If the ingress correctly checks membership, we'd expect a 400 here.
-	// On the defective code path, the write succeeds (200).
-	// We proceed regardless and check the *effect* (whether V can read it).
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"Agent A is not a participant in the B↔V DM; the write must be rejected")
 
 	// Allow time for any async delivery to settle (poll briefly).
 	assert.Eventually(t, func() bool {
