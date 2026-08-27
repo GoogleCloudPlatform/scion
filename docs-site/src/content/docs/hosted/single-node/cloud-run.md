@@ -359,7 +359,7 @@ proxy. See [Section 4](#4-sizing) for measured ceilings by Instance size.
 :::note[Shallow clones]
 Agent workspaces are depth-1 shallow clones and can only push to `origin`. Pushes
 to other remotes will fail. This is a known limitation
-([#1274](https://github.com/GoogleCloudPlatform/scion/issues/1274)).
+([ptone/scion#1274](https://github.com/ptone/scion/issues/1274)).
 :::
 
 ---
@@ -409,7 +409,7 @@ gcloud iap web get-iam-policy \
 
 If the Instance fails to start with a confusing image-pull error that names a cache
 mirror rather than your image, this is a known platform behavior
-([#1291](https://github.com/GoogleCloudPlatform/scion/issues/1291)). Verify:
+([ptone/scion#1291](https://github.com/ptone/scion/issues/1291)). Verify:
 
 1. The image coordinate is correct (check for typos in the digest or tag).
 2. The image is accessible to the Instance's service account.
