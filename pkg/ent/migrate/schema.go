@@ -1773,11 +1773,17 @@ var (
 				Name:    "usagereservation_limit_definition_id_scope_type_scope_id_subject_id",
 				Unique:  false,
 				Columns: []*schema.Column{UsageReservationsColumns[8], UsageReservationsColumns[2], UsageReservationsColumns[3], UsageReservationsColumns[1]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "released_at IS NULL",
+				},
 			},
 			{
 				Name:    "usagereservation_limit_definition_id_resource_id",
-				Unique:  false,
+				Unique:  true,
 				Columns: []*schema.Column{UsageReservationsColumns[8], UsageReservationsColumns[4]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "released_at IS NULL",
+				},
 			},
 		},
 	}

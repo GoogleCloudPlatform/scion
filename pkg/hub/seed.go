@@ -955,8 +955,6 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 	return canDemote, nil
 }
 
-// ensureHubMembership adds the given user to the hub-members group.
-// This is best-effort; errors are logged at debug level and ignored.
 // seedLimitDefinitions creates the system limit definitions if they don't
 // already exist. Shipped with DefaultValue=0 (unlimited) for discoverability
 // per sponsor decision OQ-2 Option B. It is called once during Hub
@@ -1005,6 +1003,8 @@ func seedLimitDefinition(ctx context.Context, s store.Store, name, resourceType,
 	slog.Info("seeded limit definition", "name", name, "resource_type", resourceType)
 }
 
+// ensureHubMembership adds the given user to the hub-members group.
+// This is best-effort; errors are logged at debug level and ignored.
 func ensureHubMembership(ctx context.Context, s store.Store, userID string) {
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {

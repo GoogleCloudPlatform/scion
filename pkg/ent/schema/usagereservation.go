@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
@@ -63,9 +64,15 @@ func (UsageReservation) Fields() []ent.Field {
 func (UsageReservation) Indexes() []ent.Index {
 	return []ent.Index{
 		// Active reservations for quota enforcement counting.
-		index.Fields("limit_definition_id", "scope_type", "scope_id", "subject_id"),
+		// Partial index: only non-released reservations are indexed.
+		index.Fields("limit_definition_id", "scope_type", "scope_id", "subject_id").
+			Annotations(entsql.IndexWhere("released_at IS NULL")),
 		// Unique active reservation per resource.
-		index.Fields("limit_definition_id", "resource_id"),
+		// Partial index: released reservations are excluded so the same
+		// resource can be re-reserved after release.
+		index.Fields("limit_definition_id", "resource_id").
+			Unique().
+			Annotations(entsql.IndexWhere("released_at IS NULL")),
 	}
 }
 
