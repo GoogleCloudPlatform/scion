@@ -319,7 +319,7 @@ system and no error, which is more dangerous than an outage that announces itsel
 agent create times climb from under two seconds to tens of seconds as the Instance
 approaches its limit. **Agent creates taking ten or more seconds mean the Instance
 is near its ceiling — stop adding agents.** The final create before a crash
-typically returns a 503 rather than success.
+returned a 503 in both measured cases.
 
 With idle agents there is no such warning. Creates return success at normal speed
 right up to the point of failure, and the operator's last signal before losing
