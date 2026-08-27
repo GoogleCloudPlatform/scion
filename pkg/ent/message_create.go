@@ -230,6 +230,20 @@ func (_c *MessageCreate) SetNillableThreadID(v *string) *MessageCreate {
 	return _c
 }
 
+// SetConversationID sets the "conversation_id" field.
+func (_c *MessageCreate) SetConversationID(v uuid.UUID) *MessageCreate {
+	_c.mutation.SetConversationID(v)
+	return _c
+}
+
+// SetNillableConversationID sets the "conversation_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableConversationID(v *uuid.UUID) *MessageCreate {
+	if v != nil {
+		_c.SetConversationID(*v)
+	}
+	return _c
+}
+
 // SetVisibility sets the "visibility" field.
 func (_c *MessageCreate) SetVisibility(v string) *MessageCreate {
 	_c.mutation.SetVisibility(v)
@@ -502,6 +516,10 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ThreadID(); ok {
 		_spec.SetField(message.FieldThreadID, field.TypeString, value)
 		_node.ThreadID = value
+	}
+	if value, ok := _c.mutation.ConversationID(); ok {
+		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
+		_node.ConversationID = &value
 	}
 	if value, ok := _c.mutation.Visibility(); ok {
 		_spec.SetField(message.FieldVisibility, field.TypeString, value)
@@ -812,6 +830,24 @@ func (u *MessageUpsert) UpdateThreadID() *MessageUpsert {
 // ClearThreadID clears the value of the "thread_id" field.
 func (u *MessageUpsert) ClearThreadID() *MessageUpsert {
 	u.SetNull(message.FieldThreadID)
+	return u
+}
+
+// SetConversationID sets the "conversation_id" field.
+func (u *MessageUpsert) SetConversationID(v uuid.UUID) *MessageUpsert {
+	u.Set(message.FieldConversationID, v)
+	return u
+}
+
+// UpdateConversationID sets the "conversation_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateConversationID() *MessageUpsert {
+	u.SetExcluded(message.FieldConversationID)
+	return u
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (u *MessageUpsert) ClearConversationID() *MessageUpsert {
+	u.SetNull(message.FieldConversationID)
 	return u
 }
 
@@ -1175,6 +1211,27 @@ func (u *MessageUpsertOne) UpdateThreadID() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearThreadID() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearThreadID()
+	})
+}
+
+// SetConversationID sets the "conversation_id" field.
+func (u *MessageUpsertOne) SetConversationID(v uuid.UUID) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetConversationID(v)
+	})
+}
+
+// UpdateConversationID sets the "conversation_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateConversationID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateConversationID()
+	})
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (u *MessageUpsertOne) ClearConversationID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearConversationID()
 	})
 }
 
@@ -1708,6 +1765,27 @@ func (u *MessageUpsertBulk) UpdateThreadID() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearThreadID() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearThreadID()
+	})
+}
+
+// SetConversationID sets the "conversation_id" field.
+func (u *MessageUpsertBulk) SetConversationID(v uuid.UUID) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetConversationID(v)
+	})
+}
+
+// UpdateConversationID sets the "conversation_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateConversationID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateConversationID()
+	})
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (u *MessageUpsertBulk) ClearConversationID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearConversationID()
 	})
 }
 

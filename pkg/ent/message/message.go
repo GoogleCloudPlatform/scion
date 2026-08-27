@@ -48,6 +48,8 @@ const (
 	FieldChannel = "channel"
 	// FieldThreadID holds the string denoting the thread_id field in the database.
 	FieldThreadID = "thread_id"
+	// FieldConversationID holds the string denoting the conversation_id field in the database.
+	FieldConversationID = "conversation_id"
 	// FieldVisibility holds the string denoting the visibility field in the database.
 	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -76,6 +78,7 @@ var Columns = []string{
 	FieldDispatchedAt,
 	FieldChannel,
 	FieldThreadID,
+	FieldConversationID,
 	FieldVisibility,
 	FieldCreated,
 }
@@ -210,6 +213,11 @@ func ByChannel(opts ...sql.OrderTermOption) OrderOption {
 // ByThreadID orders the results by the thread_id field.
 func ByThreadID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldThreadID, opts...).ToFunc()
+}
+
+// ByConversationID orders the results by the conversation_id field.
+func ByConversationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversationID, opts...).ToFunc()
 }
 
 // ByVisibility orders the results by the visibility field.

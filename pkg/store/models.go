@@ -1686,23 +1686,24 @@ const (
 
 // Message represents a persisted structured message between agents and humans.
 type Message struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	Sender      string    `json:"sender"`    // "user:alice", "agent:code-reviewer"
-	SenderID    string    `json:"senderId"`  // UUID or identity key
-	Recipient   string    `json:"recipient"` // "user:alice", "agent:code-reviewer"
-	RecipientID string    `json:"recipientId"`
-	Msg         string    `json:"msg"`
-	Type        string    `json:"type"` // "instruction", "input-needed", "state-change"
-	Urgent      bool      `json:"urgent,omitempty"`
-	Broadcasted bool      `json:"broadcasted,omitempty"`
-	Read        bool      `json:"read"`    // Whether recipient has read/acknowledged
-	AgentID     string    `json:"agentId"` // The agent involved (sender or recipient)
-	GroupID     string    `json:"groupId,omitempty"`
-	Channel     string    `json:"channel,omitempty"`
-	ThreadID    string    `json:"threadId,omitempty"`
-	Visibility  string    `json:"visibility,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID             string    `json:"id"`
+	ProjectID      string    `json:"projectId"`
+	Sender         string    `json:"sender"`    // "user:alice", "agent:code-reviewer"
+	SenderID       string    `json:"senderId"`  // UUID or identity key
+	Recipient      string    `json:"recipient"` // "user:alice", "agent:code-reviewer"
+	RecipientID    string    `json:"recipientId"`
+	Msg            string    `json:"msg"`
+	Type           string    `json:"type"` // "instruction", "input-needed", "state-change"
+	Urgent         bool      `json:"urgent,omitempty"`
+	Broadcasted    bool      `json:"broadcasted,omitempty"`
+	Read           bool      `json:"read"`    // Whether recipient has read/acknowledged
+	AgentID        string    `json:"agentId"` // The agent involved (sender or recipient)
+	GroupID        string    `json:"groupId,omitempty"`
+	Channel        string    `json:"channel,omitempty"`
+	ThreadID       string    `json:"threadId,omitempty"`
+	ConversationID string    `json:"conversationId,omitempty"`
+	Visibility     string    `json:"visibility,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
 	// intent (design §5.2/§6.1).
@@ -1760,14 +1761,69 @@ type MessageFilter struct {
 	// the sender_id UUID column), this matches the human-readable
 	// sender label. Useful for finding messages from agents that were
 	// persisted before SenderID was reliably populated.
-	Sender     string
-	OnlyUnread bool      // Only unread messages
-	Type       string    // Filter by message type
-	Channel    string    // Filter by channel (e.g. "web", "discord")
-	ThreadID   string    // Filter by thread_id (wave-2 conversation key)
-	Visibility []string  // Filter to listed visibility levels
-	Before     time.Time // Upper bound for created_at (exclusive)
-	After      time.Time // Lower bound for created_at (exclusive)
+	Sender         string
+	OnlyUnread     bool      // Only unread messages
+	Type           string    // Filter by message type
+	Channel        string    // Filter by channel (e.g. "web", "discord")
+	ThreadID       string    // Filter by thread_id (wave-2 conversation key)
+	ConversationID string    // Filter by conversation_id (S4 conversation model)
+	Visibility     []string  // Filter to listed visibility levels
+	Before         time.Time // Upper bound for created_at (exclusive)
+	After          time.Time // Lower bound for created_at (exclusive)
+}
+
+// =============================================================================
+// Conversations (Multi-Party Messaging)
+// =============================================================================
+
+// Conversation represents a conversation container for a thread of messages.
+// It may be a direct (1:1) or group conversation, and may originate from a
+// native or external surface (Discord, Slack, etc.).
+type Conversation struct {
+	ID             string     `json:"id"`
+	ProjectID      *string    `json:"projectId,omitempty"` // nil for direct conversations
+	Kind           string     `json:"kind"`                // direct | group
+	Surface        string     `json:"surface"`             // native | discord | slack | telegram | gchat | teams
+	ExternalRef    string     `json:"externalRef,omitempty"`
+	ParentRef      string     `json:"parentRef,omitempty"`
+	DisplayName    string     `json:"displayName,omitempty"`
+	DefaultAgentID *string    `json:"defaultAgentId,omitempty"` // MUST be a valid UUID; slugs rejected
+	DriftState     string     `json:"driftState"`               // active | orphaned | unresolvable
+	LastActivityAt time.Time  `json:"lastActivityAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	ArchivedAt     *time.Time `json:"archivedAt,omitempty"`
+	DeletedAt      *time.Time `json:"deletedAt,omitempty"`
+}
+
+// ConversationParticipant links a principal (user or agent) to a conversation.
+type ConversationParticipant struct {
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversationId"`
+	PrincipalKind  string     `json:"principalKind"` // user | agent
+	PrincipalID    string     `json:"principalId"`
+	Role           string     `json:"role"` // member | observer
+	JoinedAt       time.Time  `json:"joinedAt"`
+	LeftAt         *time.Time `json:"leftAt,omitempty"`
+}
+
+// MessageAddressee records one principal that a message is addressed to,
+// how the addressing was resolved, and the current delivery state.
+type MessageAddressee struct {
+	ID            string  `json:"id"`
+	MessageID     string  `json:"messageId"`
+	PrincipalKind string  `json:"principalKind"` // user | agent
+	PrincipalID   string  `json:"principalId"`
+	Via           string  `json:"via"`           // explicit | body-mention | default-agent | direct
+	DeliveryState string  `json:"deliveryState"` // pending | delivered | failed
+	FailureReason *string `json:"failureReason,omitempty"`
+}
+
+// ConversationFilter defines query parameters for listing conversations.
+type ConversationFilter struct {
+	ProjectID  string
+	Kind       string
+	Surface    string
+	DriftState string
 }
 
 // =============================================================================

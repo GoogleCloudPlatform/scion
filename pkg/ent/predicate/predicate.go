@@ -36,6 +36,12 @@ type BrokerSecret func(*sql.Selector)
 // ChatLinkCode is the predicate function for chatlinkcode builders.
 type ChatLinkCode func(*sql.Selector)
 
+// Conversation is the predicate function for conversation builders.
+type Conversation func(*sql.Selector)
+
+// ConversationParticipant is the predicate function for conversationparticipant builders.
+type ConversationParticipant func(*sql.Selector)
+
 // DecisionAudit is the predicate function for decisionaudit builders.
 type DecisionAudit func(*sql.Selector)
 
@@ -95,6 +101,9 @@ type MaintenanceOperationRun func(*sql.Selector)
 
 // Message is the predicate function for message builders.
 type Message func(*sql.Selector)
+
+// MessageAddressee is the predicate function for messageaddressee builders.
+type MessageAddressee func(*sql.Selector)
 
 // MutationAudit is the predicate function for mutationaudit builders.
 type MutationAudit func(*sql.Selector)

@@ -85,6 +85,11 @@ func (Message) Fields() []ent.Field {
 		field.String("thread_id").
 			Optional().
 			MaxLen(256),
+		// conversation_id links this message to a Conversation record.
+		// Populated by backfill (Phase 4) and dual-write (Phase 5).
+		field.UUID("conversation_id", uuid.UUID{}).
+			Optional().
+			Nillable(),
 		// visibility controls which consumers see this message:
 		// "normal", "verbose", or "full". Empty is treated as "normal"
 		// at read time (backfill in the store adapter).
@@ -103,6 +108,7 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("project_id"),
 		index.Fields("recipient", "recipient_id"),
 		index.Fields("created"),
+		index.Fields("conversation_id"),
 	}
 }
 

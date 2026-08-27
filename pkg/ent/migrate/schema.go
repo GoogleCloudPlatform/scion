@@ -341,6 +341,76 @@ var (
 			},
 		},
 	}
+	// ConversationsColumns holds the columns for the "conversations" table.
+	ConversationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"direct", "group"}},
+		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "discord", "slack", "telegram", "gchat", "teams"}},
+		{Name: "external_ref", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "parent_ref", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "display_name", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "default_agent_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "drift_state", Type: field.TypeEnum, Enums: []string{"active", "orphaned", "unresolvable"}, Default: "active"},
+		{Name: "last_activity_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "archived_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true},
+	}
+	// ConversationsTable holds the schema information for the "conversations" table.
+	ConversationsTable = &schema.Table{
+		Name:       "conversations",
+		Columns:    ConversationsColumns,
+		PrimaryKey: []*schema.Column{ConversationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "conversation_surface_external_ref",
+				Unique:  true,
+				Columns: []*schema.Column{ConversationsColumns[3], ConversationsColumns[4]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "external_ref <> '' AND deleted_at IS NULL",
+				},
+			},
+			{
+				Name:    "conversation_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{ConversationsColumns[1]},
+			},
+			{
+				Name:    "conversation_kind",
+				Unique:  false,
+				Columns: []*schema.Column{ConversationsColumns[2]},
+			},
+		},
+	}
+	// ConversationParticipantsColumns holds the columns for the "conversation_participants" table.
+	ConversationParticipantsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "conversation_id", Type: field.TypeUUID},
+		{Name: "principal_kind", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
+		{Name: "principal_id", Type: field.TypeString},
+		{Name: "role", Type: field.TypeEnum, Enums: []string{"member", "observer"}, Default: "member"},
+		{Name: "joined_at", Type: field.TypeTime},
+		{Name: "left_at", Type: field.TypeTime, Nullable: true},
+	}
+	// ConversationParticipantsTable holds the schema information for the "conversation_participants" table.
+	ConversationParticipantsTable = &schema.Table{
+		Name:       "conversation_participants",
+		Columns:    ConversationParticipantsColumns,
+		PrimaryKey: []*schema.Column{ConversationParticipantsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "conversationparticipant_conversation_id_principal_kind_principal_id",
+				Unique:  true,
+				Columns: []*schema.Column{ConversationParticipantsColumns[1], ConversationParticipantsColumns[2], ConversationParticipantsColumns[3]},
+			},
+			{
+				Name:    "conversationparticipant_principal_id",
+				Unique:  false,
+				Columns: []*schema.Column{ConversationParticipantsColumns[3]},
+			},
+		},
+	}
 	// DecisionAuditsColumns holds the columns for the "decision_audits" table.
 	DecisionAuditsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -977,6 +1047,7 @@ var (
 		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Nullable: true, Size: 16},
 		{Name: "created", Type: field.TypeTime},
 	}
@@ -999,7 +1070,45 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[19]},
+				Columns: []*schema.Column{MessagesColumns[20]},
+			},
+			{
+				Name:    "message_conversation_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[18]},
+			},
+		},
+	}
+	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
+	MessageAddresseesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "message_id", Type: field.TypeUUID},
+		{Name: "principal_kind", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
+		{Name: "principal_id", Type: field.TypeString},
+		{Name: "via", Type: field.TypeEnum, Enums: []string{"explicit", "body-mention", "default-agent", "direct"}},
+		{Name: "delivery_state", Type: field.TypeEnum, Enums: []string{"pending", "delivered", "failed"}, Default: "pending"},
+		{Name: "failure_reason", Type: field.TypeString, Nullable: true},
+	}
+	// MessageAddresseesTable holds the schema information for the "message_addressees" table.
+	MessageAddresseesTable = &schema.Table{
+		Name:       "message_addressees",
+		Columns:    MessageAddresseesColumns,
+		PrimaryKey: []*schema.Column{MessageAddresseesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "messageaddressee_message_id_principal_kind_principal_id",
+				Unique:  true,
+				Columns: []*schema.Column{MessageAddresseesColumns[1], MessageAddresseesColumns[2], MessageAddresseesColumns[3]},
+			},
+			{
+				Name:    "messageaddressee_message_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessageAddresseesColumns[1]},
+			},
+			{
+				Name:    "messageaddressee_principal_kind_principal_id_delivery_state",
+				Unique:  false,
+				Columns: []*schema.Column{MessageAddresseesColumns[2], MessageAddresseesColumns[3], MessageAddresseesColumns[5]},
 			},
 		},
 	}
@@ -1884,6 +1993,8 @@ var (
 		BrokerJoinTokensTable,
 		BrokerSecretsTable,
 		ChatLinkCodesTable,
+		ConversationsTable,
+		ConversationParticipantsTable,
 		DecisionAuditsTable,
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
@@ -1904,6 +2015,7 @@ var (
 		MaintenanceOperationsTable,
 		MaintenanceOperationRunsTable,
 		MessagesTable,
+		MessageAddresseesTable,
 		MutationAuditsTable,
 		NonceCacheTable,
 		NotificationsTable,
@@ -1955,6 +2067,12 @@ func init() {
 	ChatLinkCodesTable.Annotation = &entsql.Annotation{
 		Table: "chat_link_codes",
 	}
+	ConversationsTable.Annotation = &entsql.Annotation{
+		Table: "conversations",
+	}
+	ConversationParticipantsTable.Annotation = &entsql.Annotation{
+		Table: "conversation_participants",
+	}
 	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",
@@ -1998,6 +2116,9 @@ func init() {
 	}
 	MessagesTable.Annotation = &entsql.Annotation{
 		Table: "messages",
+	}
+	MessageAddresseesTable.Annotation = &entsql.Annotation{
+		Table: "message_addressees",
 	}
 	NonceCacheTable.Annotation = &entsql.Annotation{
 		Table: "nonce_cache",

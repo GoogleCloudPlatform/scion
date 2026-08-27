@@ -140,6 +140,11 @@ func ThreadID(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldThreadID, v))
 }
 
+// ConversationID applies equality check predicate on the "conversation_id" field. It's identical to ConversationIDEQ.
+func ConversationID(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldConversationID, v))
+}
+
 // Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
 func Visibility(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldVisibility, v))
@@ -1118,6 +1123,56 @@ func ThreadIDEqualFold(v string) predicate.Message {
 // ThreadIDContainsFold applies the ContainsFold predicate on the "thread_id" field.
 func ThreadIDContainsFold(v string) predicate.Message {
 	return predicate.Message(sql.FieldContainsFold(FieldThreadID, v))
+}
+
+// ConversationIDEQ applies the EQ predicate on the "conversation_id" field.
+func ConversationIDEQ(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldConversationID, v))
+}
+
+// ConversationIDNEQ applies the NEQ predicate on the "conversation_id" field.
+func ConversationIDNEQ(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldConversationID, v))
+}
+
+// ConversationIDIn applies the In predicate on the "conversation_id" field.
+func ConversationIDIn(vs ...uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldConversationID, vs...))
+}
+
+// ConversationIDNotIn applies the NotIn predicate on the "conversation_id" field.
+func ConversationIDNotIn(vs ...uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldConversationID, vs...))
+}
+
+// ConversationIDGT applies the GT predicate on the "conversation_id" field.
+func ConversationIDGT(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldConversationID, v))
+}
+
+// ConversationIDGTE applies the GTE predicate on the "conversation_id" field.
+func ConversationIDGTE(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldConversationID, v))
+}
+
+// ConversationIDLT applies the LT predicate on the "conversation_id" field.
+func ConversationIDLT(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldConversationID, v))
+}
+
+// ConversationIDLTE applies the LTE predicate on the "conversation_id" field.
+func ConversationIDLTE(v uuid.UUID) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldConversationID, v))
+}
+
+// ConversationIDIsNil applies the IsNil predicate on the "conversation_id" field.
+func ConversationIDIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldConversationID))
+}
+
+// ConversationIDNotNil applies the NotNil predicate on the "conversation_id" field.
+func ConversationIDNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldConversationID))
 }
 
 // VisibilityEQ applies the EQ predicate on the "visibility" field.

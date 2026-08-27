@@ -52,6 +52,8 @@ type Message struct {
 	Channel string `json:"channel,omitempty"`
 	// ThreadID holds the value of the "thread_id" field.
 	ThreadID string `json:"thread_id,omitempty"`
+	// ConversationID holds the value of the "conversation_id" field.
+	ConversationID *uuid.UUID `json:"conversation_id,omitempty"`
 	// Visibility holds the value of the "visibility" field.
 	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
@@ -64,6 +66,8 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case message.FieldConversationID:
+			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
 		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldChannel, message.FieldThreadID, message.FieldVisibility:
@@ -197,6 +201,13 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ThreadID = value.String
 			}
+		case message.FieldConversationID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field conversation_id", values[i])
+			} else if value.Valid {
+				_m.ConversationID = new(uuid.UUID)
+				*_m.ConversationID = *value.S.(*uuid.UUID)
+			}
 		case message.FieldVisibility:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field visibility", values[i])
@@ -299,6 +310,11 @@ func (_m *Message) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("thread_id=")
 	builder.WriteString(_m.ThreadID)
+	builder.WriteString(", ")
+	if v := _m.ConversationID; v != nil {
+		builder.WriteString("conversation_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("visibility=")
 	builder.WriteString(_m.Visibility)
