@@ -267,21 +267,46 @@ and inspect its output in real time.
 
 ## 4. Sizing
 
-<!-- PLACEHOLDER: sizing guidance pending -->
-<!-- ======================================================================= -->
-<!-- Sizing data is not yet available. Stress testing is running in parallel  -->
-<!-- and will provide concrete numbers. DO NOT add estimates, ranges, or any  -->
-<!-- numbers here. This section will be filled in when the stress test agents -->
-<!-- (sn-stress-def, sn-stress-max) report their results.                    -->
-<!-- ======================================================================= -->
+### Measured ceilings
 
-Sizing guidance for this tier is pending and will be added when stress-test
-results are available.
+| Instance size | Idle agents | Working agents |
+|---------------|-------------|----------------|
+| 4 CPU / 8 GiB (default) | 20 | 6 |
+| 8 CPU / 32 GiB (maximum) | 51 | 14 |
 
-**What is known today:** the default allocation is `--cpu 4 --memory 8Gi`. There
-are **no per-agent resource limits** — all agents share the Instance's CPU and
-memory budget. A single compute-heavy agent can starve its neighbours. Plan
-accordingly until per-agent limits are available.
+8 CPU / 32 GiB is the largest size Cloud Run allows. Larger deploys are refused.
+
+Each number is a **single observation** — one stress-test run per size. Repeatability
+is unmeasured. These are the points past which the Instance was observed to fail,
+not thresholds to design against.
+
+**Do not extrapolate a per-CPU or per-GiB rule.** Four times the memory and twice
+the CPU bought about three times the idle capacity and about twice the working
+capacity. Two points cannot establish a curve, and the relationship is not linear
+in either resource.
+
+**The numbers are context. The operating signal is create latency.** Agent creates
+under two seconds mean headroom. Creates at ten seconds or more mean the Instance
+is near its ceiling — stop adding agents. That rule was measured at both sizes and,
+unlike a headcount, adapts to what the agents are actually doing. See the
+[overload warning](#overloading-the-instance-destroys-all-work) below for details.
+
+**Sizing to the measured ceiling is not the safe choice.** Running fewer agents than
+you could costs only capacity. Running more destroys every workspace on the Instance
+with no warning and no recovery. The two errors are not the same size.
+
+There are **no per-agent resource limits**. All agents share the Instance's CPU and
+memory budget. A single compute-heavy agent can starve its neighbours.
+
+To change the Instance size:
+
+```bash
+scion deploy-instance \
+  --name my-scion-hub \
+  --project $PROJECT_ID \
+  --cpu 8 --memory 32Gi \
+  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
+```
 
 ---
 
@@ -327,7 +352,7 @@ everything is a success message.
 
 There are no per-agent resource limits on this tier and no direct memory or CPU
 instrument visible to the operator; create latency under load is the practical
-proxy. The agent count ceiling is not yet published (see [Section 4](#4-sizing)).
+proxy. See [Section 4](#4-sizing) for measured ceilings by Instance size.
 **Push work to a git remote often.** Anything not pushed is unrecoverable.
 :::
 
