@@ -487,7 +487,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
-	if req.GatherEnv {
+	if req.GatherEnv && !req.NoAuth {
 		// Build a preliminary merged env for env-gather evaluation
 		env := make(map[string]string)
 		for k, v := range req.ResolvedEnv {

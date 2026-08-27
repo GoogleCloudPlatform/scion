@@ -730,6 +730,51 @@ profiles:
 	}
 }
 
+// TestEnvGather_NoAuthSkipsEnvGather tests that env-gather is skipped when
+// NoAuth is true, even when GatherEnv is also true. When NoAuth is set, the hub
+// intentionally strips credentials, so the broker must not report them as missing.
+func TestEnvGather_NoAuthSkipsEnvGather(t *testing.T) {
+	settings := `
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      ANTHROPIC_API_KEY: ""
+profiles:
+  default:
+    runtime: mock
+`
+	srv, mgr, projectDir := newTestServerWithProjectPath(t, settings)
+
+	body := `{
+		"name": "test-agent-noauth",
+		"id": "agent-uuid-noauth",
+		"gatherEnv": true,
+		"noAuth": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	// Should create the agent normally (201), NOT return 202 with env requirements.
+	if w.Code == http.StatusAccepted {
+		t.Fatalf("expected env-gather to be skipped for noAuth, but got 202: %s", w.Body.String())
+	}
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Agent was started (env gather skipped)
+	if mgr.lastEnv == nil {
+		t.Fatal("expected env to be set")
+	}
+}
+
 // TestEnvGather_SecretAutoUpgrade tests that when all required env keys are
 // satisfied by resolved secrets, the env-gather check passes through without
 // returning 202. The agent proceeds to creation (which may fail for other
