@@ -450,6 +450,40 @@ var (
 			},
 		},
 	}
+	// EntitlementBindingsColumns holds the columns for the "entitlement_bindings" table.
+	EntitlementBindingsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "subject_type", Type: field.TypeEnum, Enums: []string{"user", "group", "system_default"}},
+		{Name: "subject_id", Type: field.TypeString, Default: ""},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "value", Type: field.TypeInt64},
+		{Name: "created_by", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "limit_definition_id", Type: field.TypeUUID},
+	}
+	// EntitlementBindingsTable holds the schema information for the "entitlement_bindings" table.
+	EntitlementBindingsTable = &schema.Table{
+		Name:       "entitlement_bindings",
+		Columns:    EntitlementBindingsColumns,
+		PrimaryKey: []*schema.Column{EntitlementBindingsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "entitlement_bindings_limit_definitions_entitlement_bindings",
+				Columns:    []*schema.Column{EntitlementBindingsColumns[9]},
+				RefColumns: []*schema.Column{LimitDefinitionsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "entitlementbinding_limit_definition_id_subject_type_subject_id_scope_type_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{EntitlementBindingsColumns[9], EntitlementBindingsColumns[1], EntitlementBindingsColumns[2], EntitlementBindingsColumns[3], EntitlementBindingsColumns[4]},
+			},
+		},
+	}
 	// EnvVarsColumns holds the columns for the "env_vars" table.
 	EnvVarsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -852,6 +886,31 @@ var (
 		Name:       "lifecycle_hook_agent_phases",
 		Columns:    LifecycleHookAgentPhasesColumns,
 		PrimaryKey: []*schema.Column{LifecycleHookAgentPhasesColumns[0]},
+	}
+	// LimitDefinitionsColumns holds the columns for the "limit_definitions" table.
+	LimitDefinitionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString, Unique: true},
+		{Name: "resource_type", Type: field.TypeString},
+		{Name: "unit", Type: field.TypeString, Default: "count"},
+		{Name: "description", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "default_value", Type: field.TypeInt64, Default: 0},
+		{Name: "system", Type: field.TypeBool, Default: false},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// LimitDefinitionsTable holds the schema information for the "limit_definitions" table.
+	LimitDefinitionsTable = &schema.Table{
+		Name:       "limit_definitions",
+		Columns:    LimitDefinitionsColumns,
+		PrimaryKey: []*schema.Column{LimitDefinitionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "limitdefinition_resource_type",
+				Unique:  false,
+				Columns: []*schema.Column{LimitDefinitionsColumns[2]},
+			},
+		},
 	}
 	// MaintenanceOperationsColumns holds the columns for the "maintenance_operations" table.
 	MaintenanceOperationsColumns = []*schema.Column{
@@ -1684,6 +1743,50 @@ var (
 			},
 		},
 	}
+	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
+	UsageReservationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "subject_id", Type: field.TypeString},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "resource_id", Type: field.TypeString},
+		{Name: "reserved", Type: field.TypeInt64, Default: 1},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "released_at", Type: field.TypeTime, Nullable: true},
+		{Name: "limit_definition_id", Type: field.TypeUUID},
+	}
+	// UsageReservationsTable holds the schema information for the "usage_reservations" table.
+	UsageReservationsTable = &schema.Table{
+		Name:       "usage_reservations",
+		Columns:    UsageReservationsColumns,
+		PrimaryKey: []*schema.Column{UsageReservationsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "usage_reservations_limit_definitions_usage_reservations",
+				Columns:    []*schema.Column{UsageReservationsColumns[8]},
+				RefColumns: []*schema.Column{LimitDefinitionsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usagereservation_limit_definition_id_scope_type_scope_id_subject_id",
+				Unique:  false,
+				Columns: []*schema.Column{UsageReservationsColumns[8], UsageReservationsColumns[2], UsageReservationsColumns[3], UsageReservationsColumns[1]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "released_at IS NULL",
+				},
+			},
+			{
+				Name:    "usagereservation_limit_definition_id_resource_id",
+				Unique:  true,
+				Columns: []*schema.Column{UsageReservationsColumns[8], UsageReservationsColumns[4]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "released_at IS NULL",
+				},
+			},
+		},
+	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1783,6 +1886,7 @@ var (
 		ChatLinkCodesTable,
 		DecisionAuditsTable,
 		DelegationEdgesTable,
+		EntitlementBindingsTable,
 		EnvVarsTable,
 		GcpServiceAccountsTable,
 		GithubResolutionCacheTable,
@@ -1796,6 +1900,7 @@ var (
 		InviteCodesTable,
 		LifecycleHooksTable,
 		LifecycleHookAgentPhasesTable,
+		LimitDefinitionsTable,
 		MaintenanceOperationsTable,
 		MaintenanceOperationRunsTable,
 		MessagesTable,
@@ -1820,6 +1925,7 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
+		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
 		GroupChildGroupsTable,
@@ -1849,6 +1955,7 @@ func init() {
 	ChatLinkCodesTable.Annotation = &entsql.Annotation{
 		Table: "chat_link_codes",
 	}
+	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",
 	}
@@ -1945,6 +2052,7 @@ func init() {
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
 	}
+	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UserAccessTokensTable.Annotation = &entsql.Annotation{
 		Table: "user_access_tokens",
 	}

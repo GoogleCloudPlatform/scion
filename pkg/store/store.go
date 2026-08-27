@@ -28,6 +28,7 @@ var (
 	ErrVersionConflict  = errors.New("version conflict")
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
+	ErrQuotaExceeded    = errors.New("quota exceeded")
 
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
@@ -173,6 +174,9 @@ type Store interface {
 
 	// Mutation Audit operations (Authorization Mutation Audit Phase 1I)
 	MutationAuditStore
+
+	// Quota operations (Permissions Phase 2B — Limits/Quotas)
+	QuotaStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1726,4 +1730,76 @@ type MutationAuditStore interface {
 	// DeleteMutationAuditsBefore removes mutation audit records older than the given time.
 	// Returns the number of records deleted.
 	DeleteMutationAuditsBefore(ctx context.Context, before time.Time) (int, error)
+}
+
+// =============================================================================
+// Quota Store (Permissions Phase 2B — Limits/Quotas)
+// =============================================================================
+
+// QuotaStore defines limit and quota persistence operations (Permissions Phase 2B).
+type QuotaStore interface {
+	// Limit definitions
+	// CreateLimitDefinition creates a new limit definition.
+	// Returns ErrAlreadyExists if a definition with the same name exists.
+	CreateLimitDefinition(ctx context.Context, def *LimitDefinition) (*LimitDefinition, error)
+
+	// GetLimitDefinition retrieves a limit definition by ID.
+	// Returns ErrNotFound if the definition doesn't exist.
+	GetLimitDefinition(ctx context.Context, id string) (*LimitDefinition, error)
+
+	// GetLimitDefinitionByName retrieves a limit definition by name.
+	// Returns ErrNotFound if the definition doesn't exist.
+	GetLimitDefinitionByName(ctx context.Context, name string) (*LimitDefinition, error)
+
+	// ListLimitDefinitions returns all limit definitions.
+	ListLimitDefinitions(ctx context.Context) ([]*LimitDefinition, error)
+
+	// UpdateLimitDefinition updates an existing limit definition.
+	// Returns ErrNotFound if the definition doesn't exist.
+	UpdateLimitDefinition(ctx context.Context, def *LimitDefinition) (*LimitDefinition, error)
+
+	// DeleteLimitDefinition deletes a limit definition by ID.
+	// Returns ErrNotFound if the definition doesn't exist.
+	DeleteLimitDefinition(ctx context.Context, id string) error
+
+	// Entitlement bindings
+	// CreateEntitlementBinding creates a new entitlement binding.
+	// Returns ErrAlreadyExists if the exact binding already exists.
+	CreateEntitlementBinding(ctx context.Context, binding *EntitlementBinding) (*EntitlementBinding, error)
+
+	// GetEntitlementBinding retrieves an entitlement binding by ID.
+	// Returns ErrNotFound if the binding doesn't exist.
+	GetEntitlementBinding(ctx context.Context, id string) (*EntitlementBinding, error)
+
+	// ListEntitlementBindings returns all entitlement bindings for a limit definition.
+	ListEntitlementBindings(ctx context.Context, limitDefinitionID string) ([]*EntitlementBinding, error)
+
+	// ListEntitlementBindingsForSubject returns all entitlement bindings for a given subject.
+	ListEntitlementBindingsForSubject(ctx context.Context, subjectType, subjectID string) ([]*EntitlementBinding, error)
+
+	// UpdateEntitlementBinding updates an existing entitlement binding.
+	// Returns ErrNotFound if the binding doesn't exist.
+	UpdateEntitlementBinding(ctx context.Context, binding *EntitlementBinding) (*EntitlementBinding, error)
+
+	// DeleteEntitlementBinding deletes an entitlement binding by ID.
+	// Returns ErrNotFound if the binding doesn't exist.
+	DeleteEntitlementBinding(ctx context.Context, id string) error
+
+	// Usage reservations
+	// CreateUsageReservation creates a new usage reservation.
+	CreateUsageReservation(ctx context.Context, reservation *UsageReservation) (*UsageReservation, error)
+
+	// CountActiveReservations counts non-released reservations for a specific
+	// limit, subject, and scope. Only reservations with released_at IS NULL are counted.
+	CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error)
+
+	// ReleaseReservation releases a reservation by setting released_at.
+	// The record is retained for auditing. Matches on limit_definition_id and resource_id.
+	ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error
+
+	// ReleaseReservationsByResource releases all reservations for a given resource ID.
+	ReleaseReservationsByResource(ctx context.Context, resourceID string) error
+
+	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
+	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
 }

@@ -1344,6 +1344,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
 	seedRoleDefinitions(ctx, s)
 
+	// Seed system limit definitions for the quota/limits subsystem (Phase 2B).
+	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.
+	seedLimitDefinitions(ctx, s)
+
 	// Backfill role bindings from existing User.Role and project group memberships.
 	// Must run after seedRoleDefinitions so the role definitions exist.
 	if err := BackfillRoleBindings(ctx, s); err != nil {

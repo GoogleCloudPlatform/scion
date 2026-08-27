@@ -153,6 +153,18 @@ func (f DelegationEdgeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DelegationEdgeMutation", m)
 }
 
+// The EntitlementBindingFunc type is an adapter to allow the use of ordinary
+// function as EntitlementBinding mutator.
+type EntitlementBindingFunc func(context.Context, *ent.EntitlementBindingMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f EntitlementBindingFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.EntitlementBindingMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.EntitlementBindingMutation", m)
+}
+
 // The EnvVarFunc type is an adapter to allow the use of ordinary
 // function as EnvVar mutator.
 type EnvVarFunc func(context.Context, *ent.EnvVarMutation) (ent.Value, error)
@@ -307,6 +319,18 @@ func (f LifecycleHookAgentPhaseFunc) Mutate(ctx context.Context, m ent.Mutation)
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.LifecycleHookAgentPhaseMutation", m)
+}
+
+// The LimitDefinitionFunc type is an adapter to allow the use of ordinary
+// function as LimitDefinition mutator.
+type LimitDefinitionFunc func(context.Context, *ent.LimitDefinitionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f LimitDefinitionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.LimitDefinitionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.LimitDefinitionMutation", m)
 }
 
 // The MaintenanceOperationFunc type is an adapter to allow the use of ordinary
@@ -595,6 +619,18 @@ func (f TemplateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, er
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TemplateMutation", m)
+}
+
+// The UsageReservationFunc type is an adapter to allow the use of ordinary
+// function as UsageReservation mutator.
+type UsageReservationFunc func(context.Context, *ent.UsageReservationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageReservationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageReservationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageReservationMutation", m)
 }
 
 // The UserFunc type is an adapter to allow the use of ordinary

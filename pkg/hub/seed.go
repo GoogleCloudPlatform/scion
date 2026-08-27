@@ -955,6 +955,57 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 	return canDemote, nil
 }
 
+// seedLimitDefinitions creates the system limit definitions if they don't
+// already exist. Shipped with DefaultValue=0 (unlimited) for discoverability
+// per sponsor decision OQ-2 Option B. It is called once during Hub
+// initialization and is idempotent.
+func seedLimitDefinitions(ctx context.Context, s store.Store) {
+	systemLimits := []struct {
+		name         string
+		resourceType string
+		unit         string
+		description  string
+		defaultValue int64
+	}{
+		{store.LimitMaxAgentsPerProject, "agent", "count", "Maximum agents per project", 0},
+		{store.LimitMaxProjectsPerUser, "project", "count", "Maximum projects per user", 0},
+		{store.LimitMaxMembersPerGroup, "group", "count", "Maximum members per group", 0},
+	}
+
+	for _, lim := range systemLimits {
+		seedLimitDefinition(ctx, s, lim.name, lim.resourceType, lim.unit, lim.description, lim.defaultValue)
+	}
+}
+
+// seedLimitDefinition creates a single system limit definition if it doesn't
+// already exist.
+func seedLimitDefinition(ctx context.Context, s store.Store, name, resourceType, unit, description string, defaultValue int64) {
+	_, err := s.GetLimitDefinitionByName(ctx, name)
+	if err == nil {
+		return // already exists
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		slog.Warn("failed to check for existing limit definition", "name", name, "error", err)
+		return
+	}
+	ld := &store.LimitDefinition{
+		Name:         name,
+		ResourceType: resourceType,
+		Unit:         unit,
+		Description:  description,
+		DefaultValue: defaultValue,
+		System:       true,
+	}
+	if _, err := s.CreateLimitDefinition(ctx, ld); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return // Another instance already seeded this — expected in multi-node
+		}
+		slog.Warn("failed to seed limit definition", "name", name, "error", err)
+		return
+	}
+	slog.Info("seeded limit definition", "name", name, "resource_type", resourceType)
+}
+
 // ensureHubMembership adds the given user to the hub-members group.
 // This is best-effort; errors are logged at debug level and ignored.
 func ensureHubMembership(ctx context.Context, s store.Store, userID string) {

@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -30,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -55,6 +57,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/google/uuid"
@@ -412,6 +415,34 @@ func init() {
 	delegationedgeDescID := delegationedgeFields[0].Descriptor()
 	// delegationedge.DefaultID holds the default value on creation for the id field.
 	delegationedge.DefaultID = delegationedgeDescID.Default.(func() uuid.UUID)
+	entitlementbindingFields := schema.EntitlementBinding{}.Fields()
+	_ = entitlementbindingFields
+	// entitlementbindingDescSubjectID is the schema descriptor for subject_id field.
+	entitlementbindingDescSubjectID := entitlementbindingFields[3].Descriptor()
+	// entitlementbinding.DefaultSubjectID holds the default value on creation for the subject_id field.
+	entitlementbinding.DefaultSubjectID = entitlementbindingDescSubjectID.Default.(string)
+	// entitlementbindingDescScopeID is the schema descriptor for scope_id field.
+	entitlementbindingDescScopeID := entitlementbindingFields[5].Descriptor()
+	// entitlementbinding.DefaultScopeID holds the default value on creation for the scope_id field.
+	entitlementbinding.DefaultScopeID = entitlementbindingDescScopeID.Default.(string)
+	// entitlementbindingDescCreatedBy is the schema descriptor for created_by field.
+	entitlementbindingDescCreatedBy := entitlementbindingFields[7].Descriptor()
+	// entitlementbinding.DefaultCreatedBy holds the default value on creation for the created_by field.
+	entitlementbinding.DefaultCreatedBy = entitlementbindingDescCreatedBy.Default.(string)
+	// entitlementbindingDescCreatedAt is the schema descriptor for created_at field.
+	entitlementbindingDescCreatedAt := entitlementbindingFields[8].Descriptor()
+	// entitlementbinding.DefaultCreatedAt holds the default value on creation for the created_at field.
+	entitlementbinding.DefaultCreatedAt = entitlementbindingDescCreatedAt.Default.(func() time.Time)
+	// entitlementbindingDescUpdatedAt is the schema descriptor for updated_at field.
+	entitlementbindingDescUpdatedAt := entitlementbindingFields[9].Descriptor()
+	// entitlementbinding.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	entitlementbinding.DefaultUpdatedAt = entitlementbindingDescUpdatedAt.Default.(func() time.Time)
+	// entitlementbinding.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	entitlementbinding.UpdateDefaultUpdatedAt = entitlementbindingDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// entitlementbindingDescID is the schema descriptor for id field.
+	entitlementbindingDescID := entitlementbindingFields[0].Descriptor()
+	// entitlementbinding.DefaultID holds the default value on creation for the id field.
+	entitlementbinding.DefaultID = entitlementbindingDescID.Default.(func() uuid.UUID)
 	envvarFields := schema.EnvVar{}.Fields()
 	_ = envvarFields
 	// envvarDescKey is the schema descriptor for key field.
@@ -788,6 +819,46 @@ func init() {
 	lifecyclehookagentphase.DefaultUpdatedAt = lifecyclehookagentphaseDescUpdatedAt.Default.(func() time.Time)
 	// lifecyclehookagentphase.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	lifecyclehookagentphase.UpdateDefaultUpdatedAt = lifecyclehookagentphaseDescUpdatedAt.UpdateDefault.(func() time.Time)
+	limitdefinitionFields := schema.LimitDefinition{}.Fields()
+	_ = limitdefinitionFields
+	// limitdefinitionDescName is the schema descriptor for name field.
+	limitdefinitionDescName := limitdefinitionFields[1].Descriptor()
+	// limitdefinition.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	limitdefinition.NameValidator = limitdefinitionDescName.Validators[0].(func(string) error)
+	// limitdefinitionDescResourceType is the schema descriptor for resource_type field.
+	limitdefinitionDescResourceType := limitdefinitionFields[2].Descriptor()
+	// limitdefinition.ResourceTypeValidator is a validator for the "resource_type" field. It is called by the builders before save.
+	limitdefinition.ResourceTypeValidator = limitdefinitionDescResourceType.Validators[0].(func(string) error)
+	// limitdefinitionDescUnit is the schema descriptor for unit field.
+	limitdefinitionDescUnit := limitdefinitionFields[3].Descriptor()
+	// limitdefinition.DefaultUnit holds the default value on creation for the unit field.
+	limitdefinition.DefaultUnit = limitdefinitionDescUnit.Default.(string)
+	// limitdefinitionDescDescription is the schema descriptor for description field.
+	limitdefinitionDescDescription := limitdefinitionFields[4].Descriptor()
+	// limitdefinition.DefaultDescription holds the default value on creation for the description field.
+	limitdefinition.DefaultDescription = limitdefinitionDescDescription.Default.(string)
+	// limitdefinitionDescDefaultValue is the schema descriptor for default_value field.
+	limitdefinitionDescDefaultValue := limitdefinitionFields[5].Descriptor()
+	// limitdefinition.DefaultDefaultValue holds the default value on creation for the default_value field.
+	limitdefinition.DefaultDefaultValue = limitdefinitionDescDefaultValue.Default.(int64)
+	// limitdefinitionDescSystem is the schema descriptor for system field.
+	limitdefinitionDescSystem := limitdefinitionFields[6].Descriptor()
+	// limitdefinition.DefaultSystem holds the default value on creation for the system field.
+	limitdefinition.DefaultSystem = limitdefinitionDescSystem.Default.(bool)
+	// limitdefinitionDescCreatedAt is the schema descriptor for created_at field.
+	limitdefinitionDescCreatedAt := limitdefinitionFields[7].Descriptor()
+	// limitdefinition.DefaultCreatedAt holds the default value on creation for the created_at field.
+	limitdefinition.DefaultCreatedAt = limitdefinitionDescCreatedAt.Default.(func() time.Time)
+	// limitdefinitionDescUpdatedAt is the schema descriptor for updated_at field.
+	limitdefinitionDescUpdatedAt := limitdefinitionFields[8].Descriptor()
+	// limitdefinition.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	limitdefinition.DefaultUpdatedAt = limitdefinitionDescUpdatedAt.Default.(func() time.Time)
+	// limitdefinition.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	limitdefinition.UpdateDefaultUpdatedAt = limitdefinitionDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// limitdefinitionDescID is the schema descriptor for id field.
+	limitdefinitionDescID := limitdefinitionFields[0].Descriptor()
+	// limitdefinition.DefaultID holds the default value on creation for the id field.
+	limitdefinition.DefaultID = limitdefinitionDescID.Default.(func() uuid.UUID)
 	maintenanceoperationFields := schema.MaintenanceOperation{}.Fields()
 	_ = maintenanceoperationFields
 	// maintenanceoperationDescKey is the schema descriptor for key field.
@@ -1458,6 +1529,32 @@ func init() {
 	templateDescID := templateFields[0].Descriptor()
 	// template.DefaultID holds the default value on creation for the id field.
 	template.DefaultID = templateDescID.Default.(func() uuid.UUID)
+	usagereservationFields := schema.UsageReservation{}.Fields()
+	_ = usagereservationFields
+	// usagereservationDescSubjectID is the schema descriptor for subject_id field.
+	usagereservationDescSubjectID := usagereservationFields[2].Descriptor()
+	// usagereservation.SubjectIDValidator is a validator for the "subject_id" field. It is called by the builders before save.
+	usagereservation.SubjectIDValidator = usagereservationDescSubjectID.Validators[0].(func(string) error)
+	// usagereservationDescScopeID is the schema descriptor for scope_id field.
+	usagereservationDescScopeID := usagereservationFields[4].Descriptor()
+	// usagereservation.DefaultScopeID holds the default value on creation for the scope_id field.
+	usagereservation.DefaultScopeID = usagereservationDescScopeID.Default.(string)
+	// usagereservationDescResourceID is the schema descriptor for resource_id field.
+	usagereservationDescResourceID := usagereservationFields[5].Descriptor()
+	// usagereservation.ResourceIDValidator is a validator for the "resource_id" field. It is called by the builders before save.
+	usagereservation.ResourceIDValidator = usagereservationDescResourceID.Validators[0].(func(string) error)
+	// usagereservationDescReserved is the schema descriptor for reserved field.
+	usagereservationDescReserved := usagereservationFields[6].Descriptor()
+	// usagereservation.DefaultReserved holds the default value on creation for the reserved field.
+	usagereservation.DefaultReserved = usagereservationDescReserved.Default.(int64)
+	// usagereservationDescCreatedAt is the schema descriptor for created_at field.
+	usagereservationDescCreatedAt := usagereservationFields[7].Descriptor()
+	// usagereservation.DefaultCreatedAt holds the default value on creation for the created_at field.
+	usagereservation.DefaultCreatedAt = usagereservationDescCreatedAt.Default.(func() time.Time)
+	// usagereservationDescID is the schema descriptor for id field.
+	usagereservationDescID := usagereservationFields[0].Descriptor()
+	// usagereservation.DefaultID holds the default value on creation for the id field.
+	usagereservation.DefaultID = usagereservationDescID.Default.(func() uuid.UUID)
 	userFields := schema.User{}.Fields()
 	_ = userFields
 	// userDescEmail is the schema descriptor for email field.
