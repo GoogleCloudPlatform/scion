@@ -211,6 +211,25 @@ Two related deploy-time consequences of the missing `K_SERVICE`:
 - The logging paths conclude "not on Cloud Run" and stand up their own Cloud Logging
   client, but an Instance's stdout is already captured. Likely duplicate ingestion.
 
+**The same principle governs the deploy path, for a different reason.** Creating the
+Instance requires the v1 `gcloud` surface, because v1 is what carries
+`sandboxLauncher`. That surface is not on every Cloud SDK. `gcloud beta run instances`
+is **absent at 575.0.0**, where the `instances` noun is alpha-only, and **present at
+582.0.0**. Versions 576–581 are unmeasured, so **this design states no version floor**.
+Writing one down would publish a number nobody has checked.
+
+Two consequences for tooling:
+
+- **Probe for the noun; do not compare version strings.** The deploy script must
+  refuse early with a message that names the missing command. A hardcoded floor would
+  reject working installations anywhere in the unmeasured range — a gate that rejects
+  a good install is worse than the error it replaces.
+- **`gcloud`'s own advice on failure is a wrong fix.** It suggests
+  `gcloud alpha run instances`. The alpha surface uses `create` rather than `deploy`
+  and has no `--sandbox-launcher`, so following it produces an Instance whose scion
+  server crashes on startup. The diagnostic has to say so, because the platform's
+  suggestion is actively misleading.
+
 ### 4.4 The runtime is named `cloudrun-sandbox`
 
 `cloudrun-instances` is taken by a real implementation of the opposite topology
