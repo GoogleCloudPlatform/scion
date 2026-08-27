@@ -94,6 +94,20 @@ type SecretWithValue struct {
 	Value string `json:"-"` // Never serialized
 }
 
+// UpdateMetaInput contains fields for a metadata-only secret update.
+// Only non-zero fields are updated. The secret value is never touched.
+type UpdateMetaInput struct {
+	Name          string
+	Scope         string
+	ScopeID       string
+	Description   *string // pointer to distinguish "" (clear) from nil (no change)
+	InjectionMode string  // "" means no change
+	SecretType    string  // "" means no change
+	Target        string  // "" means no change
+	AllowProgeny  *bool   // pointer to distinguish false from nil
+	UpdatedBy     string
+}
+
 // SetSecretInput provides the data needed to create or update a secret.
 type SetSecretInput struct {
 	Name          string // Secret key name
@@ -140,6 +154,10 @@ type SecretBackend interface {
 
 	// GetMeta retrieves secret metadata without the value.
 	GetMeta(ctx context.Context, name, scope, scopeID string) (*SecretMeta, error)
+
+	// UpdateMeta updates only the metadata of an existing secret.
+	// The secret value is not modified. Returns ErrNotFound if the secret doesn't exist.
+	UpdateMeta(ctx context.Context, input *UpdateMetaInput) (*SecretMeta, error)
 
 	// Resolve collects and merges secrets from all applicable scopes for an agent.
 	// Scopes are resolved in order, lowest first: runtime_broker < hub < project < user.

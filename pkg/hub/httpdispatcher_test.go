@@ -3461,6 +3461,9 @@ func (m *mockSecretBackend) List(ctx context.Context, filter secret.Filter) ([]s
 func (m *mockSecretBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
 	return nil, nil
 }
+func (m *mockSecretBackend) UpdateMeta(ctx context.Context, input *secret.UpdateMetaInput) (*secret.SecretMeta, error) {
+	return nil, nil
+}
 func (m *mockSecretBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	return m.secrets, nil
 }

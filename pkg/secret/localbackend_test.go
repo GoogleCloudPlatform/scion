@@ -1287,3 +1287,169 @@ func TestLocalBackend_DecryptRawValue_NilKeyPlaintextValue(t *testing.T) {
 		t.Errorf("expected %q, got %q", "plain-legacy-value", value)
 	}
 }
+
+// =============================================================================
+// UpdateMeta tests
+// =============================================================================
+
+func TestLocalBackend_UpdateMeta(t *testing.T) {
+	backend, _ := createTestBackend(t)
+	ctx := context.Background()
+
+	// Create a secret first
+	_, _, err := backend.Set(ctx, &SetSecretInput{
+		Name:          "META_SECRET",
+		Value:         "original-value",
+		SecretType:    TypeEnvironment,
+		Scope:         ScopeUser,
+		ScopeID:       "user-1",
+		Description:   "Original description",
+		InjectionMode: "as_needed",
+		CreatedBy:     "user-1",
+		UpdatedBy:     "user-1",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Update description only
+	newDesc := "Updated description"
+	meta, err := backend.UpdateMeta(ctx, &UpdateMetaInput{
+		Name:        "META_SECRET",
+		Scope:       ScopeUser,
+		ScopeID:     "user-1",
+		Description: &newDesc,
+		UpdatedBy:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("UpdateMeta failed: %v", err)
+	}
+	if meta.Description != "Updated description" {
+		t.Errorf("expected description %q, got %q", "Updated description", meta.Description)
+	}
+
+	// Verify the secret value is unchanged
+	sv, err := backend.Get(ctx, "META_SECRET", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get after UpdateMeta failed: %v", err)
+	}
+	if sv.Value != "original-value" {
+		t.Errorf("expected value to be unchanged %q, got %q", "original-value", sv.Value)
+	}
+}
+
+func TestLocalBackend_UpdateMeta_NotFound(t *testing.T) {
+	backend, _ := createTestBackend(t)
+	ctx := context.Background()
+
+	newDesc := "test"
+	_, err := backend.UpdateMeta(ctx, &UpdateMetaInput{
+		Name:        "NONEXISTENT",
+		Scope:       ScopeUser,
+		ScopeID:     "user-1",
+		Description: &newDesc,
+	})
+	if err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestLocalBackend_UpdateMeta_VersionIncrement(t *testing.T) {
+	backend, _ := createTestBackend(t)
+	ctx := context.Background()
+
+	// Create a secret
+	_, meta1, err := backend.Set(ctx, &SetSecretInput{
+		Name:       "VERSION_META",
+		Value:      "value",
+		SecretType: TypeEnvironment,
+		Scope:      ScopeUser,
+		ScopeID:    "user-1",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Update metadata
+	newDesc := "Updated"
+	meta2, err := backend.UpdateMeta(ctx, &UpdateMetaInput{
+		Name:        "VERSION_META",
+		Scope:       ScopeUser,
+		ScopeID:     "user-1",
+		Description: &newDesc,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMeta failed: %v", err)
+	}
+	if meta2.Version <= meta1.Version {
+		t.Errorf("expected version to increment: v1=%d, v2=%d", meta1.Version, meta2.Version)
+	}
+}
+
+func TestLocalBackend_UpdateMeta_PartialFields(t *testing.T) {
+	backend, _ := createTestBackend(t)
+	ctx := context.Background()
+
+	// Create a secret with multiple metadata fields
+	_, _, err := backend.Set(ctx, &SetSecretInput{
+		Name:          "PARTIAL_META",
+		Value:         "secret-value",
+		SecretType:    TypeEnvironment,
+		Scope:         ScopeUser,
+		ScopeID:       "user-1",
+		Description:   "Original",
+		InjectionMode: "as_needed",
+		AllowProgeny:  false,
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Update only injection mode — description and AllowProgeny should remain unchanged
+	meta, err := backend.UpdateMeta(ctx, &UpdateMetaInput{
+		Name:          "PARTIAL_META",
+		Scope:         ScopeUser,
+		ScopeID:       "user-1",
+		InjectionMode: "always",
+	})
+	if err != nil {
+		t.Fatalf("UpdateMeta failed: %v", err)
+	}
+
+	if meta.InjectionMode != "always" {
+		t.Errorf("expected injectionMode %q, got %q", "always", meta.InjectionMode)
+	}
+	if meta.Description != "Original" {
+		t.Errorf("expected description to remain %q, got %q", "Original", meta.Description)
+	}
+	if meta.AllowProgeny != false {
+		t.Errorf("expected allowProgeny to remain false, got %v", meta.AllowProgeny)
+	}
+
+	// Now update AllowProgeny only
+	allowTrue := true
+	meta2, err := backend.UpdateMeta(ctx, &UpdateMetaInput{
+		Name:         "PARTIAL_META",
+		Scope:        ScopeUser,
+		ScopeID:      "user-1",
+		AllowProgeny: &allowTrue,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMeta (progeny) failed: %v", err)
+	}
+	if !meta2.AllowProgeny {
+		t.Error("expected allowProgeny to be true after update")
+	}
+	if meta2.InjectionMode != "always" {
+		t.Errorf("expected injectionMode to remain %q, got %q", "always", meta2.InjectionMode)
+	}
+
+	// Verify value is still intact
+	sv, err := backend.Get(ctx, "PARTIAL_META", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if sv.Value != "secret-value" {
+		t.Errorf("expected value unchanged %q, got %q", "secret-value", sv.Value)
+	}
+}

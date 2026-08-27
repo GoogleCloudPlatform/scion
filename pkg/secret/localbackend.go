@@ -87,6 +87,22 @@ func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *S
 	return created, fromStoreSecretMeta(stored), nil
 }
 
+func (b *LocalBackend) UpdateMeta(ctx context.Context, input *UpdateMetaInput) (*SecretMeta, error) {
+	meta := &store.SecretMetaUpdate{
+		Description:   input.Description,
+		InjectionMode: input.InjectionMode,
+		SecretType:    input.SecretType,
+		Target:        input.Target,
+		AllowProgeny:  input.AllowProgeny,
+		UpdatedBy:     input.UpdatedBy,
+	}
+	updated, err := b.store.UpdateSecretMeta(ctx, input.Name, input.Scope, input.ScopeID, meta)
+	if err != nil {
+		return nil, err
+	}
+	return fromStoreSecretMeta(updated), nil
+}
+
 func (b *LocalBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
 	return b.store.DeleteSecret(ctx, name, scope, scopeID)
 }
