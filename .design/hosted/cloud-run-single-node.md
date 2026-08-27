@@ -236,6 +236,29 @@ matters: both register a runtime, so whichever lands second reconciles the
 registration. That is expected, and it is the ordinary cost of the two runtimes being
 genuinely separate rather than one overloaded implementation.
 
+**Outcome, 2026-08-27 — the prediction held, and my first attempt to correct it was
+itself wrong.** Both entries stay, because the sequence is the lesson.
+
+At 00:31 I measured the rebase surface and found `factory.go` untouched by any of the
+eight upstream commits the branch was behind. I concluded the predicted conflict had
+been overtaken by landing order, wrote that here, and told the rebase developer
+explicitly not to go looking for it.
+
+That measurement was accurate and the conclusion drawn from it was not. #1302 — the
+Instances runtime, the *other* half of the pair this section is about — merged
+upstream as `83ee4bd9` roughly twenty minutes after I measured. Re-measured at 00:49,
+the branch was behind by eleven rather than eight, and the conflict surface was
+exactly the three files named above: `factory.go`, `cmd/server_foreground.go`,
+`pkg/config/settings_v1.go`. The original reasoning was right on all three.
+
+Two things are worth carrying forward. **A conflict-surface measurement is a snapshot
+with a short half-life**, and an active upstream invalidates one faster than a rebase
+takes to run; the measurement needs re-taking immediately before resolution, not once
+at brief-writing time. And the `factory.go` conflict has a shape that a clean
+auto-merge hides: both sides register `cloudrun-instances`, so git resolving it
+without complaint can yield a duplicated `case` — a compile error, not a merge marker.
+The branch appeared `MERGEABLE` throughout.
+
 ### 4.5 Every address handed into a sandbox needs an explicit decision
 
 A sandbox is not on the launcher's network, and it is not on the public internet's
@@ -409,6 +432,34 @@ surfaced first.
 
 Until #1273 and #1276 land, this tier needs deploy-time workarounds. They are
 stopgaps and should be removed when the fixes arrive.
+
+**Update, 2026-08-27 — three of the four have landed upstream.**
+
+| Issue | Fix | Landed as |
+|---|---|---|
+| #1273 | resolve implicit `default` template when none is specified | `fc523ecd` (PR #1305) |
+| #1275 | skip env-gather when `noAuth` is true | `6edf6ed0` (PR #1304) |
+| #1276 | auth preflight recognises passthrough GCP identity mode | `a30368aa` (PR #1306) |
+
+So **the deploy-time stopgaps for #1273 and #1276 are now obsolete and should be
+deleted.** They were operator settings rather than code, which is why this tier never
+had to carry a workaround for them and never blocked on them — the §1 walkthrough was
+completed end to end on 2026-08-25 with all four open.
+
+**#1274 remains open** and is the one with a live consequence: a depth-1 workspace
+cannot push to any remote but `origin`. That constrains §1's final step to
+origin-only pushes. It is a real limitation of the tier as shipped, not a
+theoretical one.
+
+A fifth defect was filed after this section was first written — **#1281**, session-end
+telemetry rejected with a 400 because `SessionID` is dropped in `Finalize()`, so
+`exit_code` is never persisted. Also open, also not blocking.
+
+A sixth, the `WebServer` access-settings split-brain, was **fixed upstream by #1300**
+(`AccessSettingsProvider`) before it was ever filed from here. All browser login paths
+now read live settings, so tightening access mode in the admin UI reaches browser
+logins. Verified by reading the merged code, **not yet exercised on a live deployment** —
+that retest is still outstanding.
 
 ## 10. Acceptance criteria
 
