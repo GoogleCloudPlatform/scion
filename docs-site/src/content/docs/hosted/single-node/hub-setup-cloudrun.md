@@ -183,8 +183,8 @@ https://my-scion-hub-PROJECT_NUMBER.us-east4.run.app
 
 1. **IAP challenge** — Google sign-in. Use the email that was bound as the IAP user
    during deploy (your gcloud account, or the `--admin-email` value).
-2. **Hub login** — After IAP, the Hub presents its own login. The deployer is
-   automatically seeded as the first admin.
+2. **Hub access** — After sign-in you land directly in the Hub. There is no
+   second login. The deployer is automatically seeded as the first admin.
 
 :::tip[Granting access to other users]
 IAP access is region-scoped, not per-instance. To add another user:
