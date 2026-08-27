@@ -49,6 +49,7 @@ gcloud services enable \
 |------|--------|
 | `gcloud` (recent version, with `beta` component) | `gcloud beta run instances deploy --help` |
 | `scion` CLI that includes `deploy-instance` (see below) | `scion deploy-instance --help` |
+| `git` and `go` — only needed to build `scion` from source (see below) | `git --version`, `go version` |
 
 The `deploy-instance` subcommand is not yet in any published `scion` release. Until
 one ships it, build the CLI from a clone of the repository at `main`:
@@ -63,8 +64,15 @@ the subcommand — tracked by
 :::
 
 ```bash
+git clone https://github.com/GoogleCloudPlatform/scion.git
+cd scion
 go build -tags no_embed_web -o ./scion ./cmd/scion/
 ```
+
+The build writes the binary to `./scion` inside the clone. The rest of this guide
+assumes you stay in that directory — the wrapper scripts in
+[Section 1](#1-deploy) and [Section 6](#6-teardown) are repository-relative paths.
+Invoke the binary you just built as `./scion`, or put it on your `PATH`.
 
 :::caution[gcloud version]
 `gcloud beta run instances deploy` requires a recent gcloud SDK. If `beta run
