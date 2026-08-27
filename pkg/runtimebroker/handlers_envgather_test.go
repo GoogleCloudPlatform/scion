@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // claudeAuthBlock is the declarative auth metadata for the claude harness,
@@ -2155,5 +2156,71 @@ profiles:
 	// Satisfied keys should NOT appear in Alternatives
 	if _, ok := envReqs.Alternatives["GOOGLE_CLOUD_PROJECT"]; ok {
 		t.Errorf("GOOGLE_CLOUD_PROJECT should not be in Alternatives (it is satisfied)")
+	}
+}
+
+// TestEnvGather_VertexAI_GCPIdentitySkipsADC tests that vertex-ai auth with
+// GCPIdentity.MetadataMode set to "assign" or "passthrough" does not require
+// the gcloud-adc file secret. Both modes provide GCP credentials (assign via
+// broker-managed SA, passthrough via ambient GCE metadata), so the ADC file
+// is unnecessary.
+// Regression test for https://github.com/ptone/scion/issues/1276.
+func TestEnvGather_VertexAI_GCPIdentitySkipsADC(t *testing.T) {
+	tests := []struct {
+		name            string
+		metadataMode    string
+		gcpIdentityJSON string
+	}{
+		{
+			name:            store.GCPMetadataModePassthrough,
+			metadataMode:    store.GCPMetadataModePassthrough,
+			gcpIdentityJSON: `{"metadata_mode": "passthrough"}`,
+		},
+		{
+			name:            store.GCPMetadataModeAssign,
+			metadataMode:    store.GCPMetadataModeAssign,
+			gcpIdentityJSON: `{"metadata_mode": "assign", "sa_email": "test@proj.iam.gserviceaccount.com", "project_id": "my-project"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+				"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+				`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+			body := `{
+				"name": "test-agent-vertex-` + tt.metadataMode + `",
+				"id": "agent-uuid-` + tt.metadataMode + `",
+				"gatherEnv": true,
+				"grovePath": "` + projectDir + `",
+				"resolvedEnv": {
+					"GOOGLE_CLOUD_PROJECT": "my-project",
+					"GOOGLE_CLOUD_REGION": "us-central1"
+				},
+				"config": {
+					"template": "claude",
+					"profile": "default",
+					"gcpIdentity": ` + tt.gcpIdentityJSON + `
+				}
+			}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201 (%s should skip ADC requirement), got %d: %s",
+					tt.metadataMode, w.Code, w.Body.String())
+			}
+		})
 	}
 }
