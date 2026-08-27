@@ -115,6 +115,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Validate DM key format when the thread_id looks like a DM key.
+	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
+	if req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && !validDMKey(req.ThreadID) {
+		BadRequest(w, "invalid DM key format")
+		return
+	}
+
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -547,6 +554,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.SenderID = senderID
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
+		return
+	}
+
+	// Validate DM key format when the thread_id looks like a DM key.
+	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
+		strings.HasPrefix(structuredMsg.ThreadID, "dm:") && !validDMKey(structuredMsg.ThreadID) {
+		BadRequest(w, "invalid DM key format")
 		return
 	}
 
