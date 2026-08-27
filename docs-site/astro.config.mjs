@@ -153,6 +153,7 @@ export default defineConfig({
 								{ label: 'Single-node Overview', slug: 'hosted/single-node/overview' },
 								{ label: 'Hub Setup', slug: 'hosted/single-node/hub-server' },
 								{ label: 'Deploy on a VM (GCE)', slug: 'hosted/single-node/hub-setup-gce' },
+								{ label: 'Deploy on Cloud Run', slug: 'hosted/single-node/cloud-run' },
 								{ label: 'Auth & Tenancy', slug: 'hosted/single-node/auth' },
 								{ label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },
 								{ label: 'Skill Registry & Federation', slug: 'hosted/single-node/skill-registry' },
