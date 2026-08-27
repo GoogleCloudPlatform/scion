@@ -762,7 +762,7 @@ profiles:
 	}
 
 	mgr := NewManager(mockRT)
-	_, err := mgr.Start(context.Background(), api.StartOptions{
+	_, err = mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: projectScionDir,
 		NoAuth:      true,
