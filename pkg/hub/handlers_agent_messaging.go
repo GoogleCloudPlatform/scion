@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -248,6 +249,33 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Visibility:  req.Visibility,
 		CreatedAt:   time.Now(),
 	}
+
+	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
+	var convResult *messaging.ConversationResult
+	if req.ThreadID != "" {
+		convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, req.ThreadID, agent.ProjectID)
+	} else if agent.ID != "" && recipientID != "" {
+		convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, "agent", agent.ID, "user", recipientID)
+	}
+	if convResult != nil {
+		storeMsg.ConversationID = convResult.ConversationID
+	}
+	// Always log divergence — even when convResult is nil, that is a divergence signal.
+	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
+	convID := ""
+	actualRef := ""
+	if convResult != nil {
+		convID = convResult.ConversationID
+		actualRef = convResult.ExternalRef
+	}
+	match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+	messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+		MessageID:  storeMsg.ID,
+		OldRouting: oldRouting,
+		NewRouting: messaging.NewRoutingStr(convID),
+		Match:      match,
+		Reason:     reason,
+	})
 
 	// Build a structured message for external dispatch paths.
 	structuredMsg := &messages.StructuredMessage{
@@ -755,6 +783,37 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
+		var convResult *messaging.ConversationResult
+		if structuredMsg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
+		} else if structuredMsg.SenderID != "" && agent.ID != "" {
+			if senderKind, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, structuredMsg.SenderID, "agent", agent.ID)
+			} else {
+				s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
+					"sender", structuredMsg.Sender, "sender_id", structuredMsg.SenderID)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
@@ -979,6 +1038,35 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				DispatchState: store.MessageDispatchDispatched,
 				CreatedAt:     time.Now(),
 			}
+			// Phase 5 dual-write: resolve-or-create conversation for group set message.
+			var convResult *messaging.ConversationResult
+			if agentMsg.SenderID != "" && agent.ID != "" {
+				if senderKind, ok := messages.PrincipalKindFromAddress(agentMsg.Sender); ok {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, agentMsg.SenderID, "agent", agent.ID)
+				} else {
+					s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
+						"sender", agentMsg.Sender, "sender_id", agentMsg.SenderID)
+				}
+			}
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, "")
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}
@@ -1073,6 +1161,35 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				GroupID:     groupID,
 				CreatedAt:   time.Now(),
 			}
+			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
+			var convResult *messaging.ConversationResult
+			if userMsg.SenderID != "" && userID != "" {
+				if senderKind, ok := messages.PrincipalKindFromAddress(userMsg.Sender); ok {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.messageLog, senderKind, userMsg.SenderID, "user", userID)
+				} else {
+					s.messageLog.Warn("skipping DM conversation resolution: sender kind undetermined",
+						"sender", userMsg.Sender, "sender_id", userMsg.SenderID)
+				}
+			}
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(userMsg.SenderID, userID, "")
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}

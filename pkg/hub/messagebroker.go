@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -454,6 +455,42 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Visibility:  msg.Visibility,
 		CreatedAt:   time.Now(),
 	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !msg.Broadcasted {
+		var convResult *messaging.ConversationResult
+		if msg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+		} else if msg.SenderID != "" && msg.RecipientID != "" {
+			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
+			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+			if sOK && rOK {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+			} else {
+				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
 	}
@@ -592,6 +629,40 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		AgentID:       agent.ID,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     time.Now(),
+	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !msg.Broadcasted {
+		var convResult *messaging.ConversationResult
+		if msg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+		} else if msg.SenderID != "" && agent.ID != "" {
+			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+			} else {
+				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
+					"sender", msg.Sender, "sender_id", msg.SenderID)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
