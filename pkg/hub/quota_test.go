@@ -373,6 +373,114 @@ func TestRelease_Idempotent(t *testing.T) {
 }
 
 // ===========================================================================
+// Unlimited merge rule tests
+// ===========================================================================
+
+func TestResolveEffectiveLimit_UnlimitedBindingWins(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	def := seedLimit(t, s, "max_agents_per_project", 10)
+
+	groupA := uuid.NewString()
+	userID := uuid.NewString()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: userID + "@test.com", DisplayName: "Test User", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: groupA, Name: "Group U", Slug: "group-u-" + groupA[:8]}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: groupA, MemberType: "user", MemberID: userID, Role: "member"}))
+
+	// User has finite binding (50), but their group grants unlimited (0).
+	// Unlimited should always win because it is the most generous.
+	seedBinding(t, s, def.ID, store.EntitlementSubjectUser, userID, store.QuotaScopeSystem, "", 50)
+	seedBinding(t, s, def.ID, store.EntitlementSubjectGroup, groupA, store.QuotaScopeSystem, "", 0)
+
+	effective, err := qs.ResolveEffectiveLimit(ctx, def.ID, userID, store.QuotaScopeSystem, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), effective, "unlimited binding (Value=0) should win over finite binding (Value=50)")
+}
+
+func TestResolveEffectiveLimit_UnlimitedGroupBindingWins(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	def := seedLimit(t, s, "max_agents_per_project", 10)
+
+	groupA := uuid.NewString()
+	userID := uuid.NewString()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: userID + "@test.com", DisplayName: "Test User", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: groupA, Name: "Group A", Slug: "group-a-" + groupA[:8]}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: groupA, MemberType: "user", MemberID: userID, Role: "member"}))
+
+	// User has finite binding (50), group has unlimited binding (0).
+	// Unlimited should win across the merge.
+	seedBinding(t, s, def.ID, store.EntitlementSubjectUser, userID, store.QuotaScopeSystem, "", 50)
+	seedBinding(t, s, def.ID, store.EntitlementSubjectGroup, groupA, store.QuotaScopeSystem, "", 0)
+
+	effective, err := qs.ResolveEffectiveLimit(ctx, def.ID, userID, store.QuotaScopeSystem, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), effective, "unlimited group binding (Value=0) should win over finite user binding (Value=50)")
+}
+
+func TestResolveEffectiveLimit_NegativeValueMeansUnlimited(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	def := seedLimit(t, s, "max_agents_per_project", 10)
+
+	userID := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: userID + "@test.com", DisplayName: "Test User", Role: "member", Status: "active"}))
+
+	// Negative value also means unlimited.
+	seedBinding(t, s, def.ID, store.EntitlementSubjectUser, userID, store.QuotaScopeSystem, "", -1)
+
+	effective, err := qs.ResolveEffectiveLimit(ctx, def.ID, userID, store.QuotaScopeSystem, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), effective, "negative binding value should be treated as unlimited")
+}
+
+func TestCheckAndReserve_UnlimitedBindingSkipsEnforcement(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	// Default is 2, but user has unlimited binding.
+	def := seedLimit(t, s, "max_test_unlimited", 2)
+
+	userID := "user-unlimited"
+	seedBinding(t, s, def.ID, store.EntitlementSubjectUser, userID, store.QuotaScopeSystem, "", 0)
+
+	// Should be able to create many resources without hitting quota.
+	for i := 0; i < 20; i++ {
+		err := qs.CheckAndReserve(ctx, "max_test_unlimited", userID, "project", "p1", fmt.Sprintf("r-%d", i))
+		require.NoError(t, err, "reservation %d should succeed with unlimited binding", i)
+	}
+}
+
+// ===========================================================================
+// Lock contention tests
+// ===========================================================================
+
+func TestCheckAndReserve_LockContentionReturnsRetryableError(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	seedLimit(t, s, "max_test_lock", 10)
+
+	// Get the underlying locking wrapper to pre-acquire the lock.
+	wrapper := qs.store.(*lockingStoreWrapper)
+	objID := store.StableProjectHash("p1")
+	acquired, release, err := wrapper.TryAdvisoryLockObject(ctx, store.LockQuotaEnforcement, objID)
+	require.NoError(t, err)
+	require.True(t, acquired, "should acquire lock in test setup")
+	defer func() { _ = release() }()
+
+	// Now CheckAndReserve should fail with ErrQuotaLockContention.
+	err = qs.CheckAndReserve(ctx, "max_test_lock", "user-1", "project", "p1", "r1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrQuotaLockContention, "should return ErrQuotaLockContention when lock is held")
+}
+
+// ===========================================================================
 // Scope matching tests
 // ===========================================================================
 

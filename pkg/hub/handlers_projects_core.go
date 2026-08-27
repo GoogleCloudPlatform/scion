@@ -403,6 +403,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 					"quota exceeded: max_projects_per_user", nil)
 				return
 			}
+			if errors.Is(err, ErrQuotaLockContention) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota check temporarily unavailable, please retry", nil)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 			return
 		}
@@ -1382,6 +1387,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, store.ErrQuotaExceeded) {
 					writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 						"quota exceeded: max_projects_per_user", nil)
+					return
+				}
+				if errors.Is(err, ErrQuotaLockContention) {
+					writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+						"quota check temporarily unavailable, please retry", nil)
 					return
 				}
 				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)

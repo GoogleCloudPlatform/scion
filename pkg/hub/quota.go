@@ -98,9 +98,11 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 
 // ResolveEffectiveLimit determines the effective limit using the merge rule:
 // most generous (maximum value) wins across all matching bindings.
+// Value <= 0 means "unlimited" — if ANY binding grants unlimited, the result
+// is unlimited (0) because that is the most generous possible limit.
 func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID string, subjectID string, scopeType string, scopeID string) (int64, error) {
-	var maxValue int64
-	var found bool
+	// Collect all matching bindings from every source.
+	var matchingBindings []*store.EntitlementBinding
 
 	// 1. Collect user-specific bindings.
 	userBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectUser, subjectID)
@@ -109,10 +111,7 @@ func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID st
 	}
 	for _, b := range userBindings {
 		if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
-			found = true
-			if b.Value > maxValue {
-				maxValue = b.Value
-			}
+			matchingBindings = append(matchingBindings, b)
 		}
 	}
 
@@ -132,10 +131,7 @@ func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID st
 			}
 			for _, b := range groupBindings {
 				if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
-					found = true
-					if b.Value > maxValue {
-						maxValue = b.Value
-					}
+					matchingBindings = append(matchingBindings, b)
 				}
 			}
 		}
@@ -148,22 +144,38 @@ func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID st
 	} else {
 		for _, b := range sysBindings {
 			if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
-				found = true
-				if b.Value > maxValue {
-					maxValue = b.Value
-				}
+				matchingBindings = append(matchingBindings, b)
 			}
 		}
 	}
 
 	// 4. If no binding found, fall back to limit definition's default value.
-	if !found {
+	if len(matchingBindings) == 0 {
 		limitDef, err := qs.store.GetLimitDefinition(ctx, limitDefID)
 		if err != nil {
 			return 0, fmt.Errorf("get limit definition: %w", err)
 		}
-		// DefaultValue == 0 means unlimited (return 0).
+		// DefaultValue <= 0 means unlimited (return 0).
+		if limitDef.DefaultValue <= 0 {
+			return 0, nil
+		}
 		return limitDef.DefaultValue, nil
+	}
+
+	// 5. Apply merge rule: if ANY binding grants unlimited (Value <= 0),
+	// the result is unlimited — that's the most generous possible limit.
+	for _, b := range matchingBindings {
+		if b.Value <= 0 {
+			return 0, nil // unlimited
+		}
+	}
+
+	// 6. Otherwise, take the maximum positive value (most generous finite limit).
+	var maxValue int64
+	for _, b := range matchingBindings {
+		if b.Value > maxValue {
+			maxValue = b.Value
+		}
 	}
 
 	return maxValue, nil

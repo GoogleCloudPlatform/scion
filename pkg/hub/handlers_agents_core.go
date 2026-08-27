@@ -1151,6 +1151,11 @@ func (s *Server) createAgentInProject(
 					"quota exceeded: max_agents_per_project", nil)
 				return
 			}
+			if errors.Is(err, ErrQuotaLockContention) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota check temporarily unavailable, please retry", nil)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 			return
 		}

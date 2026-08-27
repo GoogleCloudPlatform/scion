@@ -717,6 +717,11 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 					"quota exceeded: max_members_per_group", nil)
 				return
 			}
+			if errors.Is(err, ErrQuotaLockContention) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+					"quota check temporarily unavailable, please retry", nil)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 			return
 		}
