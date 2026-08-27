@@ -219,12 +219,8 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code,
 		"Agent A is not a participant in the B↔V DM; the write must be rejected")
 
-	// Allow time for any async delivery to settle (poll briefly).
-	assert.Eventually(t, func() bool {
-		// We're waiting for delivery to settle, not for the message to appear.
-		// A short settle period is sufficient.
-		return true
-	}, 500*time.Millisecond, 50*time.Millisecond)
+	// No async settle needed: the injection was rejected synchronously
+	// (StatusBadRequest), so no message was created or delivered.
 
 	// ---------------------------------------------------------------
 	// Step 3: User V reads the B↔V conversation history.
@@ -272,10 +268,26 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 	controlDMKey := fmt.Sprintf("dm:agent:%s:user:%s", agentA.ID, victimUserID)
 	controlRR := sendOutbound(agentA, p1.ID, "control message from A in own DM", "web", controlDMKey)
 	if controlRR.Code == http.StatusOK {
-		// If the control message was accepted, wait for delivery to settle
-		// then verify it does NOT appear in B↔V history.
-		assert.Eventually(t, func() bool { return true },
-			500*time.Millisecond, 50*time.Millisecond)
+		// Poll until the control message is visible in its own DM,
+		// confirming delivery has settled before checking B↔V isolation.
+		require.Eventually(t, func() bool {
+			rec := doRequestAsUser(t, srv, victimUser, http.MethodGet,
+				"/api/v1/chat/conversations/"+controlDMKey+"/messages", nil)
+			if rec.Code != http.StatusOK {
+				return false
+			}
+			var resp chatHistoryResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				return false
+			}
+			for _, m := range resp.Messages {
+				if m.Msg == "control message from A in own DM" {
+					return true
+				}
+			}
+			return false
+		}, 5*time.Second, 100*time.Millisecond,
+			"control message should be visible in agent A's own DM")
 	}
 
 	// Re-fetch the B↔V conversation and verify control message is absent.
