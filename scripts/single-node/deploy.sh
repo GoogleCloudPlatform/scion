@@ -83,7 +83,7 @@ di_validate_instance_url() {
     echo "Error: instance URL is empty" >&2
     return 1
   fi
-  if ! [[ "$url" =~ ^https://[^/]+\.run\.app$ ]]; then
+  if ! [[ "$url" =~ ^https://[a-zA-Z0-9._-]+\.run\.app$ ]]; then
     echo "Error: computed instance URL '$url' is invalid (project number may be contaminated)" >&2
     return 1
   fi
