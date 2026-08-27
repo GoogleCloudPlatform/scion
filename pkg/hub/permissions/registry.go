@@ -31,6 +31,7 @@ const (
 	ResourcePolicy            = "policy"
 	ResourceBroker            = "broker"
 	ResourceGCPServiceAccount = "gcp_service_account"
+	ResourceHub               = "hub"
 
 	ActionCreate       = "create"
 	ActionRead         = "read"
@@ -48,6 +49,11 @@ const (
 	ActionVerify       = "verify"
 	ActionMint         = "mint"
 	ActionAssign       = "assign"
+	ActionInvite       = "invite"
+	ActionSuspend      = "suspend"
+	ActionPromote      = "promote"
+	ActionClone        = "clone"
+	ActionExecute      = "execute"
 
 	UATScopeAgentManage = "agent:manage"
 )
@@ -147,6 +153,45 @@ var Registry = []Permission{
 	{ID: "gcp_service_account.verify", Resource: ResourceGCPServiceAccount, Action: ActionVerify, CapabilityKind: CapabilityResource, Description: "Verify GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.mint", Resource: ResourceGCPServiceAccount, Action: ActionMint, CapabilityKind: CapabilityScope, Description: "Mint GCP service account tokens", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.assign", Resource: ResourceGCPServiceAccount, Action: ActionAssign, CapabilityKind: CapabilityResource, Description: "Assign GCP service accounts to agents", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go", "pkg/hub/authz.go"}},
+
+	// Hub resource type — hub-level administrative operations (Phase 2 D4 resolution)
+	{ID: "hub.settings.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub:settings:read", Description: "Read hub settings", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.settings.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub:settings:update", Description: "Update hub settings", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.config.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub:config:read", Description: "Read server configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.config.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub:config:update", Description: "Update server configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.maintenance.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Execute maintenance operations", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.diagnostics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read diagnostics and logs", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.health.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub:health:read", Description: "Read health summary", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.admin_mode.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read admin mode state", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.admin_mode.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update admin mode", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.integrations.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub:integrations:read", Description: "Read integrations", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.integrations.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub:integrations:update", Description: "Update integrations", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.lifecycle_hooks.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read lifecycle hooks", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.lifecycle_hooks.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update lifecycle hooks", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.allow_list.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read allow list", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.allow_list.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update allow list", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.project_defaults.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.federation.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read federation config", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.federation.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update federation config", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.teams_manifest.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read teams manifest", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.teams_manifest.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update teams manifest", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.validate.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Validate resources", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.github_app.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read GitHub app configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.github_app.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update GitHub app configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.metrics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read metrics dashboard", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+
+	// Extensions to existing resource types (Phase 2 D4 resolution)
+	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "user.suspend", Resource: ResourceUser, Action: ActionSuspend, CapabilityKind: CapabilityResource, Description: "Suspend users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "user.promote", Resource: ResourceUser, Action: ActionPromote, CapabilityKind: CapabilityResource, Description: "Promote or demote users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "user.list", Resource: ResourceUser, Action: ActionList, CapabilityKind: CapabilityScope, Description: "List users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "project.clone", Resource: ResourceProject, Action: ActionClone, CapabilityKind: CapabilityResource, UATScope: "project:clone", Description: "Clone projects", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "project.list", Resource: ResourceProject, Action: ActionList, CapabilityKind: CapabilityScope, Description: "List projects", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "skill.register", Resource: ResourceSkill, Action: ActionRegister, CapabilityKind: CapabilityScope, Description: "Register skills in registries", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 
 	{ID: "agent.status_update", Resource: ResourceAgent, Action: "status_update", AgentScopes: []string{"agent:status:update"}, Description: "Update own agent status", NonRouteUse: []string{"agent token self-status endpoint"}},
 	{ID: "agent.log_append", Resource: ResourceAgent, Action: "log_append", AgentScopes: []string{"agent:log:append"}, Description: "Append own agent logs", NonRouteUse: []string{"agent token log append endpoint"}},

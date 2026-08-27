@@ -2383,6 +2383,7 @@ const (
 // System role names
 const (
 	SystemRoleSuperAdmin = "super-admin"
+	SystemRoleHubAdmin   = "hub-admin"
 	SystemRoleHubMember  = "hub-member"
 	SystemRoleHubViewer  = "hub-viewer"
 )

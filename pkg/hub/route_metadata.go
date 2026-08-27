@@ -857,11 +857,51 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			// the handler where resource IDs, ownership, and visibility are known.
 			next(w, r)
 		case RouteHubAdmin:
-			// Delegate to existing requireAdmin — already handles scoped/federated rejection
-			if _, ok := s.requireAdmin(w, r); !ok {
-				return
+			if meta.Permission != "" {
+				// Validate route metadata completeness
+				if meta.Resource == "" || meta.Action == "" {
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+						"route misconfigured: Resource and Action must be set when Permission is set", nil)
+					return
+				}
+				// D4 conversion: permission-based check via Decide.
+				// Routes that declare a Permission in their metadata are
+				// evaluated through the authorization pipeline, which
+				// preserves the super-admin bypass and enables scoped
+				// admin access through role bindings.
+				identity := GetIdentityFromContext(r.Context())
+				if identity == nil {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+					return
+				}
+				user, ok := identity.(UserIdentity)
+				if !ok {
+					logAuthzDenial(r, identity, Resource{Type: meta.Resource}, Action(meta.Action), "non-user identity")
+					Forbidden(w)
+					return
+				}
+				decision := s.authzService.Decide(r.Context(), AuthzRequest{
+					Principal:  principalContextForIdentity(user),
+					Credential: credentialContextForIdentity(user),
+					Resource:   Resource{Type: meta.Resource, ID: "hub"},
+					Action:     Action(meta.Action),
+					Permission: meta.Permission,
+				})
+				if !decision.Allowed {
+					logAuthzDenial(r, identity, Resource{Type: meta.Resource, ID: "hub"}, Action(meta.Action), decision.Reason)
+					Forbidden(w)
+					return
+				}
+				next(w, r)
+			} else {
+				// Fallback: unconverted route still uses requireAdmin.
+				// This makes incremental D4 conversion safe — routes
+				// without a declared Permission behave exactly as before.
+				if _, ok := s.requireAdmin(w, r); !ok {
+					return
+				}
+				next(w, r)
 			}
-			next(w, r)
 		case RouteWorkstation:
 			// Delegate to existing requireWorkstation check
 			s.requireWorkstation(http.HandlerFunc(next)).ServeHTTP(w, r)

@@ -421,6 +421,7 @@ func seedDevUser(ctx context.Context, s store.Store, cfg DevUserConfig) {
 // already exist. It is called once during Hub initialization and is idempotent.
 func seedRoleDefinitions(ctx context.Context, s store.Store) {
 	allPermIDs := allPermissionIDs()
+	hubAdminPermIDs := hubAdminPermissionIDs()
 	readListPermIDs := permissionIDsByActions("read", "list")
 	readOnlyPermIDs := permissionIDsByActions("read")
 
@@ -441,6 +442,7 @@ func seedRoleDefinitions(ctx context.Context, s store.Store) {
 		permissions []string
 	}{
 		{store.SystemRoleSuperAdmin, "Full platform administrator with all permissions", store.RoleScopeSystem, allPermIDs},
+		{store.SystemRoleHubAdmin, "Hub administrator with scopeable admin permissions", store.RoleScopeSystem, hubAdminPermIDs},
 		{store.SystemRoleHubMember, "Hub member with read access and project creation", store.RoleScopeSystem, readListPermIDs},
 		{store.SystemRoleHubViewer, "Hub viewer with read-only access", store.RoleScopeSystem, readOnlyPermIDs},
 		{store.ProjectRoleOwner, "Project owner with full project permissions", store.RoleScopeProject, projectAllPermIDs},
@@ -486,6 +488,73 @@ func allPermissionIDs() []string {
 	ids := make([]string, len(permissions.Registry))
 	for i, p := range permissions.Registry {
 		ids[i] = p.ID
+	}
+	return ids
+}
+
+// hubAdminPermissionIDs returns the curated permission set for the hub-admin
+// role. This is a subset of all permissions — it excludes super-admin-only
+// operations (maintenance, auth reset, diagnostics, admin mode, policies,
+// user suspend/promote) and non-route internal permissions.
+func hubAdminPermissionIDs() []string {
+	// Explicit set of permission IDs included in the hub-admin role.
+	// This set is a product decision; changes require architect or sponsor review.
+	included := map[string]bool{
+		// User management (not suspend/promote — those remain super-admin-only)
+		"user.read":   true,
+		"user.list":   true,
+		"user.update": true,
+		"user.invite": true,
+		// Group management
+		"group.read":         true,
+		"group.list":         true,
+		"group.create":       true,
+		"group.update":       true,
+		"group.delete":       true,
+		"group.addMember":    true,
+		"group.removeMember": true,
+		// Hub settings (read + update, but not maintenance/reset)
+		"hub.settings.read":           true,
+		"hub.settings.update":         true,
+		"hub.config.read":             true,
+		"hub.config.update":           true,
+		"hub.health.read":             true,
+		"hub.integrations.read":       true,
+		"hub.integrations.update":     true,
+		"hub.lifecycle_hooks.read":    true,
+		"hub.lifecycle_hooks.update":  true,
+		"hub.allow_list.read":         true,
+		"hub.allow_list.update":       true,
+		"hub.project_defaults.read":   true,
+		"hub.project_defaults.update": true,
+		"hub.scheduler.read":          true,
+		"hub.scheduler.update":        true,
+		"hub.federation.read":         true,
+		"hub.federation.update":       true,
+		"hub.teams_manifest.read":     true,
+		"hub.teams_manifest.update":   true,
+		"hub.github_app.read":         true,
+		"hub.github_app.update":       true,
+		"hub.metrics.read":            true,
+		"hub.validate.execute":        true,
+		// Project oversight
+		"project.read":   true,
+		"project.list":   true,
+		"project.update": true,
+		// Skill registries
+		"skill.read":     true,
+		"skill.list":     true,
+		"skill.create":   true,
+		"skill.update":   true,
+		"skill.delete":   true,
+		"skill.register": true,
+	}
+
+	var ids []string
+	for _, p := range permissions.Registry {
+		if included[p.ID] {
+			ids = append(ids, p.ID)
+		}
 	}
 	return ids
 }
