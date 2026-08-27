@@ -15,7 +15,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Stage 2: Build Go binary (with embedded web assets)
 # ---------------------------------------------------------------------------
-FROM golang:1.25 AS go-builder
+FROM golang:1.26 AS go-builder
 
 WORKDIR /src
 COPY go.mod go.sum ./

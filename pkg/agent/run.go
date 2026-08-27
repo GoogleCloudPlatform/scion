@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -83,7 +84,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Determine the project ID for label-based filtering. In broker/hosted mode
 	// this comes from env injected by the hub dispatcher.
 	projectID := ""
+	agentID := opts.Name
 	if opts.Env != nil {
+		if opts.Env["SCION_AGENT_ID"] != "" {
+			agentID = opts.Env["SCION_AGENT_ID"]
+		}
 		projectID = opts.Env["SCION_PROJECT_ID"]
 		if projectID == "" {
 			projectID = opts.Env["SCION_GROVE_ID"]
@@ -134,6 +139,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
+	}
+	if opts.SharedWorkspace {
+		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
@@ -931,20 +939,80 @@ authDone:
 		}
 	}
 
+	workspaceBackendName := ""
+	nfsUID := 0
+	nfsGID := 0
+	nfsPVClaimName := ""
+	nfsSubPath := ""
+	nfsStorageClass := ""
+
+	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
+		sharingMode := store.SharingModeWorktreePerAgent
+		if opts.SharedWorkspace || opts.GitClone != nil {
+			sharingMode = store.SharingModeSharedPlain
+		}
+		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
+		if backend.Name() == "nfs" {
+			sharedDirNames := make([]string, 0, len(effectiveSharedDirs))
+			for _, dir := range effectiveSharedDirs {
+				sharedDirNames = append(sharedDirNames, dir.Name)
+			}
+			resolvedWorkspace, err := backend.Resolve(runtime.ResolveInput{
+				ProjectID:      projectID,
+				AgentID:        agentID,
+				ProjectSlug:    api.Slugify(projectName),
+				Mode:           sharingMode,
+				SharedDirNames: sharedDirNames,
+				ProjectDir:     projectDir,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("resolve workspace backend %q: %w", backend.Name(), err)
+			}
+			mount, err := backend.Realize(runtime.RealizeInput{
+				Resolved:           resolvedWorkspace,
+				ContainerWorkspace: containerWorkspace,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("realize workspace backend %q: %w", backend.Name(), err)
+			}
+
+			workspaceBackendName = backend.Name()
+			if mount.HostPath != "" {
+				effectiveWorkspace = mount.HostPath
+			}
+			if mount.Target != "" {
+				containerWorkspace = mount.Target
+			}
+			nfsPVClaimName = mount.PVClaimName
+			nfsSubPath = mount.SubPath
+			if settings.Server.WorkspaceStorage.NFS != nil {
+				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
+				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
+				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
+			}
+		}
+	}
+
 	runCfg := runtime.RunConfig{
-		Name:               containerName(projectName, opts.Name),
-		Template:           template,
-		UnixUsername:       unixUsername,
-		Image:              resolvedImage,
-		HomeDir:            agentHome,
-		Workspace:          effectiveWorkspace,
-		RepoRoot:           repoRoot,
-		ContainerWorkspace: containerWorkspace,
-		ResolvedAuth:       resolvedAuth,
-		Harness:            h,
-		Project:            projectName,
-		ProjectID:          projectID,
-		TelemetryEnabled:   telemetryEnabled,
+		Name:                 containerName(projectName, opts.Name),
+		Template:             template,
+		UnixUsername:         unixUsername,
+		Image:                resolvedImage,
+		HomeDir:              agentHome,
+		Workspace:            effectiveWorkspace,
+		RepoRoot:             repoRoot,
+		ContainerWorkspace:   containerWorkspace,
+		ResolvedAuth:         resolvedAuth,
+		Harness:              h,
+		Project:              projectName,
+		ProjectID:            projectID,
+		WorkspaceBackendName: workspaceBackendName,
+		NFSUID:               nfsUID,
+		NFSGID:               nfsGID,
+		NFSPVClaimName:       nfsPVClaimName,
+		NFSSubPath:           nfsSubPath,
+		NFSStorageClass:      nfsStorageClass,
+		TelemetryEnabled:     telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {
@@ -1026,6 +1094,7 @@ authDone:
 				"scion.template":       template,
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
+				"agent_id":             agentID,
 			}
 			for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
 				l[k] = v

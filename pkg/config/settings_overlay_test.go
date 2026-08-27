@@ -45,9 +45,9 @@ func TestSettingsOverlay_Update_Apply(t *testing.T) {
 	dbRuntimes := map[string]V1RuntimeConfig{
 		"cloudrun": {
 			Type: "cloudrun-instances",
-			CloudRun: &V1CloudRunConfig{
-				Project: "my-project",
-				Region:  "us-central1",
+			CloudRun: &CloudRunConfig{
+				ProjectID: "my-project",
+				Location:  "us-central1",
 			},
 			Env: map[string]string{"GCP_PROJECT": "my-project"},
 		},
@@ -73,7 +73,7 @@ func TestSettingsOverlay_Update_Apply(t *testing.T) {
 	if cr.Type != "cloudrun-instances" {
 		t.Errorf("expected type 'cloudrun-instances', got %q", cr.Type)
 	}
-	if cr.CloudRun == nil || cr.CloudRun.Project != "my-project" {
+	if cr.CloudRun == nil || cr.CloudRun.ProjectID != "my-project" {
 		t.Error("CloudRun config not applied correctly")
 	}
 	if cr.Env["GCP_PROJECT"] != "my-project" {
@@ -102,9 +102,9 @@ func TestSettingsOverlay_DeepCopy(t *testing.T) {
 	original := map[string]V1RuntimeConfig{
 		"cloudrun": {
 			Type: "cloudrun-instances",
-			CloudRun: &V1CloudRunConfig{
-				Project: "project-a",
-				Region:  "us-central1",
+			CloudRun: &CloudRunConfig{
+				ProjectID: "project-a",
+				Location:  "us-central1",
 			},
 			Env: map[string]string{"KEY": "value-a"},
 		},
@@ -112,15 +112,15 @@ func TestSettingsOverlay_DeepCopy(t *testing.T) {
 	o.Update(original, nil, nil, "")
 
 	// Mutate the original — should NOT affect the overlay.
-	original["cloudrun"].CloudRun.Project = "project-b"
+	original["cloudrun"].CloudRun.ProjectID = "project-b"
 	original["cloudrun"].Env["KEY"] = "value-b"
 
 	vs := &VersionedSettings{}
 	o.Apply(vs)
 
 	cr := vs.Runtimes["cloudrun"]
-	if cr.CloudRun.Project != "project-a" {
-		t.Errorf("overlay mutation leaked: expected project-a, got %q", cr.CloudRun.Project)
+	if cr.CloudRun.ProjectID != "project-a" {
+		t.Errorf("overlay mutation leaked: expected project-a, got %q", cr.CloudRun.ProjectID)
 	}
 	if cr.Env["KEY"] != "value-a" {
 		t.Errorf("overlay mutation leaked: expected value-a, got %q", cr.Env["KEY"])

@@ -119,9 +119,14 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		// whether the CLI binary exists in the container image.
 		if os.Getenv("K_SERVICE") != "" {
 			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
-			rt := NewCloudRunRuntime(rtConfig.CloudRun)
-			if vs != nil && vs.Server != nil {
-				rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+			cfg := rtConfig.CloudRun
+			if cfg == nil {
+				cfg = &config.CloudRunConfig{}
+			}
+			rt, err := NewCloudRunRuntime(cfg)
+			if err != nil {
+				util.Debugf("GetRuntime: failed to create cloudrun runtime for K_SERVICE fallback: %v", err)
+				return &ErrorRuntime{Err: err}
 			}
 			return rt
 		}
@@ -167,15 +172,24 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
 		return rt
 	case "cloudrun":
-		rt := NewCloudRunRuntime(rtConfig.CloudRun)
-		if vs != nil && vs.Server != nil {
-			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+		cfg := rtConfig.CloudRun
+		if cfg == nil && os.Getenv("K_SERVICE") != "" {
+			// Auto-detected Cloud Run environment with no explicit config
+			// from settings. Create a default config; project/region will
+			// be discovered from GCP metadata when API calls are made.
+			cfg = &config.CloudRunConfig{}
+		}
+		rt, err := NewCloudRunRuntime(cfg)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create cloudrun runtime: %v", err)
+			return &ErrorRuntime{Err: err}
 		}
 		return rt
 	case "cloudrun-instances":
-		rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
-		if vs != nil && vs.Server != nil {
-			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+		rt, err := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create cloudrun-instances runtime: %v", err)
+			return &ErrorRuntime{Err: err}
 		}
 		return rt
 	}

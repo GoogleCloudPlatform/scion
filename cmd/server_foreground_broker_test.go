@@ -102,9 +102,9 @@ func TestCloudRunLogicalBrokerIDIsDeterministic(t *testing.T) {
 		Runtimes: map[string]config.V1RuntimeConfig{
 			"cloudrun": {
 				Type: "cloudrun",
-				CloudRun: &config.V1CloudRunConfig{
-					Project: "test-project",
-					Region:  "us-central1",
+				CloudRun: &config.CloudRunConfig{
+					ProjectID: "test-project",
+					Location:  "us-central1",
 				},
 			},
 		},

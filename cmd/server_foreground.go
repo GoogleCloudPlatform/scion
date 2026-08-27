@@ -2797,7 +2797,7 @@ func resolveCloudRunProjectAndRegion(rtConfig config.V1RuntimeConfig, runtimeTyp
 		if rtConfig.CloudRun == nil {
 			return "", ""
 		}
-		return strings.TrimSpace(rtConfig.CloudRun.Project), strings.TrimSpace(rtConfig.CloudRun.Region)
+		return strings.TrimSpace(rtConfig.CloudRun.ProjectID), strings.TrimSpace(rtConfig.CloudRun.Location)
 	case "cloudrun-instances":
 		if rtConfig.CloudRunInstances == nil {
 			return "", ""

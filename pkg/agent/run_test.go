@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -677,6 +678,125 @@ profiles:
 
 	if capturedConfig.UnixUsername != "scion" {
 		t.Errorf("expected UnixUsername = %q, got %q", "scion", capturedConfig.UnixUsername)
+	}
+}
+
+func TestStartPropagatesNFSWorkspaceBackendToRunConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+
+	nfsMountRoot := filepath.Join(tmpDir, "nfs")
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      uid: 2000
+      gid: 2001
+      storage_class: filestore-sc
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+          pv_name: scion-workspaces-pv
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`, nfsMountRoot)
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	_, err = mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-456",
+			"SCION_PROJECT_ID": "proj-123",
+		},
+		GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if capturedConfig.WorkspaceBackendName != "nfs" {
+		t.Fatalf("WorkspaceBackendName = %q, want nfs", capturedConfig.WorkspaceBackendName)
+	}
+	wantWorkspace := filepath.Join(nfsMountRoot, "share-1", "projects", "proj-123", "workspace")
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Fatalf("Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+	if capturedConfig.NFSUID != 2000 || capturedConfig.NFSGID != 2001 {
+		t.Fatalf("NFS uid/gid = %d/%d, want 2000/2001", capturedConfig.NFSUID, capturedConfig.NFSGID)
+	}
+	if capturedConfig.NFSPVClaimName != "scion-workspaces-pv" {
+		t.Fatalf("NFSPVClaimName = %q", capturedConfig.NFSPVClaimName)
+	}
+	if capturedConfig.NFSSubPath != filepath.Join("projects", "proj-123", "workspace") {
+		t.Fatalf("NFSSubPath = %q", capturedConfig.NFSSubPath)
+	}
+	if capturedConfig.NFSStorageClass != "filestore-sc" {
+		t.Fatalf("NFSStorageClass = %q", capturedConfig.NFSStorageClass)
+	}
+	if capturedConfig.Labels["agent_id"] != "agent-456" {
+		t.Fatalf("agent_id label = %q", capturedConfig.Labels["agent_id"])
 	}
 }
 

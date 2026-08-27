@@ -99,8 +99,8 @@ runtimes:
   cr:
     type: cloudrun
     cloudrun:
-      project: my-project
-      region: us-central1
+      project_id: my-project
+      location: us-central1
 `)
 	version, isLegacy := DetectSettingsFormat(data)
 	assert.Equal(t, "1", version, "v1-shaped runtime with type key should be detected as versioned")

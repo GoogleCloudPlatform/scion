@@ -25,40 +25,47 @@ import (
 )
 
 func TestCloudRunRuntime_Name(t *testing.T) {
-	rt := NewCloudRunRuntime(nil)
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "p", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if rt.Name() != "cloudrun" {
 		t.Errorf("Name() = %q, want %q", rt.Name(), "cloudrun")
 	}
 }
 
 func TestCloudRunRuntime_ExecUser(t *testing.T) {
-	rt := NewCloudRunRuntime(nil)
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "p", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if rt.ExecUser() != "scion" {
 		t.Errorf("ExecUser() = %q, want %q", rt.ExecUser(), "scion")
 	}
 }
 
 func TestCloudRunRuntime_NewWithConfig(t *testing.T) {
-	cfg := &config.V1CloudRunConfig{
-		Project: "my-gcp-project",
-		Region:  "us-central1",
+	cfg := &config.CloudRunConfig{
+		ProjectID: "my-gcp-project",
+		Location:  "us-central1",
 	}
-	rt := NewCloudRunRuntime(cfg)
-	if rt.Project != "my-gcp-project" {
-		t.Errorf("Project = %q, want %q", rt.Project, "my-gcp-project")
+	rt, err := NewCloudRunRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if rt.Region != "us-central1" {
-		t.Errorf("Region = %q, want %q", rt.Region, "us-central1")
+	if rt.Name() != "cloudrun" {
+		t.Errorf("Name() = %q, want %q", rt.Name(), "cloudrun")
 	}
 }
 
 func TestCloudRunRuntime_NewWithNilConfig(t *testing.T) {
-	rt := NewCloudRunRuntime(nil)
-	if rt.Project != "" {
-		t.Errorf("Project = %q, want empty", rt.Project)
-	}
-	if rt.Region != "" {
-		t.Errorf("Region = %q, want empty", rt.Region)
+	_, err := NewCloudRunRuntime(nil)
+	if err == nil {
+		t.Error("expected error for nil config")
 	}
 }
 
@@ -67,12 +74,9 @@ func TestCloudRunRuntime_NewFromInstances(t *testing.T) {
 		ProjectID: "instances-project",
 		Region:    "us-west1",
 	}
-	rt := NewCloudRunRuntimeFromInstances(cfg)
-	if rt.Project != "instances-project" {
-		t.Errorf("Project = %q, want %q", rt.Project, "instances-project")
-	}
-	if rt.Region != "us-west1" {
-		t.Errorf("Region = %q, want %q", rt.Region, "us-west1")
+	rt, err := NewCloudRunRuntimeFromInstances(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if rt.Name() != "cloudrun" {
 		t.Errorf("Name() = %q, want %q", rt.Name(), "cloudrun")
@@ -80,74 +84,91 @@ func TestCloudRunRuntime_NewFromInstances(t *testing.T) {
 }
 
 func TestCloudRunRuntime_NewFromInstancesNil(t *testing.T) {
-	rt := NewCloudRunRuntimeFromInstances(nil)
-	if rt.Project != "" {
-		t.Errorf("Project = %q, want empty", rt.Project)
-	}
-	if rt.Region != "" {
-		t.Errorf("Region = %q, want empty", rt.Region)
+	_, err := NewCloudRunRuntimeFromInstances(nil)
+	if err == nil {
+		t.Error("expected error for nil config")
 	}
 }
 
-func TestCloudRunRuntime_LifecycleMethodsReturnNotImplemented(t *testing.T) {
-	rt := NewCloudRunRuntime(nil)
+func TestCloudRunRuntime_NewFromInstancesMissingProjectID(t *testing.T) {
+	_, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		Region: "us-west1",
+	})
+	if err == nil {
+		t.Error("expected error for empty ProjectID")
+	}
+}
+
+func TestCloudRunRuntime_NewFromInstancesMissingRegion(t *testing.T) {
+	_, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		ProjectID: "my-project",
+	})
+	if err == nil {
+		t.Error("expected error for empty Region")
+	}
+}
+
+func TestCloudRunRuntime_LifecycleMethods(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
-	methods := []struct {
+	// Methods that make real GCP API calls — expect errors in a test
+	// environment without valid credentials / API access.
+	apiMethods := []struct {
 		name string
 		fn   func() error
 	}{
 		{"Stop", func() error { return rt.Stop(ctx, "x") }},
 		{"Delete", func() error { return rt.Delete(ctx, "x") }},
 		{"Attach", func() error { return rt.Attach(ctx, "x") }},
-		{"PullImage", func() error { return rt.PullImage(ctx, "x") }},
-		{"Sync", func() error { return rt.Sync(ctx, "x", SyncTo) }},
+		{"Exec", func() error { _, e := rt.Exec(ctx, "x", []string{"ls"}); return e }},
+		{"List", func() error { _, e := rt.List(ctx, nil); return e }},
+		{"GetLogs", func() error { _, e := rt.GetLogs(ctx, "x"); return e }},
 	}
-
-	for _, m := range methods {
+	for _, m := range apiMethods {
 		t.Run(m.name, func(t *testing.T) {
-			err := m.fn()
-			if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("%s() error = %v, want 'not yet implemented'", m.name, err)
+			if err := m.fn(); err == nil {
+				t.Errorf("%s() expected error in test env, got nil", m.name)
 			}
 		})
 	}
 
-	t.Run("List", func(t *testing.T) {
-		agents, err := rt.List(ctx, nil)
-		if err != nil {
-			t.Errorf("List() error = %v, want nil", err)
-		}
-		if agents != nil {
-			t.Errorf("List() agents = %v, want nil", agents)
+	// PullImage is a no-op for Cloud Run (images are pulled by the platform).
+	t.Run("PullImage", func(t *testing.T) {
+		if err := rt.PullImage(ctx, "gcr.io/test/image"); err != nil {
+			t.Errorf("PullImage() error = %v, want nil", err)
 		}
 	})
 
-	t.Run("GetLogs", func(t *testing.T) {
-		_, err := rt.GetLogs(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("GetLogs() error = %v, want 'not yet implemented'", err)
-		}
-	})
-
+	// ImageExists always returns true for Cloud Run (assumes valid image ref).
 	t.Run("ImageExists", func(t *testing.T) {
-		_, err := rt.ImageExists(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("ImageExists() error = %v, want 'not yet implemented'", err)
+		exists, err := rt.ImageExists(ctx, "gcr.io/test/image")
+		if err != nil {
+			t.Errorf("ImageExists() error = %v, want nil", err)
+		}
+		if !exists {
+			t.Error("ImageExists() = false, want true")
 		}
 	})
 
-	t.Run("Exec", func(t *testing.T) {
-		_, err := rt.Exec(ctx, "x", []string{"ls"})
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("Exec() error = %v, want 'not yet implemented'", err)
+	// Sync returns a specific unsupported-operation message.
+	t.Run("Sync", func(t *testing.T) {
+		err := rt.Sync(ctx, "x", SyncTo)
+		if err == nil || !strings.Contains(err.Error(), "sync is not supported") {
+			t.Errorf("Sync() error = %v, want 'sync is not supported'", err)
 		}
 	})
 
+	// GetWorkspacePath returns a specific unsupported-operation message.
 	t.Run("GetWorkspacePath", func(t *testing.T) {
 		_, err := rt.GetWorkspacePath(ctx, "x")
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("GetWorkspacePath() error = %v, want 'not yet implemented'", err)
+		if err == nil || !strings.Contains(err.Error(), "host workspace paths are not available") {
+			t.Errorf("GetWorkspacePath() error = %v, want 'host workspace paths are not available'", err)
 		}
 	})
 }
@@ -160,86 +181,45 @@ func TestCloudRunRuntime_Run_BrokerSideProvisioning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rt := NewCloudRunRuntime(&config.V1CloudRunConfig{
-		Project: "test-project",
-		Region:  "us-central1",
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project",
+		Location:  "us-central1",
+		NFSServer: "10.0.0.2",
+		NFSExport: "/ws",
 	})
-	rt.WorkspaceStorage = &config.V1WorkspaceStorageConfig{
-		Backend: "nfs",
-		NFS: &config.V1NFSConfig{
-			MountRoot:   mountRoot,
-			SubPathRoot: "projects",
-			Shares: []config.V1NFSShare{
-				{ID: "share1", Server: "10.0.0.2", Export: "/ws"},
-			},
-		},
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	cfg := RunConfig{
-		Name:      "test-agent",
-		ProjectID: "proj-123",
-		Workspace: tmpDir,
-		Labels:    map[string]string{"agent_id": "agent-1"},
+		Name:                 "test-agent",
+		ProjectID:            "proj-123",
+		Workspace:            tmpDir,
+		WorkspaceBackendName: "nfs",
+		Labels:               map[string]string{"agent_id": "agent-1"},
 	}
 
-	// Run will provision the workspace then fail with "not yet implemented"
-	// for the deploy step — that's expected.
-	_, err := rt.Run(context.Background(), cfg)
+	// Run will attempt to provision NFS then create a Cloud Run instance.
+	// It will fail because we don't have a real Cloud Run API endpoint.
+	_, err = rt.Run(context.Background(), cfg)
 	if err == nil {
-		t.Fatal("expected 'not yet implemented' error from Run")
-	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("Run() error = %q, want containing 'not yet implemented'", err.Error())
-	}
-
-	// Verify workspace was provisioned (directory created + sentinel)
-	wsPath := filepath.Join(mountRoot, "share1", "projects", "proj-123", "workspace")
-	if _, err := os.Stat(wsPath); os.IsNotExist(err) {
-		t.Errorf("workspace directory %q was not created by broker-side provisioning", wsPath)
-	}
-
-	sentinelPath := filepath.Join(mountRoot, "share1", "projects", "proj-123", ".scion-provisioned")
-	if _, err := os.Stat(sentinelPath); os.IsNotExist(err) {
-		t.Errorf("sentinel %q was not written — ProvisionShared did not run", sentinelPath)
+		t.Fatal("expected error from Run in test environment")
 	}
 }
 
-func TestCloudRunRuntime_Run_CloudRunVolume_SkipsProvisionShared(t *testing.T) {
-	rt := NewCloudRunRuntime(&config.V1CloudRunConfig{
-		Project: "test-project",
-		Region:  "us-central1",
+func TestCloudRunRuntime_Run_MissingAgentID(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project",
+		Location:  "us-central1",
 	})
-	rt.WorkspaceStorage = &config.V1WorkspaceStorageConfig{
-		Backend: "cloudrun-volume",
-		CloudRunVolume: &config.V1CloudRunVolumeConfig{
-			VolumeName:  "workspace-vol",
-			SubPathRoot: "projects",
-		},
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	cfg := RunConfig{
-		Name:      "test-agent",
-		ProjectID: "proj-456",
-		Labels:    map[string]string{"agent_id": "agent-2"},
-	}
-
-	// With cloudrun-volume backend, Resolve returns no HostPath, so
-	// ProvisionShared is skipped (platform provisions the volume).
-	// Run still fails at the deploy step.
-	_, err := rt.Run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("expected 'not yet implemented' error from Run")
-	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("Run() error = %q, want containing 'not yet implemented'", err.Error())
-	}
-}
-
-func TestCloudRunRuntime_Run_MissingProjectID(t *testing.T) {
-	rt := NewCloudRunRuntime(nil)
-	_, err := rt.Run(context.Background(), RunConfig{})
-	if err == nil || !strings.Contains(err.Error(), "ProjectID is required") {
-		t.Errorf("Run() without ProjectID: error = %v, want 'ProjectID is required'", err)
+	_, err = rt.Run(context.Background(), RunConfig{
+		Labels: map[string]string{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "agent_id label is required") {
+		t.Errorf("Run() without agent_id: error = %v, want 'agent_id label is required'", err)
 	}
 }
 
@@ -261,8 +241,8 @@ func TestGetRuntime_CloudRun(t *testing.T) {
 			"cloudrun": {
 				"type": "cloudrun",
 				"cloudrun": {
-					"project": "my-project",
-					"region": "us-east1"
+					"project_id": "my-project",
+					"location": "us-east1"
 				}
 			}
 		},
@@ -284,15 +264,8 @@ func TestGetRuntime_CloudRun(t *testing.T) {
 	defer func() { _ = os.Chdir(oldWd) }()
 
 	r := GetRuntime("", "")
-	cr, ok := r.(*CloudRunRuntime)
-	if !ok {
+	if _, ok := r.(*CloudRunRuntime); !ok {
 		t.Fatalf("expected *CloudRunRuntime, got %T", r)
-	}
-	if cr.Project != "my-project" {
-		t.Errorf("Project = %q, want %q", cr.Project, "my-project")
-	}
-	if cr.Region != "us-east1" {
-		t.Errorf("Region = %q, want %q", cr.Region, "us-east1")
 	}
 }
 
@@ -308,6 +281,30 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Provide a settings file with a cloudrun profile and runtime so that
+	// NewCloudRunRuntime receives a valid config when "cloudrun" is
+	// passed as a direct profile name.
+	settings := `{
+		"schema_version": "1",
+		"runtimes": {
+			"cloudrun": {
+				"type": "cloudrun",
+				"cloudrun": {
+					"project_id": "my-project",
+					"location": "us-east1"
+				}
+			}
+		},
+		"profiles": {
+			"cloudrun": {
+				"runtime": "cloudrun"
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.json"), []byte(settings), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	oldWd, _ := os.Getwd()
 	tmpWd := t.TempDir()
 	if err := os.Chdir(tmpWd); err != nil {
@@ -318,5 +315,161 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 	r := GetRuntime("", "cloudrun")
 	if _, ok := r.(*CloudRunRuntime); !ok {
 		t.Fatalf("expected *CloudRunRuntime from direct profile name, got %T", r)
+	}
+}
+
+func TestCloudRunNFSExportPaths(t *testing.T) {
+	paths, err := cloudRunNFSExportPaths("/scion-workspaces/", "proj-123", "agent-456")
+	if err != nil {
+		t.Fatalf("cloudRunNFSExportPaths: %v", err)
+	}
+
+	if paths.workspaceExportPath != "/scion-workspaces/projects/proj-123/workspace" {
+		t.Errorf("workspaceExportPath = %q", paths.workspaceExportPath)
+	}
+	if paths.homeExportPath != "/scion-workspaces/projects/proj-123/agents/agent-456/home" {
+		t.Errorf("homeExportPath = %q", paths.homeExportPath)
+	}
+	if paths.secretsExportPath != "/scion-workspaces/projects/proj-123/agents/agent-456/secrets" {
+		t.Errorf("secretsExportPath = %q", paths.secretsExportPath)
+	}
+}
+
+func TestCloudRunNFSExportPathsRejectUnsafeInputs(t *testing.T) {
+	tests := []struct {
+		name      string
+		export    string
+		projectID string
+		agentID   string
+		want      string
+	}{
+		{
+			name:      "relative export",
+			export:    "scion-workspaces",
+			projectID: "proj-123",
+			agentID:   "agent-456",
+			want:      "nfs_export must be an absolute server path",
+		},
+		{
+			name:      "project traversal",
+			export:    "/scion-workspaces",
+			projectID: "../proj-123",
+			agentID:   "agent-456",
+			want:      "project_id",
+		},
+		{
+			name:      "agent slash",
+			export:    "/scion-workspaces",
+			projectID: "proj-123",
+			agentID:   "agents/agent-456",
+			want:      "agent_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := cloudRunNFSExportPaths(tt.export, tt.projectID, tt.agentID)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloudRunNFSHostPaths(t *testing.T) {
+	hostWorkspace := filepath.Join(string(filepath.Separator), "mnt", "nfs", "share1", "projects", "proj-123", "workspace")
+
+	paths, err := cloudRunNFSHostPaths(hostWorkspace, "proj-123", "agent-456")
+	if err != nil {
+		t.Fatalf("cloudRunNFSHostPaths: %v", err)
+	}
+
+	wantHostBase := filepath.Join(string(filepath.Separator), "mnt", "nfs", "share1")
+	if paths.hostBase != wantHostBase {
+		t.Errorf("hostBase = %q, want %q", paths.hostBase, wantHostBase)
+	}
+	if paths.homeHostPath != filepath.Join(wantHostBase, "projects", "proj-123", "agents", "agent-456", "home") {
+		t.Errorf("homeHostPath = %q", paths.homeHostPath)
+	}
+	if paths.secretsHostPath != filepath.Join(wantHostBase, "projects", "proj-123", "agents", "agent-456", "secrets") {
+		t.Errorf("secretsHostPath = %q", paths.secretsHostPath)
+	}
+}
+
+func TestCloudRunNFSHostPathsRejectLocalAssumptions(t *testing.T) {
+	tests := []struct {
+		name          string
+		hostWorkspace string
+		want          string
+	}{
+		{
+			name:          "relative",
+			hostWorkspace: filepath.Join("mnt", "nfs", "share1", "projects", "proj-123", "workspace"),
+			want:          "must be absolute",
+		},
+		{
+			name:          "wrong suffix",
+			hostWorkspace: filepath.Join(string(filepath.Separator), "tmp", "proj-123"),
+			want:          "must end with",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := cloudRunNFSHostPaths(tt.hostWorkspace, "proj-123", "agent-456")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloudRunProvisionNFSRequiresWorkspaceHostPath(t *testing.T) {
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{
+		ProjectID: "gcp-project",
+		Location:  "us-central1",
+		NFSServer: "10.0.0.2",
+		NFSExport: "/scion-workspaces",
+	}}
+
+	_, err := r.provisionCloudRunNFS(context.Background(), RunConfig{
+		WorkspaceBackendName: "nfs",
+		ProjectID:            "proj-123",
+	}, "agent-456", 1000, 1000)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "RunConfig.Workspace is empty") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestCloudRunProvisionNFSFailsWhenHubLacksNFSMount(t *testing.T) {
+	root := t.TempDir()
+	missingMount := filepath.Join(root, "missing-share")
+	workspace := filepath.Join(missingMount, "projects", "proj-123", "workspace")
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{
+		ProjectID: "gcp-project",
+		Location:  "us-central1",
+		NFSServer: "10.0.0.2",
+		NFSExport: "/scion-workspaces",
+	}}
+
+	_, err := r.provisionCloudRunNFS(context.Background(), RunConfig{
+		WorkspaceBackendName: "nfs",
+		ProjectID:            "proj-123",
+		Workspace:            workspace,
+	}, "agent-456", 1000, 1000)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "Hub cannot access NFS export") {
+		t.Fatalf("error = %q", err)
 	}
 }
