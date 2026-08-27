@@ -379,16 +379,22 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Phase:     string(state.PhaseRunning),
 	}
 
+	isAdmin := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(userIdent),
+		Credential: credentialContextForIdentity(userIdent),
+		Resource:   Resource{Type: "agent", ID: "hub"},
+		Action:     Action("stop_all"),
+		Permission: "agent.stop_all",
+	}).Allowed
 	if projectID == "" {
-		// Global stop-all: platform admin only
-		if !IsUnscopedLocalPlatformAdmin(userIdent) {
+		// Global stop-all: requires agent.stop_all permission
+		if !isAdmin {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only admins can stop all agents", nil)
 			return
 		}
 	} else {
 		// Project-scoped stop-all: any project member allowed
-		isAdmin := IsUnscopedLocalPlatformAdmin(userIdent)
 		if !isAdmin {
 			projectRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
 			if projectRole == "" {

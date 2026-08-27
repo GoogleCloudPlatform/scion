@@ -35,9 +35,19 @@ func (s *Server) handleSetTemplate(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	// Admin check
+	// Require project.clone permission for template management.
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+	if !s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "project", ID: "hub"},
+		Action:     Action("clone"),
+		Permission: "project.clone",
+	}).Allowed {
 		Forbidden(w)
 		return
 	}

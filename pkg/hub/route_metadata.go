@@ -369,17 +369,17 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Policy: Skill registries
+	// Hub admin: Skill registries (admin-only management)
 	// -------------------------------------------------------------------------
 	"/api/v1/skill-registries": {
 		Pattern: "/api/v1/skill-registries", RouteID: "skillRegistries.list",
-		Classification: RoutePolicy,
-		Permission:     "skill.read", Resource: "skill", Action: "read",
+		Classification: RouteHubAdmin,
+		Permission:     "skill.register", Resource: "skill", Action: "register",
 	},
 	"/api/v1/skill-registries/": {
 		Pattern: "/api/v1/skill-registries/", RouteID: "skillRegistries.byId",
-		Classification: RoutePolicy,
-		Permission:     "skill.read", Resource: "skill", Action: "read",
+		Classification: RouteHubAdmin,
+		Permission:     "skill.register", Resource: "skill", Action: "register",
 	},
 
 	// -------------------------------------------------------------------------
@@ -536,15 +536,18 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Policies
+	// Hub admin: Policies (super-admin-only: policy permissions are not in
+	// the hub-admin role, so only super-admins pass via the step-1 bypass)
 	// -------------------------------------------------------------------------
 	"/api/v1/policies": {
 		Pattern: "/api/v1/policies", RouteID: "policies.list",
 		Classification: RouteHubAdmin,
+		Permission:     "policy.read", Resource: "policy", Action: "read",
 	},
 	"/api/v1/policies/": {
 		Pattern: "/api/v1/policies/", RouteID: "policies.byId",
 		Classification: RouteHubAdmin,
+		Permission:     "policy.read", Resource: "policy", Action: "read",
 	},
 
 	// -------------------------------------------------------------------------
@@ -660,6 +663,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/gcp-quota": {
 		Pattern: "/api/v1/admin/gcp-quota", RouteID: "admin.gcpQuota",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/lifecycle-hooks": {
 		Pattern: "/api/v1/admin/lifecycle-hooks", RouteID: "admin.lifecycleHooks",

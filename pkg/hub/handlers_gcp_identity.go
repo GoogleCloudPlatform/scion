@@ -959,12 +959,7 @@ type GCPQuotaResponse struct {
 
 // handleAdminGCPQuota handles GET /api/v1/admin/gcp-quota.
 func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
+	// Route guard enforces hub.health.read permission.
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return

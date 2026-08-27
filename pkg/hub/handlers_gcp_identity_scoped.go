@@ -584,9 +584,16 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 	}
 
 	// Authorization: current hub member may register (BYO) a hub-scoped SA.
-	// Admin and owner bypass are already handled by CheckAccess; this check
-	// is for ordinary hub members who are neither.
-	if user.Role() != "admin" {
+	// Users with gcp_service_account.create permission bypass the hub-member
+	// check; others must be current hub members.
+	isAdmin := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "gcp_service_account", ID: "hub"},
+		Action:     Action("create"),
+		Permission: "gcp_service_account.create",
+	}).Allowed
+	if !isAdmin {
 		if !s.authzService.isCurrentHubMember(r.Context(), user.ID()) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You must be a hub member to register a hub-scoped service account", nil)

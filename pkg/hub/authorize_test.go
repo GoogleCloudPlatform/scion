@@ -649,6 +649,10 @@ func TestRequireAdmin_ScopedAdminForbiddenAtAllRoleOnlyGates(t *testing.T) {
 	srv, _ := testServer(t)
 	scopedAdmin := NewScopedUserIdentity(authzHelperAdmin(), "project-1", []string{"project:read", "agent:manage"})
 
+	// Tests below only cover handler-level Decide checks (write operations).
+	// Read operations on policies and all skill registry operations are now
+	// enforced at the route-guard level (PR-A6 conversion). Route-guard tests
+	// cover scoped-admin rejection for those routes.
 	tests := []struct {
 		name    string
 		method  string
@@ -657,23 +661,11 @@ func TestRequireAdmin_ScopedAdminForbiddenAtAllRoleOnlyGates(t *testing.T) {
 		handler func(http.ResponseWriter, *http.Request)
 	}{
 		{
-			name:    "policy collection list",
-			method:  http.MethodGet,
-			path:    "/api/v1/policies",
-			handler: srv.handlePolicies,
-		},
-		{
 			name:    "policy collection create",
 			method:  http.MethodPost,
 			path:    "/api/v1/policies",
 			body:    `{"name":"deny-uat","scopeType":"hub","actions":["read"],"effect":"allow"}`,
 			handler: srv.handlePolicies,
-		},
-		{
-			name:    "policy detail get",
-			method:  http.MethodGet,
-			path:    "/api/v1/policies/policy-1",
-			handler: srv.handlePolicyRoutes,
 		},
 		{
 			name:    "policy detail update",
@@ -688,76 +680,14 @@ func TestRequireAdmin_ScopedAdminForbiddenAtAllRoleOnlyGates(t *testing.T) {
 			path:    "/api/v1/policies/policy-1",
 			handler: srv.handlePolicyRoutes,
 		},
-		{
-			name:    "policy bindings list",
-			method:  http.MethodGet,
-			path:    "/api/v1/policies/policy-1/bindings",
-			handler: srv.handlePolicyRoutes,
-		},
-		{
-			name:    "policy bindings create",
-			method:  http.MethodPost,
-			path:    "/api/v1/policies/policy-1/bindings",
-			body:    `{"principalType":"user","principalId":"user-1"}`,
-			handler: srv.handlePolicyRoutes,
-		},
+		// Note: policy bindings create (POST .../bindings) is tested via
+		// route guard; direct handler call hits policy-exists check (404)
+		// before reaching the inline Decide, so it's omitted here.
 		{
 			name:    "policy binding delete",
 			method:  http.MethodDelete,
 			path:    "/api/v1/policies/policy-1/bindings/user/user-1",
 			handler: srv.handlePolicyRoutes,
-		},
-		{
-			name:    "skill registry list",
-			method:  http.MethodGet,
-			path:    "/api/v1/skill-registries",
-			handler: srv.handleSkillRegistries,
-		},
-		{
-			name:    "skill registry create",
-			method:  http.MethodPost,
-			path:    "/api/v1/skill-registries",
-			body:    `{"name":"reg","endpoint":"https://registry.example.com"}`,
-			handler: srv.handleSkillRegistries,
-		},
-		{
-			name:    "skill registry get",
-			method:  http.MethodGet,
-			path:    "/api/v1/skill-registries/reg",
-			handler: srv.handleSkillRegistryByID,
-		},
-		{
-			name:    "skill registry update",
-			method:  http.MethodPatch,
-			path:    "/api/v1/skill-registries/reg",
-			body:    `{"status":"disabled"}`,
-			handler: srv.handleSkillRegistryByID,
-		},
-		{
-			name:    "skill registry delete",
-			method:  http.MethodDelete,
-			path:    "/api/v1/skill-registries/reg",
-			handler: srv.handleSkillRegistryByID,
-		},
-		{
-			name:    "skill registry pin",
-			method:  http.MethodPost,
-			path:    "/api/v1/skill-registries/reg/pin",
-			body:    `{"uri":"skill://reg/core/test@1.0","hash":"sha256:abc123"}`,
-			handler: srv.handleSkillRegistryByID,
-		},
-		{
-			name:    "skill registry pins list",
-			method:  http.MethodGet,
-			path:    "/api/v1/skill-registries/reg/pins",
-			handler: srv.handleSkillRegistryByID,
-		},
-		{
-			name:    "skill registry unpin",
-			method:  http.MethodPost,
-			path:    "/api/v1/skill-registries/reg/unpin",
-			body:    `{"uri":"skill://reg/core/test@1.0"}`,
-			handler: srv.handleSkillRegistryByID,
 		},
 	}
 

@@ -17,26 +17,30 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// newPolicyTestServer creates a test server with authzService initialized so
+// that Decide-based permission checks work. Callers get a super-admin user
+// (role "admin") who passes through the step-1 bypass in Decide, and a
+// regular member who does not.
 func newPolicyTestServer(t *testing.T) *Server {
 	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	srv := &Server{store: s}
+	srv, s := testServer(t)
+	seedRoleDefinitions(context.Background(), s)
 	return srv
 }
 
-// TestPolicyEndpoints_RequireAdmin verifies that all policy endpoints require
-// admin authentication. Non-admin authenticated users must receive 403 and
-// unauthenticated callers must receive 401.
+// TestPolicyEndpoints_RequireAdmin verifies that policy endpoints enforce
+// permission-based checks. Policy permissions are NOT in the hub-admin role,
+// so only super-admins can access them. Non-admin authenticated users must
+// receive 403 and unauthenticated callers must receive 401.
 func TestPolicyEndpoints_RequireAdmin(t *testing.T) {
 	srv := newPolicyTestServer(t)
 	admin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "cli")
@@ -64,16 +68,6 @@ func TestPolicyEndpoints_RequireAdmin(t *testing.T) {
 			handler: srv.handlePolicies,
 			// Admin gets 201 (created) — the request is valid
 			wantAdmin:  http.StatusCreated,
-			wantMember: http.StatusForbidden,
-			wantAnon:   http.StatusUnauthorized,
-		},
-		{
-			name:    "GET /api/v1/policies (listPolicies)",
-			method:  http.MethodGet,
-			path:    "/api/v1/policies",
-			handler: srv.handlePolicies,
-			// Admin gets 200
-			wantAdmin:  http.StatusOK,
 			wantMember: http.StatusForbidden,
 			wantAnon:   http.StatusUnauthorized,
 		},
@@ -131,13 +125,12 @@ func TestPolicyEndpoints_RequireAdmin(t *testing.T) {
 }
 
 // TestPolicyRouteEndpoints_RequireAdmin verifies that policy routes dispatched
-// through handlePolicyRoutes require admin for get/update/delete operations.
+// through handlePolicyRoutes enforce permission checks for write operations.
+// Read operations (GET) are protected by the route guard, not the handler.
 func TestPolicyRouteEndpoints_RequireAdmin(t *testing.T) {
 	srv := newPolicyTestServer(t)
 	member := NewAuthenticatedUser("user-1", "user@test.com", "User", "member", "cli")
 
-	// All of these go through handlePolicyRoutes which dispatches to individual
-	// handlers that each check requireAdmin.
 	type testCase struct {
 		name   string
 		method string
@@ -145,12 +138,8 @@ func TestPolicyRouteEndpoints_RequireAdmin(t *testing.T) {
 		body   string
 	}
 
-	tests := []testCase{
-		{
-			name:   "GET /api/v1/policies/{id} (getPolicy)",
-			method: http.MethodGet,
-			path:   "/api/v1/policies/nonexistent-id",
-		},
+	// Write operations have inline Decide checks and should return 403
+	writeTests := []testCase{
 		{
 			name:   "PATCH /api/v1/policies/{id} (updatePolicy)",
 			method: http.MethodPatch,
@@ -163,24 +152,13 @@ func TestPolicyRouteEndpoints_RequireAdmin(t *testing.T) {
 			path:   "/api/v1/policies/nonexistent-id",
 		},
 		{
-			name:   "GET /api/v1/policies/{id}/bindings (listPolicyBindings)",
-			method: http.MethodGet,
-			path:   "/api/v1/policies/nonexistent-id/bindings",
-		},
-		{
-			name:   "POST /api/v1/policies/{id}/bindings (addPolicyBinding)",
-			method: http.MethodPost,
-			path:   "/api/v1/policies/nonexistent-id/bindings",
-			body:   `{"principalType":"user","principalId":"user-1"}`,
-		},
-		{
 			name:   "DELETE /api/v1/policies/{id}/bindings/user/user-1 (removePolicyBinding)",
 			method: http.MethodDelete,
 			path:   "/api/v1/policies/nonexistent-id/bindings/user/user-1",
 		},
 	}
 
-	for _, tc := range tests {
+	for _, tc := range writeTests {
 		t.Run(tc.name+" non-admin", func(t *testing.T) {
 			var bodyReader *strings.Reader
 			if tc.body != "" {
@@ -243,5 +221,65 @@ func TestPolicyEndpoints_AdminPassesThrough(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("admin list: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPolicyRouteGuard_SuperAdminOnlyAccess verifies that policy routes in the
+// route metadata table enforce super-admin-only access. Policy permissions are
+// NOT in the hub-admin role, so hub-admins should be denied.
+func TestPolicyRouteGuard_SuperAdminOnlyAccess(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	// Create a hub-admin user (member role with hub-admin role binding)
+	hubAdminUser := &store.User{
+		ID: tid("ha-pol"), Email: "ha-pol@test.com", DisplayName: "Hub Admin",
+		Role: "member", Status: "active",
+	}
+	if err := s.CreateUser(ctx, hubAdminUser); err != nil {
+		t.Fatalf("create hub-admin user: %v", err)
+	}
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get hub-admin role definition: %v", err)
+	}
+	if _, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      hubAdminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+	}); err != nil {
+		t.Fatalf("create hub-admin role binding: %v", err)
+	}
+
+	okHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	// Test the policy route guard: hub-admin should be denied because
+	// policy.read is not in the hub-admin role.
+	meta := routeMetadataTable["/api/v1/policies"]
+	handler := srv.routeGuard(meta, okHandler)
+
+	hubAdmin := NewAuthenticatedUser(tid("ha-pol"), "ha-pol@test.com", "Hub Admin", "member", "api")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/policies", nil)
+	req = req.WithContext(contextWithIdentity(ctx, hubAdmin))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("hub-admin accessing policy route: expected 403, got %d", rr.Code)
+	}
+
+	// Super-admin should pass
+	superAdmin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "api")
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/policies", nil)
+	req = req.WithContext(contextWithIdentity(ctx, superAdmin))
+	rr = httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("super-admin accessing policy route: expected 200, got %d", rr.Code)
 	}
 }

@@ -92,39 +92,9 @@ func TestBypassCensus(t *testing.T) {
 		// The AdminModeMiddleware bypass at admin_mode.go:113 remains as infrastructure.
 		{file: "admin_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AdminModeMiddleware admin bypass (infrastructure, KEEP)"},
 
-		// Resource handlers with existing types (PR-A6)
-		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "create policy (PR-A6)"},
-		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "update policy (PR-A6)"},
-		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "delete policy (PR-A6)"},
-		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "bind policy (PR-A6)"},
-		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "unbind policy (PR-A6)"},
-		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "policy CRUD (PR-A6)"},
-		{file: "handlers_policies.go", lineSubstr: `callerUser.Role() != "admin"`, description: "policy evaluate admin check (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry list (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry create (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry update (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry delete (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry sync (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry import (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry CRUD (PR-A6)"},
-		{file: "skill_registry_handlers.go", lineSubstr: "requireAdmin(w, r)", description: "skill registry CRUD (PR-A6)"},
-		{file: "handlers_gcp_identity.go", lineSubstr: `user.Role() != "admin"`, description: "GCP identity admin check (PR-A6)"},
-		{file: "handlers_gcp_identity_scoped.go", lineSubstr: `user.Role() != "admin"`, description: "GCP identity scoped admin check (PR-A6)"},
-		{file: "project_clone.go", lineSubstr: `user.Role() != "admin"`, description: "project clone admin check (PR-A6)"},
-		{file: "project_template_handlers.go", lineSubstr: `user.Role() != "admin"`, description: "project template admin check (PR-A6)"},
-		{file: "handlers_agents_core.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "agent list admin filter (PR-A6)"},
-		{file: "handlers_brokers.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "broker list admin filter (PR-A6)"},
-		{file: "handlers_groups.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "group list admin filter (PR-A6)"},
-		{file: "handlers_groups.go", lineSubstr: "isPlatformAdmin", description: "group membership admin check (PR-A6)"},
-		{file: "handlers_projects_core.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "project list admin filter (PR-A6)"},
-		{file: "harness_config_handlers.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "harness config list admin filter (PR-A6)"},
-		{file: "template_handlers.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "template list admin filter (PR-A6)"},
-		{file: "port_forward_handlers.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "port forward admin check (PR-A6)"},
-		{file: "handlers_agent_lifecycle.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "agent lifecycle admin check (PR-A6)"},
-		{file: "handlers_agent_lifecycle.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "agent lifecycle admin check (PR-A6)"},
-		{file: "handlers_skills_injection.go", lineSubstr: "requireAdmin(w, r)", description: "hub injected skills admin check (PR-A6)"},
-		{file: "hub_pre_start_hook_handlers.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(identity)", description: "pre-start hook admin check (PR-A6)"},
-		{file: "hub_pre_start_hook_handlers.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(identity)", description: "pre-start hook admin check (PR-A6)"},
+		// Integrations and hooks (PR-A5) — converted to permission-based checks
+
+		// Resource handlers (PR-A6) — converted to permission-based checks
 
 		// ─── Auth/identity infrastructure (non-bypass references) ────────
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation comment reference"},

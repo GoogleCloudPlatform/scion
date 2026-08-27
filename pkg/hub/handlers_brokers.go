@@ -207,7 +207,13 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	brokerIdent := GetBrokerIdentityFromContext(r.Context())
 
 	authorized := false
-	if IsUnscopedLocalPlatformAdmin(user) {
+	if user != nil && s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "broker", ID: "hub"},
+		Action:     Action("read"),
+		Permission: "broker.read",
+	}).Allowed {
 		authorized = true
 	} else if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
 		authorized = true

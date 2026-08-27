@@ -738,8 +738,20 @@ func (s *Server) getHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	user, ok := s.requireAdmin(w, r)
-	if !ok {
+	// Require hub.settings.update permission.
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+	if !s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     Action("update"),
+		Permission: "hub.settings.update",
+	}).Allowed {
+		Forbidden(w)
 		return
 	}
 

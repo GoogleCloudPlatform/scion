@@ -188,8 +188,19 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// ── asTemplate: mark clone as a project template ─────────────────────
 	if req.AsTemplate {
-		// Admin-only: creating templates is a hub-management action
-		if user := GetUserIdentityFromContext(ctx); user == nil || user.Role() != "admin" {
+		// Creating templates requires project.clone permission.
+		user := GetUserIdentityFromContext(ctx)
+		if user == nil {
+			Unauthorized(w)
+			return
+		}
+		if !s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: "project", ID: "hub"},
+			Action:     Action("clone"),
+			Permission: "project.clone",
+		}).Allowed {
 			Forbidden(w)
 			return
 		}
