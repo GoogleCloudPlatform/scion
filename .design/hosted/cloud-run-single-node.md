@@ -211,12 +211,15 @@ Two related deploy-time consequences of the missing `K_SERVICE`:
 - The logging paths conclude "not on Cloud Run" and stand up their own Cloud Logging
   client, but an Instance's stdout is already captured. Likely duplicate ingestion.
 
-**The same principle governs the deploy path, for a different reason.** Creating the
-Instance requires the v1 `gcloud` surface, because v1 is what carries
-`sandboxLauncher`. That surface is not on every Cloud SDK. `gcloud beta run instances`
-is **absent at 575.0.0**, where the `instances` noun is alpha-only, and **present at
-582.0.0**. Versions 576–581 are unmeasured, so **this design states no version floor**.
-Writing one down would publish a number nobody has checked.
+**The same principle governs the deploy path, for a different reason.** Creating this
+tier's Instance requires the `gcloud beta run instances` command, which speaks the v1
+API — the only surface that carries `sandboxLauncher`. The v2 API will happily create
+an Instance without it, so the constraint is not "v2 cannot create Instances"; it is
+that a `sandboxLauncher`-less Instance is a different artifact, and one whose scion
+server cannot start. That command is not on every Cloud SDK: it is **absent at
+575.0.0**, where the `instances` noun is alpha-only, and **present at 582.0.0**.
+Versions 576–581 are unmeasured, so **this design states no version floor**. Writing
+one down would publish a number nobody has checked.
 
 Two consequences for tooling:
 
