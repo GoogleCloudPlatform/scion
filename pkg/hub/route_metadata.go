@@ -858,6 +858,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			next(w, r)
 		case RouteHubAdmin:
 			if meta.Permission != "" {
+				// Validate route metadata completeness
+				if meta.Resource == "" || meta.Action == "" {
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+						"route misconfigured: Resource and Action must be set when Permission is set", nil)
+					return
+				}
 				// D4 conversion: permission-based check via Decide.
 				// Routes that declare a Permission in their metadata are
 				// evaluated through the authorization pipeline, which

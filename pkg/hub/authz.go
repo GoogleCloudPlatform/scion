@@ -475,7 +475,7 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 }
 
 // checkAccessForUser evaluates access for a user principal.
-func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action, permissionID ...string) Decision {
+func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action, permissionID string) Decision {
 	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
 	if scopedIdentity, ok := user.(*ScopedUserIdentity); ok {
 		if denied := a.enforceUATConstraints(scopedIdentity, resource, action); denied != nil {
@@ -578,21 +578,17 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 	// the path that enables scoped admin: a non-super-admin user with the
 	// hub-admin role binding can access hub operations they have permissions
 	// for, without holding the super-admin bypass.
-	permID := ""
-	if len(permissionID) > 0 {
-		permID = permissionID[0]
-	}
-	if permID != "" {
+	if permissionID != "" {
 		effectivePerms, err := a.getEffectivePermissions(ctx, "user", user.ID(), store.RoleScopeSystem, "")
 		if err != nil {
 			a.logger.Warn("failed to get effective permissions for user", "userID", user.ID(), "error", err.Error())
 		} else {
 			for _, p := range effectivePerms {
-				if p == permID {
+				if p == permissionID {
 					return Decision{
 						Allowed:       true,
 						Reason:        "role binding grant",
-						MatchedGrant:  permID,
+						MatchedGrant:  permissionID,
 						PrincipalKind: PrincipalKindUser,
 					}
 				}
