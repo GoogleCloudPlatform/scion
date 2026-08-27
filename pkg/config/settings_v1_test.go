@@ -1567,7 +1567,7 @@ func TestCloudRunInstancesConfig_CoexistsWithCloudRun(t *testing.T) {
 	k := koanf.New(".")
 	require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
 		"runtimes.cr-service.type":                            "cloudrun",
-		"runtimes.cr-service.cloudrun.project_id":              "service-project",
+		"runtimes.cr-service.cloudrun.project_id":             "service-project",
 		"runtimes.cr-service.cloudrun.location":               "us-east1",
 		"runtimes.cr-instances.type":                          "cloudrun-instances",
 		"runtimes.cr-instances.cloudrun_instances.project_id": "instances-project",
