@@ -207,7 +207,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	brokerIdent := GetBrokerIdentityFromContext(r.Context())
 
 	authorized := false
-	if user != nil && user.Role() == "admin" {
+	if IsUnscopedLocalPlatformAdmin(user) {
 		authorized = true
 	} else if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
 		authorized = true

@@ -301,13 +301,13 @@ After logging in interactively inside the agent (via `scion attach` or the termi
 Credential capture supports scoping captured credentials to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents).
 
 *   **In the Web UI**: Clicking the **Capture Auth** button triggers an interactive dialog allowing you to choose between **Project** scope and **User** scope before executing the capture script.
-*   **Via CLI/Script**: The `capture_auth.py` script defaults to `user` scope with progeny enabled. You can optionally override this with `--scope project` to make the credential available to all users in the project:
+*   **Via CLI/Script**: The `capture_auth.py` script accepts a `--scope` argument (`project` or `user`). If omitted, it defaults to `project` for backward compatibility:
     ```bash
-    # Capture credentials to the user scope (default)
+    # Capture credentials to the project scope (default)
     python3 ~/.scion/harness/capture_auth.py
 
-    # Capture credentials to the project scope
-    python3 ~/.scion/harness/capture_auth.py --scope project
+    # Capture credentials to the user scope (personal secret)
+    python3 ~/.scion/harness/capture_auth.py --scope user
     ```
 
 ### How capture works
@@ -316,9 +316,7 @@ The host generates a capture manifest (`inputs/capture-auth-config.json`) from t
 `auth.types.*.required_files` declarations — every credential file the harness can authenticate
 with that has a well-known path. `capture_auth.py` reads that manifest, locates each file the
 harness just wrote, and stores it as a secret by shelling out to
-`sciontool secret set <key> @<file> --type <type> --target <path> --scope <project|user> --allow-progeny`.
-
-By default, all capture paths use **user scope** with **progeny enabled** (`--allow-progeny`), meaning the credentials are kept private to your user identity but safely passed down to any child agents (progeny) your agent creates.
+`sciontool secret set <key> @<file> --type <type> --target <path> --scope <project|user>`.
 
 - **What is captured** — the harness's credential file(s). For example, Codex captures
   `~/.codex/auth.json` as the `CODEX_AUTH` file secret; Gemini captures

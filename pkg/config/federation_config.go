@@ -126,6 +126,9 @@ func (c *FederationConfig) Validate() []error {
 		if !allowedIssuerTypes[issuer.IssuerType] {
 			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: unknown issuer_type %q (must be \"hub\", \"service_account\", or \"user\")", i, issuer.IssuerType))
 		}
+		if issuer.IssuerType == "user" && issuer.DefaultRole == "admin" {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: default_role \"admin\" is not allowed for federated users", i))
+		}
 
 		// Rule 7: Non-hub issuers may omit jwks_url if OIDC discovery is available.
 		// The authenticator will attempt discovery at startup and fail if neither works.

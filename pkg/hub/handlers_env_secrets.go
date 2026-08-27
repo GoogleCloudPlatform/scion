@@ -548,16 +548,6 @@ type SetSecretResponse struct {
 	Created bool          `json:"created"`
 }
 
-// PatchSecretRequest is the request body for metadata-only secret updates (PATCH).
-// Only non-null/non-empty fields are applied. The secret value is never modified.
-type PatchSecretRequest struct {
-	Description   *string `json:"description"`             // null = no change, "" = clear
-	InjectionMode string  `json:"injectionMode,omitempty"` // "" = no change
-	Type          string  `json:"type,omitempty"`          // "" = no change
-	Target        string  `json:"target,omitempty"`        // "" = no change
-	AllowProgeny  *bool   `json:"allowProgeny,omitempty"`  // null = no change
-}
-
 // metaToStoreSecret converts a secret.SecretMeta to a store.Secret for API response compatibility.
 func metaToStoreSecret(m secret.SecretMeta) store.Secret {
 	return store.Secret{
@@ -805,8 +795,6 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 		s.getSecret(w, r, key)
 	case http.MethodPut:
 		s.setSecret(w, r, key)
-	case http.MethodPatch:
-		s.patchSecret(w, r, key)
 	case http.MethodDelete:
 		s.deleteSecret(w, r, key)
 	default:
@@ -972,138 +960,6 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	})
 }
 
-// patchSecretValidateAndUpdate is the shared helper for all PATCH secret
-// handlers. It decodes and validates the PatchSecretRequest, applies the
-// metadata update, manages progeny-policy lifecycle, and writes the response.
-func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Request, key, scope, scopeID string) {
-	ctx := r.Context()
-
-	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
-
-	var req PatchSecretRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
-		return
-	}
-
-	// Validate type if provided
-	if req.Type != "" {
-		switch req.Type {
-		case store.SecretTypeEnvironment, store.SecretTypeVariable, store.SecretTypeFile:
-			// valid
-		default:
-			ValidationError(w, "type must be one of: environment, variable, file", map[string]interface{}{
-				"field": "type",
-				"value": req.Type,
-			})
-			return
-		}
-	}
-
-	// Validate injectionMode if provided
-	if req.InjectionMode != "" {
-		switch req.InjectionMode {
-		case store.InjectionModeAlways, store.InjectionModeAsNeeded:
-			// valid
-		default:
-			ValidationError(w, "injectionMode must be \"always\" or \"as_needed\"", map[string]interface{}{
-				"field":   "injectionMode",
-				"value":   req.InjectionMode,
-				"allowed": []string{"always", "as_needed"},
-			})
-			return
-		}
-	}
-
-	// Determine the effective secret type for target validation
-	effectiveType := req.Type
-	if effectiveType == "" && req.Target != "" {
-		// Fetch stored type to validate target against it
-		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		effectiveType = existing.SecretType
-	}
-
-	// Validate file-specific target constraints (including stored target when type changes to file)
-	effectiveTarget := req.Target
-	if effectiveType == store.SecretTypeFile && effectiveTarget == "" {
-		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		effectiveTarget = existing.Target
-	}
-	if effectiveTarget != "" && effectiveType == store.SecretTypeFile {
-		if strings.Contains(effectiveTarget, "..") {
-			BadRequest(w, "target path must not contain '..'")
-			return
-		}
-		if !strings.HasPrefix(effectiveTarget, "/") && !strings.HasPrefix(effectiveTarget, "~/") {
-			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
-				"field": "target",
-				"value": effectiveTarget,
-			})
-			return
-		}
-	}
-
-	// allowProgeny is only valid on user-scoped secrets
-	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
-		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
-			"field": "allowProgeny",
-			"scope": scope,
-		})
-		return
-	}
-
-	input := &secret.UpdateMetaInput{
-		Name:          key,
-		Scope:         scope,
-		ScopeID:       scopeID,
-		Description:   req.Description,
-		InjectionMode: req.InjectionMode,
-		SecretType:    req.Type,
-		Target:        req.Target,
-		AllowProgeny:  req.AllowProgeny,
-	}
-
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		input.UpdatedBy = userIdent.ID()
-	}
-
-	meta, err := s.secretBackend.UpdateMeta(ctx, input)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Manage implicit progeny policy lifecycle if AllowProgeny changed
-	if req.AllowProgeny != nil {
-		s.ensureProgenyPolicy(ctx, meta)
-	}
-
-	result := metaToStoreSecret(*meta)
-	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) patchSecret(w http.ResponseWriter, r *http.Request, key string) {
-	scope := r.URL.Query().Get("scope")
-	if scope == "" {
-		scope = store.ScopeUser
-	}
-
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, r.URL.Query().Get("scopeId"), true)
-	if !ok {
-		return
-	}
-
-	s.patchSecretValidateAndUpdate(w, r, key, scope, scopeID)
-}
-
 func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string) {
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -1135,13 +991,12 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 
 // AgentSetSecretRequest is the request body for agent-initiated secret creation.
 type AgentSetSecretRequest struct {
-	Value        string `json:"value"`                  // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
-	Encoding     string `json:"encoding,omitempty"`     // "base64" (default) or "raw" (value is literal text, no decoding)
-	Type         string `json:"type,omitempty"`         // environment (default), variable, file
-	Target       string `json:"target,omitempty"`       // Injection target path
-	Force        bool   `json:"force,omitempty"`        // Overwrite existing secret
-	Scope        string `json:"scope,omitempty"`        // "project" (default) or "user"
-	AllowProgeny bool   `json:"allowProgeny,omitempty"` // Allow creator's progeny agents to access (user scope only)
+	Value    string `json:"value"`              // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
+	Encoding string `json:"encoding,omitempty"` // "base64" (default) or "raw" (value is literal text, no decoding)
+	Type     string `json:"type,omitempty"`     // environment (default), variable, file
+	Target   string `json:"target,omitempty"`   // Injection target path
+	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
+	Scope    string `json:"scope,omitempty"`    // "project" (default) or "user"
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -1276,15 +1131,6 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
-	if req.AllowProgeny && scope != store.ScopeUser {
-		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
-			"field": "allowProgeny",
-			"scope": scope,
-		})
-		return
-	}
-
 	var decoded []byte
 	if req.Encoding == "raw" {
 		// Caller explicitly opted in to raw text — store the value as-is.
@@ -1356,15 +1202,14 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	input := &secret.SetSecretInput{
-		Name:         key,
-		Value:        string(decoded),
-		SecretType:   secretType,
-		Target:       target,
-		Scope:        scope,
-		ScopeID:      scopeID,
-		AllowProgeny: req.AllowProgeny,
-		CreatedBy:    fmt.Sprintf("agent:%s", agentID),
-		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
+		Name:       key,
+		Value:      string(decoded),
+		SecretType: secretType,
+		Target:     target,
+		Scope:      scope,
+		ScopeID:    scopeID,
+		CreatedBy:  fmt.Sprintf("agent:%s", agentID),
+		UpdatedBy:  fmt.Sprintf("agent:%s", agentID),
 	}
 
 	created, _, err := s.secretBackend.Set(ctx, input)
@@ -1929,7 +1774,7 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 	}
 
 	// Authorize access
-	isWrite := r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete
+	isWrite := r.Method == http.MethodPut || r.Method == http.MethodDelete
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
@@ -2053,9 +1898,6 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		}
 		result := metaToStoreSecret(*meta)
 		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: &result, Created: created})
-
-	case http.MethodPatch:
-		s.patchSecretValidateAndUpdate(w, r, key, store.ScopeProject, projectID)
 
 	case http.MethodDelete:
 		if err := s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID); err != nil {
@@ -2612,7 +2454,7 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Authorize access: broker self-access or user CheckAccess
-	isWrite := r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete
+	isWrite := r.Method == http.MethodPut || r.Method == http.MethodDelete
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
 		// Broker accessing its own secrets — allowed
 	} else {
@@ -2730,9 +2572,6 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		}
 		result := metaToStoreSecret(*meta)
 		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: &result, Created: created})
-
-	case http.MethodPatch:
-		s.patchSecretValidateAndUpdate(w, r, key, store.ScopeRuntimeBroker, brokerID)
 
 	case http.MethodDelete:
 		if err := s.secretBackend.Delete(ctx, key, store.ScopeRuntimeBroker, brokerID); err != nil {

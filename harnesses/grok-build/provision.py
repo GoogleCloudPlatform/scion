@@ -23,9 +23,7 @@ Grok-build-native concerns handled here:
     written to ~/.grok/auth.json from a staged file secret.
   - MCP servers translate to TOML [mcp_servers.*] entries in
     ~/.grok/config.toml (stdio→command/args/env, sse/http→url/headers).
-  - Instructions project to .grok/AGENTS.md (configurable via instructions_file).
-  - System prompt is written to .grok/system-prompt.md and passed via
-    --system-prompt-override (native routing).
+  - Instructions project to AGENTS.md (configurable via instructions_file).
   - ~/.grok/config.toml gets hardened defaults (auto-update off, telemetry
     off, memory off, subagents off).
   - Hook wiring to sciontool via ~/.grok/hooks/scion.json.
@@ -66,8 +64,9 @@ AUTH = scion_harness.AuthSpec(
         ),
         scion_harness.env_method(
             "vertex-ai",
-            any_of=["GOOGLE_CLOUD_PROJECT", "SCION_METADATA_PROJECT_ID"],
-            hint="set GOOGLE_CLOUD_PROJECT for Vertex AI model routing",
+            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
+            hint="provide GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION",
         ),
     ],
     fallback_to_none_on_error=True,
@@ -115,172 +114,6 @@ def _write_auth_file(ctx: scion_harness.ProvisionContext) -> None:
         f.write(content)
     os.chmod(tmp, 0o600)
     os.replace(tmp, target)
-
-
-def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> None:
-    """Write the staged system prompt to the native grok CLI location.
-
-    config.yaml declares system_prompt_file (.grok/system-prompt.md) and
-    system_prompt_mode (native), so the prompt goes into its own file rather
-    than being prepended to the instructions file. The Go-side harness reads
-    this file and passes it via --system-prompt-override.
-    """
-    system_prompt = ctx.read_input_text("system-prompt.md")
-    if not system_prompt.strip():
-        return
-
-    target = str(ctx.harness_config.get("system_prompt_file") or "")
-    if not target:
-        return
-
-    full = os.path.join(ctx.home, target)
-    parent = os.path.dirname(full)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    tmp = full + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(system_prompt)
-    os.replace(tmp, full)
-    ctx.info(f"wrote system prompt to {full}")
-
-
-# ---------------------------------------------------------------------------
-# Vertex AI configuration
-# ---------------------------------------------------------------------------
-
-_VERTEX_MODEL_ID = "xai/grok-4.6"
-_VERTEX_AUTH_PROVIDER_NAME = "vertex-grok"
-_VERTEX_MODEL_CONFIG_NAME = "vertex-grok"
-
-
-def _configure_vertex_ai(
-    ctx: scion_harness.ProvisionContext,
-    env: dict[str, str],
-) -> dict[str, Any]:
-    """Configure grok to route inference through Vertex AI Model Garden.
-
-    Writes:
-      - [auth_provider.vertex-grok] with gcloud token command
-      - [model.vertex-grok] with Vertex AI base_url and auth_provider ref
-      - [models] default = "vertex-grok"
-    """
-    project = _read_token(ctx, "GOOGLE_CLOUD_PROJECT")
-    if not project:
-        # Fallback: when GCP identity is assigned, the platform injects the
-        # project ID as SCION_METADATA_PROJECT_ID.
-        project = os.environ.get("SCION_METADATA_PROJECT_ID", "").strip()
-    if not project:
-        raise scion_harness.ProvisionError(
-            "vertex-ai auth selected but GOOGLE_CLOUD_PROJECT is empty"
-        )
-    env["GOOGLE_CLOUD_PROJECT"] = project
-
-    # Region is optional — when empty, use the global multi-region endpoint.
-    region = ""
-    for key in ("GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"):
-        val = _read_token(ctx, key)
-        if val:
-            region = val
-            env[key] = val
-            break
-
-    # Construct Vertex AI base URL.
-    if region:
-        base_url = (
-            f"https://{region}-aiplatform.googleapis.com"
-            f"/v1beta1/projects/{project}/locations/{region}/endpoints/openapi"
-        )
-    else:
-        base_url = (
-            f"https://aiplatform.googleapis.com"
-            f"/v1beta1/projects/{project}/locations/global/endpoints/openapi"
-        )
-
-    # Place ADC credentials file if staged.
-    adc_content = ctx.read_file_secret("gcloud-adc")
-    if adc_content:
-        adc_dir = os.path.join(ctx.home, ".config", "gcloud")
-        os.makedirs(adc_dir, exist_ok=True)
-        adc_target = os.path.join(adc_dir, "application_default_credentials.json")
-        scion_harness.atomic_write_text(adc_target, adc_content, mode=0o600)
-        env["GOOGLE_APPLICATION_CREDENTIALS"] = adc_target
-        ctx.info(f"placed ADC credentials at {adc_target}")
-
-    # Resolve model ID — aliases map to the default Vertex AI model since
-    # Vertex AI Model Garden may not have all xAI models available.
-    raw_model = os.environ.get("SCION_MODEL", "").strip()
-    if raw_model:
-        aliases = ctx.harness_config.get("model_aliases")
-        if not isinstance(aliases, dict):
-            aliases = {}
-        if raw_model.lower() in aliases:
-            # Scion alias (small, medium, large) — use default Vertex model.
-            model_id = _VERTEX_MODEL_ID
-            ctx.info(f"vertex-ai: resolved alias '{raw_model}' to {_VERTEX_MODEL_ID}")
-        else:
-            # Explicit model ID (e.g., "xai/grok-4.2") — use as-is.
-            model_id = raw_model
-    else:
-        model_id = _VERTEX_MODEL_ID
-
-    # Write Vertex AI model config to config.toml.
-    _write_vertex_config(ctx, base_url, model_id)
-
-    # Set GROK_DEFAULT_MODEL so grok uses the vertex-grok config block.
-    # This is belt-and-suspenders alongside [models] default in config.toml —
-    # the env var cannot be overwritten by grok's /model command at runtime.
-    env["GROK_DEFAULT_MODEL"] = _VERTEX_MODEL_CONFIG_NAME
-
-    ctx.info(f"vertex-ai: project={project} model={model_id} base_url={base_url}")
-
-    return {"vertex_ai": True, "vertex_base_url": base_url}
-
-
-def _write_vertex_config(
-    ctx: scion_harness.ProvisionContext,
-    base_url: str,
-    model_id: str,
-) -> None:
-    """Append Vertex AI auth_provider and model config to config.toml."""
-    config_path = os.path.join(ctx.home, ".grok", "config.toml")
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-
-    existing = ""
-    if os.path.isfile(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                existing = f.read()
-        except OSError:
-            pass
-
-    # Strip any existing vertex config sections to avoid duplicates.
-    cleaned = scion_harness.strip_toml_sections(
-        existing,
-        lambda line: (
-            line == f"[auth_provider.{_VERTEX_AUTH_PROVIDER_NAME}]"
-            or line == f"[model.{_VERTEX_MODEL_CONFIG_NAME}]"
-            or line == "[models]"
-        ),
-    )
-
-    # Build the vertex config block.
-    vertex_toml = f'''[auth_provider.{_VERTEX_AUTH_PROVIDER_NAME}]
-command = "gcloud auth print-access-token"
-
-[model.{_VERTEX_MODEL_CONFIG_NAME}]
-model = "{scion_harness.toml_escape(model_id)}"
-base_url = "{scion_harness.toml_escape(base_url)}"
-auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"
-
-[models]
-default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
-
-    content = cleaned.rstrip("\n")
-    if content:
-        content += "\n\n"
-    content += vertex_toml + "\n"
-
-    scion_harness.atomic_write_text(config_path, content)
 
 
 # ---------------------------------------------------------------------------
@@ -614,18 +447,21 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         extra = {"auth_file_written": True}
 
     if resolved.method == "vertex-ai":
-        extra = _configure_vertex_ai(ctx, env)
+        region_key = resolved.env_key or "GOOGLE_CLOUD_REGION"
+        region = _read_token(ctx, region_key)
+        project = _read_token(ctx, "GOOGLE_CLOUD_PROJECT")
+        env["GOOGLE_CLOUD_PROJECT"] = project
+        env["GOOGLE_CLOUD_REGION"] = region
+        extra = {"vertex_ai": True}
 
     # --- Model resolution ---------------------------------------------------
     # The Go side does not populate ctx.model_resolution for out-of-tree
     # harnesses. Use the SCION_MODEL env var and resolve via model_aliases.
-    # vertex-ai sets GROK_DEFAULT_MODEL in _configure_vertex_ai.
-    if resolved.method != "vertex-ai":
-        raw_model = os.environ.get("SCION_MODEL", "").strip()
-        aliases = ctx.harness_config.get("model_aliases") or {}
-        resolved_model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
-        if resolved_model:
-            env["GROK_DEFAULT_MODEL"] = resolved_model
+    raw_model = os.environ.get("SCION_MODEL", "").strip()
+    aliases = ctx.harness_config.get("model_aliases") or {}
+    resolved_model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
+    if resolved_model:
+        env["GROK_DEFAULT_MODEL"] = resolved_model
 
     # --- Telemetry: inject native OTel env vars when enabled ----------------
     telemetry_payload = ctx.telemetry
@@ -642,18 +478,15 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     ctx.write_outputs(resolved, env=env, extra=extra)
 
-    # --- System prompt (native routing) -------------------------------------
-    _apply_native_system_prompt(ctx)
-
     # --- Instructions projection --------------------------------------------
     harness_cfg = ctx.harness_config
-    instructions_file = harness_cfg.get("instructions_file") or ".grok/AGENTS.md"
+    instructions_file = harness_cfg.get("instructions_file") or "AGENTS.md"
     target = os.path.join(ctx.home, instructions_file)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     # include_skills left at default False: config.yaml declares skills_dir,
     # so the host-side provisioner installs skills as individual files.
     try:
-        scion_harness.project_instructions(ctx, target, system_prompt_mode="none")
+        scion_harness.project_instructions(ctx, target)
     except OSError as exc:
         ctx.warn(f"failed to project instructions: {exc}")
 

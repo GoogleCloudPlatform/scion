@@ -263,6 +263,20 @@ func (_u *AccessPolicyUpdate) ClearOrigin() *AccessPolicyUpdate {
 	return _u
 }
 
+// SetPolicyKind sets the "policy_kind" field.
+func (_u *AccessPolicyUpdate) SetPolicyKind(v accesspolicy.PolicyKind) *AccessPolicyUpdate {
+	_u.mutation.SetPolicyKind(v)
+	return _u
+}
+
+// SetNillablePolicyKind sets the "policy_kind" field if the given value is not nil.
+func (_u *AccessPolicyUpdate) SetNillablePolicyKind(v *accesspolicy.PolicyKind) *AccessPolicyUpdate {
+	if v != nil {
+		_u.SetPolicyKind(*v)
+	}
+	return _u
+}
+
 // AddBindingIDs adds the "bindings" edge to the PolicyBinding entity by IDs.
 func (_u *AccessPolicyUpdate) AddBindingIDs(ids ...uuid.UUID) *AccessPolicyUpdate {
 	_u.mutation.AddBindingIDs(ids...)
@@ -362,6 +376,11 @@ func (_u *AccessPolicyUpdate) check() error {
 			return &ValidationError{Name: "effect", err: fmt.Errorf(`ent: validator failed for field "AccessPolicy.effect": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.PolicyKind(); ok {
+		if err := accesspolicy.PolicyKindValidator(v); err != nil {
+			return &ValidationError{Name: "policy_kind", err: fmt.Errorf(`ent: validator failed for field "AccessPolicy.policy_kind": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -453,6 +472,9 @@ func (_u *AccessPolicyUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if _u.mutation.OriginCleared() {
 		_spec.ClearField(accesspolicy.FieldOrigin, field.TypeString)
+	}
+	if value, ok := _u.mutation.PolicyKind(); ok {
+		_spec.SetField(accesspolicy.FieldPolicyKind, field.TypeEnum, value)
 	}
 	if _u.mutation.BindingsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -750,6 +772,20 @@ func (_u *AccessPolicyUpdateOne) ClearOrigin() *AccessPolicyUpdateOne {
 	return _u
 }
 
+// SetPolicyKind sets the "policy_kind" field.
+func (_u *AccessPolicyUpdateOne) SetPolicyKind(v accesspolicy.PolicyKind) *AccessPolicyUpdateOne {
+	_u.mutation.SetPolicyKind(v)
+	return _u
+}
+
+// SetNillablePolicyKind sets the "policy_kind" field if the given value is not nil.
+func (_u *AccessPolicyUpdateOne) SetNillablePolicyKind(v *accesspolicy.PolicyKind) *AccessPolicyUpdateOne {
+	if v != nil {
+		_u.SetPolicyKind(*v)
+	}
+	return _u
+}
+
 // AddBindingIDs adds the "bindings" edge to the PolicyBinding entity by IDs.
 func (_u *AccessPolicyUpdateOne) AddBindingIDs(ids ...uuid.UUID) *AccessPolicyUpdateOne {
 	_u.mutation.AddBindingIDs(ids...)
@@ -862,6 +898,11 @@ func (_u *AccessPolicyUpdateOne) check() error {
 			return &ValidationError{Name: "effect", err: fmt.Errorf(`ent: validator failed for field "AccessPolicy.effect": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.PolicyKind(); ok {
+		if err := accesspolicy.PolicyKindValidator(v); err != nil {
+			return &ValidationError{Name: "policy_kind", err: fmt.Errorf(`ent: validator failed for field "AccessPolicy.policy_kind": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -970,6 +1011,9 @@ func (_u *AccessPolicyUpdateOne) sqlSave(ctx context.Context) (_node *AccessPoli
 	}
 	if _u.mutation.OriginCleared() {
 		_spec.ClearField(accesspolicy.FieldOrigin, field.TypeString)
+	}
+	if value, ok := _u.mutation.PolicyKind(); ok {
+		_spec.SetField(accesspolicy.FieldPolicyKind, field.TypeEnum, value)
 	}
 	if _u.mutation.BindingsCleared() {
 		edge := &sqlgraph.EdgeSpec{

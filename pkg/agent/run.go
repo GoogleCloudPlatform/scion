@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -35,7 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -84,11 +82,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Determine the project ID for label-based filtering. In broker/hosted mode
 	// this comes from env injected by the hub dispatcher.
 	projectID := ""
-	agentID := opts.Name
 	if opts.Env != nil {
-		if opts.Env["SCION_AGENT_ID"] != "" {
-			agentID = opts.Env["SCION_AGENT_ID"]
-		}
 		projectID = opts.Env["SCION_PROJECT_ID"]
 		if projectID == "" {
 			projectID = opts.Env["SCION_GROVE_ID"]
@@ -104,7 +98,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if !matchAgentProject(a, projectName, projectID) {
 				continue
 			}
-			isRunning := a.Phase == string(state.PhaseRunning)
+			status := strings.ToLower(a.ContainerStatus)
+			isRunning := strings.HasPrefix(status, "up") || status == "running"
 			if isRunning {
 				// If a new task is provided, we might want to recreate even if running
 				// but if no task provided, we just return the running one
@@ -139,9 +134,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
-	}
-	if opts.SharedWorkspace {
-		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
@@ -508,34 +500,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 			return nil, fmt.Errorf("auth resolution failed: %w", err)
 		}
-		if resolved == nil {
-			// ResolveAuth returned nil without error — treat as no auth available.
-			if canFallbackToNoAuth() {
-				util.Debugf("auth: resolution returned nil, falling back to no-auth mode")
-				opts.NoAuth = true
-				warnings = append(warnings, "Auth: no credentials found, starting in no-auth mode")
-				goto authDone
-			}
-			return nil, fmt.Errorf("auth resolution returned nil for method %q", auth.SelectedType)
-		}
 		// Keep a copy of the full resolved auth material for secret filtering.
-		// Deep-copy the Files slice so in-place SourcePath clearing below
-		// does not leak into resolvedForSecretFilter.
 		resolvedForSecretFilter := *resolved
-		resolvedForSecretFilter.Files = append([]api.FileMapping(nil), resolved.Files...)
 		if opts.BrokerMode {
-			// File content projection is handled by writeFileSecrets() from
-			// ResolvedSecrets at container launch (via SCION_STAGED_SECRETS),
-			// not by applyResolvedAuth from local paths. Clear SourcePath so
-			// stageFileSecretFiles won't try to read host files, but preserve
-			// ContainerPath so it can populate file_secret_files in
-			// auth-candidates.json.
-			for i := range resolved.Files {
-				resolved.Files[i].SourcePath = ""
-			}
+			// File projection is handled by writeFileSecrets() from ResolvedSecrets
+			// at container launch, not by applyResolvedAuth from local paths.
+			resolved.Files = nil
 		}
 		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
-		if err := harness.ValidateAuth(resolved, opts.BrokerMode); err != nil {
+		if err := harness.ValidateAuth(resolved); err != nil {
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
 				opts.NoAuth = true
@@ -939,80 +912,20 @@ authDone:
 		}
 	}
 
-	workspaceBackendName := ""
-	nfsUID := 0
-	nfsGID := 0
-	nfsPVClaimName := ""
-	nfsSubPath := ""
-	nfsStorageClass := ""
-
-	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
-		sharingMode := store.SharingModeWorktreePerAgent
-		if opts.SharedWorkspace || opts.GitClone != nil {
-			sharingMode = store.SharingModeSharedPlain
-		}
-		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
-		if backend.Name() == "nfs" {
-			sharedDirNames := make([]string, 0, len(effectiveSharedDirs))
-			for _, dir := range effectiveSharedDirs {
-				sharedDirNames = append(sharedDirNames, dir.Name)
-			}
-			resolvedWorkspace, err := backend.Resolve(runtime.ResolveInput{
-				ProjectID:      projectID,
-				AgentID:        agentID,
-				ProjectSlug:    api.Slugify(projectName),
-				Mode:           sharingMode,
-				SharedDirNames: sharedDirNames,
-				ProjectDir:     projectDir,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("resolve workspace backend %q: %w", backend.Name(), err)
-			}
-			mount, err := backend.Realize(runtime.RealizeInput{
-				Resolved:           resolvedWorkspace,
-				ContainerWorkspace: containerWorkspace,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("realize workspace backend %q: %w", backend.Name(), err)
-			}
-
-			workspaceBackendName = backend.Name()
-			if mount.HostPath != "" {
-				effectiveWorkspace = mount.HostPath
-			}
-			if mount.Target != "" {
-				containerWorkspace = mount.Target
-			}
-			nfsPVClaimName = mount.PVClaimName
-			nfsSubPath = mount.SubPath
-			if settings.Server.WorkspaceStorage.NFS != nil {
-				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
-				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
-				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
-			}
-		}
-	}
-
 	runCfg := runtime.RunConfig{
-		Name:                 containerName(projectName, opts.Name),
-		Template:             template,
-		UnixUsername:         unixUsername,
-		Image:                resolvedImage,
-		HomeDir:              agentHome,
-		Workspace:            effectiveWorkspace,
-		RepoRoot:             repoRoot,
-		ContainerWorkspace:   containerWorkspace,
-		ResolvedAuth:         resolvedAuth,
-		Harness:              h,
-		Project:              projectName,
-		ProjectID:            projectID,
-		WorkspaceBackendName: workspaceBackendName,
-		NFSUID:               nfsUID,
-		NFSGID:               nfsGID,
-		NFSPVClaimName:       nfsPVClaimName,
-		NFSSubPath:           nfsSubPath,
-		NFSStorageClass:      nfsStorageClass,
-		TelemetryEnabled:     telemetryEnabled,
+		Name:               containerName(projectName, opts.Name),
+		Template:           template,
+		UnixUsername:       unixUsername,
+		Image:              resolvedImage,
+		HomeDir:            agentHome,
+		Workspace:          effectiveWorkspace,
+		RepoRoot:           repoRoot,
+		ContainerWorkspace: containerWorkspace,
+		ResolvedAuth:       resolvedAuth,
+		Harness:            h,
+		Project:            projectName,
+		ProjectID:          projectID,
+		TelemetryEnabled:   telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {
@@ -1094,7 +1007,6 @@ authDone:
 				"scion.template":       template,
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
-				"agent_id":             agentID,
 			}
 			for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
 				l[k] = v
@@ -1135,7 +1047,8 @@ authDone:
 		for _, a := range allAgents {
 			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
 				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
+				containerStatus := strings.ToLower(a.ContainerStatus)
+				if strings.Contains(containerStatus, "exited") || strings.Contains(containerStatus, "dead") {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, id)

@@ -170,7 +170,9 @@ func TestFederationE2E_FullSuccessPath(t *testing.T) {
 	claims.Subject = "e2e-agent-1"
 	claims.AgentName = "e2e-worker"
 	claims.ProjectID = "e2e-project"
+	// Phase 1G fix 1: ancestry[0] must agree with root_user.
 	claims.RootUser = "user:e2e-admin"
+	claims.Ancestry = []string{"user:e2e-admin"}
 	token := signFederationToken(t, hubAKey, kid, claims)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/test", nil)

@@ -48,6 +48,8 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldOrigin holds the string denoting the origin field in the database.
 	FieldOrigin = "origin"
+	// FieldPolicyKind holds the string denoting the policy_kind field in the database.
+	FieldPolicyKind = "policy_kind"
 	// EdgeBindings holds the string denoting the bindings edge name in mutations.
 	EdgeBindings = "bindings"
 	// Table holds the table name of the accesspolicy in the database.
@@ -80,6 +82,7 @@ var Columns = []string{
 	FieldUpdated,
 	FieldCreatedBy,
 	FieldOrigin,
+	FieldPolicyKind,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -160,6 +163,32 @@ func EffectValidator(e Effect) error {
 	}
 }
 
+// PolicyKind defines the type for the "policy_kind" enum field.
+type PolicyKind string
+
+// PolicyKindExplicit is the default value of the PolicyKind enum.
+const DefaultPolicyKind = PolicyKindExplicit
+
+// PolicyKind values.
+const (
+	PolicyKindExplicit PolicyKind = "explicit"
+	PolicyKindDefault  PolicyKind = "default"
+)
+
+func (pk PolicyKind) String() string {
+	return string(pk)
+}
+
+// PolicyKindValidator is a validator for the "policy_kind" field enum values. It is called by the builders before save.
+func PolicyKindValidator(pk PolicyKind) error {
+	switch pk {
+	case PolicyKindExplicit, PolicyKindDefault:
+		return nil
+	default:
+		return fmt.Errorf("accesspolicy: invalid enum value for policy_kind field: %q", pk)
+	}
+}
+
 // OrderOption defines the ordering options for the AccessPolicy queries.
 type OrderOption func(*sql.Selector)
 
@@ -226,6 +255,11 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByOrigin orders the results by the origin field.
 func ByOrigin(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOrigin, opts...).ToFunc()
+}
+
+// ByPolicyKind orders the results by the policy_kind field.
+func ByPolicyKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPolicyKind, opts...).ToFunc()
 }
 
 // ByBindingsCount orders the results by bindings count.

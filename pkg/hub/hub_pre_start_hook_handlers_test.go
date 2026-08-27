@@ -95,6 +95,36 @@ func doRequestWithToken(t *testing.T, srv *Server, token, method, path string, b
 	return rec
 }
 
+// doHubPSHRequestAsIdentity invokes the hub pre-start-hook handlers with an
+// already authenticated identity. Federation tokens are verified by separate
+// middleware tests; this helper exercises the authorization boundary after
+// identity construction, including defensive handling of an unexpected admin
+// role on a federated identity.
+func doHubPSHRequestAsIdentity(t *testing.T, srv *Server, identity UserIdentity, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+
+	rec := httptest.NewRecorder()
+	if path == hubPSHPath {
+		srv.handleHubPreStartHooks(rec, req)
+	} else {
+		srv.handleHubPreStartHookByID(rec, req)
+	}
+	return rec
+}
+
 // createHubHook creates a hub-scoped hook via the API as the admin dev user.
 func createHubHook(t *testing.T, srv *Server, name, slug, script string) store.ProjectPreStartHook {
 	t.Helper()
@@ -493,6 +523,56 @@ func TestHubPreStartHooks_Delete_ScopedAdminForbidden(t *testing.T) {
 
 	rec := doRequestWithToken(t, srv, token, http.MethodDelete, hubPSHPath+"/"+hook.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestHubPreStartHooks_FederatedAdminCannotUseHubAdminBypass(t *testing.T) {
+	srv, _ := testServer(t)
+	federatedAdmin := NewFederatedUserIdentity(
+		"https://issuer.example", "federated-admin", "federated-admin@example.com", "Federated Admin", store.UserRoleAdmin, nil,
+	)
+	hook := createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho SECRET_TOKEN\n")
+
+	newName := "Hijacked"
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   interface{}
+	}{
+		{
+			name:   "create",
+			method: http.MethodPost,
+			path:   hubPSHPath,
+			body:   CreateProjectPreStartHookRequest{Name: "Backdoor", Script: "#!/bin/sh\ntrue\n"},
+		},
+		{
+			name:   "update",
+			method: http.MethodPut,
+			path:   hubPSHPath + "/" + hook.ID,
+			body:   UpdateProjectPreStartHookRequest{Name: &newName},
+		},
+		{
+			name:   "activate",
+			method: http.MethodPost,
+			path:   hubPSHPath + "/" + hook.ID + "/activate",
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+			path:   hubPSHPath + "/" + hook.ID,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doHubPSHRequestAsIdentity(t, srv, federatedAdmin, tc.method, tc.path, tc.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	for _, path := range []string{hubPSHPath, hubPSHPath + "/" + hook.ID} {
+		rec := doHubPSHRequestAsIdentity(t, srv, federatedAdmin, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "SECRET_TOKEN", "federated admins must not receive hub hook scripts")
+	}
 }
 
 // =============================================================================

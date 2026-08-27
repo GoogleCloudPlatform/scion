@@ -21,12 +21,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
+
+const legacyFailedContainerStatusPrefix = "failed"
 
 func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	agents, err := m.Runtime.List(ctx, filter)
@@ -75,12 +78,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	runningNames := make(map[string]bool)
-	runtimePhases := make(map[string]string, len(agents))
 	for i := range agents {
-		// Capture the runtime's Phase before agent-info.json overwrites it.
-		// The runtime Phase (derived from container state) is authoritative
-		// for running/stopped reconciliation below.
-		runtimePhases[agents[i].Name] = agents[i].Phase
 		runningNames[agents[i].Name] = true
 		if agents[i].ProjectPath != "" {
 			// ResolveAgentDir probes both worktree and shared-workspace
@@ -159,25 +157,20 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		}
 
 		// Reconcile phase with actual container status.
-		// The runtime Phase (captured before agent-info.json merge) is
-		// authoritative for whether the container is running or stopped.
-		runtimePhase := runtimePhases[agents[i].Name]
-		isContainerRunning := runtimePhase == string(state.PhaseRunning)
-		isContainerStopped := runtimePhase == string(state.PhaseStopped) || runtimePhase == string(state.PhaseError)
+		// Container runtime status is authoritative for running/stopped.
+		containerStatusLower := strings.ToLower(agents[i].ContainerStatus)
+		isContainerRunning := strings.HasPrefix(containerStatusLower, "up") || containerStatusLower == "running"
+		isContainerStopped := strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped"
 
 		if isContainerRunning && agents[i].Phase == string(state.PhaseStopped) {
 			agents[i].Phase = string(state.PhaseRunning)
 		}
 		if isContainerStopped {
 			// A non-zero exit code means the agent crashed; map to error
-			// (restartable) rather than a clean stop. A zero exit (or no
-			// exit code) is a clean stop.
-			exitCode := 0
-			hasCode := agents[i].ExitCode != nil
-			if hasCode {
-				exitCode = *agents[i].ExitCode
-			}
-			crashed := (hasCode && exitCode != 0) || runtimePhase == string(state.PhaseError)
+			// (restartable) rather than a clean stop. A zero exit (or a plain
+			// "stopped" with no embedded code) is a clean stop.
+			exitCode, hasCode := scionruntime.ExitCodeFromContainerStatus(agents[i].ContainerStatus)
+			crashed := hasCode && exitCode != 0
 			p := state.Phase(agents[i].Phase)
 			switch p {
 			case state.PhaseRunning:
@@ -322,7 +315,8 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 	if agent.Phase != scionruntime.LegacyAgentPhaseEnded {
 		return ""
 	}
-	if agent.ExitCode != nil && *agent.ExitCode != 0 {
+	containerStatus := strings.ToLower(agent.ContainerStatus)
+	if strings.Contains(containerStatus, legacyFailedContainerStatusPrefix) {
 		return string(state.PhaseError)
 	}
 	return string(state.PhaseStopped)

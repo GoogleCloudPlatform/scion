@@ -296,3 +296,15 @@ func (m *mockAuthzStore) GetGroupBySlug(_ context.Context, _ string) (*store.Gro
 func (m *mockAuthzStore) GetGroupMembership(_ context.Context, _, _ string, _ string) (*store.GroupMember, error) {
 	return nil, store.ErrNotFound
 }
+
+func (m *mockAuthzStore) GetProjectMembership(_ context.Context, _, _ string) (*store.ProjectMembership, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
+	return nil, nil
+}
+
+func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, _ string) (*store.RoleDefinition, error) {
+	return nil, store.ErrNotFound
+}

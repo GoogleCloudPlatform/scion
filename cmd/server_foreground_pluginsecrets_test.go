@@ -64,10 +64,6 @@ func (f *fakeSecretBackend) GetMeta(context.Context, string, string, string) (*s
 	return nil, store.ErrNotFound
 }
 
-func (f *fakeSecretBackend) UpdateMeta(_ context.Context, _ *secret.UpdateMetaInput) (*secret.SecretMeta, error) {
-	return nil, nil
-}
-
 func (f *fakeSecretBackend) Resolve(context.Context, string, string, string, *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	return nil, nil
 }

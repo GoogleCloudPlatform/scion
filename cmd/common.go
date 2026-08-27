@@ -503,7 +503,8 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		if err == nil {
 			for _, a := range agents {
 				if strings.EqualFold(a.Name, agentName) || a.ID == agentName || strings.EqualFold(strings.TrimPrefix(a.Name, "/"), agentName) {
-					isRunning := a.Phase == string(state.PhaseRunning)
+					status := strings.ToLower(a.ContainerStatus)
+					isRunning := strings.HasPrefix(status, "up") || status == "running"
 					if isRunning {
 						fmt.Printf("Agent '%s' is already running. Attaching...\n", agentName)
 						return rt.Attach(context.Background(), agentName)

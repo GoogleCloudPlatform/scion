@@ -45,19 +45,13 @@ interface AccessToken {
 
 const AVAILABLE_SCOPES = [
   { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
-  {
-    value: 'agent:dispatch',
-    label: 'agent:dispatch',
-    description: 'Dispatch agents (create + start)',
-  },
+  { value: 'project:update', label: 'project:update', description: 'Update projects' },
   { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
   { value: 'agent:list', label: 'agent:list', description: 'List agents in the project' },
   { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
-  { value: 'agent:start', label: 'agent:start', description: 'Start/restart agents' },
-  { value: 'agent:stop', label: 'agent:stop', description: 'Stop agents' },
   { value: 'agent:delete', label: 'agent:delete', description: 'Delete agents' },
-  { value: 'agent:message', label: 'agent:message', description: 'Send messages to agents' },
   { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
+  { value: 'agent:port_access', label: 'agent:port_access', description: 'Access forwarded ports' },
   {
     value: 'agent:manage',
     label: 'agent:manage',

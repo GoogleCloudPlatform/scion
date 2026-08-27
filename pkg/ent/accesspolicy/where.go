@@ -801,6 +801,26 @@ func OriginContainsFold(v string) predicate.AccessPolicy {
 	return predicate.AccessPolicy(sql.FieldContainsFold(FieldOrigin, v))
 }
 
+// PolicyKindEQ applies the EQ predicate on the "policy_kind" field.
+func PolicyKindEQ(v PolicyKind) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldEQ(FieldPolicyKind, v))
+}
+
+// PolicyKindNEQ applies the NEQ predicate on the "policy_kind" field.
+func PolicyKindNEQ(v PolicyKind) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldNEQ(FieldPolicyKind, v))
+}
+
+// PolicyKindIn applies the In predicate on the "policy_kind" field.
+func PolicyKindIn(vs ...PolicyKind) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldIn(FieldPolicyKind, vs...))
+}
+
+// PolicyKindNotIn applies the NotIn predicate on the "policy_kind" field.
+func PolicyKindNotIn(vs ...PolicyKind) predicate.AccessPolicy {
+	return predicate.AccessPolicy(sql.FieldNotIn(FieldPolicyKind, vs...))
+}
+
 // HasBindings applies the HasEdge predicate on the "bindings" edge.
 func HasBindings() predicate.AccessPolicy {
 	return predicate.AccessPolicy(func(s *sql.Selector) {

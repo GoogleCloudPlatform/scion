@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -276,6 +277,10 @@ type ServerConfig struct {
 	// operator must opt out explicitly via server.native_chat.enabled.
 	// Read through Server.nativeChatEnabled(), never directly.
 	NativeChatEnabled *bool
+
+	// AuditRetentionDays is the number of days to retain authorization audit records.
+	// Default: 90. Used by CleanupAuditRecords for periodic retention cleanup.
+	AuditRetentionDays int
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -868,6 +873,12 @@ type Server struct {
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
 
+	// demotionSafe is set to true when ReconcileSuperAdminBindings completes
+	// with a non-empty intended admin set. Zero value (false) means "do NOT
+	// demote" — every early return, error path, or "reconciler never ran" case
+	// fails closed. The login path (getUserRole) checks this before demoting.
+	demotionSafe atomic.Bool
+
 	imageChecker *imagecheck.Checker
 	imageManager imageManager
 	brokerClient *HybridBrokerClient
@@ -1035,6 +1046,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Warn("Failed to initialize agent token service", "error", err)
 	} else {
 		srv.agentTokenService = tokenService
+		// Wire credential recorder and checker so issued tokens are persisted
+		// for revocation, and RefreshAgentToken can verify revocation status.
+		credAdapter := &storeCredentialRecorder{store: s}
+		tokenService.SetCredentialRecorder(credAdapter)
+		tokenService.SetCredentialChecker(credAdapter)
 		fp := sha256.Sum256(tokenService.config.SigningKey)
 		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
@@ -1239,6 +1255,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize authorization service
 	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
 
+	// Wire decision audit emitter
+	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
+	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
+
 	// Wire the caller-permission checker for agent service-account assignment.
 	//
 	// GCP IAM check mode: read from config, default to "off" (Q1 ruling).
@@ -1320,6 +1340,27 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// would silently lose assign when the gate moves to ActionAssign.
 	backfillProjectAssignPolicies(ctx, s)
 
+	// Seed role definitions for the role-binding authorization model (Phase 1E).
+	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
+	seedRoleDefinitions(ctx, s)
+
+	// Backfill role bindings from existing User.Role and project group memberships.
+	// Must run after seedRoleDefinitions so the role definitions exist.
+	if err := BackfillRoleBindings(ctx, s); err != nil {
+		slog.Warn("failed to backfill role bindings", "error", err)
+	}
+
+	// Reconcile super-admin bindings: ensure User.Role == "admin" and
+	// system-scoped super-admin role bindings are consistent (Phase 1F).
+	// Must run after BackfillRoleBindings.
+	// D11: pass AdminEmails to enable bidirectional convergence (demotion).
+	// Revocation latency: takes effect on this restart; documented in commit.
+	if demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails); err != nil {
+		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
+	} else {
+		srv.demotionSafe.Store(demotionSafe)
+	}
+
 	// Seed the dev user when dev-auth is enabled so that Ent FK constraints
 	// on owner_id are satisfied when the dev user creates projects/groups.
 	if cfg.DevAuthToken != "" {
@@ -1391,6 +1432,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		TrustedProxies:     cfg.TrustedProxies,
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
+		CredentialStore:    s,
 		AuthMode:           cfg.AuthMode,
 		Debug:              cfg.Debug,
 		Logger:             srv.authLog,
@@ -2108,35 +2150,6 @@ func (s *Server) HubName() string {
 	return s.config.HubName
 }
 
-// AdminEmails returns the current admin email list. The returned slice is a
-// defensive copy — callers may iterate safely without holding s.mu.
-// Implements AccessSettingsProvider.
-func (s *Server) AdminEmails() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]string, len(s.config.AdminEmails))
-	copy(result, s.config.AdminEmails)
-	return result
-}
-
-// AuthorizedDomains returns the current authorized domain list. The returned
-// slice is a defensive copy. Implements AccessSettingsProvider.
-func (s *Server) AuthorizedDomains() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]string, len(s.config.AuthorizedDomains))
-	copy(result, s.config.AuthorizedDomains)
-	return result
-}
-
-// UserAccessMode returns the current user access mode. Thread-safe.
-// Implements AccessSettingsProvider.
-func (s *Server) UserAccessMode() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.config.UserAccessMode
-}
-
 // SetSecretBackend sets the secret backend for pluggable secret storage.
 func (s *Server) SetSecretBackend(b secret.SecretBackend) {
 	s.mu.Lock()
@@ -2264,6 +2277,12 @@ func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
 // GetMaintenanceState returns the runtime maintenance state.
 func (s *Server) GetMaintenanceState() *MaintenanceState {
 	return s.maintenance
+}
+
+// GetDemotionSafe returns a pointer to the process-level demotionSafe flag so
+// it can be shared with the WebServer for proxy-auth login paths.
+func (s *Server) GetDemotionSafe() *atomic.Bool {
+	return &s.demotionSafe
 }
 
 // SetEventPublisher sets the event publisher for real-time SSE updates.
@@ -2602,6 +2621,19 @@ func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string
 	return tokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)
 }
 
+// storeCredentialRecorder adapts store.AgentCredentialStore to CredentialRecorder.
+type storeCredentialRecorder struct {
+	store store.AgentCredentialStore
+}
+
+func (r *storeCredentialRecorder) RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
+	return r.store.CreateAgentCredential(ctx, cred)
+}
+
+func (r *storeCredentialRecorder) GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*store.AgentCredential, error) {
+	return r.store.GetAgentCredentialByJTIHash(ctx, jtiHash)
+}
+
 // agentHeartbeatTimeoutHandler returns a recurring handler function that marks
 // agents as offline when their last heartbeat exceeds a 2-minute threshold.
 // It publishes status events for each affected agent so SSE subscribers and the
@@ -2864,12 +2896,49 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
 		scopes := append(ScopesForRole(role), additionalScopes...)
+		hasCreate := false
 		for _, scope := range scopes {
 			if scope == ScopeAgentCreate {
-				return true, nil
+				hasCreate = true
+				break
 			}
 		}
-		return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
+		if !hasCreate {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
+		}
+
+		// CanDelegate check (Phase 1F): at fire time, verify the creator
+		// agent still holds the scopes it would delegate to the new agent.
+		if s.authzService != nil {
+			agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
+				Claims:    jwt.Claims{Subject: creator.ID},
+				ProjectID: creator.ProjectID,
+				Scopes:    scopes,
+			}}
+			grantDesc := GrantDescriptor{
+				Type:      GrantTypeAgentDelegation,
+				AgentRole: string(role),
+				ProjectID: evt.ProjectID,
+				ScopeType: store.RoleScopeProject,
+				ScopeID:   evt.ProjectID,
+			}
+			delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
+			if !delegateDecision.Allowed {
+				s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+					MutationType:       "agent_delegation",
+					ActorPrincipalKind: "agent",
+					ActorPrincipalID:   creator.ID,
+					TargetType:         "scheduled_dispatch",
+					TargetID:           evt.ID,
+					CanDelegateResult:  "deny",
+					CanDelegateReason:  delegateDecision.Reason,
+				})
+				return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
+					evt.CreatedBy, delegateDecision.Reason)
+			}
+		}
+
+		return true, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return false, fmt.Errorf("failed to resolve scheduled dispatch creator agent %q: %w", evt.CreatedBy, err)
 	}
@@ -2898,6 +2967,33 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
 			evt.CreatedBy, evt.ProjectID, decision.Reason)
 	}
+
+	// CanDelegate check (Phase 1F): at fire time, re-resolve the user's
+	// current permissions and check they still cover the agent being dispatched.
+	if s.authzService != nil {
+		grantDesc := GrantDescriptor{
+			Type:      GrantTypeAgentDelegation,
+			AgentRole: string(AgentRoleFull), // scheduled dispatch uses the default role
+			ProjectID: evt.ProjectID,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   evt.ProjectID,
+		}
+		delegateDecision := s.authzService.CanDelegate(ctx, identity, grantDesc)
+		if !delegateDecision.Allowed {
+			s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+				MutationType:       "agent_delegation",
+				ActorPrincipalKind: "user",
+				ActorPrincipalID:   user.ID,
+				TargetType:         "scheduled_dispatch",
+				TargetID:           evt.ID,
+				CanDelegateResult:  "deny",
+				CanDelegateReason:  delegateDecision.Reason,
+			})
+			return false, fmt.Errorf("scheduled dispatch creator user %q failed CanDelegate at fire time: %s",
+				evt.CreatedBy, delegateDecision.Reason)
+		}
+	}
+
 	return true, nil
 }
 
@@ -3013,17 +3109,6 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			}
 		}
 
-		// Global fallback: try resolving a template named "default" when no
-		// name arrived from the payload, the project annotation, or the hub
-		// operational defaults. Twin of the rung on the agent-create path in
-		// handlers_agents_core.go — design §5.2 risk (d) applies.
-		templateFromImplicitDefault := false
-		if payload.Template == "" {
-			payload.Template = "default"
-			agent.Template = "default"
-			templateFromImplicitDefault = true
-		}
-
 		// Resolve template if specified
 		if payload.Template != "" {
 			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
@@ -3058,16 +3143,6 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			if templateFromHubDefault && tmpl == nil &&
 				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
 				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, "not found")
-				payload.Template = ""
-				agent.Template = ""
-			}
-			if templateFromImplicitDefault && tmpl == nil &&
-				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
-				// The implicit "default" fallback template doesn't exist —
-				// this is normal on hubs that haven't created one. Continue
-				// with no template. No warning: unlike a hub default (which
-				// is operator-configured and should resolve), the implicit
-				// fallback is speculative.
 				payload.Template = ""
 				agent.Template = ""
 			}
@@ -3116,6 +3191,22 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
+
+		// Record delegation edge (Phase 1G) from the schedule creator to the
+		// dispatched agent. Best-effort: log errors but do not fail dispatch.
+		// Determine delegator type by looking up whether the creator is an agent.
+		delegatorType := store.DelegationPrincipalUser
+		if _, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
+			delegatorType = store.DelegationPrincipalAgent
+		}
+		// Use the agent's actual effective role from its applied config,
+		// not AgentRoleNone. The edge role is used for audit and for
+		// frozen-ceiling decisions on orphaned delegations.
+		edgeRole := string(AgentRoleNone)
+		if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
+			edgeRole = agent.AppliedConfig.AgentRole
+		}
+		s.recordDelegationEdgeWithType(ctx, agent.ID, evt.ProjectID, edgeRole, delegatorType, evt.CreatedBy)
 
 		// Dispatch to runtime broker
 		dispatcher := s.GetDispatcher()
@@ -3464,6 +3555,7 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			s.ctxCancel()
 		}
 
+		// Wait for in-flight audit goroutines.
 		if cc != nil {
 			cc.Shutdown()
 		}
@@ -3522,49 +3614,49 @@ func (s *Server) Handler() http.Handler {
 // registerRoutes sets up all API routes.
 func (s *Server) registerRoutes() {
 	// Health and metrics endpoints
-	s.mux.HandleFunc("/healthz", s.handleHealthz)
-	s.mux.HandleFunc("/readyz", s.handleReadyz)
-	s.mux.HandleFunc("/metrics", s.handleMetrics)
+	s.mux.HandleFunc("/healthz", s.guarded("/healthz", s.handleHealthz))
+	s.mux.HandleFunc("/readyz", s.guarded("/readyz", s.handleReadyz))
+	s.mux.HandleFunc("/metrics", s.guarded("/metrics", s.handleMetrics))
 
 	// Authentication endpoints (these routes are handled specially in middleware)
-	s.mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
-	s.mux.HandleFunc("/api/v1/auth/token", s.handleAuthToken)
-	s.mux.HandleFunc("/api/v1/auth/refresh", s.handleAuthRefresh)
-	s.mux.HandleFunc("/api/v1/auth/validate", s.handleAuthValidate)
-	s.mux.HandleFunc("/api/v1/auth/logout", s.handleAuthLogout)
-	s.mux.HandleFunc("/api/v1/auth/me", s.handleAuthMe)
-	s.mux.HandleFunc("/api/v1/auth/tokens", s.handleTokens)
-	s.mux.HandleFunc("/api/v1/auth/tokens/", s.handleTokenByID)
-	s.mux.HandleFunc("/api/v1/auth/providers", s.handleCLIAuthProviders)
+	s.mux.HandleFunc("/api/v1/auth/login", s.guarded("/api/v1/auth/login", s.handleAuthLogin))
+	s.mux.HandleFunc("/api/v1/auth/token", s.guarded("/api/v1/auth/token", s.handleAuthToken))
+	s.mux.HandleFunc("/api/v1/auth/refresh", s.guarded("/api/v1/auth/refresh", s.handleAuthRefresh))
+	s.mux.HandleFunc("/api/v1/auth/validate", s.guarded("/api/v1/auth/validate", s.handleAuthValidate))
+	s.mux.HandleFunc("/api/v1/auth/logout", s.guarded("/api/v1/auth/logout", s.handleAuthLogout))
+	s.mux.HandleFunc("/api/v1/auth/me", s.guarded("/api/v1/auth/me", s.handleAuthMe))
+	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
+	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
+	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
 	// CLI OAuth endpoints (unauthenticated - used for login)
-	s.mux.HandleFunc("/api/v1/auth/invite/redeem", s.handleInviteRedeem)
-	s.mux.HandleFunc("/api/v1/auth/cli/authorize", s.handleCLIAuthAuthorize)
-	s.mux.HandleFunc("/api/v1/auth/cli/token", s.handleCLIAuthToken)
-	s.mux.HandleFunc("/api/v1/auth/cli/device", s.handleCLIDeviceAuthorize)
-	s.mux.HandleFunc("/api/v1/auth/cli/device/token", s.handleCLIDeviceToken)
+	s.mux.HandleFunc("/api/v1/auth/invite/redeem", s.guarded("/api/v1/auth/invite/redeem", s.handleInviteRedeem))
+	s.mux.HandleFunc("/api/v1/auth/cli/authorize", s.guarded("/api/v1/auth/cli/authorize", s.handleCLIAuthAuthorize))
+	s.mux.HandleFunc("/api/v1/auth/cli/token", s.guarded("/api/v1/auth/cli/token", s.handleCLIAuthToken))
+	s.mux.HandleFunc("/api/v1/auth/cli/device", s.guarded("/api/v1/auth/cli/device", s.handleCLIDeviceAuthorize))
+	s.mux.HandleFunc("/api/v1/auth/cli/device/token", s.guarded("/api/v1/auth/cli/device/token", s.handleCLIDeviceToken))
 
 	// API v1 routes
-	s.mux.HandleFunc("/api/v1/agents", s.handleAgents)
-	s.mux.HandleFunc("/api/v1/agents/", s.handleAgentByID)
+	s.mux.HandleFunc("/api/v1/agents", s.guarded("/api/v1/agents", s.handleAgents))
+	s.mux.HandleFunc("/api/v1/agents/", s.guarded("/api/v1/agents/", s.handleAgentByID))
 
-	s.mux.HandleFunc("/api/v1/projects", s.handleProjects)
-	s.mux.HandleFunc("/api/v1/projects/register", s.handleProjectRegister)
+	s.mux.HandleFunc("/api/v1/projects", s.guarded("/api/v1/projects", s.handleProjects))
+	s.mux.HandleFunc("/api/v1/projects/register", s.guarded("/api/v1/projects/register", s.handleProjectRegister))
 	// Project-nested routes: /api/v1/projects/{projectId}/agents, /api/v1/projects/{projectId}/env, etc.
 	// This handler must come before the generic project-by-id handler
-	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectRoutes)
+	s.mux.HandleFunc("/api/v1/projects/", s.guarded("/api/v1/projects/", s.handleProjectRoutes))
 
 	// Legacy /api/v1/groves aliases are external compatibility adapters for
 	// the canonical /api/v1/projects handlers.
-	s.mux.HandleFunc("/api/v1/groves", s.handleLegacyGroveRoute(s.handleProjects))
-	s.mux.HandleFunc("/api/v1/groves/register", s.handleLegacyGroveRoute(s.handleProjectRegister))
-	s.mux.HandleFunc("/api/v1/groves/", s.handleLegacyGroveRoute(s.handleProjectRoutes))
+	s.mux.HandleFunc("/api/v1/groves", s.guarded("/api/v1/groves", s.handleLegacyGroveRoute(s.handleProjects)))
+	s.mux.HandleFunc("/api/v1/groves/register", s.guarded("/api/v1/groves/register", s.handleLegacyGroveRoute(s.handleProjectRegister)))
+	s.mux.HandleFunc("/api/v1/groves/", s.guarded("/api/v1/groves/", s.handleLegacyGroveRoute(s.handleProjectRoutes)))
 
-	s.mux.HandleFunc("/api/v1/runtime-brokers", s.handleRuntimeBrokers)
-	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes)
+	s.mux.HandleFunc("/api/v1/runtime-brokers", s.guarded("/api/v1/runtime-brokers", s.handleRuntimeBrokers))
+	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.guarded("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes))
 
-	s.mux.HandleFunc("/api/v1/templates", s.handleTemplatesV2)
-	s.mux.HandleFunc("/api/v1/templates/", s.handleTemplateByIDV2)
+	s.mux.HandleFunc("/api/v1/templates", s.guarded("/api/v1/templates", s.handleTemplatesV2))
+	s.mux.HandleFunc("/api/v1/templates/", s.guarded("/api/v1/templates/", s.handleTemplateByIDV2))
 
 	// Scope-addressed service accounts. The project-nested routes under
 	// /api/v1/projects/{id}/gcp-service-accounts remain registered and
@@ -3577,115 +3669,119 @@ func (s *Server) registerRoutes() {
 	// that have none. P4 registered the collection alone because it only
 	// needed to list; P5 needs to view, re-verify and delete a hub-scoped
 	// account from a UI and a CLI that are not inside any project.
-	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts)
-	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID)
+	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.guarded("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts))
+	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.guarded("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID))
 
-	s.mux.HandleFunc("/api/v1/skills", s.handleSkills)
-	s.mux.HandleFunc("/api/v1/skills/", s.handleSkillByID)
+	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
+	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
 
-	s.mux.HandleFunc("/api/v1/skill-registries", s.handleSkillRegistries)
-	s.mux.HandleFunc("/api/v1/skill-registries/", s.handleSkillRegistryByID)
+	s.mux.HandleFunc("/api/v1/skill-registries", s.guarded("/api/v1/skill-registries", s.handleSkillRegistries))
+	s.mux.HandleFunc("/api/v1/skill-registries/", s.guarded("/api/v1/skill-registries/", s.handleSkillRegistryByID))
 
-	s.mux.HandleFunc("/api/v1/harness-configs", s.handleHarnessConfigs)
-	s.mux.HandleFunc("/api/v1/harness-configs/", s.handleHarnessConfigByID)
+	s.mux.HandleFunc("/api/v1/harness-configs", s.guarded("/api/v1/harness-configs", s.handleHarnessConfigs))
+	s.mux.HandleFunc("/api/v1/harness-configs/", s.guarded("/api/v1/harness-configs/", s.handleHarnessConfigByID))
 
 	// Hub-scoped pre-start hooks. The project-scoped equivalents live under
 	// /api/v1/projects/{projectId}/pre-start-hooks (see handleProjectRoutes).
-	s.mux.HandleFunc("/api/v1/pre-start-hooks", s.handleHubPreStartHooks)
-	s.mux.HandleFunc("/api/v1/pre-start-hooks/", s.handleHubPreStartHookByID)
+	s.mux.HandleFunc("/api/v1/pre-start-hooks", s.guarded("/api/v1/pre-start-hooks", s.handleHubPreStartHooks))
+	s.mux.HandleFunc("/api/v1/pre-start-hooks/", s.guarded("/api/v1/pre-start-hooks/", s.handleHubPreStartHookByID))
 
-	s.mux.HandleFunc("/api/v1/users", s.handleUsers)
-	s.mux.HandleFunc("/api/v1/users/", s.handleUserByID)
+	s.mux.HandleFunc("/api/v1/users", s.guarded("/api/v1/users", s.handleUsers))
+	s.mux.HandleFunc("/api/v1/users/", s.guarded("/api/v1/users/", s.handleUserByID))
 
 	// Environment variables and secrets (generic endpoints)
-	s.mux.HandleFunc("/api/v1/env", s.handleEnvVars)
-	s.mux.HandleFunc("/api/v1/env/", s.handleEnvVarByKey)
-	s.mux.HandleFunc("/api/v1/secrets", s.handleSecrets)
-	s.mux.HandleFunc("/api/v1/secrets/", s.handleSecretByKey)
+	s.mux.HandleFunc("/api/v1/env", s.guarded("/api/v1/env", s.handleEnvVars))
+	s.mux.HandleFunc("/api/v1/env/", s.guarded("/api/v1/env/", s.handleEnvVarByKey))
+	s.mux.HandleFunc("/api/v1/secrets", s.guarded("/api/v1/secrets", s.handleSecrets))
+	s.mux.HandleFunc("/api/v1/secrets/", s.guarded("/api/v1/secrets/", s.handleSecretByKey))
 
 	// Session metrics (DB-backed, distinct from Cloud Monitoring metrics dashboard)
-	s.mux.HandleFunc("/api/v1/metrics/session/", s.handleSessionMetrics)
+	s.mux.HandleFunc("/api/v1/metrics/session/", s.guarded("/api/v1/metrics/session/", s.handleSessionMetrics))
 
 	// Groups and Policies (Hub Permissions System)
-	s.mux.HandleFunc("/api/v1/groups", s.handleGroups)
-	s.mux.HandleFunc("/api/v1/groups/", s.handleGroupRoutes)
-	s.mux.HandleFunc("/api/v1/policies", s.requireAdminHandler(s.handlePolicies))
-	s.mux.HandleFunc("/api/v1/policies/", s.requireAdminHandler(s.handlePolicyRoutes))
+	s.mux.HandleFunc("/api/v1/groups", s.guarded("/api/v1/groups", s.handleGroups))
+	s.mux.HandleFunc("/api/v1/groups/", s.guarded("/api/v1/groups/", s.handleGroupRoutes))
+	// Policy routes: declarative guard enforces hub-admin; handler-local checks remain as defense-in-depth.
+	s.mux.HandleFunc("/api/v1/policies", s.guarded("/api/v1/policies", s.handlePolicies))
+	s.mux.HandleFunc("/api/v1/policies/", s.guarded("/api/v1/policies/", s.handlePolicyRoutes))
+
+	// Authorization explain endpoint
+	s.mux.HandleFunc("/api/v1/authz/explain", s.guarded("/api/v1/authz/explain", s.handleAuthzExplain))
 
 	// Principal resolution endpoints (Phase 4)
-	s.mux.HandleFunc("/api/v1/users/me/groups", s.handleMyGroups)
-	s.mux.HandleFunc("/api/v1/principals/", s.handlePrincipalRoutes)
+	s.mux.HandleFunc("/api/v1/users/me/groups", s.guarded("/api/v1/users/me/groups", s.handleMyGroups))
+	s.mux.HandleFunc("/api/v1/principals/", s.guarded("/api/v1/principals/", s.handlePrincipalRoutes))
 
 	// User-scoped injected-skills endpoints (/users/me/...)
-	s.mux.HandleFunc("/api/v1/users/me/injected-skills", s.handleUserMeInjectedSkills)
-	s.mux.HandleFunc("/api/v1/users/me/injected-skills/", func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("/api/v1/users/me/injected-skills", s.guarded("/api/v1/users/me/injected-skills", s.handleUserMeInjectedSkills))
+	s.mux.HandleFunc("/api/v1/users/me/injected-skills/", s.guarded("/api/v1/users/me/injected-skills/", func(w http.ResponseWriter, r *http.Request) {
 		entryID := strings.TrimPrefix(r.URL.Path, "/api/v1/users/me/injected-skills/")
 		entryID = strings.TrimSuffix(entryID, "/")
 		s.handleUserMeInjectedSkillByID(w, r, entryID)
-	})
+	}))
 
 	// User-scoped template endpoints (/users/me/templates)
-	s.mux.HandleFunc("/api/v1/users/me/templates", s.handleUserMeTemplates)
-	s.mux.HandleFunc("/api/v1/users/me/templates/", func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("/api/v1/users/me/templates", s.guarded("/api/v1/users/me/templates", s.handleUserMeTemplates))
+	s.mux.HandleFunc("/api/v1/users/me/templates/", s.guarded("/api/v1/users/me/templates/", func(w http.ResponseWriter, r *http.Request) {
 		templateID := strings.TrimPrefix(r.URL.Path, "/api/v1/users/me/templates/")
 		templateID = strings.TrimSuffix(templateID, "/")
 		s.handleUserMeTemplateByID(w, r, templateID)
-	})
+	}))
 
 	// Hub-scope injected-skills endpoint
-	s.mux.HandleFunc("/api/v1/hub/settings/injected-skills", s.handleHubInjectedSkills)
+	s.mux.HandleFunc("/api/v1/hub/settings/injected-skills", s.guarded("/api/v1/hub/settings/injected-skills", s.handleHubInjectedSkills))
 
 	// Broker registration endpoints (Runtime Broker HMAC authentication)
-	s.mux.HandleFunc("/api/v1/brokers", s.handleBrokersEndpoint)
-	s.mux.HandleFunc("/api/v1/brokers/join", s.handleBrokerJoin)
-	s.mux.HandleFunc("/api/v1/brokers/", s.handleBrokerByIDRoutes)
+	s.mux.HandleFunc("/api/v1/brokers", s.guarded("/api/v1/brokers", s.handleBrokersEndpoint))
+	s.mux.HandleFunc("/api/v1/brokers/join", s.guarded("/api/v1/brokers/join", s.handleBrokerJoin))
+	s.mux.HandleFunc("/api/v1/brokers/", s.guarded("/api/v1/brokers/", s.handleBrokerByIDRoutes))
 
 	// Broker plugin inbound message delivery
-	s.mux.HandleFunc("/api/v1/broker/inbound", s.handleBrokerInbound)
+	s.mux.HandleFunc("/api/v1/broker/inbound", s.guarded("/api/v1/broker/inbound", s.handleBrokerInbound))
 
 	// Broker plugin project listing (fresh list for /setup flows)
-	s.mux.HandleFunc("/api/v1/broker/projects", s.handleBrokerProjects)
+	s.mux.HandleFunc("/api/v1/broker/projects", s.guarded("/api/v1/broker/projects", s.handleBrokerProjects))
 
-	// Admin system endpoints
-	s.mux.HandleFunc("/api/v1/admin/maintenance", s.requireAdminHandler(s.handleAdminMaintenance))
-	s.mux.HandleFunc("/api/v1/admin/maintenance/operations", s.requireAdminHandler(s.handleAdminMaintenanceOps))
-	s.mux.HandleFunc("/api/v1/admin/maintenance/operations/", s.requireAdminHandler(s.handleAdminMaintenanceOps))
-	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.requireAdminHandler(s.handleAdminMaintenanceMigrations))
-	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.requireAdminHandler(s.handleCheckForUpdates))
-	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.requireAdminHandler(s.handleAdminRestart))
-	s.mux.HandleFunc("/api/v1/admin/scheduler", s.requireAdminHandler(s.handleAdminScheduler))
-	s.mux.HandleFunc("/api/v1/admin/allow-list", s.requireAdminHandler(s.handleAdminAllowList))
-	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.requireAdminHandler(s.handleAdminAllowListByEmail))
-	s.mux.HandleFunc("/api/v1/admin/users/invite/bulk", s.requireAdminHandler(s.handleAdminUserInviteBulk))
-	s.mux.HandleFunc("/api/v1/admin/users/invite", s.requireAdminHandler(s.handleAdminUserInvite))
-	s.mux.HandleFunc("/api/v1/admin/invites", s.requireAdminHandler(s.handleAdminInvites))
-	s.mux.HandleFunc("/api/v1/admin/invites/", s.requireAdminHandler(s.handleAdminInviteByID))
-	s.mux.HandleFunc("/api/v1/admin/server-config/schema", s.requireAdminHandler(s.handleAdminServerConfigSchema))
-	s.mux.HandleFunc("/api/v1/admin/server-config/sections/", s.requireAdminHandler(s.handleAdminServerConfigSectionReset))
-	s.mux.HandleFunc("/api/v1/admin/server-config", s.requireAdminHandler(s.handleAdminServerConfig))
-	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.requireAdminHandler(s.handleAdminProjectDefaults))
-	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.requireAdminHandler(s.handleAdminResetAuthAll))
-	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.requireAdminHandler(s.handleAdminGCPQuota))
-	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.requireAdminHandler(s.handleAdminLifecycleHooks))
-	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.requireAdminHandler(s.handleAdminLifecycleHookByID))
-	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.requireAdminHandler(s.handleAdminValidateResources))
-	s.mux.HandleFunc("/api/v1/admin/integrations", s.requireAdminHandler(s.handleAdminIntegrations))
-	s.mux.HandleFunc("/api/v1/admin/integrations/teams/manifest", s.requireAdminHandler(s.handleTeamsManifestDownload))
-	s.mux.HandleFunc("/api/v1/admin/integrations/", s.requireAdminHandler(s.handleAdminIntegrationByName))
-	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs/stream", s.requireAdminHandler(s.handleDiagnosticsLogsStream))
-	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs", s.requireAdminHandler(s.handleDiagnosticsLogs))
-	s.mux.HandleFunc("/api/v1/admin/health/summary", s.requireAdminHandler(s.handleHealthSummary))
-	s.mux.HandleFunc("/api/v1/metrics/", s.requireAdminHandler(s.handleMetricsDashboard))
-	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.requireAdminHandler(s.handleAdminMetricsDashboard)) // legacy backward-compat
+	// Admin system endpoints: declarative guard enforces hub-admin; handler-local checks remain as defense-in-depth.
+	s.mux.HandleFunc("/api/v1/admin/maintenance", s.guarded("/api/v1/admin/maintenance", s.handleAdminMaintenance))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/operations", s.guarded("/api/v1/admin/maintenance/operations", s.handleAdminMaintenanceOps))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/operations/", s.guarded("/api/v1/admin/maintenance/operations/", s.handleAdminMaintenanceOps))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.guarded("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.guarded("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
+	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
+	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
+	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.guarded("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail))
+	s.mux.HandleFunc("/api/v1/admin/users/invite/bulk", s.guarded("/api/v1/admin/users/invite/bulk", s.handleAdminUserInviteBulk))
+	s.mux.HandleFunc("/api/v1/admin/users/invite", s.guarded("/api/v1/admin/users/invite", s.handleAdminUserInvite))
+	s.mux.HandleFunc("/api/v1/admin/invites", s.guarded("/api/v1/admin/invites", s.handleAdminInvites))
+	s.mux.HandleFunc("/api/v1/admin/invites/", s.guarded("/api/v1/admin/invites/", s.handleAdminInviteByID))
+	s.mux.HandleFunc("/api/v1/admin/server-config/schema", s.guarded("/api/v1/admin/server-config/schema", s.handleAdminServerConfigSchema))
+	s.mux.HandleFunc("/api/v1/admin/server-config/sections/", s.guarded("/api/v1/admin/server-config/sections/", s.handleAdminServerConfigSectionReset))
+	s.mux.HandleFunc("/api/v1/admin/server-config", s.guarded("/api/v1/admin/server-config", s.handleAdminServerConfig))
+	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
+	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
+	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
+	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
+	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.guarded("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID))
+	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.guarded("/api/v1/admin/validate-resources", s.handleAdminValidateResources))
+	s.mux.HandleFunc("/api/v1/admin/integrations", s.guarded("/api/v1/admin/integrations", s.handleAdminIntegrations))
+	s.mux.HandleFunc("/api/v1/admin/integrations/teams/manifest", s.guarded("/api/v1/admin/integrations/teams/manifest", s.handleTeamsManifestDownload))
+	s.mux.HandleFunc("/api/v1/admin/integrations/", s.guarded("/api/v1/admin/integrations/", s.handleAdminIntegrationByName))
+	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs/stream", s.guarded("/api/v1/admin/diagnostics/logs/stream", s.handleDiagnosticsLogsStream))
+	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs", s.guarded("/api/v1/admin/diagnostics/logs", s.handleDiagnosticsLogs))
+	s.mux.HandleFunc("/api/v1/admin/health/summary", s.guarded("/api/v1/admin/health/summary", s.handleHealthSummary))
+	s.mux.HandleFunc("/api/v1/metrics/", s.guarded("/api/v1/metrics/", s.handleMetricsDashboard))
+	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.guarded("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard)) // legacy backward-compat
 
 	// Notification endpoints (user-facing)
-	s.mux.HandleFunc("/api/v1/notifications", s.handleNotifications)
-	s.mux.HandleFunc("/api/v1/notifications/", s.handleNotificationRoutes)
+	s.mux.HandleFunc("/api/v1/notifications", s.guarded("/api/v1/notifications", s.handleNotifications))
+	s.mux.HandleFunc("/api/v1/notifications/", s.guarded("/api/v1/notifications/", s.handleNotificationRoutes))
 
 	// Message inbox endpoints (user-facing)
-	s.mux.HandleFunc("/api/v1/messages", s.handleMessages)
-	s.mux.HandleFunc("/api/v1/messages/", s.handleMessageRoutes)
-	s.mux.HandleFunc("/api/v1/message-channels", s.handleMessageChannels)
+	s.mux.HandleFunc("/api/v1/messages", s.guarded("/api/v1/messages", s.handleMessages))
+	s.mux.HandleFunc("/api/v1/messages/", s.guarded("/api/v1/messages/", s.handleMessageRoutes))
+	s.mux.HandleFunc("/api/v1/message-channels", s.guarded("/api/v1/message-channels", s.handleMessageChannels))
 
 	// Native chat endpoints. Registration is gated on server.native_chat.enabled,
 	// so disabling the feature makes every /api/v1/chat/* path 404 rather than
@@ -3693,93 +3789,93 @@ func (s *Server) registerRoutes() {
 	// flipping the toggle requires a hub restart (same as the message broker).
 	if s.nativeChatEnabled() {
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
-		s.mux.HandleFunc("/api/v1/chat/prefs", s.handleChatPrefs)
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
 
 		// Chat thread endpoints (Phase 5 — thread rail, legacy)
-		s.mux.HandleFunc("/api/v1/chat/threads", s.handleChatThreads)
-		s.mux.HandleFunc("/api/v1/chat/threads/", s.handleChatThreadRoutes)
+		s.mux.HandleFunc("/api/v1/chat/threads", s.guarded("/api/v1/chat/threads", s.handleChatThreads))
+		s.mux.HandleFunc("/api/v1/chat/threads/", s.guarded("/api/v1/chat/threads/", s.handleChatThreadRoutes))
 
 		// Wave-2 chat endpoints (conversation REST API)
-		s.mux.HandleFunc("/api/v1/chat/spaces", s.handleChatSpaces)
-		s.mux.HandleFunc("/api/v1/chat/spaces/", s.handleChatSpaceRoutes)
-		s.mux.HandleFunc("/api/v1/chat/conversations/", s.handleChatConversationRoutes)
-		s.mux.HandleFunc("/api/v1/chat/topics/", s.handleChatTopicRoutes)
-		s.mux.HandleFunc("/api/v1/chat/dms", s.handleChatDMs)
-		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.handleChatUserPrefs)
-		s.mux.HandleFunc("/api/v1/chat/presence", s.handleChatPresence)
-		s.mux.HandleFunc("/api/v1/chat/search", s.handleChatSearch)
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.handleChatAttachments)
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.handleChatAttachmentByID)
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
+		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
+		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
+		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.handleChatAttachments))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.handleChatAttachmentByID))
 	}
 
 	// WebSocket control channel endpoint for Runtime Brokers
-	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)
+	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.guarded("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect))
 
 	// GCP identity endpoints (agent token auth)
-	s.mux.HandleFunc("/api/v1/agent/gcp-token", s.handleAgentGCPToken)
-	s.mux.HandleFunc("/api/v1/agent/gcp-identity-token", s.handleAgentGCPIdentityToken)
+	s.mux.HandleFunc("/api/v1/agent/gcp-token", s.guarded("/api/v1/agent/gcp-token", s.handleAgentGCPToken))
+	s.mux.HandleFunc("/api/v1/agent/gcp-identity-token", s.guarded("/api/v1/agent/gcp-identity-token", s.handleAgentGCPIdentityToken))
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
-	s.mux.HandleFunc("/api/v1/settings/public", s.handlePublicSettings)
+	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
 
-	// GitHub App integration endpoints
-	s.mux.HandleFunc("/api/v1/github-app", s.requireAdminHandler(s.handleGitHubApp))
-	s.mux.HandleFunc("/api/v1/github-app/installations", s.requireAdminHandler(s.handleGitHubAppInstallations))
-	s.mux.HandleFunc("/api/v1/github-app/installations/", s.requireAdminHandler(s.handleGitHubAppInstallations))
-	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.requireAdminHandler(s.handleGitHubAppDiscover))
-	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.requireAdminHandler(s.handleGitHubAppSyncPermissions))
+	// GitHub App integration endpoints: declarative guard enforces hub-admin.
+	s.mux.HandleFunc("/api/v1/github-app", s.guarded("/api/v1/github-app", s.handleGitHubApp))
+	s.mux.HandleFunc("/api/v1/github-app/installations", s.guarded("/api/v1/github-app/installations", s.handleGitHubAppInstallations))
+	s.mux.HandleFunc("/api/v1/github-app/installations/", s.guarded("/api/v1/github-app/installations/", s.handleGitHubAppInstallations))
+	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.guarded("/api/v1/github-app/installations/discover", s.handleGitHubAppDiscover))
+	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.guarded("/api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
 
 	// Telegram account linking endpoints
-	s.mux.HandleFunc("/api/v1/telegram/link", s.handleTelegramLink)
-	s.mux.HandleFunc("/api/v1/telegram/link/verify", s.handleTelegramLinkVerify)
-	s.mux.HandleFunc("/api/v1/telegram/link/status", s.handleTelegramLinkStatus)
+	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))
+	s.mux.HandleFunc("/api/v1/telegram/link/verify", s.guarded("/api/v1/telegram/link/verify", s.handleTelegramLinkVerify))
+	s.mux.HandleFunc("/api/v1/telegram/link/status", s.guarded("/api/v1/telegram/link/status", s.handleTelegramLinkStatus))
 
 	// Discord account linking endpoints
-	s.mux.HandleFunc("/api/v1/discord/link", s.handleDiscordLink)
-	s.mux.HandleFunc("/api/v1/discord/link/verify", s.handleDiscordLinkVerify)
-	s.mux.HandleFunc("/api/v1/discord/link/status", s.handleDiscordLinkStatus)
+	s.mux.HandleFunc("/api/v1/discord/link", s.guarded("/api/v1/discord/link", s.handleDiscordLink))
+	s.mux.HandleFunc("/api/v1/discord/link/verify", s.guarded("/api/v1/discord/link/verify", s.handleDiscordLinkVerify))
+	s.mux.HandleFunc("/api/v1/discord/link/status", s.guarded("/api/v1/discord/link/status", s.handleDiscordLinkStatus))
 
 	// Teams account linking endpoints
-	s.mux.HandleFunc("/api/v1/teams/link", s.handleTeamsLink)
-	s.mux.HandleFunc("/api/v1/teams/link/verify", s.handleTeamsLinkVerify)
-	s.mux.HandleFunc("/api/v1/teams/link/status", s.handleTeamsLinkStatus)
+	s.mux.HandleFunc("/api/v1/teams/link", s.guarded("/api/v1/teams/link", s.handleTeamsLink))
+	s.mux.HandleFunc("/api/v1/teams/link/verify", s.guarded("/api/v1/teams/link/verify", s.handleTeamsLinkVerify))
+	s.mux.HandleFunc("/api/v1/teams/link/status", s.guarded("/api/v1/teams/link/status", s.handleTeamsLinkStatus))
 
 	// Unified resource import endpoint (templates + harness-configs, global + project)
-	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
-	s.mux.HandleFunc("/api/v1/resources/discover", s.handleResourcesDiscover)
+	s.mux.HandleFunc("/api/v1/resources/import", s.guarded("/api/v1/resources/import", s.handleResourcesImport))
+	s.mux.HandleFunc("/api/v1/resources/discover", s.guarded("/api/v1/resources/discover", s.handleResourcesDiscover))
 
 	// Skill directory discovery (batch-add support for injected skills). Registered
 	// as an exact path so it takes precedence over the /api/v1/skills/ subtree
 	// handler above.
-	s.mux.HandleFunc("/api/v1/skills/discover-directory", s.handleSkillsDiscoverDirectory)
+	s.mux.HandleFunc("/api/v1/skills/discover-directory", s.guarded("/api/v1/skills/discover-directory", s.handleSkillsDiscoverDirectory))
 
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
-	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)
-	s.mux.HandleFunc("/github-app/setup", s.handleGitHubAppSetup)
+	s.mux.HandleFunc("/api/v1/webhooks/github", s.guarded("/api/v1/webhooks/github", s.handleGitHubWebhook))
+	s.mux.HandleFunc("/github-app/setup", s.guarded("/github-app/setup", s.handleGitHubAppSetup))
 
-	// Workstation-only system endpoints
-	s.mux.Handle("/api/v1/system/identity", s.requireWorkstation(http.HandlerFunc(s.handleSystemIdentity)))
-	s.mux.Handle("/api/v1/system/status", s.requireWorkstation(http.HandlerFunc(s.handleSystemStatus)))
-	s.mux.Handle("/api/v1/system/check", s.requireWorkstation(http.HandlerFunc(s.handleSystemCheck)))
-	s.mux.Handle("/api/v1/system/runtime", s.requireWorkstation(http.HandlerFunc(s.handleSystemRuntime)))
-	s.mux.Handle("/api/v1/system/init", s.requireWorkstation(http.HandlerFunc(s.handleSystemInit)))
-	s.mux.Handle("/api/v1/system/images/pull", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesPull)))
-	s.mux.Handle("/api/v1/system/images/build", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesBuild)))
-	s.mux.Handle("/api/v1/system/apple-dns", s.requireWorkstation(http.HandlerFunc(s.handleAppleDNS)))
-	s.mux.Handle("/api/v1/system/registry", s.requireWorkstation(http.HandlerFunc(s.handleSystemRegistry)))
-	s.mux.Handle("/api/v1/system/workstation-settings", s.requireWorkstation(http.HandlerFunc(s.handleWorkstationSettings)))
+	// Workstation-only system endpoints: declarative guard enforces workstation token.
+	s.mux.HandleFunc("/api/v1/system/identity", s.guarded("/api/v1/system/identity", s.handleSystemIdentity))
+	s.mux.HandleFunc("/api/v1/system/status", s.guarded("/api/v1/system/status", s.handleSystemStatus))
+	s.mux.HandleFunc("/api/v1/system/check", s.guarded("/api/v1/system/check", s.handleSystemCheck))
+	s.mux.HandleFunc("/api/v1/system/runtime", s.guarded("/api/v1/system/runtime", s.handleSystemRuntime))
+	s.mux.HandleFunc("/api/v1/system/init", s.guarded("/api/v1/system/init", s.handleSystemInit))
+	s.mux.HandleFunc("/api/v1/system/images/pull", s.guarded("/api/v1/system/images/pull", s.handleSystemImagesPull))
+	s.mux.HandleFunc("/api/v1/system/images/build", s.guarded("/api/v1/system/images/build", s.handleSystemImagesBuild))
+	s.mux.HandleFunc("/api/v1/system/apple-dns", s.guarded("/api/v1/system/apple-dns", s.handleAppleDNS))
+	s.mux.HandleFunc("/api/v1/system/registry", s.guarded("/api/v1/system/registry", s.handleSystemRegistry))
+	s.mux.HandleFunc("/api/v1/system/workstation-settings", s.guarded("/api/v1/system/workstation-settings", s.handleWorkstationSettings))
 
 	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
 	if s.oidcKeyManager != nil {
-		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCDiscovery)
-		s.mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
-		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken)
+		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", s.handleOIDCDiscovery))
+		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", s.handleJWKS))
+		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken))
 	}
 
-	// Workstation-only filesystem endpoints
-	s.mux.Handle("/api/v1/system/fs/list", s.requireWorkstation(http.HandlerFunc(s.handleFSList)))
-	s.mux.Handle("/api/v1/system/fs/mkdir", s.requireWorkstation(http.HandlerFunc(s.handleFSMkdir)))
-	s.mux.Handle("/api/v1/system/fs/validate-path", s.requireWorkstation(http.HandlerFunc(s.handleFSValidatePath)))
+	// Workstation-only filesystem endpoints: declarative guard enforces workstation token.
+	s.mux.HandleFunc("/api/v1/system/fs/list", s.guarded("/api/v1/system/fs/list", s.handleFSList))
+	s.mux.HandleFunc("/api/v1/system/fs/mkdir", s.guarded("/api/v1/system/fs/mkdir", s.handleFSMkdir))
+	s.mux.HandleFunc("/api/v1/system/fs/validate-path", s.guarded("/api/v1/system/fs/validate-path", s.handleFSValidatePath))
 }
 
 // applyMiddleware wraps the handler with middleware.

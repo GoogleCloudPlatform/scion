@@ -292,23 +292,9 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// field names to their container target paths using the harness config's
 	// required_files entries. A seen set keyed by Field prevents duplicate
 	// mappings when the same field appears in multiple auth types.
-	//
-	// When a specific auth type is selected, only gather file mappings for
-	// that type. In auto-detect mode (SelectedType empty), gather from all
-	// types and let the provisioner script decide.
 	if c.entry.Auth != nil {
 		seenFields := make(map[string]struct{})
-		typesToProcess := c.entry.Auth.Types
-		if auth.SelectedType != "" {
-			if selectedType, ok := c.entry.Auth.Types[auth.SelectedType]; ok {
-				typesToProcess = map[string]config.HarnessAuthTypeMetadata{
-					auth.SelectedType: selectedType,
-				}
-			}
-			// If the selected type isn't in the map, typesToProcess stays as
-			// all types (graceful fallback for unrecognized selections).
-		}
-		for _, authType := range typesToProcess {
+		for _, authType := range c.entry.Auth.Types {
 			for _, rf := range authType.RequiredFiles {
 				if rf.Field == "" || rf.TargetSuffix == "" {
 					continue
@@ -692,11 +678,8 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 		}
 
 		if f.SourcePath == "" {
-			// Broker mode: file content is staged via SCION_STAGED_SECRETS
-			// (stagedsecrets.Write), so there is no host-side source path.
-			// Record the container target path in file_secret_files so the
-			// container-side provisioner script can locate the file.
-			fileSecretFiles[matchedName] = normCP
+			// No host path to read; keep as bind-mount fallback.
+			remaining = append(remaining, f)
 			continue
 		}
 

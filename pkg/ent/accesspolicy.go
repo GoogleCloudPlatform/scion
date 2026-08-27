@@ -52,6 +52,8 @@ type AccessPolicy struct {
 	CreatedBy string `json:"created_by,omitempty"`
 	// Origin holds the value of the "origin" field.
 	Origin string `json:"origin,omitempty"`
+	// PolicyKind holds the value of the "policy_kind" field.
+	PolicyKind accesspolicy.PolicyKind `json:"policy_kind,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AccessPolicyQuery when eager-loading is set.
 	Edges        AccessPolicyEdges `json:"edges"`
@@ -85,7 +87,7 @@ func (*AccessPolicy) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case accesspolicy.FieldPriority:
 			values[i] = new(sql.NullInt64)
-		case accesspolicy.FieldName, accesspolicy.FieldDescription, accesspolicy.FieldScopeType, accesspolicy.FieldScopeID, accesspolicy.FieldResourceType, accesspolicy.FieldResourceID, accesspolicy.FieldEffect, accesspolicy.FieldCreatedBy, accesspolicy.FieldOrigin:
+		case accesspolicy.FieldName, accesspolicy.FieldDescription, accesspolicy.FieldScopeType, accesspolicy.FieldScopeID, accesspolicy.FieldResourceType, accesspolicy.FieldResourceID, accesspolicy.FieldEffect, accesspolicy.FieldCreatedBy, accesspolicy.FieldOrigin, accesspolicy.FieldPolicyKind:
 			values[i] = new(sql.NullString)
 		case accesspolicy.FieldCreated, accesspolicy.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -216,6 +218,12 @@ func (_m *AccessPolicy) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Origin = value.String
 			}
+		case accesspolicy.FieldPolicyKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field policy_kind", values[i])
+			} else if value.Valid {
+				_m.PolicyKind = accesspolicy.PolicyKind(value.String)
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -304,6 +312,9 @@ func (_m *AccessPolicy) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("origin=")
 	builder.WriteString(_m.Origin)
+	builder.WriteString(", ")
+	builder.WriteString("policy_kind=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PolicyKind))
 	builder.WriteByte(')')
 	return builder.String()
 }

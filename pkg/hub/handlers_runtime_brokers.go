@@ -299,32 +299,6 @@ func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
-
-	// Authorize: broker self-access or user with CheckAccess
-	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
-		// Broker accessing its own record — allowed
-	} else {
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionRead, "no identity")
-			Unauthorized(w)
-			return
-		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionRead)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionRead, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionRead, "non-user non-broker identity")
-			Forbidden(w)
-			return
-		}
-	}
-
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -644,38 +618,10 @@ type brokerAgentHeartbeat struct {
 	Message         string `json:"message,omitempty"`     // Error or status message from agent
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
-	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
-
-	// Authorize: broker self-access or user with CheckAccess (ActionUpdate —
-	// heartbeats modify agent state and broker liveness).
-	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
-		// Broker sending its own heartbeat — allowed
-	} else {
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "no identity")
-			Unauthorized(w)
-			return
-		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionUpdate)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "non-user non-broker identity")
-			Forbidden(w)
-			return
-		}
-	}
 
 	var heartbeat brokerHeartbeatRequest
 	if err := readJSON(r, &heartbeat); err != nil {
@@ -700,8 +646,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 
-			// Defense in depth: skip agents not assigned to the targeted broker.
-			// Caller authorization is handled above at the handler level.
+			// Security check: ensure the agent belongs to this broker
 			if agent.RuntimeBrokerID != id {
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
@@ -765,46 +710,20 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					hbPhase := state.Phase(agentHB.Phase)
 					curPhase := state.Phase(agent.Phase)
 
-					// Derive a crash from the exit code even when the broker
-					// reports a plain "stopped". Prefer the structured ExitCode
-					// field; fall back to parsing ContainerStatus for old brokers.
-					if hbPhase == state.PhaseStopped || hbPhase == state.PhaseError {
-						if agentHB.ExitCode != nil && *agentHB.ExitCode != 0 {
-							// crash path
-							if hbPhase == state.PhaseStopped {
-								// Promote PhaseStopped→PhaseError when exit code is non-zero.
-								hbPhase = state.PhaseError
-								agentHB.Phase = string(state.PhaseError)
-							}
-							statusUpdate.ExitCode = agentHB.ExitCode
-							if isValidExitReason(agentHB.ExitReason) {
-								statusUpdate.ExitReason = agentHB.ExitReason
-							} else if agentHB.ExitReason != "" {
-								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
-							}
+					// Derive a crash from the container exit code even when the
+					// broker reports a plain "stopped" (its phase derivation is
+					// based on the container being exited, not on the exit code).
+					// A non-zero exit means the agent crashed → error, with the
+					// exit code recorded so the UI can show it. This works even
+					// if sciontool's own crash report never reached the hub.
+					if hbPhase == state.PhaseStopped {
+						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+							hbPhase = state.PhaseError
+							agentHB.Phase = string(state.PhaseError)
+							c := code
+							statusUpdate.ExitCode = &c
 							if statusUpdate.Message == "" {
-								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
-							}
-						} else if hbPhase == state.PhaseStopped && agentHB.ExitCode == nil {
-							// Legacy fallback: parse from ContainerStatus string (old broker).
-							// Only applies to PhaseStopped — PhaseError already has the correct phase.
-							if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
-								hbPhase = state.PhaseError
-								agentHB.Phase = string(state.PhaseError)
-								c := code
-								statusUpdate.ExitCode = &c
-								if statusUpdate.Message == "" {
-									statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
-								}
-							}
-						} else {
-							// PhaseStopped with ExitCode == 0 (clean exit) or
-							// PhaseError with nil/zero ExitCode: persist what we have.
-							statusUpdate.ExitCode = agentHB.ExitCode
-							if isValidExitReason(agentHB.ExitReason) {
-								statusUpdate.ExitReason = agentHB.ExitReason
-							} else if agentHB.ExitReason != "" {
-								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
+								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
 							}
 						}
 					}
@@ -850,7 +769,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					case strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped":
 						// A non-zero exit code means the agent crashed → error
 						// (restartable); a zero/absent code is a clean stop.
-						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 { //nolint:staticcheck // legacy fallback for brokers without ExitCode
+						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
 							statusUpdate.Phase = string(state.PhaseError)
 							c := code
 							statusUpdate.ExitCode = &c
@@ -868,27 +787,6 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						if agent.Phase != string(state.PhaseRunning) {
 							statusUpdate.Phase = string(state.PhaseProvisioning)
 						}
-					}
-				}
-			}
-
-			// If the broker didn't send a ContainerStatus but we have structured
-			// fields, render a display string for backward-compatible clients.
-			if statusUpdate.ContainerStatus == "" && agentHB.ContainerStatus == "" {
-				if statusUpdate.Phase != "" {
-					switch state.Phase(statusUpdate.Phase) {
-					case state.PhaseRunning:
-						statusUpdate.ContainerStatus = "running"
-					case state.PhaseStopped:
-						statusUpdate.ContainerStatus = "stopped"
-					case state.PhaseError:
-						if statusUpdate.ExitCode != nil {
-							statusUpdate.ContainerStatus = fmt.Sprintf("exited (%d)", *statusUpdate.ExitCode)
-						} else {
-							statusUpdate.ContainerStatus = "exited"
-						}
-					case state.PhaseProvisioning:
-						statusUpdate.ContainerStatus = "created"
 					}
 				}
 			}
@@ -955,31 +853,6 @@ type ListBrokerProjectsResponse struct {
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess
-	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
-		// Broker accessing its own project list — allowed
-	} else {
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "no identity")
-			Unauthorized(w)
-			return
-		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: brokerID}, ActionRead)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "non-user non-broker identity")
-			Forbidden(w)
-			return
-		}
-	}
-
 	// Verify broker exists
 	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
@@ -1022,9 +895,4 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	writeJSON(w, http.StatusOK, ListBrokerProjectsResponse{
 		Projects: projects,
 	})
-}
-
-// isValidExitReason reports whether reason is a valid ExitReason value.
-func isValidExitReason(reason string) bool {
-	return state.ExitReason(reason).IsValid()
 }

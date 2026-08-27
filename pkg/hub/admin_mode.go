@@ -110,7 +110,7 @@ func adminModeMiddleware(state *MaintenanceState) func(http.Handler) http.Handle
 			}
 
 			// Allow admin users through.
-			if user := GetUserIdentityFromContext(r.Context()); user != nil && user.Role() == "admin" {
+			if user := GetUserIdentityFromContext(r.Context()); IsUnscopedLocalPlatformAdmin(user) {
 				next.ServeHTTP(w, r)
 				return
 			}

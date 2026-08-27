@@ -527,8 +527,14 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 		}
 		return agent, true
 	}
-	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil && userIdent.Role() == "admin" {
-		return agent, true
+	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
+		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", nil)
+			return nil, false
+		}
+		if IsUnscopedLocalPlatformAdmin(userIdent) {
+			return agent, true
+		}
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, "Only the agent can manage its exposed ports", nil)
 	return nil, false
