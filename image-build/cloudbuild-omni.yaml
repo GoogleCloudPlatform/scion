@@ -189,4 +189,4 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 14400s
+timeout: 2400s # 40 minutes - measured 641s (build 9a1b9766, 2026-08-27)
