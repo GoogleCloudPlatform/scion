@@ -50,7 +50,8 @@ func (LimitDefinition) Fields() []ent.Field {
 		field.Int64("default_value").
 			Default(0),
 		field.Bool("system").
-			Default(false),
+			Default(false).
+			Immutable(),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

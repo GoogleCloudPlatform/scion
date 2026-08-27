@@ -162,7 +162,6 @@ func (q *QuotaStore) UpdateLimitDefinition(ctx context.Context, def *store.Limit
 		SetUnit(def.Unit).
 		SetDescription(def.Description).
 		SetDefaultValue(def.DefaultValue).
-		SetSystem(def.System).
 		Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -275,7 +274,6 @@ func (q *QuotaStore) UpdateEntitlementBinding(ctx context.Context, binding *stor
 	}
 	updated, err := q.client.EntitlementBinding.UpdateOneID(uid).
 		SetValue(binding.Value).
-		SetCreatedBy(binding.CreatedBy).
 		Save(ctx)
 	if err != nil {
 		return nil, mapError(err)

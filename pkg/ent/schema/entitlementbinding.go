@@ -50,7 +50,8 @@ func (EntitlementBinding) Fields() []ent.Field {
 		field.Int64("value"),
 		field.String("created_by").
 			Optional().
-			Default(""),
+			Default("").
+			Immutable(),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

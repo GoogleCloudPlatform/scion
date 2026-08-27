@@ -114,20 +114,6 @@ func (_u *LimitDefinitionUpdate) AddDefaultValue(v int64) *LimitDefinitionUpdate
 	return _u
 }
 
-// SetSystem sets the "system" field.
-func (_u *LimitDefinitionUpdate) SetSystem(v bool) *LimitDefinitionUpdate {
-	_u.mutation.SetSystem(v)
-	return _u
-}
-
-// SetNillableSystem sets the "system" field if the given value is not nil.
-func (_u *LimitDefinitionUpdate) SetNillableSystem(v *bool) *LimitDefinitionUpdate {
-	if v != nil {
-		_u.SetSystem(*v)
-	}
-	return _u
-}
-
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *LimitDefinitionUpdate) SetUpdatedAt(v time.Time) *LimitDefinitionUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -294,9 +280,6 @@ func (_u *LimitDefinitionUpdate) sqlSave(ctx context.Context) (_node int, err er
 	}
 	if value, ok := _u.mutation.AddedDefaultValue(); ok {
 		_spec.AddField(limitdefinition.FieldDefaultValue, field.TypeInt64, value)
-	}
-	if value, ok := _u.mutation.System(); ok {
-		_spec.SetField(limitdefinition.FieldSystem, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(limitdefinition.FieldUpdatedAt, field.TypeTime, value)
@@ -491,20 +474,6 @@ func (_u *LimitDefinitionUpdateOne) SetNillableDefaultValue(v *int64) *LimitDefi
 // AddDefaultValue adds value to the "default_value" field.
 func (_u *LimitDefinitionUpdateOne) AddDefaultValue(v int64) *LimitDefinitionUpdateOne {
 	_u.mutation.AddDefaultValue(v)
-	return _u
-}
-
-// SetSystem sets the "system" field.
-func (_u *LimitDefinitionUpdateOne) SetSystem(v bool) *LimitDefinitionUpdateOne {
-	_u.mutation.SetSystem(v)
-	return _u
-}
-
-// SetNillableSystem sets the "system" field if the given value is not nil.
-func (_u *LimitDefinitionUpdateOne) SetNillableSystem(v *bool) *LimitDefinitionUpdateOne {
-	if v != nil {
-		_u.SetSystem(*v)
-	}
 	return _u
 }
 
@@ -704,9 +673,6 @@ func (_u *LimitDefinitionUpdateOne) sqlSave(ctx context.Context) (_node *LimitDe
 	}
 	if value, ok := _u.mutation.AddedDefaultValue(); ok {
 		_spec.AddField(limitdefinition.FieldDefaultValue, field.TypeInt64, value)
-	}
-	if value, ok := _u.mutation.System(); ok {
-		_spec.SetField(limitdefinition.FieldSystem, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(limitdefinition.FieldUpdatedAt, field.TypeTime, value)

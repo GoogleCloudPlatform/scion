@@ -453,24 +453,6 @@ func (u *EntitlementBindingUpsert) AddValue(v int64) *EntitlementBindingUpsert {
 	return u
 }
 
-// SetCreatedBy sets the "created_by" field.
-func (u *EntitlementBindingUpsert) SetCreatedBy(v string) *EntitlementBindingUpsert {
-	u.Set(entitlementbinding.FieldCreatedBy, v)
-	return u
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *EntitlementBindingUpsert) UpdateCreatedBy() *EntitlementBindingUpsert {
-	u.SetExcluded(entitlementbinding.FieldCreatedBy)
-	return u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *EntitlementBindingUpsert) ClearCreatedBy() *EntitlementBindingUpsert {
-	u.SetNull(entitlementbinding.FieldCreatedBy)
-	return u
-}
-
 // SetUpdatedAt sets the "updated_at" field.
 func (u *EntitlementBindingUpsert) SetUpdatedAt(v time.Time) *EntitlementBindingUpsert {
 	u.Set(entitlementbinding.FieldUpdatedAt, v)
@@ -499,6 +481,9 @@ func (u *EntitlementBindingUpsertOne) UpdateNewValues() *EntitlementBindingUpser
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(entitlementbinding.FieldID)
+		}
+		if _, exists := u.create.mutation.CreatedBy(); exists {
+			s.SetIgnore(entitlementbinding.FieldCreatedBy)
 		}
 		if _, exists := u.create.mutation.CreatedAt(); exists {
 			s.SetIgnore(entitlementbinding.FieldCreatedAt)
@@ -622,27 +607,6 @@ func (u *EntitlementBindingUpsertOne) AddValue(v int64) *EntitlementBindingUpser
 func (u *EntitlementBindingUpsertOne) UpdateValue() *EntitlementBindingUpsertOne {
 	return u.Update(func(s *EntitlementBindingUpsert) {
 		s.UpdateValue()
-	})
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *EntitlementBindingUpsertOne) SetCreatedBy(v string) *EntitlementBindingUpsertOne {
-	return u.Update(func(s *EntitlementBindingUpsert) {
-		s.SetCreatedBy(v)
-	})
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *EntitlementBindingUpsertOne) UpdateCreatedBy() *EntitlementBindingUpsertOne {
-	return u.Update(func(s *EntitlementBindingUpsert) {
-		s.UpdateCreatedBy()
-	})
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *EntitlementBindingUpsertOne) ClearCreatedBy() *EntitlementBindingUpsertOne {
-	return u.Update(func(s *EntitlementBindingUpsert) {
-		s.ClearCreatedBy()
 	})
 }
 
@@ -843,6 +807,9 @@ func (u *EntitlementBindingUpsertBulk) UpdateNewValues() *EntitlementBindingUpse
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(entitlementbinding.FieldID)
 			}
+			if _, exists := b.mutation.CreatedBy(); exists {
+				s.SetIgnore(entitlementbinding.FieldCreatedBy)
+			}
 			if _, exists := b.mutation.CreatedAt(); exists {
 				s.SetIgnore(entitlementbinding.FieldCreatedAt)
 			}
@@ -966,27 +933,6 @@ func (u *EntitlementBindingUpsertBulk) AddValue(v int64) *EntitlementBindingUpse
 func (u *EntitlementBindingUpsertBulk) UpdateValue() *EntitlementBindingUpsertBulk {
 	return u.Update(func(s *EntitlementBindingUpsert) {
 		s.UpdateValue()
-	})
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *EntitlementBindingUpsertBulk) SetCreatedBy(v string) *EntitlementBindingUpsertBulk {
-	return u.Update(func(s *EntitlementBindingUpsert) {
-		s.SetCreatedBy(v)
-	})
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *EntitlementBindingUpsertBulk) UpdateCreatedBy() *EntitlementBindingUpsertBulk {
-	return u.Update(func(s *EntitlementBindingUpsert) {
-		s.UpdateCreatedBy()
-	})
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *EntitlementBindingUpsertBulk) ClearCreatedBy() *EntitlementBindingUpsertBulk {
-	return u.Update(func(s *EntitlementBindingUpsert) {
-		s.ClearCreatedBy()
 	})
 }
 

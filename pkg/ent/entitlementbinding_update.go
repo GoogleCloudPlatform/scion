@@ -121,26 +121,6 @@ func (_u *EntitlementBindingUpdate) AddValue(v int64) *EntitlementBindingUpdate 
 	return _u
 }
 
-// SetCreatedBy sets the "created_by" field.
-func (_u *EntitlementBindingUpdate) SetCreatedBy(v string) *EntitlementBindingUpdate {
-	_u.mutation.SetCreatedBy(v)
-	return _u
-}
-
-// SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *EntitlementBindingUpdate) SetNillableCreatedBy(v *string) *EntitlementBindingUpdate {
-	if v != nil {
-		_u.SetCreatedBy(*v)
-	}
-	return _u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (_u *EntitlementBindingUpdate) ClearCreatedBy() *EntitlementBindingUpdate {
-	_u.mutation.ClearCreatedBy()
-	return _u
-}
-
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *EntitlementBindingUpdate) SetUpdatedAt(v time.Time) *EntitlementBindingUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -246,9 +226,6 @@ func (_u *EntitlementBindingUpdate) sqlSave(ctx context.Context) (_node int, err
 	}
 	if value, ok := _u.mutation.AddedValue(); ok {
 		_spec.AddField(entitlementbinding.FieldValue, field.TypeInt64, value)
-	}
-	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(entitlementbinding.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(entitlementbinding.FieldCreatedBy, field.TypeString)
@@ -396,26 +373,6 @@ func (_u *EntitlementBindingUpdateOne) AddValue(v int64) *EntitlementBindingUpda
 	return _u
 }
 
-// SetCreatedBy sets the "created_by" field.
-func (_u *EntitlementBindingUpdateOne) SetCreatedBy(v string) *EntitlementBindingUpdateOne {
-	_u.mutation.SetCreatedBy(v)
-	return _u
-}
-
-// SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *EntitlementBindingUpdateOne) SetNillableCreatedBy(v *string) *EntitlementBindingUpdateOne {
-	if v != nil {
-		_u.SetCreatedBy(*v)
-	}
-	return _u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (_u *EntitlementBindingUpdateOne) ClearCreatedBy() *EntitlementBindingUpdateOne {
-	_u.mutation.ClearCreatedBy()
-	return _u
-}
-
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *EntitlementBindingUpdateOne) SetUpdatedAt(v time.Time) *EntitlementBindingUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -551,9 +508,6 @@ func (_u *EntitlementBindingUpdateOne) sqlSave(ctx context.Context) (_node *Enti
 	}
 	if value, ok := _u.mutation.AddedValue(); ok {
 		_spec.AddField(entitlementbinding.FieldValue, field.TypeInt64, value)
-	}
-	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(entitlementbinding.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(entitlementbinding.FieldCreatedBy, field.TypeString)

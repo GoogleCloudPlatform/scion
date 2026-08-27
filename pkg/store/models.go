@@ -2569,7 +2569,7 @@ type LimitDefinition struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`         // e.g. "max_agents_per_project"
 	ResourceType string    `json:"resourceType"` // e.g. "agent", "project", "group"
-	Unit         string    `json:"unit"`          // e.g. "count"
+	Unit         string    `json:"unit"`         // e.g. "count"
 	Description  string    `json:"description"`
 	DefaultValue int64     `json:"defaultValue"` // 0 = unlimited
 	System       bool      `json:"system"`       // true = seeded, not user-modifiable

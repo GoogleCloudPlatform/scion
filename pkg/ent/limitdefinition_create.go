@@ -488,18 +488,6 @@ func (u *LimitDefinitionUpsert) AddDefaultValue(v int64) *LimitDefinitionUpsert 
 	return u
 }
 
-// SetSystem sets the "system" field.
-func (u *LimitDefinitionUpsert) SetSystem(v bool) *LimitDefinitionUpsert {
-	u.Set(limitdefinition.FieldSystem, v)
-	return u
-}
-
-// UpdateSystem sets the "system" field to the value that was provided on create.
-func (u *LimitDefinitionUpsert) UpdateSystem() *LimitDefinitionUpsert {
-	u.SetExcluded(limitdefinition.FieldSystem)
-	return u
-}
-
 // SetUpdatedAt sets the "updated_at" field.
 func (u *LimitDefinitionUpsert) SetUpdatedAt(v time.Time) *LimitDefinitionUpsert {
 	u.Set(limitdefinition.FieldUpdatedAt, v)
@@ -528,6 +516,9 @@ func (u *LimitDefinitionUpsertOne) UpdateNewValues() *LimitDefinitionUpsertOne {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(limitdefinition.FieldID)
+		}
+		if _, exists := u.create.mutation.System(); exists {
+			s.SetIgnore(limitdefinition.FieldSystem)
 		}
 		if _, exists := u.create.mutation.CreatedAt(); exists {
 			s.SetIgnore(limitdefinition.FieldCreatedAt)
@@ -644,20 +635,6 @@ func (u *LimitDefinitionUpsertOne) AddDefaultValue(v int64) *LimitDefinitionUpse
 func (u *LimitDefinitionUpsertOne) UpdateDefaultValue() *LimitDefinitionUpsertOne {
 	return u.Update(func(s *LimitDefinitionUpsert) {
 		s.UpdateDefaultValue()
-	})
-}
-
-// SetSystem sets the "system" field.
-func (u *LimitDefinitionUpsertOne) SetSystem(v bool) *LimitDefinitionUpsertOne {
-	return u.Update(func(s *LimitDefinitionUpsert) {
-		s.SetSystem(v)
-	})
-}
-
-// UpdateSystem sets the "system" field to the value that was provided on create.
-func (u *LimitDefinitionUpsertOne) UpdateSystem() *LimitDefinitionUpsertOne {
-	return u.Update(func(s *LimitDefinitionUpsert) {
-		s.UpdateSystem()
 	})
 }
 
@@ -858,6 +835,9 @@ func (u *LimitDefinitionUpsertBulk) UpdateNewValues() *LimitDefinitionUpsertBulk
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(limitdefinition.FieldID)
 			}
+			if _, exists := b.mutation.System(); exists {
+				s.SetIgnore(limitdefinition.FieldSystem)
+			}
 			if _, exists := b.mutation.CreatedAt(); exists {
 				s.SetIgnore(limitdefinition.FieldCreatedAt)
 			}
@@ -974,20 +954,6 @@ func (u *LimitDefinitionUpsertBulk) AddDefaultValue(v int64) *LimitDefinitionUps
 func (u *LimitDefinitionUpsertBulk) UpdateDefaultValue() *LimitDefinitionUpsertBulk {
 	return u.Update(func(s *LimitDefinitionUpsert) {
 		s.UpdateDefaultValue()
-	})
-}
-
-// SetSystem sets the "system" field.
-func (u *LimitDefinitionUpsertBulk) SetSystem(v bool) *LimitDefinitionUpsertBulk {
-	return u.Update(func(s *LimitDefinitionUpsert) {
-		s.SetSystem(v)
-	})
-}
-
-// UpdateSystem sets the "system" field to the value that was provided on create.
-func (u *LimitDefinitionUpsertBulk) UpdateSystem() *LimitDefinitionUpsertBulk {
-	return u.Update(func(s *LimitDefinitionUpsert) {
-		s.UpdateSystem()
 	})
 }
 

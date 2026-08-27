@@ -997,6 +997,9 @@ func seedLimitDefinition(ctx context.Context, s store.Store, name, resourceType,
 		System:       true,
 	}
 	if _, err := s.CreateLimitDefinition(ctx, ld); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return // Another instance already seeded this — expected in multi-node
+		}
 		slog.Warn("failed to seed limit definition", "name", name, "error", err)
 		return
 	}
