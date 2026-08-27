@@ -287,7 +287,7 @@ func TestOutboundMessage_AttachmentsLinkedToMessage(t *testing.T) {
 		Recipient:   "user:human@example.com",
 		Msg:         "here is the screenshot",
 		Attachments: []string{staged},
-		ThreadID:    "dm:" + recipient.ID + "+" + agent.ID,
+		ThreadID:    "dm:agent:" + agent.ID + ":user:" + recipient.ID,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

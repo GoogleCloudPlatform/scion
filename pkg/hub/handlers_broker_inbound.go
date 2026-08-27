@@ -224,6 +224,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate DM key format when the thread_id looks like a DM key.
+	if req.Message.ThreadID != "" && strings.HasPrefix(req.Message.ThreadID, "dm:") && !validDMKey(req.Message.ThreadID) {
+		BadRequest(w, "invalid DM key format")
+		return
+	}
+
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
 	// so that messages from external channels (Discord, Telegram) appear in
 	// the web chat — both live and after a refresh. This mirrors the
