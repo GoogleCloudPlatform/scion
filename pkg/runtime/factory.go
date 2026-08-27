@@ -135,9 +135,19 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
 			}
 			util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher (docker override), using cloudrun-instances runtime")
-			rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
-			if vs != nil && vs.Server != nil {
-				rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+			instCfg := rtConfig.CloudRunInstances
+			if instCfg == nil {
+				rt, err := NewCloudRunRuntime(&config.CloudRunConfig{})
+				if err != nil {
+					util.Debugf("GetRuntime: failed to create cloudrun runtime for auto-detected instance (docker override): %v", err)
+					return &ErrorRuntime{Err: err}
+				}
+				return rt
+			}
+			rt, err := NewCloudRunRuntimeFromInstances(instCfg)
+			if err != nil {
+				util.Debugf("GetRuntime: failed to create cloudrun-instances runtime (docker override): %v", err)
+				return &ErrorRuntime{Err: err}
 			}
 			return rt
 		}
@@ -212,7 +222,19 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		return rt
 	case "cloudrun-instances":
-		rt, err := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
+		instCfg := rtConfig.CloudRunInstances
+		if instCfg == nil {
+			// Auto-detected Cloud Run Instance without explicit config.
+			// Fall back to the base CloudRunRuntime which auto-discovers
+			// project/region from GCP metadata.
+			rt, err := NewCloudRunRuntime(&config.CloudRunConfig{})
+			if err != nil {
+				util.Debugf("GetRuntime: failed to create cloudrun runtime for auto-detected instance: %v", err)
+				return &ErrorRuntime{Err: err}
+			}
+			return rt
+		}
+		rt, err := NewCloudRunRuntimeFromInstances(instCfg)
 		if err != nil {
 			util.Debugf("GetRuntime: failed to create cloudrun-instances runtime: %v", err)
 			return &ErrorRuntime{Err: err}
