@@ -64,7 +64,7 @@ criteria in §10.
 - **Durability of agent workspaces.** Workspaces live on ephemeral storage and are
   lost on redeploy (§5).
 - **Per-agent resource isolation guarantees.** All agents share the Instance's CPU
-  and memory budget.
+  and memory budget. See §9.1 for measured agent counts at each Instance size.
 - **Replacing the Cloudflare Tunnel design.** That targets ingress for self-hosted
   nodes. A Cloud Run Instance has its own `run.app` ingress and needs no tunnel. The
   two are siblings, not competitors.
@@ -309,6 +309,11 @@ front of it. Turning IAP on did not remove this footgun; it *relocated* it. Beca
 the open configuration is now the supported one, the deploy command must gate on it
 rather than merely warn.
 
+**Verified 2026-08-27.** The deploy sets `invokerIamDisabled: true`, so the Cloud Run
+invoker check is off and IAP is the sole perimeter. A six-way header × token ×
+audience matrix confirmed that IAP rejects all unauthenticated and mis-audienced
+requests, and that the hub is unreachable without a valid IAP assertion.
+
 ### 6.2 The hub work was already done
 
 Auditing before designing showed the hub's IAP verification already exists and
@@ -409,13 +414,31 @@ definition, not a redesign.
 ### 9.1 Within this tier
 
 - **Ephemeral only.** No workspace or control-plane durability (§5).
-- **No per-agent resource limits.** All agents share the Instance budget.
+- **No per-agent resource limits.** All agents share the Instance budget. Measured
+  agent counts on a single observation (repeatability unmeasured):
+
+  | Instance size | Idle agents | Working agents |
+  |---|---|---|
+  | 4 CPU / 8 GiB (default) | 20 | 6 |
+  | 8 CPU / 32 GiB (maximum) | 51 | 14 |
+
+  No per-CPU or per-GiB scaling rule is derivable from these two points: 4× memory
+  and 2× CPU bought roughly 3× idle and 2× working capacity — non-linear in both
+  resources.
 - **Image-pull failures on first deploy are hard to diagnose.** The messages come
   from the Cloud Run sandbox launcher, not from Scion, and name a cache mirror rather
   than the requested image. Routed as platform feedback.
 - **Sandbox stderr can be lost**, which makes an agent that dies during provisioning
   harder to diagnose than it should be. The general Scion path is well instrumented;
   the loss is specific to this runtime's sandbox handling.
+- **No per-agent observability.** The Instance budget is shared (above) and also
+  invisible. Cloud Monitoring covers `cloud_run_revision` (Services) but not
+  `cloud_run_instance`; `getStats` returns hardcoded zeros; the hub agent list is
+  wrong in both directions; sandboxes are gVisor processes invisible to Cloud
+  Monitoring; `sshd` is absent from the omni image. The only working signal today is
+  agent create latency. This is a known gap we intend to close, staged in two parts:
+  per-agent logging (ptone/scion#1310) and CPU/memory visibility
+  (ptone/scion#1311).
 
 ### 9.2 Upstream dependencies
 
@@ -483,4 +506,5 @@ Additionally, for review:
 10. Autodetect selects `cloudrun-sandbox` on an Instance and does not select it
     anywhere else (§4.3).
 11. The omni image is produced by the chained build, and no harness version is pinned
-    in two places (§4.1).
+    in two places (§4.1). **Verified — run.** The chained build produces the omni
+    image and the result is verified by digest.
