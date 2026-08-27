@@ -153,6 +153,25 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Ownership check: verify the DM key IDs match the actual participants.
+	// The agent in the DM key must match the resolved agent; the user must
+	// match the sender.
+	if req.Message.ThreadID != "" && strings.HasPrefix(req.Message.ThreadID, "dm:") {
+		dmAgentID, dmUserID := parseDMKeyIDs(req.Message.ThreadID)
+		// Resolve sender user ID: prefer the message field, fall back to email lookup.
+		senderID := req.Message.SenderID
+		if senderID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
+			senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+			if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
+				senderID = u.ID
+			}
+		}
+		if dmAgentID != agent.ID || dmUserID != senderID {
+			BadRequest(w, "DM thread_id does not match the sender and recipient")
+			return
+		}
+	}
+
 	// Reject messages to non-running agents.
 	if phase := state.Phase(agent.Phase); phase != state.PhaseRunning {
 		var msg string
