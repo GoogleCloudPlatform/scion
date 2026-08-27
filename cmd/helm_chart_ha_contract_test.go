@@ -263,8 +263,8 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	}
 	// THE DENOMINATOR. A glob that silently returns two files would produce a
 	// shorter artifact that still round-trips against itself.
-	if len(goldens) != 5 {
-		t.Fatalf("expected 5 chart goldens, found %d (%v). The walk's corpus is the chart's golden set; if that set changed, this number changes with it in the same commit.",
+	if len(goldens) != 6 {
+		t.Fatalf("expected 6 chart goldens, found %d (%v). The walk's corpus is the chart's golden set; if that set changed, this number changes with it in the same commit.",
 			len(goldens), goldens)
 	}
 	sort.Strings(goldens)

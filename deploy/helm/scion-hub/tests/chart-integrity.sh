@@ -869,6 +869,7 @@ _e9_C="$(_e9_run --set-string auth.oauth.web.google.clientSecret=E9-ARM-A-SECRET
 # ambiguous and the comparison meaningless.
 for _e9_n in A B C; do
   eval "_e9_v=\"\$_e9_${_e9_n}\""
+  # shellcheck disable=SC2154
   _e9_d="$(_e9_dig "$_e9_v")"
   _e9_c="$(printf '%s\n' "$_e9_d" | grep -c . || true)"
   if [ "$_e9_c" -ne 1 ]; then

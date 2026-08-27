@@ -249,6 +249,7 @@ for f in findings:
     print("FINDING=%s" % f)
 PYEOF
 
+# shellcheck disable=SC2120
 scan() { # stdin = render; $1 = \x1f-joined extra needles
   python3 -c "$SCANNER" "${1:-}"
 }
@@ -354,6 +355,7 @@ FIXEOF
     exit 2
   fi
 
+  # shellcheck disable=SC2034
   want_labels=(ConfigMap/annotation ConfigMap/data Deployment/annotation Deployment/args)
   mapfile -t got_labels < <(printf '%s\n' "${found[@]}" | cut -d: -f1 | sort -u)
 
