@@ -246,6 +246,7 @@ Unlike `scion hub secret` (which supports managing secrets at any scope: user, h
     - Flags:
         - `--type <string>`: Secret type: `environment` (default), `variable`, or `file`.
         - `--target <string>`: Injection target path (defaults to key for env, required for file-type secrets).
+        - `--allow-progeny`: Allow child agents (progeny) to inherit this secret.
 - `scion secret get KEY`: Retrieve the metadata of a project-scoped secret. Secret values are never returned to protect security.
 - `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned.
 
@@ -399,7 +400,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub projects`: List all projects registered on the Hub.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
-    - `set <key> <value>`: Set a secret.
+    - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
     - `get [key]`: Get secret metadata.
     - `clear <key>`: Remove a secret.
 - `scion hub env`: Manage environment variables on the Hub.
