@@ -2675,7 +2675,7 @@ Verified by round-trip through pgx's own parser, not by inspection: see
 hack/verify.sh dsn-roundtrip and tests/.
 */}}
 {{- define "scion-hub.pctEncodeUserinfo" -}}
-{{- $s := . -}}
+{{- $s := toString . -}}
 {{- $s = replace "%" "%25" $s -}}
 {{- $s = replace "@" "%40" $s -}}
 {{- $s = replace ":" "%3A" $s -}}
