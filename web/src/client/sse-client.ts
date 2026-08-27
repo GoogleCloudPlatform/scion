@@ -126,7 +126,11 @@ export class SSEClient extends EventTarget {
       // client also listens for is never emitted by the hub, so consumers that
       // need to know the stream is live (state.connected, the chat thread's
       // catch-up refetch) would otherwise never hear anything.
-      this.dispatchEvent(new CustomEvent('connected'));
+      this.dispatchEvent(
+        new CustomEvent('connected', {
+          detail: { connectionId: '', subjects: [...this.subjects] },
+        })
+      );
     };
 
     es.onerror = () => {
@@ -156,6 +160,7 @@ export class SSEClient extends EventTarget {
 
     // Handle state update events from the server
     this.eventSource.addEventListener('update', (event) => {
+      if (es !== this.eventSource) return;
       try {
         const data = JSON.parse((event as MessageEvent).data) as SSEUpdateEvent;
         this.dispatchEvent(new CustomEvent('update', { detail: data }));
@@ -168,14 +173,16 @@ export class SSEClient extends EventTarget {
     // connectionOpen is left alone: the feed was live a moment ago, so if the
     // replacement connection never lands, that still counts as a drop.
     this.eventSource.addEventListener('reconnect', () => {
+      if (es !== this.eventSource) return;
       this.reconnectAttempts = 0;
-      this.eventSource?.close();
+      es.close();
       this.eventSource = null;
       this.openConnection();
     });
 
     // Handle initial connection acknowledgement
     this.eventSource.addEventListener('connected', (event) => {
+      if (es !== this.eventSource) return;
       try {
         const data = JSON.parse((event as MessageEvent).data) as {
           connectionId: string;

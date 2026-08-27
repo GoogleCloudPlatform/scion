@@ -432,4 +432,22 @@ describe('SSEClient connected event', () => {
     expect(connected).toHaveBeenCalledTimes(2);
     client.disconnect();
   });
+
+  it('supplies a non-null detail matching SSEClientEventMap on the connected event', () => {
+    const client = new SSEClient();
+    const connected = vi.fn();
+    client.addEventListener('connected', connected);
+
+    client.connect(['agent.>', 'project.123']);
+    latest().simulateOpen();
+
+    expect(connected).toHaveBeenCalledTimes(1);
+    const event = connected.mock.calls[0]?.[0] as CustomEvent;
+    expect(event.detail).not.toBeNull();
+    expect(event.detail).toEqual({
+      connectionId: '',
+      subjects: ['agent.>', 'project.123'],
+    });
+    client.disconnect();
+  });
 });
