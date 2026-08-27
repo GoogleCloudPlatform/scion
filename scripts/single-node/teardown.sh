@@ -33,14 +33,31 @@ NAME=""
 PROJECT=""
 REGION="us-east4"
 
+usage() {
+  echo "Usage: $0 --name NAME --project PROJECT [--region REGION]" >&2
+}
+
+# require_value FLAG VALUE — reject a flag given no value, an empty value, or
+# another flag as its value. Without this, `--name` with nothing after it dies
+# on `$2: unbound variable`, and `--name --project foo` silently takes
+# "--project" as the instance name. This script deletes cloud resources; a
+# misparsed argument must stop it, not be guessed at.
+require_value() {
+  if [[ -z "${2:-}" || "$2" == -* ]]; then
+    echo "Error: $1 requires a non-empty value." >&2
+    usage
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --name)     NAME="$2";    shift 2 ;;
-    --project)  PROJECT="$2"; shift 2 ;;
-    --region)   REGION="$2";  shift 2 ;;
+    --name)     require_value "$1" "${2:-}"; NAME="$2";    shift 2 ;;
+    --project)  require_value "$1" "${2:-}"; PROJECT="$2"; shift 2 ;;
+    --region)   require_value "$1" "${2:-}"; REGION="$2";  shift 2 ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 --name NAME --project PROJECT [--region REGION]" >&2
+      usage
       exit 1
       ;;
   esac
@@ -48,7 +65,7 @@ done
 
 if [[ -z "$NAME" || -z "$PROJECT" ]]; then
   echo "Error: --name and --project are required." >&2
-  echo "Usage: $0 --name NAME --project PROJECT [--region REGION]" >&2
+  usage
   exit 1
 fi
 

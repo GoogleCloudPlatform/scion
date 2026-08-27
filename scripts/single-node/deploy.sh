@@ -47,10 +47,38 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Locate the scion binary
+#
+# Resolution order:
+#   1. $SCION_BIN, if set — explicit override, wins over everything.
+#   2. ./scion in the repository root — where the tutorial's
+#      `go build -tags no_embed_web -o ./scion ./cmd/scion/` puts it.
+#   3. ./scion in the current directory.
+#   4. `scion` on $PATH.
+#
+# Step 2 matters: `deploy-instance` may not exist in an installed release, so
+# the tutorial tells the operator to build into the repo root and then run this
+# script from there. Looking only at $PATH would fail that documented flow.
 # ---------------------------------------------------------------------------
-SCION_BIN="${SCION_BIN:-scion}"
-if ! command -v "$SCION_BIN" &>/dev/null; then
-  echo "Error: '$SCION_BIN' not found. Set SCION_BIN to the path of the scion binary." >&2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+if [[ -n "${SCION_BIN:-}" ]]; then
+  if ! command -v "$SCION_BIN" &>/dev/null; then
+    echo "Error: SCION_BIN is set to '$SCION_BIN', which is not an executable command." >&2
+    exit 1
+  fi
+elif [[ -x "$REPO_ROOT/scion" ]]; then
+  SCION_BIN="$REPO_ROOT/scion"
+elif [[ -x "./scion" ]]; then
+  SCION_BIN="./scion"
+elif command -v scion &>/dev/null; then
+  SCION_BIN="scion"
+else
+  echo "Error: no 'scion' binary found." >&2
+  echo "Looked for: \$SCION_BIN, $REPO_ROOT/scion, ./scion, and 'scion' on \$PATH." >&2
+  echo "Build one with:" >&2
+  echo "  go build -tags no_embed_web -o ./scion ./cmd/scion/" >&2
+  echo "or set SCION_BIN to the path of an existing binary." >&2
   exit 1
 fi
 
