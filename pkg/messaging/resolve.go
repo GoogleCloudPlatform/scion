@@ -114,8 +114,8 @@ type ResolveContext struct {
 // ResolveResult is the outcome of a successful resolution.
 type ResolveResult struct {
 	ConversationID string
-	Created        bool              // true if a new conversation was created
-	Unresolved     []UnresolvedRef   // mentions that could not be resolved (non-fatal in DMs)
+	Created        bool            // true if a new conversation was created
+	Unresolved     []UnresolvedRef // mentions that could not be resolved (non-fatal in DMs)
 }
 
 // UnresolvedRef describes a reference that could not be resolved.

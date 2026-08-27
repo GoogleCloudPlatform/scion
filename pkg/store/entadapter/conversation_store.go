@@ -525,8 +525,8 @@ func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.Convers
 		if parseErr != nil {
 			return fmt.Errorf("direct conversation has unparseable external_ref: %w", store.ErrInvalidInput)
 		}
-		if !((p.PrincipalKind == kindA && p.PrincipalID == idA) ||
-			(p.PrincipalKind == kindB && p.PrincipalID == idB)) {
+		if (p.PrincipalKind != kindA || p.PrincipalID != idA) &&
+			(p.PrincipalKind != kindB || p.PrincipalID != idB) {
 			return fmt.Errorf("participant (%s, %s) not named in direct conversation key: %w", p.PrincipalKind, p.PrincipalID, store.ErrInvalidInput)
 		}
 	}

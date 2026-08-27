@@ -108,7 +108,7 @@ func (m *mockMessageStore) ListMessages(_ context.Context, filter store.MessageF
 	if opts.Cursor != "" {
 		// Find the cursor message's position and skip everything before it
 		// (inclusive), simulating keyset pagination in DESC order.
-		var cursorIdx int = -1
+		var cursorIdx = -1
 		for i, msg := range filtered {
 			if msg.ID == opts.Cursor {
 				cursorIdx = i

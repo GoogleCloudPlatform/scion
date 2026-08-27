@@ -868,9 +868,9 @@ func TestResolveConvByID_RejectsNonParticipant(t *testing.T) {
 	ms := newMockStore()
 	ctx := context.Background()
 	projectID := uuid.NewString()
-	principalA := uuid.NewString()   // participant
-	principalB := uuid.NewString()   // same project, NOT a participant
-	otherParty := uuid.NewString()   // the other side of the DM
+	principalA := uuid.NewString() // participant
+	principalB := uuid.NewString() // same project, NOT a participant
+	otherParty := uuid.NewString() // the other side of the DM
 	convID := uuid.NewString()
 
 	// Create a direct conversation in projectID with kind-encoded external_ref.
@@ -953,9 +953,9 @@ func TestResolve_DirectConv_RejectionGrammarIndependent(t *testing.T) {
 	ms := newMockStore()
 	ctx := context.Background()
 	projectID := uuid.NewString()
-	userA := uuid.NewString()     // owns the DM
-	agentID := uuid.NewString()   // the other party in the DM
-	intruder := uuid.NewString()  // different user, same project
+	userA := uuid.NewString()    // owns the DM
+	agentID := uuid.NewString()  // the other party in the DM
+	intruder := uuid.NewString() // different user, same project
 
 	// Register an agent in the project.
 	ms.agents[projectID+"/target-agent"] = &store.Agent{ID: agentID, Slug: "target-agent", ProjectID: projectID}

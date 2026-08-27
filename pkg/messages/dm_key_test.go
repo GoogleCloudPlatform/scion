@@ -150,7 +150,8 @@ func TestDMConversationKey_AgentAgent(t *testing.T) {
 // by DMConversationKey matches the production DM key regex shipped in the hub.
 //
 // Source of truth: pkg/hub/handlers_chat_v2.go:391
-//   dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
+//
+//	dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
 //
 // The regex is unexported, so we reproduce the exact pattern here. If the hub
 // pattern changes, this test should be updated to match — the comment above

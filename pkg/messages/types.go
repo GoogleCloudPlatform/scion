@@ -125,23 +125,23 @@ var validTypes = map[string]bool{
 
 // StructuredMessage represents a formatted Scion message.
 type StructuredMessage struct {
-	Version      int               `json:"version"`
-	Timestamp    string            `json:"timestamp"`
-	Sender       string            `json:"sender"`
-	SenderID     string            `json:"sender_id,omitempty"`
-	Recipient    string            `json:"recipient"`
-	RecipientID  string            `json:"recipient_id,omitempty"`
-	Recipients   string            `json:"recipients,omitempty"`
-	Msg          string            `json:"msg"`
-	Type         string            `json:"type"`
-	Plain        bool              `json:"plain,omitempty"`
-	Raw          bool              `json:"raw,omitempty"`
-	Urgent       bool              `json:"urgent,omitempty"`
-	Broadcasted  bool              `json:"broadcasted,omitempty"`
-	ObserverOnly bool              `json:"observer_only,omitempty"`
-	Status       string            `json:"status,omitempty"`
-	Attachments  []string          `json:"attachments,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	Version        int               `json:"version"`
+	Timestamp      string            `json:"timestamp"`
+	Sender         string            `json:"sender"`
+	SenderID       string            `json:"sender_id,omitempty"`
+	Recipient      string            `json:"recipient"`
+	RecipientID    string            `json:"recipient_id,omitempty"`
+	Recipients     string            `json:"recipients,omitempty"`
+	Msg            string            `json:"msg"`
+	Type           string            `json:"type"`
+	Plain          bool              `json:"plain,omitempty"`
+	Raw            bool              `json:"raw,omitempty"`
+	Urgent         bool              `json:"urgent,omitempty"`
+	Broadcasted    bool              `json:"broadcasted,omitempty"`
+	ObserverOnly   bool              `json:"observer_only,omitempty"`
+	Status         string            `json:"status,omitempty"`
+	Attachments    []string          `json:"attachments,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
 	Channel        string            `json:"channel,omitempty"`
 	ThreadID       string            `json:"thread_id,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
