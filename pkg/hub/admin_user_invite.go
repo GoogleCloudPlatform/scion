@@ -61,10 +61,6 @@ type UserInviteBulkResponse struct {
 // handleAdminUserInvite handles POST /api/v1/admin/users/invite.
 func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -141,10 +137,6 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 // Accepts JSON or CSV (multipart/form-data) input.
 func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)

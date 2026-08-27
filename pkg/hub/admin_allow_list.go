@@ -60,10 +60,6 @@ func setDeprecationHeader(w http.ResponseWriter) {
 // DEPRECATED: Use POST /api/v1/admin/users/invite and GET /api/v1/users?status=invited instead.
 func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	setDeprecationHeader(w)
 
@@ -81,10 +77,6 @@ func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 // DEPRECATED: Use the new invite endpoints instead.
 func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	// Extract sub-path
 	subPath := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/allow-list/")
