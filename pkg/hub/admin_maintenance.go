@@ -94,6 +94,11 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 // Supports POST /api/v1/admin/maintenance/migrations/{key}/run to execute a migration.
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminMaintenanceMigrations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
 	user := GetUserIdentityFromContext(r.Context())
 
 	// Extract sub-path: /api/v1/admin/maintenance/migrations/{key}/run
@@ -105,11 +110,6 @@ func (s *Server) handleAdminMaintenanceMigrations(w http.ResponseWriter, r *http
 	}
 
 	key := parts[0]
-
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
 
 	s.executeMigration(w, r, key, user)
 }
@@ -667,12 +667,12 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 // so the response is sent before the restart takes effect.
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
 	}
+
+	user := GetUserIdentityFromContext(r.Context())
 
 	serviceName := s.config.MaintenanceConfig.ServiceName
 	if serviceName == "" {

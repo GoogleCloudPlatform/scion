@@ -373,13 +373,8 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 	}
 }
 
-func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
-	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
-	srv.registerRoutes()
-
-	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")
-	scopedAdmin := NewScopedUserIdentity(admin, "project-1", []string{"agent:create", "project:read", "policy:manage"})
-
+// allHubAdminRoutes returns all routes classified as hub-admin, sorted.
+func allHubAdminRoutes() []string {
 	routes := make([]string, 0)
 	for route, classification := range routePermissionClassifications {
 		if strings.HasPrefix(classification, "hub-admin:") {
@@ -387,6 +382,17 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 		}
 	}
 	sort.Strings(routes)
+	return routes
+}
+
+func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
+	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
+	srv.registerRoutes()
+
+	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")
+	scopedAdmin := NewScopedUserIdentity(admin, "project-1", []string{"agent:create", "project:read", "policy:manage"})
+
+	routes := allHubAdminRoutes()
 
 	for _, route := range routes {
 		t.Run(route, func(t *testing.T) {
