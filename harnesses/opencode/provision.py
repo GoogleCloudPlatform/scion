@@ -318,15 +318,17 @@ def _prefetch_models_catalog(ctx: sh.ProvisionContext) -> None:
             headers={"User-Agent": "scion-opencode-provision/1.0"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = resp.read()
+            data = resp.read(10 * 1024 * 1024)  # 10MB cap
         # Sanity-check: a real catalog is several KB of JSON.
         if len(data) > 100:
-            with open(cache_path, "wb") as f:
+            tmp_path = cache_path + ".tmp"
+            with open(tmp_path, "wb") as f:
                 f.write(data)
+            os.replace(tmp_path, cache_path)
             ctx.info(f"pre-fetched models catalog ({len(data)} bytes)")
         else:
             ctx.info("models catalog response too small, skipping")
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except Exception as e:
         ctx.info(f"models catalog pre-fetch failed (non-fatal): {e}")
 
 
