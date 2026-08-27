@@ -215,28 +215,10 @@ From the Hub web UI, click **New Project**. Provide a name and a git remote URL
 Create an agent via the web UI or the API. The web UI is the simplest path — click
 a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 
-For the API, specify `template`, `harnessConfig`, and `projectId` explicitly.
-The access token authenticates through IAP because the caller has
-`roles/iap.httpsResourceAccessor` (granted by the deploy command). Both the
-`Authorization` and `Proxy-Authorization` headers work.
-
-```bash
-# Replace PROJECT_UUID with the project ID from the create-project response
-curl -s -X POST "$HUB_URL/api/v1/agents" \
-  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-agent",
-    "projectId": "PROJECT_UUID",
-    "template": "default",
-    "harnessConfig": "claude"
-  }'
-```
-
-:::note[Identity tokens as an alternative]
-For stricter or scripted environments, you can use an OIDC identity token instead
-of an access token. The audience **must** be the IAP OAuth client ID (not the
-resource path):
+:::note[IAP authentication for API and scripted access]
+If you access the Hub API programmatically (scripts, CI, or `curl`), authenticate
+through IAP with an access token or an OIDC identity token. For identity tokens,
+the audience **must** be the IAP OAuth client ID (not the resource path):
 
 ```bash
 # Discover the auto-generated IAP OAuth client ID
@@ -254,8 +236,8 @@ Using the resource path (`/projects/NUMBER/locations/REGION/services/NAME`) as t
 audience will fail with "Invalid JWT audience".
 :::
 
-:::caution[Always specify harnessConfig]
-An agent create that omits `harnessConfig` will fail with a 502 and an error
+:::caution[Always specify harnessConfig when creating agents via the API]
+An API agent create that omits `harnessConfig` will fail with a 502 and an error
 naming a harness the operator never chose:
 
 ```
@@ -264,7 +246,8 @@ failed to find harness-config "antigravity": harness-config "antigravity" not fo
 
 This is the product-wide default harness resolving to a name that is not registered
 on the running hub. The error gives no indication that specifying `harnessConfig`
-is the fix. Always pass `template` and `harnessConfig` explicitly.
+is the fix. Always pass `template` and `harnessConfig` explicitly. The web UI
+enforces harness selection and is not affected.
 :::
 
 ### Attach to the agent's terminal
