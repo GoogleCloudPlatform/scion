@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,7 +179,7 @@ func TestEnableIAPPatchBody(t *testing.T) {
 
 	// Call the REST endpoint directly (we can't call diEnableIAP because
 	// it calls diGetAccessToken which requires gcloud)
-	statusCode, _, err := diRESTCall(http.MethodPatch, server.URL, "fake-token", jsonBody)
+	statusCode, _, err := diRESTCall(context.Background(), http.MethodPatch, server.URL, "fake-token", jsonBody)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, statusCode)
 
@@ -216,7 +217,7 @@ func TestEnableIAPUpdateMask(t *testing.T) {
 	// Build the URL the same way diEnableIAP does, but pointing at our test server
 	patchURL := fmt.Sprintf("%s?updateMask=iapEnabled,invokerIamDisabled", server.URL)
 
-	statusCode, _, err := diRESTCall(http.MethodPatch, patchURL, "fake-token", []byte(`{}`))
+	statusCode, _, err := diRESTCall(context.Background(), http.MethodPatch, patchURL, "fake-token", []byte(`{}`))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, statusCode)
 

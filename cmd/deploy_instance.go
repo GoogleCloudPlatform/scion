@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -96,9 +97,11 @@ func init() {
 }
 
 func runDeployInstance(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+
 	// Step 1: Resolve identity
 	fmt.Println("==> Step 1: Resolving deployer identity...")
-	operatorEmail, err := diResolveIdentity()
+	operatorEmail, err := diResolveIdentity(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to resolve deployer identity: %w", err)
 	}
@@ -119,7 +122,7 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 
 	// Step 2: Resolve project number
 	fmt.Println("==> Step 2: Resolving project number...")
-	projectNumber, err := diResolveProjectNumber(diProject)
+	projectNumber, err := diResolveProjectNumber(ctx, diProject)
 	if err != nil {
 		return fmt.Errorf("failed to resolve project number: %w", err)
 	}
@@ -157,7 +160,7 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 	// REST v2 neither sets nor returns sandboxLauncher — it returns 400 on
 	// create and silently omits it on read.
 	fmt.Println("==> Step 3a: Creating/updating Cloud Run Instance (gcloud, v1 surface)...")
-	if err := diGcloudDeploy(diName, diImage, diProject, diRegion,
+	if err := diGcloudDeploy(ctx, diName, diImage, diProject, diRegion,
 		diServiceAccount, diMemory, diCPU, iapAudience, adminEmail, imageRegistry); err != nil {
 		return fmt.Errorf("failed to deploy instance via gcloud: %w", err)
 	}
@@ -167,7 +170,7 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 	// iapEnabled and invokerIamDisabled are v2-only fields. gcloud has no
 	// --iap flag, so we flip both booleans with a single REST PATCH.
 	fmt.Println("==> Step 3b: Enabling IAP (REST v2 PATCH)...")
-	if err := diEnableIAP(diName, diProject, diRegion); err != nil {
+	if err := diEnableIAP(ctx, diName, diProject, diRegion); err != nil {
 		return fmt.Errorf("failed to enable IAP: %w", err)
 	}
 	fmt.Println("    IAP enabled on instance.")
@@ -183,14 +186,14 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 
 	// Step 5: Bind IAP access policy at the region level.
 	fmt.Println("==> Step 5: Binding IAP access policy...")
-	if err := diBindIAPPolicy(diProject, diRegion, operatorEmail); err != nil {
+	if err := diBindIAPPolicy(ctx, diProject, diRegion, operatorEmail); err != nil {
 		return fmt.Errorf("failed to bind IAP access policy: %w", err)
 	}
 	fmt.Printf("    IAP access granted to %s\n", operatorEmail)
 
 	// If admin-email differs from operator, also bind for the admin
 	if diAdminEmail != "" && diAdminEmail != operatorEmail {
-		if err := diBindIAPPolicy(diProject, diRegion, diAdminEmail); err != nil {
+		if err := diBindIAPPolicy(ctx, diProject, diRegion, diAdminEmail); err != nil {
 			return fmt.Errorf("failed to bind IAP access policy for admin: %w", err)
 		}
 		fmt.Printf("    IAP access granted to %s\n", diAdminEmail)
@@ -200,7 +203,7 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 	// Both project-level and region-level, because project-level grants
 	// inherit invisibly and a tool that only prints its own writes misleads.
 	fmt.Println("==> Step 6: Reading effective access...")
-	if err := diPrintEffectiveAccess(diProject, diRegion); err != nil {
+	if err := diPrintEffectiveAccess(ctx, diProject, diRegion); err != nil {
 		fmt.Printf("    Warning: could not read effective access: %v\n", err)
 	}
 
@@ -231,8 +234,8 @@ func runDeployInstance(cmd *cobra.Command, args []string) error {
 // ---------------------------------------------------------------------------
 
 // diResolveIdentity runs `gcloud config get account` to get the deploying operator's email.
-func diResolveIdentity() (string, error) {
-	out, err := diRunGcloud("config", "get", "account")
+func diResolveIdentity(ctx context.Context) (string, error) {
+	out, err := diRunGcloud(ctx, "config", "get", "account")
 	if err != nil {
 		return "", err
 	}
@@ -248,8 +251,8 @@ func diResolveIdentity() (string, error) {
 // ---------------------------------------------------------------------------
 
 // diResolveProjectNumber runs `gcloud projects describe` to get the project number.
-func diResolveProjectNumber(project string) (string, error) {
-	out, err := diRunGcloud("projects", "describe", project,
+func diResolveProjectNumber(ctx context.Context, project string) (string, error) {
+	out, err := diRunGcloud(ctx, "projects", "describe", project,
 		"--format=value(projectNumber)")
 	if err != nil {
 		return "", err
@@ -278,7 +281,7 @@ func diResolveProjectNumber(project string) (string, error) {
 // no --iap flag. They are set in a separate REST v2 PATCH (diEnableIAP).
 // The Instance is born with invoker check ON (default) — it is closed from
 // birth, and the IAP PATCH follows immediately.
-func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, iapAudience, adminEmail, imageRegistry string) error {
+func diGcloudDeploy(ctx context.Context, name, image, project, region, serviceAccount, memory, cpu, iapAudience, adminEmail, imageRegistry string) error {
 	args := []string{
 		"beta", "run", "instances", "deploy", name,
 		"--image", image,
@@ -301,7 +304,7 @@ func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, i
 	}
 
 	fmt.Printf("    gcloud %s\n", strings.Join(args[:6], " "))
-	_, err := diRunGcloud(args...)
+	_, err := diRunGcloud(ctx, args...)
 	return err
 }
 
@@ -326,7 +329,7 @@ func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, i
 //
 // Invariant: invokerIamDisabled: true is NEVER sent without iapEnabled: true
 // in the same body. Both are sent together with a single updateMask.
-func diEnableIAP(name, project, region string) error {
+func diEnableIAP(ctx context.Context, name, project, region string) error {
 	token, err := diGetAccessToken()
 	if err != nil {
 		return fmt.Errorf("failed to get access token: %w", err)
@@ -346,7 +349,7 @@ func diEnableIAP(name, project, region string) error {
 		region, project, region, name)
 	fmt.Printf("    PATCH %s\n", patchURL)
 
-	statusCode, respBody, err := diRESTCall(http.MethodPatch, patchURL, token, jsonBody)
+	statusCode, respBody, err := diRESTCall(ctx, http.MethodPatch, patchURL, token, jsonBody)
 	if err != nil {
 		return fmt.Errorf("REST PATCH failed: %w", err)
 	}
@@ -375,13 +378,13 @@ func diGetAccessToken() (string, error) {
 }
 
 // diRESTCall performs an authenticated HTTP request to the Cloud Run v2 API.
-func diRESTCall(method, url, token string, body []byte) (int, string, error) {
+func diRESTCall(ctx context.Context, method, url, token string, body []byte) (int, string, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return 0, "", err
 	}
@@ -477,8 +480,8 @@ func diIAMMemberPrefix(email string) string {
 // diBindIAPPolicy binds roles/iap.httpsResourceAccessor for the given email
 // at the REGION level. Per §11.2, there is no per-Instance IAP path — a
 // per-Instance request returns 404.
-func diBindIAPPolicy(project, region, email string) error {
-	_, err := diRunGcloud("iap", "web", "add-iam-policy-binding",
+func diBindIAPPolicy(ctx context.Context, project, region, email string) error {
+	_, err := diRunGcloud(ctx, "iap", "web", "add-iam-policy-binding",
 		"--project="+project,
 		"--region="+region,
 		"--resource-type=cloud-run",
@@ -496,10 +499,10 @@ func diBindIAPPolicy(project, region, email string) error {
 // IAP bindings. This is critical: project-level grants inherit invisibly and
 // do not appear in resource policies. A tool that only prints what it wrote
 // would actively mislead an operator auditing access (§11.2).
-func diPrintEffectiveAccess(project, region string) error {
+func diPrintEffectiveAccess(ctx context.Context, project, region string) error {
 	// Region-level IAP bindings
 	fmt.Println("    --- Region-level IAP bindings ---")
-	regionOut, err := diRunGcloud("iap", "web", "get-iam-policy",
+	regionOut, err := diRunGcloud(ctx, "iap", "web", "get-iam-policy",
 		"--project="+project,
 		"--region="+region,
 		"--resource-type=cloud-run",
@@ -512,7 +515,7 @@ func diPrintEffectiveAccess(project, region string) error {
 
 	// Project-level bindings filtered for iap.httpsResourceAccessor
 	fmt.Println("    --- Project-level IAP bindings (inherited) ---")
-	projectOut, err := diRunGcloud("projects", "get-iam-policy", project,
+	projectOut, err := diRunGcloud(ctx, "projects", "get-iam-policy", project,
 		"--format=yaml",
 	)
 	if err != nil {
@@ -686,8 +689,8 @@ func diNoAuthClient() *http.Client {
 // "WARNING: This command is using service account impersonation..."
 // banner) to stderr. CombinedOutput mixes those into data values like
 // project numbers and URLs, corrupting downstream consumers (#33).
-func diRunGcloud(args ...string) (string, error) {
-	cmd := exec.Command("gcloud", args...)
+func diRunGcloud(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "gcloud", args...)
 	out, err := cmd.Output() // stdout only; stderr via ExitError
 	if err != nil {
 		// Limit how much of args we show to avoid leaking tokens

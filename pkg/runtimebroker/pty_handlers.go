@@ -61,6 +61,36 @@ const (
 	cloudRunSandboxBin = "/usr/local/gcp/bin/sandbox"
 )
 
+// resizeSandboxTerminal relays a terminal resize event. For cloudrun-sandbox
+// runtimes, it sends the resize through the sandbox boundary via tmux
+// resize-window because SIGWINCH does not cross the boundary — PTY fd
+// properties propagate but signal delivery does not (design doc section
+// 4.4a-rev). NOTE: NOT refresh-client -C — that needs a control-mode client
+// and is the wrong tool (confirmed by spike-uds-b).
+//
+// It also applies pty.Setsize to the launcher-side PTY master when present —
+// both are needed.
+func resizeSandboxTerminal(ctx context.Context, runtimeCmd, containerID, logID string, cols, rows int, ptyMaster *os.File) {
+	if runtimeCmd == "cloudrun-sandbox" {
+		resizeCmd := exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+			"/usr/bin/tmux", "resize-window", "-t", "scion",
+			"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+		if err := resizeCmd.Run(); err != nil {
+			slog.Debug("Sandbox tmux resize failed", "id", logID, "error", err)
+		}
+	}
+	if ptyMaster != nil {
+		if err := pty.Setsize(ptyMaster, &pty.Winsize{
+			Cols: uint16(cols),
+			Rows: uint16(rows),
+		}); err != nil {
+			slog.Debug("PTY resize failed", "id", logID, "error", err)
+		} else {
+			slog.Debug("PTY resized", "id", logID, "cols", cols, "rows", rows)
+		}
+	}
+}
+
 // sanitizeExecUser returns user if it matches runtime.ValidExecUserName,
 // otherwise returns "scion" and logs a warning. Callers default to
 // "scion" already when the value is empty, so passing an empty
@@ -696,30 +726,7 @@ func (s *LocalPTYSession) readFromWebSocket() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			if s.runtimeCmd == "cloudrun-sandbox" {
-				// SIGWINCH does not cross the sandbox boundary -- PTY fd properties
-				// propagate but signal delivery does not (design doc section 4.4a-rev).
-				// Resize must be relayed out-of-band via tmux resize-window.
-				// NOTE: NOT refresh-client -C -- that needs a control-mode client
-				// and is the wrong tool (confirmed by spike-uds-b).
-				resizeCmd := exec.CommandContext(s.ctx, cloudRunSandboxBin, "exec", s.containerID, "--",
-					"/usr/bin/tmux", "resize-window", "-t", "scion",
-					"-x", strconv.Itoa(msg.Cols), "-y", strconv.Itoa(msg.Rows))
-				if err := resizeCmd.Run(); err != nil {
-					slog.Debug("Sandbox tmux resize failed", "agent_id", s.agentID, "error", err)
-				}
-			}
-			// ALSO still do the launcher-side pty.Setsize -- both are needed.
-			if s.ptyMaster != nil {
-				if err := pty.Setsize(s.ptyMaster, &pty.Winsize{
-					Cols: uint16(msg.Cols),
-					Rows: uint16(msg.Rows),
-				}); err != nil {
-					slog.Debug("PTY resize failed", "agent_id", s.agentID, "error", err)
-				} else {
-					slog.Debug("PTY resized", "agent_id", s.agentID, "cols", msg.Cols, "rows", msg.Rows)
-				}
-			}
+			resizeSandboxTerminal(s.ctx, s.runtimeCmd, s.containerID, s.agentID, msg.Cols, msg.Rows, s.ptyMaster)
 		}
 	}
 }
@@ -996,30 +1003,7 @@ func (h *StreamPTYHandler) handleResize() {
 			return
 		case size := <-h.handler.resizeCh:
 			cols, rows := size[0], size[1]
-			if h.runtimeCmd == "cloudrun-sandbox" {
-				// SIGWINCH does not cross the sandbox boundary -- PTY fd properties
-				// propagate but signal delivery does not (design doc section 4.4a-rev).
-				// Resize must be relayed out-of-band via tmux resize-window.
-				// NOTE: NOT refresh-client -C -- that needs a control-mode client
-				// and is the wrong tool (confirmed by spike-uds-b).
-				resizeCmd := exec.CommandContext(h.ctx, cloudRunSandboxBin, "exec", h.containerID, "--",
-					"/usr/bin/tmux", "resize-window", "-t", "scion",
-					"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
-				if err := resizeCmd.Run(); err != nil {
-					slog.Debug("Sandbox tmux resize failed", "slug", h.slug, "error", err)
-				}
-			}
-			// ALSO still do the launcher-side pty.Setsize -- both are needed.
-			if h.ptyMaster != nil {
-				if err := pty.Setsize(h.ptyMaster, &pty.Winsize{
-					Cols: uint16(cols),
-					Rows: uint16(rows),
-				}); err != nil {
-					slog.Debug("PTY resize failed", "slug", h.slug, "error", err)
-				} else {
-					slog.Debug("PTY resized", "slug", h.slug, "cols", cols, "rows", rows)
-				}
-			}
+			resizeSandboxTerminal(h.ctx, h.runtimeCmd, h.containerID, h.slug, cols, rows, h.ptyMaster)
 		}
 	}
 }

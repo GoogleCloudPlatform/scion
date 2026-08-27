@@ -681,6 +681,30 @@ func (r *CloudRunSandboxRuntime) Name() string { return "cloudrun-sandbox" }
 func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
 
 // Run launches an agent inside a sandbox. See brief §Deliverable 2.
+// waitForSandboxLiveness polls with backoff until probe returns nil or ctx is
+// cancelled. Returns nil on success, ctx.Err() on cancellation, or the last
+// probe error if all attempts fail.
+func waitForSandboxLiveness(ctx context.Context, delays []time.Duration, probe func(ctx context.Context) error, name string) error {
+	var probeErr error
+	for i, delay := range delays {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+		probeErr = probe(probeCtx)
+		probeCancel()
+		if probeErr == nil {
+			runtimeLog.Info("sandbox liveness probe passed", "name", name, "attempt", i+1)
+			return nil
+		}
+		runtimeLog.Debug("sandbox liveness probe failed, retrying",
+			"name", name, "attempt", i+1, "delay", delay, "error", probeErr)
+	}
+	return probeErr
+}
+
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	slug := sanitizeSandboxName(cfg.Name)
 
@@ -770,20 +794,18 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// precise measurement of sandbox startup latency. If this probe proves
 	// flaky in practice, lengthen the ladder rather than removing the probe.
 	probeDelays := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
-	var probeErr error
-	for i, delay := range probeDelays {
-		time.Sleep(delay)
-		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-		_, probeErr = runSimpleCommand(probeCtx, r.bin, "exec", slug, "--", "/bin/true")
-		probeCancel()
-		if probeErr == nil {
-			runtimeLog.Info("sandbox liveness probe passed", "name", slug, "attempt", i+1)
-			break
-		}
-		runtimeLog.Debug("sandbox liveness probe failed, retrying",
-			"name", slug, "attempt", i+1, "delay", delay, "error", probeErr)
-	}
+	probeErr := waitForSandboxLiveness(ctx, probeDelays, func(probeCtx context.Context) error {
+		_, err := runSimpleCommand(probeCtx, r.bin, "exec", slug, "--", "/bin/true")
+		return err
+	}, slug)
 	if probeErr != nil {
+		// A cancelled context is not a dead sandbox — the caller asked us
+		// to stop. Return the context error without dead-on-arrival
+		// diagnostics or cleanup.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
 		// Read entrypoint diagnostics from the host filesystem.
 		// paths.agentHome is the HOST-SIDE mount source; the sandbox writes
 		// to sandboxAgentHome (/home/scion, the mount destination). The bind

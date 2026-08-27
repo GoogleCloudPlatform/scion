@@ -186,7 +186,6 @@ images:
 substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/scion'
   _TAG: 'latest'
-  _COMMIT_SHA: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'

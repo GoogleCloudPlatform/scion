@@ -17,10 +17,12 @@ package runtime
 import (
 	"context"
 	"embed"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1388,5 +1390,104 @@ func TestRelocateToScion_AlreadySymlink(t *testing.T) {
 	link, _ := os.Readlink(src)
 	if link != target {
 		t.Errorf("symlink target changed to %q, want %q", link, target)
+	}
+}
+
+// -----------------------------------------------------------------------
+// waitForSandboxLiveness tests
+// -----------------------------------------------------------------------
+
+func TestWaitForSandboxLiveness_CancelledContext(t *testing.T) {
+	// A pre-cancelled context must exit immediately without calling the probe.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var probeCalls atomic.Int32
+	probe := func(ctx context.Context) error {
+		probeCalls.Add(1)
+		return nil
+	}
+
+	err := waitForSandboxLiveness(ctx, []time.Duration{time.Millisecond}, probe, "test")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("waitForSandboxLiveness() = %v, want context.Canceled", err)
+	}
+	if n := probeCalls.Load(); n != 0 {
+		t.Errorf("probe was called %d times, want 0 (context was already cancelled)", n)
+	}
+}
+
+func TestWaitForSandboxLiveness_CancelDuringSleep(t *testing.T) {
+	// Cancel the context during the delay; the probe should not run.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var probeCalls atomic.Int32
+	probe := func(ctx context.Context) error {
+		probeCalls.Add(1)
+		return nil
+	}
+
+	// Use a long delay so we can cancel during it.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	err := waitForSandboxLiveness(ctx, []time.Duration{5 * time.Second}, probe, "test")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("waitForSandboxLiveness() = %v, want context.Canceled", err)
+	}
+	if n := probeCalls.Load(); n != 0 {
+		t.Errorf("probe was called %d times, want 0 (cancelled before probe)", n)
+	}
+}
+
+func TestWaitForSandboxLiveness_Success(t *testing.T) {
+	ctx := context.Background()
+
+	probe := func(ctx context.Context) error {
+		return nil
+	}
+
+	err := waitForSandboxLiveness(ctx, []time.Duration{time.Millisecond}, probe, "test")
+	if err != nil {
+		t.Errorf("waitForSandboxLiveness() = %v, want nil", err)
+	}
+}
+
+func TestWaitForSandboxLiveness_RetriesThenSucceeds(t *testing.T) {
+	ctx := context.Background()
+
+	var probeCalls atomic.Int32
+	probe := func(ctx context.Context) error {
+		n := probeCalls.Add(1)
+		if n < 3 {
+			return errors.New("not ready")
+		}
+		return nil
+	}
+
+	delays := []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	err := waitForSandboxLiveness(ctx, delays, probe, "test")
+	if err != nil {
+		t.Errorf("waitForSandboxLiveness() = %v, want nil", err)
+	}
+	if n := probeCalls.Load(); n != 3 {
+		t.Errorf("probe was called %d times, want 3", n)
+	}
+}
+
+func TestWaitForSandboxLiveness_AllFail(t *testing.T) {
+	ctx := context.Background()
+	probeErr := errors.New("sandbox dead")
+
+	probe := func(ctx context.Context) error {
+		return probeErr
+	}
+
+	delays := []time.Duration{time.Millisecond, time.Millisecond}
+	err := waitForSandboxLiveness(ctx, delays, probe, "test")
+	if !errors.Is(err, probeErr) {
+		t.Errorf("waitForSandboxLiveness() = %v, want %v", err, probeErr)
 	}
 }
