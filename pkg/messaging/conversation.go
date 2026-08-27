@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -33,6 +34,13 @@ type ConversationUpserter interface {
 // lookups. It is satisfied by store.Store (which embeds ConversationStore).
 type ConversationReader interface {
 	GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*store.Conversation, error)
+}
+
+// ParticipantAdder is the minimal interface for registering conversation
+// participants. Separated from ConversationUpserter to keep each interface
+// single-purpose.
+type ParticipantAdder interface {
+	AddParticipant(ctx context.Context, p *store.ConversationParticipant) error
 }
 
 // ConversationResult carries the outcome of a resolve-or-create operation,
@@ -53,6 +61,7 @@ type ConversationResult struct {
 func ResolveOrCreateDMConversation(
 	ctx context.Context,
 	cs ConversationUpserter,
+	pa ParticipantAdder,
 	log *slog.Logger,
 	senderKind, senderID, recipientKind, recipientID string,
 ) *ConversationResult {
@@ -88,6 +97,34 @@ func ResolveOrCreateDMConversation(
 			"error", err,
 		)
 		return nil
+	}
+
+	// Register both participants so the DM appears in each party's sidebar.
+	// Errors are logged but not returned — participant registration is a listing
+	// concern, not an access concern (the DM key IS the access authority).
+	//
+	// Race note: concurrent ResolveOrCreateDMConversation calls may both
+	// attempt AddParticipant. This is benign: AddParticipant's immutability
+	// guard reads Kind and ExternalRef, which are immutable for a conversation's
+	// lifetime (set at creation, never updated by UpsertConversationByExternalRef).
+	// Worst case is ErrAlreadyExists, which is swallowed above.
+	for _, pp := range []struct{ kind, id string }{
+		{senderKind, senderID},
+		{recipientKind, recipientID},
+	} {
+		addErr := pa.AddParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: result.ID,
+			PrincipalKind:  pp.kind,
+			PrincipalID:    pp.id,
+			Role:           "member",
+		})
+		if addErr != nil && !errors.Is(addErr, store.ErrAlreadyExists) {
+			log.Warn("participant registration failed (listing gap, not access)",
+				"conversation_id", result.ID,
+				"principal_kind", pp.kind,
+				"principal_id", pp.id,
+				"error", addErr)
+		}
 	}
 
 	return &ConversationResult{

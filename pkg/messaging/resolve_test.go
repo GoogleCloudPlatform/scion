@@ -1187,7 +1187,7 @@ func TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge(t *testing.T) {
 	}
 
 	// Step 1: Legacy dual-write path.
-	convResult := ResolveOrCreateDMConversation(ctx, ms, log, "user", senderID, "agent", agentID)
+	convResult := ResolveOrCreateDMConversation(ctx, ms, ms, log, "user", senderID, "agent", agentID)
 	require.NotNil(t, convResult, "dual-write path must return a result (rule 14: non-zero floor)")
 
 	// Step 2: Resolver path via @agent.
