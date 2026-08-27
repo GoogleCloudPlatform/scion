@@ -120,7 +120,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
 EXPECTED_ASSERTIONS=207   # 49 chart-integrity + 77 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
-EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
+EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
 # tests/stale-claim-triage.md; NOT_EXECUTABLE was emptied to match, so the
@@ -176,6 +176,7 @@ NOT_RUN_HERE=(
 # reported as un-covered. Listing it here is the statement that it is data, not
 # an executable, and that no assertion total is expected from it.
 NOT_EXECUTABLE=(
+  stale-claim-triage.md
 )
 
 REQUIRED_TOOLS=("${HELM:-helm}" tar mktemp awk sha256sum)
