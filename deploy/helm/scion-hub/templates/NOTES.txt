@@ -445,8 +445,11 @@ THE SETTINGS FILE IS READ-ONLY. THIS IS DELIBERATE.
   separate hazard that a hub which has already run against Postgres keeps some
   settings in database rows that shadow the file entirely; see VALIDATION.md.
 
+{{- $auth := .Values.auth | default (dict) }}
+{{- $authOauth := $auth.oauth | default (dict) }}
+{{- $web := $authOauth.web | default (dict) }}
 {{- $oauthConfigured := false }}
-{{- range $provider, $creds := .Values.auth.oauth.web }}
+{{- range $provider, $creds := $web }}
 {{- if or $creds.clientId $creds.clientSecret }}
 {{- $oauthConfigured = true }}
 {{- end }}
@@ -528,7 +531,7 @@ WHAT THIS RELEASE DOES NOT YET DO
   preflight gate by gate over the settings.yaml this chart renders, in the order
   the hub checks them - the list below is checked against that walk, it is not
   typed from memory:
-{{- if eq (toString .Values.auth.mode) "proxy" }}
+{{- if eq (toString ($auth.mode | default "")) "proxy" }}
 
     a durable session secret                session-secret phase
     server.auth.proxy.provider: iap         }
@@ -541,7 +544,7 @@ WHAT THIS RELEASE DOES NOT YET DO
 
     a durable session secret                session-secret phase
 
-  That is the whole list for auth.mode: {{ .Values.auth.mode }}. The IAP gates
+  That is the whole list for auth.mode: {{ $auth.mode | default "" }}. The IAP gates
   are not work you are waiting on - this shape never reaches them, so the
   Ingress/IAP phase lands nothing this refusal is blocked on.
 {{- end }}
