@@ -594,11 +594,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Ownership check: verify the DM key IDs match the actual participants.
 	// The agent in the DM key must match the target agent; the user must match
-	// the sender (for user→agent messages).
+	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
+	// be spoofed).
 	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
 		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
 		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
-		if dmAgentID != agent.ID || dmUserID != structuredMsg.SenderID {
+		var authenticatedUserID string
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			authenticatedUserID = user.ID()
+		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			authenticatedUserID = agentIdent.ID()
+		}
+		if dmAgentID != agent.ID || dmUserID != authenticatedUserID {
 			BadRequest(w, "DM thread_id does not match the sender and recipient")
 			return
 		}
