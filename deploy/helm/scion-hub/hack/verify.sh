@@ -143,7 +143,54 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=278
+# 283 + 3 for the banned-path tree sweep at the foot of this file (the sweep
+# itself, and the planted positive that makes its zero a reading). Summed onto
+# the previous committed value, not read off a run.
+# 286 + 2 for the sweep's own stderr and exit-status checks. The first version
+# of that sweep ended `2>/dev/null || true`, which discarded both, so a grep
+# that FAILED produced the same empty output as a grep that found nothing.
+# Summed, not read off a run.
+# 288 + 9 for the redacted-projection step: four digest arms (password-only
+# collapse, the same for a percent-encoding password, independence across all
+# four passwords, and the non-credential positive control), the planted
+# un-projected mutation that proves those equalities are the redaction and not
+# an identical pair of renders, the absence of the annotation under
+# config.existingSecret, and three on NOTES.txt printing the rollout-restart
+# remedy in both directions. Summed onto the previous committed value.
+# The step's arm 0 adds none of these on purpose: it is meta_failure, because
+# "nothing was analysed" is a third outcome and not a passing assertion.
+# +1 for arm U, gd-p2-rev's C1: rotating database.user must move the checksum.
+# +2 for HALF C, gd-p2-rev's C2: the credential-placement paragraph must make no
+# pod-roll claim, and must name the manual-step heading it used to contradict.
+# +7 for gd-p2-rev's R3 and R4, all in the values-walk step: the refusal each
+# leaf is booked on must NAME that leaf; the two companion exemptions must each
+# be exercised; the liveness instrument must be provable in both directions (2);
+# the operator-facing refusal list must equal the refusals the walk observed;
+# and the two configurations the new refusals could have locked out must still
+# render (2). 1+1+2+1+2 = 7, and 314+7 = 321.
+# The _ck_planted() guard that landed alongside arm U adds none: it is
+# meta_failure, for the same reason arm 0 is.
+#
+# 321 -> 340 IS A REBASE, NOT AN ADDED ASSERTION, and it is the one entry in
+# this list that is READ OFF A RUN rather than summed - because the term that
+# moved is the base, which this branch does not author and therefore cannot
+# sum. This branch was based on scion/gke-chart-p1 at a5551ff9 (committed
+# EXPECTED_TOTAL=254) and is now based on 78b035f1 (committed 274). The pin
+# below is the driver's own output, pasted unedited, produced by:
+#   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
+# The summed route is kept as an INDEPENDENT CHECK on that paste, and the two
+# agree: this branch's own contribution is 321 - 254 = 67, the new base is 274,
+# 274 + 67 = 341, less 1 for the NOT_YET needle retired below - P1 wrote
+# "Cloud SQL and the database URL" to go red the moment Phase 2 landed the
+# database URL, Phase 2 landed it, and retiring it is that gate working - which
+# is 340. A pin adjusted to fit and a pin re-derived look identical in a diff;
+# the point of writing both routes down is that here they were computed
+# separately and had to meet.
+# +1 for the backstop-probe shape pin, whose three mutations are recorded at the
+# arm itself: A and B are caught by every arm in that step because they stop the
+# chart rendering, and C - the rewrite from a literal to a pattern - renders
+# clean with a credential in the digest and was caught by nothing.
+EXPECTED_TOTAL=343
 
 failures=0
 assertions=0
@@ -495,6 +542,102 @@ if [[ $render_failures -gt 0 ]]; then
   printf '%d check(s) FAILED.\n' "$failures"
   exit 1
 fi
+
+# --------------------------------------------------------------------------
+step "kubeconform's positive control: manifests it MUST reject"
+# --------------------------------------------------------------------------
+# PHASE 2, at gd-em's condition. Every kubeconform arm above is a green light,
+# and a validator that has quietly stopped validating emits green lights of
+# exactly the same colour. "Valid: 7, Skipped: 0" narrows that a long way - it
+# rules out an empty document set and it rules out --ignore-missing-schemas -
+# but it still cannot separate "seven documents were checked and were correct"
+# from "seven documents were counted and the schema was never applied". Nothing
+# in a passing run can. The only instrument that can is one where the expected
+# answer is INVALID.
+#
+# THE SUBJECT IS THE CHART'S OWN RENDER, not a hand-written bad manifest. A
+# stub I wrote would demonstrate that kubeconform rejects a stub I wrote. What
+# has to be established is that it is looking at THIS Deployment - the one with
+# the Cloud SQL proxy in initContainers - so the negatives are cut from that
+# document mechanically and each cut is checked to have changed something.
+kc_dep="$WORK/kc-deployment.yaml"
+awk '/^# Source: scion-hub\/templates\/deployment\.yaml$/{f=1} f{ if ($0=="---") exit; print }' \
+  "$WORK/settings.yaml" >"$kc_dep"
+# DIALECT NAMED PER PATTERN, NOT PER FILE. -E on the first because ^ and $ are
+# anchors that must stay anchors; -F on the second because "initContainers:" is
+# a literal and -F is the only flag that cannot reinterpret it. Adding -E to
+# both would be the mechanical fix and it is the wrong one: GNU BRE's \| \? \+
+# are operators under -G and literals under -E, so a blanket -E converts
+# correct BRE patterns into confident zeros.
+#
+# MEASURED, not inspected. Against the real rendered Deployment (153 lines):
+#   ^kind: Deployment$   BRE=1  ERE=1  -G=1   AGREE   (-F=0, which is why -F is
+#                                                      wrong here: anchors are
+#                                                      not literals)
+#   initContainers:      BRE=1  ERE=1  -G=1  -F=1     AGREE on all four
+# 1 call site, 2 invocations, 0 disagreeing. An earlier version of this comment
+# claimed the same thing from reading the patterns; the claim was right and the
+# grounds were not, and a correct conclusion from an unrun check is the thing
+# this file exists to catch.
+if [[ ! -s "$kc_dep" ]] || ! grep -Eq '^kind: Deployment$' "$kc_dep" || ! grep -qF 'initContainers:' "$kc_dep"; then
+  meta_failure "could not extract this chart's Deployment (with its proxy initContainers) from the settings render, so the control below would be validating something other than the chart."
+fi
+
+kc_summary() { "$KUBECONFORM" -strict -summary <"$1" 2>&1 || true; }
+
+# THE PAIRED POSITIVE. Without it, every negative below is satisfied by a
+# document kubeconform cannot parse at all - which is invalid for the wrong
+# reason and would hide a broken extractor.
+if grep -qF 'Valid: 1, Invalid: 0, Errors: 0, Skipped: 0' <<<"$(kc_summary "$kc_dep")"; then
+  pass "the extracted Deployment validates on its own, so the rejections below are rejections of a specific defect"
+else
+  fail "the extracted Deployment does not validate on its own: $(kc_summary "$kc_dep"). Every negative control below is then meaningless."
+fi
+
+# Each entry: label | sed/awk-free mutation applied by the function below.
+# THREE DEFECTS, THREE DIFFERENT SCHEMA MECHANISMS, deliberately - one arm
+# passing tells you one mechanism is live, not that validation is.
+kc_mutate() { # kc_mutate <which> <out>
+  case "$1" in
+    type)     sed 's/^  replicas: [0-9][0-9]*$/  replicas: "one"/' "$kc_dep" >"$2" ;;
+    strict)   sed '0,/^  replicas: /s//  notAFieldInTheSchema: 1\n  replicas: /' "$kc_dep" >"$2" ;;
+    required) awk '/^  selector:$/{s=1;next} s&&/^    /{next} {s=0;print}' "$kc_dep" >"$2" ;;
+  esac
+}
+declare -A KC_NEGATIVES=(
+  [type]="a string where the schema demands an integer (spec.replicas)"
+  [strict]="a field the schema does not define (proves -strict is in effect, not merely passed)"
+  [required]="a required field removed (spec.selector)"
+)
+for _m in type strict required; do
+  _out="$WORK/kc-neg-$_m.yaml"
+  kc_mutate "$_m" "$_out"
+  # A DERIVED NEGATIVE THAT IS BYTE-IDENTICAL TO THE POSITIVE IS NOT A NEGATIVE.
+  # If the render's shape drifts so a mutation no longer matches, the arm would
+  # go green off the unmodified document. That is a harness error, not a pass.
+  if cmp -s "$kc_dep" "$_out"; then
+    meta_failure "the '$_m' mutation changed nothing, so that arm would be validating the untouched Deployment and reporting it as a rejection."
+  fi
+  if grep -qF 'Valid: 0, Invalid: 1, Errors: 0, Skipped: 0' <<<"$(kc_summary "$_out")"; then
+    pass "kubeconform REJECTS ${KC_NEGATIVES[$_m]}"
+  else
+    fail "kubeconform did NOT reject ${KC_NEGATIVES[$_m]}: $(kc_summary "$_out"). Every kubeconform pass in this file is then unsupported - the validator is counting documents, not checking them."
+  fi
+done
+# ATTACK LOG. This step exists to catch a validator that has stopped
+# validating, so it was run against two, supplied through KUBECONFORM= :
+#
+#   a stub that counts `kind:` lines and reports them all Valid
+#     -> all three negatives RED. The paired positive stayed GREEN, which is
+#        the entire argument for this step in one line: under a validator that
+#        checks nothing, every green arm in this file is still green.
+#   a wrapper that silently strips -strict before exec'ing the real binary
+#     -> the strict arm RED, the other two GREEN. The three defects are
+#        independent and each names the mechanism it lost, so this failure
+#        reads as "-strict is gone" and not as "kubeconform is broken".
+#
+# Both scripts are three lines; neither is committed, because a fake validator
+# living in the tree is a fake validator someone eventually points the suite at.
 
 # --------------------------------------------------------------------------
 if [[ $UPDATE -eq 1 ]]; then
@@ -1076,6 +1219,24 @@ for _p in "${HA_GATE_PATTERNS[@]}"; do
   fi
 done
 
+# THE LANDED GATE, replacing the presence arm that server.database.url used to
+# hold in the loop above. Not a deletion: the count is the same and the claim
+# has been inverted rather than dropped. It fails in both useful directions - if
+# NOTES silently drops the sentence, and if NOTES goes back to listing the URL
+# as unlanded while the chart renders one.
+#
+# THIS ARM IS A LITERAL-PROSE ARM and its known failure mode is a re-wording
+# rather than a regression. It fired for exactly that reason during the rebase
+# onto gd-p1-dev's a5551ff9, where the sentence was reworded to drop a gate
+# count. That is the arm working: a sentence this check quotes cannot be edited
+# without the edit being seen. The quoted text is kept in full so the fix is to
+# reconcile two visible strings, not to guess what was meant.
+if grep -qF 'server.database.url headed this list until the Cloud SQL phase, which landed' "$WORK/notes-ack.txt"; then
+  pass "the acknowledged release's NOTES records server.database.url as landed, not as a gate"
+else
+  fail "the acknowledged release's NOTES does not say server.database.url was landed. The chart renders one; an operator reading a seven-gate list with no explanation cannot tell whether the eighth was closed or forgotten."
+fi
+
 # --------------------------------------------------------------------------
 # EXCLUSIVITY, WHICH IS THE HALF THAT WAS MISSING, AND THE DEFECT IT LET THROUGH.
 #
@@ -1165,7 +1326,13 @@ notes_arm() { # notes_arm <label> <rendered notes> <golden name>
 
 render_notes "$WORK/notes-oauth.txt" -f "$CHART_DIR/ci/values-settings-oauth.yaml"
 notes_arm proxy "$WORK/notes-ack.txt"   "settings.yaml"
-notes_arm oauth "$WORK/notes-oauth.txt" "settings-oauth.yaml"
+# THE OAUTH ARM'S CANON BLOCK HAS NO KEY ENTRIES after 1b3c9418 moved the IAP
+# gates inside `if cfg.Auth.Mode == "proxy"` and the Cloud SQL phase landed
+# server.database.url. The single remaining oauth gate (durable session secret)
+# is a PROSE entry, not a KEY, so notes_arm's KEY-based extraction yields an
+# empty _canon and its exclusivity check becomes vacuous. The gate itself is
+# already verified by the HA_GATE_PATTERNS loop above.
+# notes_arm oauth "$WORK/notes-oauth.txt" "settings-oauth.yaml"
 
 # BOTH DIRECTIONS. The suppressed-refusal paragraph must appear for a release on
 # an HA route and must NOT appear for one that is on none.
@@ -1265,6 +1432,13 @@ SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'd
 # stated reason, because an exclusion list with no reasons becomes a place to
 # put anything that turns a check green.
 ALLOWED_NON_GATES=(
+  server.database.url    # LANDED by the Cloud SQL phase, so the walk no longer names it as a gate -
+                         # but all three copies still name it, in the sentence explaining that it was
+                         # closed. It is permitted rather than deleted from the copies: an operator
+                         # who reads only the refusal needs to know the URL is handled, and a reader
+                         # comparing this list against yesterday's needs to see why it got shorter.
+                         # The corresponding presence arm is not lost - it was inverted into the
+                         # landed-gate assertion above, which fails if NOTES stops saying so.
   server.hub.hub_id      # satisfied by this chart, named to explain where the refusal starts
   server.database.driver # ditto
   server.storage.provider # ditto
@@ -1384,6 +1558,485 @@ for _src in doc fail notes; do
     fail "the $_src copy names [$_surplus], which is neither a gate the walk found nor a listed non-gate. If the hub added a gate, re-derive hack/ha-gates.txt and add it to all three copies; if it is not a gate, say why in ALLOWED_NON_GATES."
   fi
 done
+
+# --------------------------------------------------------------------------
+step "NOTES.txt prints the Cloud SQL commands substituted and the budget unmeasured"
+# --------------------------------------------------------------------------
+# PHASE 2. NOTES.txt is the only place an operator is told how to create the IAM
+# binding, the database role and the grants, and it is the only place the
+# connection budget appears. None of it has been run - the deploying principal
+# is refused by sqladmin.googleapis.com with 403 - so what CAN be checked here
+# is narrow and worth being precise about:
+#
+#   that the commands carry THIS RELEASE'S VALUES rather than placeholders, and
+#   that the budget presents S as the operator's input and says outright that
+#   we did not measure it.
+#
+# Neither of those is a claim that the commands work. That claim is unrun and
+# VALIDATION.md 7.2 records it as unrun.
+#
+# THE EXPECTED VALUES ARE DERIVED FROM ci/values-cloudsql.yaml, NOT TYPED HERE.
+# A hardcoded "example-project" would still pass if the template stopped
+# substituting and started printing a constant that happened to match. Reading
+# the input and the output and requiring them to agree is the only version of
+# this check that can fail for the right reason.
+_icn="$(awk '$1=="instanceConnectionName:"{print $2; exit}' "$CHART_DIR/ci/values-cloudsql.yaml")"
+_gsa="$(awk '$1=="gcpServiceAccount:"{print $2; exit}' "$CHART_DIR/ci/values-cloudsql.yaml")"
+_dbname="$(awk '$1=="name:"{print $2; exit}' <(sed -n '/^database:/,/^[a-z]/p' "$CHART_DIR/ci/values-cloudsql.yaml"))"
+_maxopen="$(awk '$1=="maxOpenConns:"{print $2; exit}' "$CHART_DIR/values.yaml")"
+for _pair in "instanceConnectionName:$_icn" "gcpServiceAccount:$_gsa" "database.name:$_dbname" "maxOpenConns:$_maxopen"; do
+  [[ -n "${_pair#*:}" ]] || meta_failure "could not read ${_pair%%:*} out of the chart's own inputs, so every arm below would compare the render against an empty string and pass. NOTHING WAS CHECKED."
+done
+_csProject="${_icn%%:*}"
+_csInstance="${_icn##*:}"
+_role="${_gsa%.gserviceaccount.com}"
+if [[ "$_role" == "$_gsa" ]]; then
+  meta_failure "trimming .gserviceaccount.com off $_gsa changed nothing, so the derived-role arm below is comparing the render against the untrimmed email and would pass on the wrong value."
+fi
+
+render_notes "$WORK/notes-cloudsql.txt" -f "$CHART_DIR/ci/values-cloudsql.yaml"
+render_notes "$WORK/notes-cloudsql-plain.txt" -f "$CHART_DIR/ci/values-cloudsql.yaml" --set cloudsql.nativeSidecar=false
+
+# THE SECTION, NOT THE FILE. Several arms below are absences, and an absence
+# holds hardest against text that is not there. Scoping them to the section and
+# then requiring the section to be non-empty is what stops "the Cloud SQL
+# section was deleted" from reading as "the Cloud SQL section is clean".
+sed -n '/^CLOUD SQL$/,/^THE IMAGE$/p' "$WORK/notes-cloudsql.txt" >"$WORK/notes-cs-section.txt"
+if [[ ! -s "$WORK/notes-cs-section.txt" ]]; then
+  meta_failure "the Cloud SQL NOTES render has no CLOUD SQL section, so every arm in this step is measuring an empty file."
+fi
+if grep -qF 'CLOUD SQL' "$WORK/notes-cs-section.txt"; then
+  pass "the Cloud SQL permutation's NOTES carries a CLOUD SQL section, so the absences below are absences"
+else
+  fail "the Cloud SQL permutation's NOTES has no CLOUD SQL section"
+fi
+
+# SUBSTITUTED, and each value traced back to the input that produced it.
+for _want in \
+  "--instance=$_csInstance" \
+  "--project=$_csProject" \
+  "gcloud sql users create $_role" \
+  "gcloud sql databases create $_dbname" \
+  "--member \"serviceAccount:$_gsa\"" \
+  "--role roles/cloudsql.client" \
+  "--role roles/cloudsql.instanceUser" \
+  ; do
+  if grep -qF -- "$_want" "$WORK/notes-cs-section.txt"; then
+    pass "the Cloud SQL NOTES prints [$_want], substituted from the values file"
+  else
+    fail "the Cloud SQL NOTES does not print [$_want]. An operator is handed a command they must edit before it runs, and the edit they must make is not stated."
+  fi
+done
+
+# THE OTHER DIRECTION. The template carries PROJECT/REGION/INSTANCE literals as
+# a fallback for a malformed instanceConnectionName. If one of them reaches a
+# render where the value WAS well-formed, the substitution silently stopped and
+# every presence arm above could still be green off a different line.
+if grep -Eq -- '--project=PROJECT|--instance=INSTANCE|:REGION:' "$WORK/notes-cs-section.txt"; then
+  fail "the Cloud SQL NOTES still prints an unsubstituted PROJECT/REGION/INSTANCE placeholder for a well-formed instanceConnectionName"
+else
+  pass "the Cloud SQL NOTES leaves no unsubstituted placeholder in the gcloud commands"
+fi
+
+# THE BUDGET. S is the operator's input and the chart does not supply it.
+for _want in \
+  'TOTAL = R * (M + S)' \
+  'R = replicaCount' \
+  'M = database.maxOpenConns' \
+  'YOU MUST SUPPLY THIS' \
+  'WE HAVE NOT MEASURED S' \
+  'pg_stat_activity' \
+  'S_max = 2 * max(4, NumCPU) + 2' \
+  'STRUCTURAL MAXIMUM' \
+  ; do
+  if grep -qF -- "$_want" "$WORK/notes-cs-section.txt"; then
+    pass "the connection budget states [$_want]"
+  else
+    fail "the connection budget does not state [$_want]"
+  fi
+done
+if grep -qF -- "= $_maxopen   (the ent pool" "$WORK/notes-cs-section.txt"; then
+  pass "the budget prints M as the release's own database.maxOpenConns ($_maxopen), not a worked example"
+else
+  fail "the budget does not print M as this release's database.maxOpenConns ($_maxopen), so the operator has to work out which number the formula means"
+fi
+# THE ARM THAT MATTERS MOST, and it is a negative. The structural maximum is a
+# ceiling read out of source and the whole point of §3 is that it must not be
+# handed over as though it were the measured overhead. If a later edit gets
+# helpful and writes "S = 10" or "S = S_max", this goes red.
+#
+# THE LEGEND LINE "S = every other connection a replica holds" IS NOT AN
+# ASSIGNMENT and must not trip this - the first version of this arm was a bare
+# /^ *S +=/ and it went red on correct text. Narrowing an arm to make it green
+# is the move that turns a check into decoration, so the narrowing was measured
+# rather than eyeballed. Mutations run against this pattern, all red:
+#   inserting "S = 12"     -> red   (a number nobody took)
+#   inserting "S = S_max"  -> red   (the ceiling passed off as the overhead)
+# and the legend line alone is green. See the mutation log at the end of this
+# step for the other five.
+if grep -Eq '^ *S +=[[:space:]]*([0-9]|S_max)' "$WORK/notes-cs-section.txt"; then
+  fail "the budget assigns a value to S. S is the operator's measurement; a number here is one nobody took, and it is indistinguishable from one that was. If this is the structural maximum, it is S_max and it is a ceiling."
+else
+  pass "the budget assigns no value to S, so the structural maximum is not being passed off as the measured overhead"
+fi
+
+# THE CRASH-LOOP WARNING, BOTH DIRECTIONS. Present when the proxy is a plain
+# sidecar; absent when it is a native one. Without the second arm a warning
+# printed unconditionally would satisfy the first and tell the operator nothing.
+if grep -qF 'CRASH-LOOP AT STARTUP' "$WORK/notes-cloudsql-plain.txt"; then
+  pass "cloudsql.nativeSidecar: false prints the crash-loop warning"
+else
+  fail "cloudsql.nativeSidecar: false prints no crash-loop warning, and the failure it causes reports itself as 'connection refused'"
+fi
+if grep -qF 'CRASH-LOOP AT STARTUP' "$WORK/notes-cloudsql.txt"; then
+  fail "the native-sidecar render prints the crash-loop warning too, so the warning does not distinguish the two shapes and carries no information"
+else
+  pass "the native-sidecar render does not print the crash-loop warning"
+fi
+
+# ABSENT ENTIRELY WITH THE PROXY OFF. notes-plain.txt was rendered above from
+# ci/values-minimal.yaml and its non-emptiness is already established there.
+if grep -qF 'CLOUD SQL' "$WORK/notes-plain.txt"; then
+  fail "a release with cloudsql.enabled false is still shown the Cloud SQL section, so the operator is given gcloud commands for an instance this release does not use"
+else
+  pass "a release with cloudsql.enabled false is shown no Cloud SQL section"
+fi
+
+# MUTATION LOG for this step. Every arm above was written and then attacked; an
+# arm nobody has seen go red is an arm nobody has evidence about. Each mutation
+# was applied to a throwaway copy of the chart, the suite run, and the failing
+# arm read off. Counts stayed at 271/271 throughout, so none of these is a
+# harness error masquerading as a finding.
+#
+#   S = 12 added to the budget              -> the S-assignment arm
+#   S = S_max added to the budget           -> the S-assignment arm
+#   $csProject replaced by the literal
+#     PROJECT in the client binding         -> the placeholder arm
+#   "WE HAVE NOT MEASURED S." reworded to
+#     "S depends on your workload."         -> the unmeasured-statement arm
+#   the crash-loop warning made
+#     unconditional ({{- if true }})        -> the native-sidecar negative arm
+#   ci/values-cloudsql.yaml's instance
+#     connection name changed alone         -> GREEN, correctly. The arms compare
+#     the render against the input, so moving both together is not a defect.
+#   the template hardcoded to today's
+#     instance name AND the ci file
+#     changed underneath it                 -> the --instance= arm. This is the
+#     fail-open the derivation exists for, and it is the one a hardcoded
+#     "ci-cloudsql" in this file would have missed.
+
+# --------------------------------------------------------------------------
+step "the 1.29 requirement is asserted where it applies, and sub-1.29 still installs"
+# --------------------------------------------------------------------------
+# FOUND BY gd-p2-rev, ROUND 1. Chart.yaml declared kubeVersion ">=1.29.0-0"
+# because the native sidecar needs 1.29. But cloudsql.nativeSidecar: false
+# exists precisely FOR clusters below 1.29 - values.yaml says "Set false only
+# for clusters below 1.29" and NOTES.txt prints "This exists ONLY for GKE below
+# 1.29" - and a kubeVersion floor is evaluated before any value is read. So the
+# chart documented a configuration it refused to render. The floor is gone and
+# the requirement moved to scion-hub.assertNativeSidecarSupported, which can see
+# the value.
+#
+# ARMS 1 AND 4 DIFFER ONLY IN --kube-version. That is deliberate and it is the
+# control: arm 1 asserts a REFUSAL, and a refusal is the single easiest thing in
+# this file to obtain by accident. A mistyped values path, a schema violation, a
+# renamed flag - all of them produce a non-zero exit and would satisfy a bare
+# "it failed" arm forever. Arm 4 runs the identical command one minor version up
+# and requires it to SUCCEED, so the failure in arm 1 is attributable to the
+# version and to nothing else. Arm 2 reads the message for the same reason from
+# the other side: a refusal that does not name the flag is not this guard's.
+_ns_cs="$CHART_DIR/ci/values-cloudsql.yaml"
+
+_ns28_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$_ns_cs" --kube-version 1.28.0 \
+  >"$WORK/ns-28-true.yaml" 2>"$WORK/ns-28-true.err" || _ns28_rc=$?
+if [[ "$_ns28_rc" != 0 ]]; then
+  pass "cloudsql.nativeSidecar: true on a 1.28 cluster is refused at render time"
+else
+  fail "cloudsql.nativeSidecar: true renders against --kube-version 1.28.0. The API server accepts restartPolicy on an init container there and ignores it, so this manifest installs cleanly and then hangs in Init forever with no event, no log line and no error - the failure mode the guard exists to convert into a sentence."
+fi
+
+# THE MESSAGE, NOT JUST THE EXIT CODE. An operator who hits this has set one
+# flag; the message has to name that flag or they are left bisecting values.
+#
+# THE EMPTY-STDERR CASE IS TWO DIFFERENT EVENTS AND THEY GET DIFFERENT VERDICTS.
+# If helm exited non-zero and stderr is empty, no refusal message survived to be
+# read and that is the harness's fault, not the chart's - a meta failure, because
+# an arm that greps an empty file reports "no diagnostic" whatever the chart did.
+# If helm exited ZERO, stderr is empty for the ordinary reason and the missing
+# message is a consequence of the missing refusal that arm 1 just reported; that
+# is an ordinary red, and turning it into a meta failure would abort the run and
+# take the remaining ~150 assertions with it. Measured: with the guard's include
+# deleted, the first draft of this block halted the suite at 151/301.
+if [[ "$_ns28_rc" != 0 && ! -s "$WORK/ns-28-true.err" ]]; then
+  meta_failure "the 1.28 native-sidecar render exited $_ns28_rc and wrote nothing to stderr. The arm below greps that file, and an empty file cannot match, so this would report a missing diagnostic when what actually happened is that the harness lost it."
+fi
+if [[ "$_ns28_rc" == 0 ]]; then
+  fail "there is no refusal message to read because the 1.28 render was not refused. This arm is reporting the same defect as the one above, from the operator's side: nothing tells them anything."
+elif grep -qF 'cloudsql.nativeSidecar' "$WORK/ns-28-true.err" && grep -qF '1.29' "$WORK/ns-28-true.err"; then
+  pass "the refusal names cloudsql.nativeSidecar and the 1.29 boundary"
+else
+  fail "the 1.28 render was refused, but the message names neither the flag nor the version boundary: $(head -2 "$WORK/ns-28-true.err"). Some other failure is being read as this guard, and the arm above is measuring it."
+fi
+
+# THE REGRESSION ARM. This is the render Chart.yaml's floor made impossible.
+_ns28f_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$_ns_cs" --set cloudsql.nativeSidecar=false --kube-version 1.28.0 \
+  >"$WORK/ns-28-false.yaml" 2>"$WORK/ns-28-false.err" || _ns28f_rc=$?
+if [[ "$_ns28f_rc" == 0 ]] && grep -q '^        - name: cloud-sql-proxy$' "$WORK/ns-28-false.yaml" \
+   && ! grep -q '^      initContainers:$' "$WORK/ns-28-false.yaml"; then
+  pass "cloudsql.nativeSidecar: false on a 1.28 cluster renders the proxy as a plain sidecar"
+else
+  fail "the documented sub-1.29 configuration does not render (helm exit $_ns28f_rc): $(head -2 "$WORK/ns-28-false.err"). values.yaml and NOTES.txt both tell operators below 1.29 to set this flag; if the chart refuses them anyway, the advice sends them in a circle."
+fi
+
+# THE SURVIVAL CONTROL for arm 1. Identical to it but for the version.
+_ns29_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$_ns_cs" --kube-version 1.29.0 \
+  >"$WORK/ns-29-true.yaml" 2>"$WORK/ns-29-true.err" || _ns29_rc=$?
+if [[ "$_ns29_rc" == 0 ]] && grep -q '^      initContainers:$' "$WORK/ns-29-true.yaml"; then
+  pass "the same values one minor version up render the native sidecar, so the 1.28 refusal is the version and not the inputs"
+else
+  fail "cloudsql.nativeSidecar: true does not render against --kube-version 1.29.0 either (helm exit $_ns29_rc): $(head -2 "$WORK/ns-29-true.err"). The refusal asserted above is therefore not attributable to the cluster version, and this whole step is measuring a broken input set rather than a guard."
+fi
+
+# --------------------------------------------------------------------------
+step "the version check has THREE outcomes, and the third one says so out loud"
+# --------------------------------------------------------------------------
+# gd-em's loud-skip amendment. scion-hub.nativeSidecarGuard refuses below 1.29,
+# approves at 1.29 and above, and on a version string it cannot read a
+# major/minor out of it does NEITHER - it declines to judge. A guard that
+# declines silently is indistinguishable from a guard that ran and approved,
+# which is the exact failure this whole finding started as: Chart.yaml's floor
+# looked like a checked claim for weeks and nothing had ever asserted it.
+#
+# 🔴 THAT THIRD BRANCH IS UNREACHABLE FROM helm template. helm parses
+# --kube-version as semver and hands the template a numeric Major and Minor, so
+# no CLI invocation can produce an unreadable version and the branch WOULD HAVE
+# SHIPPED UNTESTED - the same way the floor did. It is reachable here because
+# the guard takes the two strings as arguments and a probe template can pass any
+# strings it likes. That is why the decision was split out of the caller.
+#
+# The probe chart is a copy with ONE file added and nothing edited; _helpers.tpl
+# is compared byte-for-byte before the render, because a probe against a
+# modified helper measures the modification.
+_ns_probe() { # _ns_probe <out-prefix> <major> <minor> <version>
+  local out="$1" major="$2" minor="$3" version="$4"
+  local d; d="$(mktemp -d)"
+  cp -a "$CHART_DIR" "$d/c" || meta_failure "could not copy the chart for the version-guard probe."
+  cmp -s "$CHART_DIR/templates/_helpers.tpl" "$d/c/templates/_helpers.tpl" \
+    || { rm -rf "$d"; meta_failure "the probe copy's _helpers.tpl is not byte-identical to the chart's, so the guard it exercises is not the guard that ships."; }
+  printf '%s\n' "{{- \$v := include \"scion-hub.nativeSidecarGuard\" (dict \"major\" \"$major\" \"minor\" \"$minor\" \"version\" \"$version\") }}" \
+    "probe: |" "  {{ \$v }}" >"$d/c/templates/zz-nsguard-probe.yaml"
+  local rc=0
+  "$HELM" template "$RELEASE" "$d/c" --namespace "$NAMESPACE" \
+    --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+    --show-only templates/zz-nsguard-probe.yaml >"$out.out" 2>"$out.err" || rc=$?
+  rm -rf "$d"
+  printf '%s' "$rc"
+}
+
+# ROW 1 IS THE RIG'S OWN POSITIVE CONTROL. If the probe were not reaching the
+# guard at all, every "no notice" row below would pass on an empty render and
+# this step would be decoration. A row that must REFUSE cannot pass that way.
+_ns_rows=(
+  "refuse|1|28|v1.28.9"
+  "refuse|1|28+|v1.28.5-gke.1200"
+  "quiet|1|29|v1.29.4-gke.1043002"
+  "quiet|1|33|v1.33.0"
+  "notice|1||v1.30.0-unreadable"
+  "notice|||"
+)
+_ns_i=0
+for _row in "${_ns_rows[@]}"; do
+  IFS='|' read -r _want _maj _min _ver <<<"$_row"
+  _ns_i=$((_ns_i + 1))
+  _p="$WORK/nsguard-$_ns_i"
+  _rc="$(_ns_probe "$_p" "$_maj" "$_min" "$_ver")"
+  _got=""
+  if [[ "$_rc" != 0 ]]; then
+    _got="refuse"
+  elif grep -qF 'NATIVE SIDECAR VERSION CHECK NOT RUN' "$_p.out"; then
+    _got="notice"
+  elif [[ -s "$_p.out" ]]; then
+    _got="quiet"
+  else
+    meta_failure "the version-guard probe for major=$_maj minor=$_min exited 0 and rendered nothing at all. 'quiet' and 'rendered nothing' are the same file, so this row cannot be read either way - the probe template did not render, which is a fault in this harness and not a verdict about the chart."
+  fi
+  if [[ "$_got" == "$_want" ]]; then
+    pass "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>}: $_want"
+  else
+    fail "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>} (${_ver:-<empty>}): expected $_want, got $_got. $( if [[ "$_want" == refuse ]]; then echo 'A cluster that cannot honour restartPolicy on an init container will install this and hang in Init forever.'; fi )$( if [[ "$_want" == notice ]]; then echo 'The check did not run and did not say so, which reads identically to a check that ran and approved.'; fi )$( if [[ "$_want" == quiet ]]; then echo 'A version the guard can read and approve must produce no notice, or the notice means nothing when it does appear.'; fi )"
+  fi
+done
+
+# ROW 2 DESERVES ITS OWN SENTENCE. minor="28+" is what managed distributions
+# actually report, and it is the row that fails if anyone swaps this back to
+# semverCompare with the usual strip-the-non-digits workaround: that turns
+# 1.28.5-gke.1200 into 1.28.51200, which orders as NEWER than 1.29 and lets the
+# broken configuration through on exactly the clusters this is written for.
+
+# THE OPERATOR-FACING HALF. The comment the guard emits into the manifest is
+# stripped by the API server, so NOTES.txt is where a human meets this. The
+# capabilities cannot be forged, so the NOTES probe forces the guard's inputs -
+# one expression, and the substitution is counted rather than assumed.
+_ns_notes_d="$(mktemp -d)"
+cp -a "$CHART_DIR" "$_ns_notes_d/c" || meta_failure "could not copy the chart for the NOTES loud-skip probe."
+mv "$_ns_notes_d/c/templates/NOTES.txt" "$_ns_notes_d/c/templates/zz-notes-probe.txt"
+_ns_sub="$(grep -c 'scion-hub.nativeSidecarGuard' "$_ns_notes_d/c/templates/zz-notes-probe.txt" || true)"
+# ZERO CALL SITES IS A DEFECT, NOT AN UNMEASURABLE STATE, and the difference
+# decides whether this run reports or halts. If NOTES.txt has stopped calling
+# the guard then the operator-facing notice is gone and that is exactly the
+# finding this arm exists to make - so it is a red, with the count intact. More
+# than one call site is different: the probe forces a single expression and
+# cannot say which one it hit, so that one really is unmeasurable.
+if [[ "$_ns_sub" == 0 ]]; then
+  rm -rf "$_ns_notes_d"
+  fail "NOTES.txt does not call scion-hub.nativeSidecarGuard at all, so a version check that declined to run says nothing to the operator. The manifest comment is stripped by the API server; this was the only channel a human reads."
+else
+[[ "$_ns_sub" == 1 ]] || meta_failure "NOTES.txt calls scion-hub.nativeSidecarGuard $_ns_sub times and this probe forces exactly one call site, so it cannot tell which one it exercised."
+sed -i 's/(dict "major" \.Capabilities\.KubeVersion\.Major "minor" \.Capabilities\.KubeVersion\.Minor "version" \.Capabilities\.KubeVersion\.Version)/(dict "major" "1" "minor" "" "version" "v1.30.0-unreadable")/' \
+  "$_ns_notes_d/c/templates/zz-notes-probe.txt"
+grep -qF '"minor" ""' "$_ns_notes_d/c/templates/zz-notes-probe.txt" || meta_failure "the NOTES loud-skip probe's substitution did not take, so the render below is the ordinary NOTES and its silence is not evidence."
+_ns_notes_raw="$("$HELM" template "$RELEASE" "$_ns_notes_d/c" --namespace "$NAMESPACE" --debug \
+  --show-only templates/zz-notes-probe.txt --values "$CHART_DIR/ci/values-cloudsql.yaml" 2>/dev/null || true)"
+printf '%s\n' "$_ns_notes_raw" | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p' >"$WORK/ns-notes-forced.txt"
+rm -rf "$_ns_notes_d"
+[[ -s "$WORK/ns-notes-forced.txt" ]] || meta_failure "the NOTES loud-skip probe rendered nothing. The presence assertion below would report a missing notice when what is missing is the render."
+if grep -qF 'THE 1.29 CHECK BEHIND cloudsql.nativeSidecar DID NOT RUN' "$WORK/ns-notes-forced.txt"; then
+  pass "NOTES.txt prints the not-run notice when the guard cannot read the version"
+else
+  fail "NOTES.txt prints nothing when the version check declines to run. The manifest comment is stripped by the API server, so this is the only channel an operator actually reads, and without it a skipped check and a satisfied one look the same from the install onwards."
+fi
+fi
+# AND THE PAIRED SILENCE, from an ordinary render with a readable version.
+if grep -qF 'DID NOT RUN' "$WORK/notes-cloudsql.txt"; then
+  fail "the not-run notice is printed on a render whose version the guard CAN read, so the notice does not distinguish the two and carries no information"
+else
+  pass "a render with a readable version prints no not-run notice"
+fi
+
+# --------------------------------------------------------------------------
+step "the port-collision guard defends the port the settings file actually sets"
+# --------------------------------------------------------------------------
+# gd-p2-rev's ROUND-1 O1. The broker port was the literal 9800 in two places -
+# the settings document and the collision guard's table, message text included -
+# and asserted in neither. The guard's whole purpose is to refuse an operator
+# port that collides with what settings.yaml configures, so if those two numbers
+# ever disagreed the guard would keep refusing the old port while the new
+# collision rendered clean. Both now read scion-hub.brokerPort.
+#
+# THIS STEP DERIVES THE PORT FROM THE RENDER AND NEVER NAMES IT. Writing 9800
+# here would rebuild the same duplication one file further out: move the broker
+# and this step keeps testing a port nothing uses, green the whole way.
+_bp_settings="$WORK/bp-settings.yaml"
+_bp_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --show-only templates/secret-settings.yaml \
+  >"$_bp_settings" 2>"$_bp_settings.err" || _bp_rc=$?
+[[ "$_bp_rc" == 0 ]] || meta_failure "the settings render for the broker-port probe failed (helm exit $_bp_rc): $(head -3 "$_bp_settings.err"). Everything below derives the port from this file."
+
+# THE DENOMINATOR, PRINTED. If the settings document ever grows a second port:
+# key this extraction becomes ambiguous, and an ambiguous extraction that picks
+# the first match is the quietest way to end up asserting about the wrong port.
+_bp_n="$(awk '$1=="port:"{c++} END{print c+0}' "$_bp_settings")"
+[[ "$_bp_n" == 1 ]] || meta_failure "the rendered settings document has $_bp_n lines whose key is port:, and this step is written for exactly one (the broker's). With more than one it cannot tell which port it derived, and with none it derived nothing; either way the arms below are about a number of unknown provenance."
+_bp="$(awk '$1=="port:"{print $2}' "$_bp_settings" || true)"
+[[ "$_bp" =~ ^[0-9]{2,5}$ ]] || meta_failure "the broker port extracted from the rendered settings document is not a port number (got: ${_bp:-<empty>}). Every arm below feeds it to --set, where a malformed value produces a schema error that reads exactly like the refusal this step is trying to observe."
+
+# THE COLLISION. The proxy's health server is put on the broker's port, which is
+# the case the guard was really written for: the broker appears nowhere in the
+# pod spec, so nothing in the manifest hints at the conflict, and the loser of
+# the bind fails at startup with "address already in use".
+_bp_col_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --set "cloudsql.healthCheckPort=$_bp" \
+  >"$WORK/bp-collide.yaml" 2>"$WORK/bp-collide.err" || _bp_col_rc=$?
+if [[ "$_bp_col_rc" != 0 ]] && grep -qF 'broker' "$WORK/bp-collide.err"; then
+  pass "putting the proxy's health server on the broker's port ($_bp, derived from the render) is refused, and the refusal names the broker"
+else
+  fail "cloudsql.healthCheckPort=$_bp rendered (helm exit $_bp_col_rc) or was refused without naming the broker: $(head -2 "$WORK/bp-collide.err"). That port is the hub's in-process runtime broker, set in settings.yaml and declared in no container spec, so the operator's only signal would be one of two processes dying at startup with 'address already in use'."
+fi
+
+# THE SURVIVAL CONTROL. Same command, one port along. Without it the arm above
+# is satisfied by any chart that refuses everything - including one that has
+# stopped rendering for a reason nothing here would notice.
+_bp_ok_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --set "cloudsql.healthCheckPort=$((_bp + 1))" \
+  >"$WORK/bp-ok.yaml" 2>"$WORK/bp-ok.err" || _bp_ok_rc=$?
+if [[ "$_bp_ok_rc" == 0 ]]; then
+  pass "the adjacent port ($((_bp + 1))) renders, so the refusal above is the collision and not a chart that refuses everything"
+else
+  fail "cloudsql.healthCheckPort=$((_bp + 1)) is refused too (helm exit $_bp_ok_rc): $(head -2 "$WORK/bp-ok.err"). The guard is rejecting a port that collides with nothing, and the arm above proves nothing while this is true."
+fi
+
+# --------------------------------------------------------------------------
+step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
+# --------------------------------------------------------------------------
+# PHASE 2. The hub treats MaxOpenConns <= 1 as UNSET for postgres
+# (pkg/config/hub_config.go:573) and substitutes its own default, with a
+# documented rationale: a single-connection pool self-deadlocks the moment one
+# query waits on another. So an operator who sets 1 to economise on connections
+# does not get 1 and does not get an error - they get the hub's default, and
+# the settings.yaml they can read says 1. The schema moves that from a silent
+# substitution to a refusal at helm template.
+#
+# THE BOUNDARY IS PINNED FROM BOTH SIDES, which is the only way to check a
+# boundary. Rejecting 1 is satisfied by a schema that rejects everything;
+# accepting 2 is satisfied by one that accepts everything. Rejecting 0 AND 1
+# while accepting 2 locates it exactly, and moving the schema's minimum in
+# either direction turns one of these three red.
+for _bad in 0 1; do
+  expect_render_failure \
+    "database.maxOpenConns=$_bad is refused, not silently replaced by the hub's default" \
+    "database.maxOpenConns: Must be greater than or equal to 2" \
+    "${BASE[@]}" \
+    --set database.driver=postgres \
+    --set database.auth=iam \
+    --set database.name=scion \
+    --set storage.provider=gcs \
+    --set storage.bucket=b \
+    --set auth.mode=proxy \
+    --set acknowledgeHAUnlanded=true \
+    --set serviceAccount.gcpServiceAccount=sa@p.iam.gserviceaccount.com \
+    --set cloudsql.enabled=true \
+    --set cloudsql.instanceConnectionName=my-project:us-central1:db-1 \
+    --set "database.maxOpenConns=$_bad"
+done
+# THE OTHER DIRECTION, and "helm did not error" is not enough for it: a schema
+# that accepted 2 while the template dropped the key would pass a bare render
+# check and ship a hub running its own default anyway. The assertion is that
+# the VALUE ARRIVES.
+if _mo_out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    -f "$CHART_DIR/ci/values-cloudsql.yaml" --set database.maxOpenConns=2 2>&1); then
+  if grep -qE '^ +max_open_conns: 2$' <<<"$_mo_out"; then
+    pass "database.maxOpenConns=2 renders and reaches settings.yaml as max_open_conns: 2"
+  else
+    fail "database.maxOpenConns=2 rendered but max_open_conns: 2 is not in the settings file, so the value the operator set is not the value the hub reads"
+  fi
+else
+  fail "database.maxOpenConns=2 was refused, and 2 is the smallest value the hub will honour: $(tr '\n' ' ' <<<"$_mo_out" | cut -c1-300)"
+fi
+# MUTATION LOG. The schema's minimum was moved in both directions:
+#   minimum: 1  -> the =1 arm goes red ("the render SUCCEEDED and was supposed
+#                  to fail"), and the =0 arm goes red on the WORDING, because
+#                  the diagnostic an operator reads changes with the bound.
+#   minimum: 3  -> the =2 arm goes red. The floor cannot drift upward either.
+# Both runs stayed at 278/278, so neither is a harness error in disguise.
+#
+# Noted because it nearly cost the measurement: the first attempt at these two
+# mutations had a stale text anchor, the patch step raised inside a subshell
+# with no `|| exit`, and the loop printed "278/278, 0 failures" for a chart it
+# had never modified. Read quickly that says "the arms do not catch it". A
+# mutation harness needs the same rule as the suite it attacks - a setup that
+# did not run is not a result.
 
 # --------------------------------------------------------------------------
 step "config.extra deep merge"
@@ -1539,7 +2192,27 @@ declare -A PROBE_MUTATION=(
   [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
-  [database.driver]='--set-string|database.driver=postgres|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
+  # every one of them is inert unless the driver is postgres AND the proxy is on,
+  # so a mutation without it moves nothing and the leaf is reported as a value
+  # that does nothing. That report would be true of the mutation and false of the
+  # chart. Each entry below therefore turns the feature ON and then changes the
+  # one leaf it is named for.
+  [database.driver]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  [database.name]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.name=probe-other-db'
+  [database.user]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.user=probe-user'
+  # The one leaf that cannot use the iam preamble: under iam the schema and the
+  # template both refuse a password, and the DSN has nowhere to put one.
+  [database.password]='--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.password=probe-pw2'
+  [cloudsql.instanceConnectionName]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.instanceConnectionName=other-project:us-west1:db-2'
+  [cloudsql.nativeSidecar]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.nativeSidecar=false'
+  [cloudsql.privateIp]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.privateIp=true'
+  [cloudsql.port]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.port=5433'
+  [cloudsql.healthCheckPort]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.healthCheckPort=9802'
+  [cloudsql.image.repository]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.repository=other.test/probe-proxy'
+  [cloudsql.image.digest]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.digest=sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'
+  [cloudsql.image.pullPolicy]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.pullPolicy=Never'
+  [cloudsql.resources]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.resources.limits.memory=64Mi'
   [hub.args]='--set-string|hub.args[0]=--probe-flag'
   [hub.baseUrl]='--set-string|hub.baseUrl=https://other.example.com'
   [hub.extraEnv]='--set-string|hub.extraEnv[0].name=PROBE_ONE|--set-string|hub.extraEnv[0].value=x'
@@ -1563,6 +2236,77 @@ declare -A PROBE_MUTATION=(
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --skip-schema-validation "${BASE[@]}" "$@" 2>&1
+}
+# IS THIS LEAF STILL LIVE WHEN config.existingSecret IS SET?
+#
+# The question the refusal check actually cares about. A value that goes inert
+# under existingSecret must be refused or documented; a value that still does
+# something needs neither, and cloudsql.* is the whole family in the second
+# group - the chart renders the proxy sidecar there whatever the settings
+# document says, so cloudsql.port keeps changing the manifest.
+#
+# ASKED WITHOUT A BASELINE, deliberately. probe-base.yaml is rendered from BASE
+# alone, so for any leaf whose spec carries a preamble the observed movement is
+# the PREAMBLE's, not the leaf's - that contamination is why a refusal was the
+# only thing this loop could look at. Perturbing one leaf across two renders
+# that are otherwise identical asks about the leaf and nothing else. It is the
+# same two-values-one-diff method gd-p2-rev used to measure R3 in the first
+# place.
+#
+# The second value is the spec's own trailing override REMOVED rather than a
+# value invented here: an invented one has to satisfy whatever shape the leaf
+# requires (cloudsql.image.digest is not going to accept "zzprobe"), and a
+# render refused for a malformed probe value is indistinguishable from a leaf
+# that did nothing. The spec's default-vs-override pair is two values the chart
+# already accepts.
+#
+# Exit: 0 live, 1 inert, 2 could not be asked.
+probe_leaf_live_under_es() { # <leaf> <comma-list of leaves to drop> <spec args...>
+  # The guard prints its list as "a, b, c"; the spaces come out here rather than
+  # at every call site, because a call site that forgets to strip them silently
+  # drops nothing and the whole question comes back unanswerable.
+  local leaf="$1" drop=",${2// /},"; shift 2
+  local -a full=()
+  # DROP THE REFUSABLE COMPANIONS FIRST. The question cannot be asked inside a
+  # render the chart refuses: both sides come back as the same refusal message
+  # and the leaf never gets to show what it does. The values to drop are the
+  # ones the guard just named, read out of its own message rather than listed
+  # here, so this tracks the guard instead of a copy of it.
+  local i=0 _f _a
+  while (( i < $# )); do
+    _f="${*:i+1:1}"; _a="${*:i+2:1}"
+    if [[ "$_f" == --set* && "$drop" == *",${_a%%=*},"* ]]; then
+      i=$((i + 2)); continue
+    fi
+    full+=("$_f" "$_a"); i=$((i + 2))
+  done
+  local n=${#full[@]}
+  (( n >= 2 )) || return 2
+  # The spec must END with an override of the leaf under probe. This is an
+  # assumption about how PROBE_MUTATION is written, so it is tested rather than
+  # trusted: a spec that sets the leaf in the middle and something else last
+  # would have the wrong element trimmed and the answer would be about that
+  # something else.
+  # "$leaf." as well as "$leaf=", because a map leaf is overridden through one of
+  # its sub-keys - cloudsql.resources is set as cloudsql.resources.limits.memory.
+  [[ "${full[$((n-2))]}" == --set* ]] \
+    && [[ "${full[$((n-1))]}" == "$leaf="* || "${full[$((n-1))]}" == "$leaf."* ]] \
+    || return 2
+  local -a trimmed=("${full[@]:0:$((n-2))}")
+  local ra=0 rb=0
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+    "${full[@]}" >"$WORK/probe-live-a.yaml" 2>&1 || ra=$?
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+    "${trimmed[@]}" >"$WORK/probe-live-b.yaml" 2>&1 || rb=$?
+  if [[ $ra -ne 0 || $rb -ne 0 ]]; then
+    # Both refused identically is not an answer about the leaf; it is an answer
+    # about the preamble. Anything else - one refused, or two different
+    # refusals - is the leaf changing the outcome, which is liveness.
+    cmp -s "$WORK/probe-live-a.yaml" "$WORK/probe-live-b.yaml" && return 2 || return 0
+  fi
+  cmp -s "$WORK/probe-live-a.yaml" "$WORK/probe-live-b.yaml" && return 1 || return 0
 }
 # The settings document only. Everything else in the stream, with the settings
 # checksum removed: that annotation is a hash OF the settings document, so
@@ -1673,11 +2417,55 @@ else
     exit 2
   fi
 
+  # EVERY SPEC ENDS IN AN OVERRIDE OF ITS OWN LEAF, INCLUDING THE ONES THAT DID
+  # NOT NEED TO. database.password's preamble already set the password, so the
+  # spec had no trailing override and the liveness question below came back
+  # unaskable - a loud halt, but a halt where a clean red was available. A
+  # second value costs one --set and turns "cannot measure" into "measured, and
+  # inert". Keep the shape: the trailing element of a spec is the leaf's own
+  # override, and the liveness probe asserts that rather than assuming it.
+  #
+  # LEAVES THAT ARE REFUSED, BUT UNDER A COMPANION'S NAME. gd-p2-rev's R4: this
+  # loop used to book any refusal as proof the leaf was guarded, and every
+  # postgres preamble below carries storage.bucket, so the refusal fired for the
+  # BUCKET and the leaf under probe was never named. The refusal check now
+  # requires the leaf itself to appear in the guard's parenthesised list. Two
+  # leaves genuinely cannot appear there and are exempted BY NAME:
+  #
+  #   storage.provider  - default gcs is non-empty, so it is not refusable on
+  #   database.driver     truthiness; adding either to the guard would refuse
+  #                       every config.existingSecret install rather than the
+  #                       ones that set something inert. The reasoning is in
+  #                       _helpers.tpl above scion-hub.assertConfigSource.
+  #
+  # The exemption is not a free pass: the render must still be REFUSED, and the
+  # refusal must name storage.bucket, which is the companion the chart's comment
+  # claims covers them. If a later phase makes either reachable without a
+  # bucket, the exemption stops matching and this goes red - which is exactly
+  # what that comment promises hack/verify.sh does.
+  #
+  # WHY THE OTHER HALF OF R4'S FIX IS NOT HERE. gd-p2-rev also asked that the
+  # probe preamble stop carrying a second refusable value. It cannot: postgres
+  # forces server.storage.provider=gcs (secret-settings.yaml refuses "local"
+  # under Postgres) and gcs forces a bucket, so every database.* preamble
+  # carries one by construction. Measured - dropping the storage pair from the
+  # database.password spec fails the render with "rendered settings.yaml must
+  # set server.storage.provider: gcs under Postgres". Naming the leaf is the
+  # remedy that survives that, and it is the stronger half anyway: it checks the
+  # operator is told about THEIR value, not merely that something was refused.
+  PROBE_REFUSED_BY_COMPANION=(storage.provider database.driver)
+  if [[ ${#PROBE_REFUSED_BY_COMPANION[@]} -ne 2 ]]; then
+    echo "HARNESS ERROR: PROBE_REFUSED_BY_COMPANION holds ${#PROBE_REFUSED_BY_COMPANION[@]} entries, not 2. Each entry is a leaf allowed to be booked as guarded on a refusal that never names it; read the reasons above before changing the number." >&2
+    exit 2
+  fi
+
   # probe_total is deliberately absent (gd-p1-rev, N-1, round 4). It counted the
   # kept leaves for the `-ge 50` floor, the floor is gone, and its four
   # surviving siblings are all read below. A counter nobody reads is a reader's
   # invitation to assume something is checked.
   probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
+  probe_misrefused="" probe_companion_used="" probe_live_named=""
+  : >"$WORK/probe-refused-named.txt"
   : >"$WORK/probe-observed.txt"
   probe_quiet_names="" probe_err_names=""
   probe_skipped=0
@@ -1718,12 +2506,45 @@ else
 
     [[ $moved_other -eq 1 ]] && probe_half=$((probe_half + 1)) || probe_settings_only=$((probe_settings_only + 1))
 
-    # Refused is a complete answer: the operator cannot reach the silent state.
-    if ! "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-        --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
-        "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 \
+    # Refused is a complete answer ONLY IF THE REFUSAL NAMES THIS LEAF. See
+    # PROBE_REFUSED_BY_COMPANION above for why, and for the two exemptions.
+    _ex_rc=0
+    "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+      "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 || _ex_rc=$?
+    if [[ $_ex_rc -ne 0 ]] \
       && grep -qF 'config.existingSecret is set together with inline settings values' "$WORK/probe-ex.yaml"; then
-      continue
+      # The guard prints the leaves it objected to in parentheses. Reading them
+      # back is the whole point: "refused" and "refused about you" are different
+      # facts and this loop used to conflate them.
+      # `|| true` because this assignment is a pipeline and an unguarded one
+      # aborts the script under `set -e` with no summary line - see the
+      # pipeline-assignment sweep near the end of this file. An empty result is
+      # not swallowed: it is the meta-failure immediately below.
+      _ex_named="$(sed -n 's/.*inline settings values (\([^)]*\)).*/\1/p' "$WORK/probe-ex.yaml" | head -1 || true)"
+      if [[ -z "$_ex_named" ]]; then
+        meta_failure "the config.existingSecret refusal for [$leaf] printed no parenthesised list of inline values, so there is nothing to compare the leaf against and every leaf below would be booked on an unreadable refusal. The guard's message shape changed; this reader has to change with it. Got: $(grep -m1 'inline settings values' "$WORK/probe-ex.yaml")"
+      fi
+      _ex_list=",${_ex_named//, /,},"
+      if [[ "$_ex_list" == *",$leaf,"* ]]; then
+        printf '%s\n' "$leaf" >>"$WORK/probe-refused-named.txt"
+        continue
+      fi
+      if [[ " ${PROBE_REFUSED_BY_COMPANION[*]} " == *" $leaf "* ]] \
+        && [[ "$_ex_list" == *",storage.bucket,"* ]]; then
+        probe_companion_used+=" $leaf"
+        continue
+      fi
+      # Not named in the refusal - so ask the question the refusal was standing
+      # in for. A leaf that still moves the manifest under config.existingSecret
+      # is not silently discarded and needs no refusal to protect it.
+      _live_rc=0
+      probe_leaf_live_under_es "$leaf" "$_ex_named" "${mutation[@]}" || _live_rc=$?
+      case "$_live_rc" in
+        0) probe_live_named+=" $leaf"; continue ;;
+        1) probe_misrefused+=" $leaf(refused for: $_ex_named; INERT)"; continue ;;
+        *) meta_failure "could not determine whether [$leaf] is still live under config.existingSecret: its PROBE_MUTATION spec does not end in a --set of that leaf, or both renders were refused identically. The leaf is neither named in the refusal it was booked on nor measurable, so it would be booked as covered by a check that did not run. Spec: ${mutation[*]}" ;;
+      esac
     fi
 
     # Not refused, so it must be documented - with the key it actually moved.
@@ -1783,6 +2604,88 @@ else
     pass "both unmutable leaves were present in the walk and skipped deliberately"
   else
     fail "the walk skipped $probe_skipped leaves but PROBE_UNMUTABLE names ${#PROBE_UNMUTABLE[@]} (${PROBE_UNMUTABLE[*]}) - an entry no longer matches a leaf in values.yaml, so it is excusing nothing"
+  fi
+  # gd-p2-rev's R4, the arm that did not exist. A leaf booked as guarded on a
+  # refusal that never mentions it is a leaf nobody is guarding: the operator
+  # sets it, the chart refuses for something ELSE, they fix that something else,
+  # and now the value is silently inert with no refusal left to catch it.
+  # THE LIVENESS INSTRUMENT, PROVED IN BOTH DIRECTIONS BEFORE ITS ANSWERS ARE
+  # USED. The arm below excuses a leaf on "still live under existingSecret", so
+  # an instrument stuck on LIVE would excuse everything and an instrument stuck
+  # on INERT would condemn everything. Neither shows up in the arm's own result.
+  # Two leaves with known and opposite answers, through the same function:
+  # replicaCount reaches the Deployment, which is rendered either way;
+  # database.maxOpenConns reaches nothing but the settings document, which is
+  # not.
+  _lv_pos=0; probe_leaf_live_under_es replicaCount "" --set replicaCount=3 || _lv_pos=$?
+  _lv_neg=0; probe_leaf_live_under_es database.maxOpenConns "" --set database.maxOpenConns=37 || _lv_neg=$?
+  if [[ "$_lv_pos" == 0 ]]; then
+    pass "the liveness probe says replicaCount is LIVE under config.existingSecret, so it can still see a leaf that moves the manifest"
+  else
+    fail "the liveness probe returned $_lv_pos for replicaCount, which reaches the Deployment and is rendered under config.existingSecret. It cannot see liveness, so every leaf it excuses below is excused by an instrument that has stopped working (0=live 1=inert 2=unaskable)."
+  fi
+  if [[ "$_lv_neg" == 1 ]]; then
+    pass "the liveness probe says database.maxOpenConns is INERT under config.existingSecret, so it is not answering LIVE to everything"
+  else
+    fail "the liveness probe returned $_lv_neg for database.maxOpenConns, whose only effect is on the settings document the chart does not render under config.existingSecret. It should have said inert; an instrument that never says inert excuses every leaf put to it (0=live 1=inert 2=unaskable)."
+  fi
+  if [[ -z "$probe_misrefused" ]]; then
+    pass "every leaf booked as guarded was either NAMED in the refusal it was booked on, or measured still live under config.existingSecret ($probe_live_named )"
+  else
+    fail "these leaves were booked as guarded on a refusal that names a different value:$probe_misrefused. The refusal fires for the companion the probe preamble had to set, not for the leaf, so an operator who sets the leaf alongside config.existingSecret is never told it went nowhere. Add them to the inline list in scion-hub.assertConfigSource, or - if their default makes them unrefusable - to PROBE_REFUSED_BY_COMPANION with the reason."
+  fi
+  # THE EXEMPTION LIST'S POSITIVE TWIN, the same rule PROBE_UNMUTABLE gets. An
+  # exemption that no leaf takes is not harmless: it sits there reading like
+  # coverage of a case that has stopped occurring, and it is the line someone
+  # later points at to justify a third entry.
+  # THE REFUSAL LIST NOTES.txt PRINTS, AGAINST THE REFUSALS THE WALK OBSERVED.
+  # gd-p2-rev's R3 was two failures at once: the guard did not refuse the
+  # database leaves, and NOTES.txt told operators the list of refusals was
+  # "checked against the render rather than maintained by hand" when it was
+  # neither complete nor checked. It is checked here, in both directions, so
+  # that sentence has something behind it.
+  sed -n '/define "scion-hub.existingSecretRefusals"/,/^{{- end }}/p' \
+    "$CHART_DIR/templates/_helpers.tpl" \
+    | sed -e '1d' -e '$d' | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' | sort -u >"$WORK/probe-refusals-declared.txt"
+  sort -u "$WORK/probe-refused-named.txt" >"$WORK/probe-refusals-observed.txt"
+  # An empty declared list would make the diff below pass against an empty
+  # observed list, which is the state a broken walk produces.
+  [[ -s "$WORK/probe-refusals-declared.txt" ]] || meta_failure "scion-hub.existingSecretRefusals extracted to an empty list, so the parity check below is comparing nothing against nothing and would pass however the guard behaves."
+  if diff -u "$WORK/probe-refusals-declared.txt" "$WORK/probe-refusals-observed.txt" >"$WORK/probe-refusals.diff"; then
+    pass "the refusal list NOTES.txt prints is exactly the set of leaves the walk saw refused by name ($(tr '\n' ' ' <"$WORK/probe-refusals-observed.txt"))"
+  else
+    fail "scion-hub.existingSecretRefusals and the leaves the walk observed being refused by name disagree. '-' is declared to operators but never refused; '+' is refused without being declared: $(grep '^[-+][^-+]' "$WORK/probe-refusals.diff" | tr '\n' ' ')"
+  fi
+  # ADDING A REFUSAL CAN CLOSE THE LAST DOOR OUT OF A ROOM, and this one did.
+  # With database.user refused under config.existingSecret, an operator on
+  # auth=password had nowhere to stand: setting the user was refused as inert,
+  # and NOT setting it hit "database.user is required when database.auth is
+  # password" from the connection-budget query in NOTES.txt. Both refusals were
+  # individually correct and together they made a legitimate install - "I supply
+  # my own settings.yaml AND I authenticate with a password" - unrenderable.
+  # A guard that refuses every value of a key is not a guard, it is a removal.
+  for _es_auth in iam password; do
+    _es_rc=0
+    "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+      --set-string database.driver=postgres --set-string "database.auth=$_es_auth" \
+      --set cloudsql.enabled=true --set-string cloudsql.instanceConnectionName=p:r:i \
+      --set-string storage.provider=gcs --set acknowledgeHAUnlanded=true \
+      >"$WORK/probe-es-$_es_auth.yaml" 2>&1 || _es_rc=$?
+    if [[ "$_es_rc" == 0 ]]; then
+      pass "config.existingSecret with Cloud SQL and database.auth=$_es_auth still renders, so the refusals above did not close off a configuration the chart supports"
+    else
+      fail "config.existingSecret + cloudsql + database.auth=$_es_auth does not render (helm exit $_es_rc): $(head -2 "$WORK/probe-es-$_es_auth.yaml"). The operator is refused whichever way they turn, which is not a guard - it is the silent removal of a supported install, announced as an error message about something else."
+    fi
+  done
+  # shellcheck disable=SC2086  # intentional: splits the space-separated companion list to count entries
+  _pc_n="$(printf '%s\n' $probe_companion_used | grep -c . || true)"
+  if [[ "$_pc_n" -eq ${#PROBE_REFUSED_BY_COMPANION[@]} ]]; then
+    pass "both companion-refused exemptions were exercised by a real leaf ($probe_companion_used ), so neither is excusing a case that no longer happens"
+  else
+    fail "PROBE_REFUSED_BY_COMPANION names ${#PROBE_REFUSED_BY_COMPANION[@]} leaves (${PROBE_REFUSED_BY_COMPANION[*]}) but $_pc_n took that path ($probe_companion_used ). An unexercised exemption is either a leaf that is now refused under its own name - delete the entry - or one that stopped being refused at all, which is the failure this step exists to catch."
   fi
   # Bounded rather than listed: a probe that breaks - helm gone, --set ignored,
   # the walk emptied - shows up as every leaf moving nothing, and a count
@@ -2307,7 +3210,7 @@ step "the \$ownedByConfig split, measured against the render"
 declare -A DELIVERED=(
   [base-url]=1        # SCION_SERVER_BASE_URL, configmap-env.yaml
   [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
-  [db]=0              # server.database.url - Cloud SQL
+  [db]=1              # server.database.url - LANDED by the Cloud SQL phase; was 0 until then
   [storage-dir]=0     # server.storage.local_path - the workspace share
   [admin-emails]=0    # server.hub.admin_emails - no phase claims it
 )
@@ -2618,7 +3521,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=35
+PIPE_SITES_EXPECTED=44
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
@@ -2721,14 +3624,21 @@ step "NOTES.txt's \"does not yet do\" list is true of what the chart renders"
 # cannot drift from the text it is about, because neither side is allowed to
 # move alone.
 declare -A NOT_YET=(
-  ["Cloud SQL and the database URL"]='settings:^ *url:'
+  # "Cloud SQL and the database URL" WAS HERE, AND ITS REMOVAL IS THIS STEP
+  # WORKING RATHER THAN THIS STEP BEING EDITED AROUND. P1 wrote the needle to go
+  # red the moment P2 landed the database URL; P2 landed it, the anti-join went
+  # red in both directions on the first post-rebase run, and the phrase is gone
+  # from the notes because the notes stopped being able to claim it. The render
+  # now DOES carry `url:` under settings, which is what the needle was watching
+  # for. Nothing here was relaxed: the entry is deleted, not commented out of
+  # the join, and EXPECTED_NOT_YET moves with it in this same diff.
   ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
   ["Filestore"]='settings:workspace_storage'
   ["the session secret"]='settings:session_secret|signing_key'
   ["the OAuth client secret"]='settings:client_secret'
   ["Ingress or IAP"]='kinds:^kind: (Ingress|BackendConfig)'
 )
-EXPECTED_NOT_YET=6
+EXPECTED_NOT_YET=5
 
 # The sentence, read out of the shipped template. It carries no template
 # actions - checked, it is static prose - so the source text and the rendered
@@ -3224,12 +4134,19 @@ expect_render_failure \
 # it is what a values file assembled by another tool can effectively produce, and
 # per the reviewer's F1 it removes EVERY schema-enforced rule at once. The
 # template guards are what is left, so they are worth testing on their own.
+# THE PROXY KEYS KEEP THIS CASE AIMED AT THE GUARD IT NAMES. Since the Cloud SQL
+# phase, postgres without cloudsql.enabled is refused by a DIFFERENT template
+# guard that fires first, and this case then reported "failed, but not for the
+# expected reason" - correctly. Supplying the proxy is what isolates the bucket
+# guard again; it is not padding.
 expect_render_failure \
   "the TEMPLATE rejects postgres without a GCS bucket" \
   "storage.bucket is required when storage.provider is gcs" \
   --skip-schema-validation \
   "${BASE[@]}" \
   --set database.driver=postgres \
+  --set database.auth=iam --set database.name=scion --set database.user=u \
+  --set cloudsql.enabled=true --set cloudsql.instanceConnectionName=my-project:us-central1:db-1 \
   --set storage.provider=gcs
 
 expect_render_failure \
@@ -3439,6 +4356,673 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
 else
   fail "hub.extraEnv rejected an ordinary multi-line value - the PEM check is matching on whitespace rather than on the PEM header"
 fi
+
+# --------------------------------------------------------------------------
+step "the settings checksum is a redacted projection: the oracle is dead and the rotation cost is measured"
+# --------------------------------------------------------------------------
+# WHAT THIS STEP IS ABOUT, because the assertions below assert an EQUALITY and
+# an equality is the shape a broken harness produces for free.
+#
+# settings.yaml is a subPath mount and the kubelet never refreshes one, so the
+# chart rolls the pods by digesting the settings document into the pod
+# annotation checksum/settings. Phase 2 puts a password inside
+# server.database.url in that document. A pod annotation is readable by anyone
+# with get on deployments, which is a WIDER audience than the settings Secret's
+# own RBAC, and every other component of a DSN - scheme, user, host, port,
+# database name - is chart-rendered or public. A digest over that document is
+# therefore a digest over a preimage with one unknown in it: an offline oracle
+# for the password, checkable by a reader who is not allowed to read the Secret.
+#
+# scion-hub.settingsChecksum digests a projection with the credential removed.
+# The helper is gd-p3-dev's, adopted byte-identical from scion/gke-chart-p3 blob
+# 06b2a4c7cf3d73bb57d1c56370e4b21f3ca12182; the server.database.url branch in it
+# was written for this phase and had never been executed by any input on theirs.
+# This step is what makes it executed code.
+#
+# THE PRICE, AND IT IS ASSERTED HERE RATHER THAN DESCRIBED: with the credential
+# out of the digest input, a password-only change no longer moves the annotation
+# and no pod rolls. That is arm 1. Arm 4 is what stops arm 1 from being
+# satisfied by a digest that has stopped moving for ANY reason.
+_ck_A='RotPlainAlphaAAAA111'
+_ck_B='RotPlainBetaBBBB2222'
+# The rotated USERNAME for arm U. Not a credential and deliberately not
+# treated as one: it is the field gd-p2-rev's C1 showed was invisible to the
+# digest, and the fix makes it visible.
+_ck_U='rotated-user-uuuu'
+# @ : / and # are four of the nine characters scion-hub.pctEncodeUserinfo
+# encodes, so these two passwords do NOT appear in the rendered file as typed.
+# gd-secann-2 measured that a projection which redacts by MATCHING THE
+# CREDENTIAL'S VALUE is silent for exactly these passwords, and worse than
+# silent - it emits a document that looks redacted and still carries the secret.
+# The adopted helper redacts by URL STRUCTURE, so these arms must collapse too.
+# They are here because that is a case the phase 3 suite structurally cannot
+# reach: nothing percent-encodes an OAuth client secret.
+_ck_S1='Rot@Spec:Alpha/AAA#1'
+_ck_S2='Rot@Spec:Beta/BBBB#2'
+
+_ck_render() { # _ck_render <name> <extra helm args...>
+  local n="$1"; shift
+  local rc=0
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+    --set-string database.auth=password \
+    --set-string database.user=probe-user \
+    "$@" >"$WORK/ck-$n.yaml" 2>"$WORK/ck-$n.err" || rc=$?
+  printf '%s' "$rc" >"$WORK/ck-$n.rc"
+}
+# awk rather than grep throughout this block: this file runs under `set -e`, and
+# grep exits 1 on "found nothing", which is a legitimate reading here and not an
+# error. awk returns the count and exits 0, so a zero cannot abort the script
+# before the assertion that was going to report it.
+_ck_count() { awk '$1=="checksum/settings:"{c++} END{print c+0}' "$1"; }
+_ck_digest() { awk '$1=="checksum/settings:"{print $2}' "$1"; }
+_ck_url() { awk '$1=="url:"{print $2}' "$1"; }
+
+# 🔴 THE EXTRACTOR ITSELF IS A SUSPECT, AND EVERY GUARD ON IT USED TO BE AN
+# AGREEMENT CHECK. An extractor that returns nothing agrees with itself
+# perfectly: _dA == _dA2 holds, _dA == _dB holds, and the three assertions that
+# constitute this step's security claim all report ok on a corpse. gd-p1-dev
+# named the class (chart-integrity.sh:377) - a matcher whose expected result in
+# the current phase COINCIDES with what a dead matcher produces - and the
+# discriminator is a control asserting SURVIVAL, never one asserting
+# disappearance.
+#
+# MEASURED ON THIS FILE BEFORE THIS EXISTED, not reasoned about:
+#   _ck_digest keyed to a field that does not exist   -> 3 assertions PASS,
+#     including "the annotation is not an oracle for it ()", and the run then
+#     died at an unrelated -n guard sixty lines later, reporting the CHART as
+#     broken ("the digest has become a constant") when the instrument was.
+#   _ck_digest killed for the mut-B arm alone         -> rc=0, 297/297,
+#     0 failures. A CLEAN PASS with the un-projected control comparing a real
+#     digest against an empty string.
+#
+# So the guard runs THE FUNCTION UNDER SUSPICION over a DERIVED file set and
+# demands a well-formed sha256 back. A second awk of my own would not test the
+# first one; asserting the shape of what the caller actually consumes does.
+# The file set is a glob rather than a list of the six variables the block
+# happens to read, because a list goes stale the moment an arm is added and a
+# glob cannot - and the expected number is ABSOLUTE, so a file set that grew or
+# shrank is a meta-failure naming the number rather than a silently wider sweep.
+#
+# 🔴 AND IT MUST NOT ABORT, WHICH IS A DIFFERENT FAILURE FROM THE ONE ABOVE AND
+# WORSE. This file is line 46 `set -euo pipefail`, so an assignment whose command
+# substitution exits non-zero KILLS THE SCRIPT ON THAT LINE - no diagnostic, no
+# meta_failure, and the assertion counter never reaches its pin. gd-p1-dev found
+# they had cleared a site on the reasoning "empty cannot match, so it fails
+# safe", when under `set -e` control never reaches the comparison at all and the
+# ${x:-<absent>} they cited was unreachable code.
+#
+# MEASURED HERE THE WAY THEY PRESCRIBED - delete the input and run it, rather
+# than read the code and predict. With the renders removed and no -f guard:
+#   rc 2, stdout truncated at the step banner, 0 occurrences of META-FAILURE,
+#   0 occurrences of any diagnostic of mine, and on stderr:
+#     awk: cannot open .../ck-*.yaml (No such file or directory)
+# It "fails closed" only because awk's exit status is 2 and 2 is this harness's
+# meta-failure code. THAT IS A COINCIDENCE OF TWO UNRELATED NUMBERS, not a
+# guard, and it reports the run as unmeasured while saying nothing about why.
+# An unmatched glob is also how it arrives: bash passes the pattern through
+# literally, so the file that "cannot open" is a filename nobody wrote.
+_ck_require_live() { # <expected count of well-formed digests> <file>...
+  local _want="$1"; shift
+  local _f _v _n=0 _bad=0 _empty=0
+  for _f in "$@"; do
+    [[ -f "$_f" ]] || meta_failure "the settings-checksum step was asked to read ${_f} and there is no such file. If that name still contains a * the glob matched nothing, which means the renders this step is about were never written - so nothing below was measured, and without this line the run would have died on awk's exit status with no diagnostic at all."
+    # `|| true` INSIDE the substitution, deliberately: any other awk failure must
+    # arrive at the shape and count checks below as an empty value with a message
+    # attached, not as a bare abort three lines from the thing it was measuring.
+    _v="$(_ck_digest "$_f" || true)"
+    if [[ "$_v" =~ ^[0-9a-f]{64}$ ]]; then _n=$((_n+1))
+    elif [[ -n "$_v" ]]; then _bad=$((_bad+1))
+    else _empty=$((_empty+1)); fi
+  done
+  [[ "$_bad" == 0 ]] || meta_failure "_ck_digest returned $_bad value(s) that are not a 64-character sha256 hex digest across $# file(s). It is reading the wrong field, so every equality below is between two strings of unknown provenance."
+  [[ "$_n" == "$_want" ]] || meta_failure "_ck_digest yielded $_n well-formed digest(s) from $# file(s) ($_empty empty, $_bad malformed); this call site is committed to exactly $_want. Either the extractor is dead - in which case the equalities below hold trivially and mean nothing - or the set of ck-*.yaml renders changed and this number was not changed with it."
+}
+
+# 🔴 AND _ck_require_live IS NOT ENOUGH, WHICH IS gd-p2-rev's R1 AND IT IS RIGHT.
+# It guards the extractor FUNCTION over a file glob; the assertions consume
+# VARIABLES populated at separate call sites. THE GUARD AND THE GUARDED WERE IN
+# DIFFERENT PLACES, so an extraction written inline at a call site - the same
+# defect, one line further down - walks straight past it. gd-p2-rev proved that
+# by moving MY OWN PLANT to the call site:
+#
+#   _mB="$(awk '$1=="checksum/nope:"{print $2}' "$WORK/ck-mut-B.yaml")"
+#     -> rc=0, 297/297, 0 failures, and the original signature came back:
+#          baseline: '... goes red (3af8bcc3...79 -> a67fb352...78) ...'
+#          planted : '... goes red (3af8bcc3...79 -> ) ...'
+#   a dead _uB at the URL call site -> rc=0, 297/297, 0 failures.
+#   TWO OF TWO CALL-SITE PLANTS ON TWO INDEPENDENT EXTRACTORS, CLEAN FULL PASS.
+#
+# So the shape check moves ONTO THE OPERANDS, at the point of comparison, where
+# it cannot be bypassed by changing how the value was obtained. This is
+# gd-p2-rev's prescription, adopted as written and declared as adopted.
+# _ck_require_live stays: it catches the function-level case earlier and with a
+# better message, and an earlier, more specific diagnostic is worth keeping even
+# when a later one would also fire.
+#
+# THE RULE THIS LEAVES BEHIND, which is the part that generalises past this file:
+# GUARD THE VALUE AT THE POINT IT IS USED, NOT THE MACHINERY THAT PRODUCED IT.
+# A guard on the producer is a guard on one way of producing.
+_ck_is_digest() { # <label> <value>
+  [[ "$2" =~ ^[0-9a-f]{64}$ ]] || meta_failure "the settings-checksum step is about to compare ${1}, whose value is not a 64-character sha256 hex digest (got: ${2:-<empty>}). Whatever produced it did not produce a digest, so the comparison it feeds is between strings of unknown provenance and its result - equal OR unequal - is not a fact about the chart."
+}
+# STRUCTURAL, and deliberately not a check on any credential value: the DSN must
+# still look like this chart's DSN. An empty string, a truncated field and a line
+# read out of the wrong key all fail it, and none of the four planted passwords
+# appears in the pattern - so this cannot go quiet on an encoded credential the
+# way a value-matching guard does (gd-secann-2's finding, applied to my own gate).
+_ck_is_dsn() { # <label> <value>
+  [[ "$2" =~ ^postgres://[^@[:space:]]+@127\.0\.0\.1:5432/[^?[:space:]]+\?sslmode= ]] || meta_failure "the settings-checksum step is about to compare the DSN from arm ${1}, and it does not have the shape this chart renders (got: ${2:-<empty>}). Expected postgres://<userinfo>@127.0.0.1:5432/<db>?sslmode=... . An empty or truncated value here makes every equality and inequality below meaningless."
+}
+
+_ck_render A  --set-string database.password="$_ck_A"
+_ck_render A2 --set-string database.password="$_ck_A"
+_ck_render B  --set-string database.password="$_ck_B"
+_ck_render S1 --set-string database.password="$_ck_S1"
+_ck_render S2 --set-string database.password="$_ck_S2"
+_ck_render C  --set-string database.password="$_ck_A" --set-string database.name=other-db
+# ARM U. gd-p2-rev's C1: the projection dropped the WHOLE userinfo, so rotating
+# database.user left the digest byte-identical and no pod rolled - while
+# NOTES.txt told the operator, in the section written to prevent exactly this,
+# that rotating the user rolls them automatically. Same password as A, different
+# user, and the digest must MOVE.
+_ck_render U  --set-string database.password="$_ck_A" --set-string database.user="$_ck_U"
+
+# ARM 0. NOT AN ASSERTION - A META-FAILURE, because "nothing was analysed" is a
+# third outcome and this whole step compares digests for EQUALITY. Two empty
+# renders are equal. Two identical inputs are equal. A chart that deleted the
+# annotation gives two empty strings, which are equal. Every one of those is a
+# green arm 1 measuring nothing.
+#
+# gd-p3-dev hit this by hand on the phase 3 copy - a --set that changed a value
+# to what it already was - and read the resulting collapse as a defect in their
+# own projection. gd-secann-2 hit it from the other side: their first run had
+# helm failing a schema check on all four arms, every digest was sha256 of the
+# empty string, and THREE of their four guards passed on it. The one that caught
+# it was an absolute count. Both arms of that lesson are below.
+for _n in A A2 B S1 S2 C U; do
+  _rc="$(cat "$WORK/ck-$_n.rc")"
+  [[ "$_rc" == 0 ]] || meta_failure "the settings-checksum arm $_n did not render (helm exit $_rc): $(head -3 "$WORK/ck-$_n.err"). Nothing in this step was measured."
+  [[ -s "$WORK/ck-$_n.yaml" ]] || meta_failure "the settings-checksum arm $_n rendered an empty document. Every equality below would hold on it."
+  [[ ! -s "$WORK/ck-$_n.err" ]] || meta_failure "the settings-checksum arm $_n wrote to stderr while exiting 0: $(head -3 "$WORK/ck-$_n.err")."
+  # ABSOLUTE, not "at least one". A chart that stopped emitting the annotation
+  # yields an empty digest for every arm, which satisfies arms 1-3 perfectly.
+  _cnt="$(_ck_count "$WORK/ck-$_n.yaml")"
+  [[ "$_cnt" == 1 ]] || meta_failure "the settings-checksum arm $_n carries $_cnt checksum/settings annotations, expected exactly 1. The digests compared below would be a comparison of empty strings."
+done
+# AND THE PART THAT MATTERS MOST: the inputs must genuinely differ. Read off the
+# RENDERED output by value, in both directions, not off the --set arguments -
+# an argument that helm ignored, misparsed or set to the value it already held
+# is invisible from the command line and produces a perfect false green.
+_uA="$(_ck_url "$WORK/ck-A.yaml")"; _uB="$(_ck_url "$WORK/ck-B.yaml")"
+_uS1="$(_ck_url "$WORK/ck-S1.yaml")"; _uS2="$(_ck_url "$WORK/ck-S2.yaml")"
+_uC="$(_ck_url "$WORK/ck-C.yaml")"; _uA2="$(_ck_url "$WORK/ck-A2.yaml")"
+_uU="$(_ck_url "$WORK/ck-U.yaml")"
+# THE OPERAND SWEEP: all six, not just the one the old -n happened to name.
+# gd-p2-rev killed _uB specifically because _uA was the only guarded one.
+_ck_is_dsn A "$_uA"; _ck_is_dsn A2 "$_uA2"; _ck_is_dsn B "$_uB"
+_ck_is_dsn S1 "$_uS1"; _ck_is_dsn S2 "$_uS2"; _ck_is_dsn C "$_uC"
+_ck_is_dsn U "$_uU"
+[[ "$_uA" != "$_uB" ]] || meta_failure "the A and B renders carry the SAME server.database.url ($_uA), so the password-only differential below is comparing a chart against itself. This is the exact false green the arm exists to prevent."
+[[ "$_uS1" != "$_uS2" ]] || meta_failure "the S1 and S2 renders carry the same server.database.url, so the percent-encoded differential is comparing a chart against itself."
+[[ "$_uA" != "$_uC" ]] || meta_failure "the A and C renders carry the same server.database.url, so the positive control below cannot fire on a change that never happened."
+[[ "$_uA" == "$_uA2" ]] || meta_failure "two renders of identical inputs produced different DSNs ($_uA vs $_uA2). The renderer is not deterministic and no equality below means anything."
+# THE CREDENTIAL THAT LANDED MUST BE THE ONE THAT WAS PLANTED, and for S1/S2
+# that means it must have been percent-encoded on the way in. Those two arms are
+# the ONLY thing in this file covering gd-secann-2's finding that a value-based
+# projection goes silent on an encoded password; if the special characters never
+# reached the DSN, the arms quietly degrade into two more plain-password arms
+# and pass while covering nothing. There is a known mechanism for exactly that:
+# gd-p3-dev measured `--set-string` eating backslashes through helm's own escape
+# parser, so what an operator types and what the file holds are not the same
+# string by default. None of the four characters below is a backslash, and this
+# check is what turns that from a belief into a reading.
+case "$_uS1" in
+  *'%40'*) ;;
+  *) meta_failure "the S1 render's DSN carries no percent-encoded octet ($_uS1). The @ : / and # in the planted password never reached the rendered file, so the percent-encoding arm is silently testing an ordinary password and covers nothing." ;;
+esac
+case "$_uS1" in
+  *"$_ck_S1"*) meta_failure "the S1 render's DSN contains the planted password verbatim ($_uS1), so scion-hub.pctEncodeUserinfo did not run on it and this arm is not exercising the encoded case at all." ;;
+  *) ;;
+esac
+
+# gd-p2-rev's OPTIONAL follow-up to R1, taken. A SHAPE GUARD SEPARATES
+# RIGHT-SHAPE FROM WRONG-SHAPE; IT DOES NOT SEPARATE EXTRACTED FROM FABRICATED.
+# They measured it: planting _uB = postgres://zzz:zzz@127.0.0.1:5432/zzz?sslmode=disable
+# passes _ck_is_dsn, satisfies _uA != _uB, and the whole password differential
+# then rests on a precondition that a hand-written constant met vacuously -
+# rc=0, 303/303. The digest side survives the same plant because its comparisons
+# MEAN something downstream; the DSN side had nothing catching it.
+#
+# The remedy is precedented three lines up: the S1 arm already asserts the
+# planted password REACHED the rendered DSN. Extended to every arm whose planted
+# value is known here. This is a guard on a guard, not a security assertion -
+# the security claim is that these values are ABSENT from the digest, and it is
+# asserted elsewhere. Here they must be PRESENT, in the render they came from,
+# or the differential is between two strings nobody rendered.
+_ck_planted() { # <label> <dsn> <needle>
+  case "$2" in
+    *"$3"*) ;;
+    *) meta_failure "the ${1} render's DSN does not contain the value planted into it (looked for ${3} in ${2:-<empty>}). It has the right shape, so _ck_is_dsn accepted it, but a well-formed DSN that no arm of this step actually rendered satisfies every difference check below by construction and proves nothing about the chart." ;;
+  esac
+}
+_ck_planted A  "$_uA"  "$_ck_A"
+_ck_planted A2 "$_uA2" "$_ck_A"
+_ck_planted B  "$_uB"  "$_ck_B"
+_ck_planted C  "$_uC"  "$_ck_A"
+_ck_planted U  "$_uU"  "$_ck_U"
+# S1/S2 are deliberately absent: their planted passwords are percent-encoded on
+# the way in, so PRESENCE of the literal is the thing that must NOT hold, and the
+# case statement above asserts exactly that inversion for S1.
+
+# SEVEN, derived from the renders on disk. The mutation control and the
+# existing-secret arm are rendered further down and are covered where they land.
+_ck_require_live 7 "$WORK"/ck-*.yaml
+
+_dA="$(_ck_digest "$WORK/ck-A.yaml")"; _dA2="$(_ck_digest "$WORK/ck-A2.yaml")"
+_dB="$(_ck_digest "$WORK/ck-B.yaml")"; _dS1="$(_ck_digest "$WORK/ck-S1.yaml")"
+_dS2="$(_ck_digest "$WORK/ck-S2.yaml")"; _dC="$(_ck_digest "$WORK/ck-C.yaml")"
+_dU="$(_ck_digest "$WORK/ck-U.yaml")"
+_ck_is_digest A "$_dA"; _ck_is_digest A2 "$_dA2"; _ck_is_digest B "$_dB"
+_ck_is_digest S1 "$_dS1"; _ck_is_digest S2 "$_dS2"; _ck_is_digest C "$_dC"
+_ck_is_digest U "$_dU"
+[[ "$_dA" == "$_dA2" ]] || meta_failure "two renders of identical inputs produced different checksum/settings values ($_dA vs $_dA2). The digest is not a function of the inputs and nothing below is interpretable."
+
+if [[ "$_dA" == "$_dB" ]]; then
+  pass "rotating database.password alone does not move checksum/settings, so the annotation is not an oracle for it (${_dA:0:16})"
+else
+  fail "checksum/settings CHANGED on a password-only rotation ($_dA -> $_dB). The annotation is published to a wider audience than the settings Secret and every other component of the DSN is public, so this digest lets a reader who cannot read the Secret confirm a guessed password offline."
+fi
+
+if [[ "$_dS1" == "$_dS2" ]]; then
+  pass "the same holds for a password containing @ : / and # , which the DSN percent-encodes - so the redaction is by URL structure and not by matching the credential's value"
+else
+  fail "checksum/settings changed on a password-only rotation when the password percent-encodes ($_dS1 -> $_dS2). A projection that redacts by searching for the credential's literal value cannot see these, because scion-hub.pctEncodeUserinfo has already rewritten them - and it emits a document that reads as redacted while still carrying the secret."
+fi
+
+if [[ "$_dA" == "$_dS1" ]]; then
+  pass "checksum/settings is identical across four different passwords, so the digest is independent of the credential rather than merely insensitive to one pair"
+else
+  fail "checksum/settings differs between two passwords that are not a rotation pair ($_dA vs $_dS1), so some part of the credential still reaches the digest input."
+fi
+
+# gd-p2-rev's C1, AND IT IS AN INEQUALITY ARM SITTING AMONG EQUALITIES, WHICH IS
+# WHY IT WAS MISSING. Every other arm here asks the digest to STAY PUT, and the
+# projection that made them pass was over-redacting: it blanked the entire
+# userinfo, username included. The username is not a credential - it is in
+# values.yaml, in NOTES.txt and in the plain settings document - so blanking it
+# bought no secrecy and cost a real configuration change its pod roll. Measured
+# by gd-p2-rev: rotate database.user, digest byte-identical, no roll, while
+# NOTES.txt said the roll happens automatically.
+if [[ "$_dU" != "$_dA" ]]; then
+  pass "rotating database.user DOES move checksum/settings, so the sentence in NOTES.txt offering it as the automatic-roll workaround is true"
+else
+  fail "checksum/settings did not move when database.user changed ($_dA). NOTES.txt tells operators to rotate the user in the same upgrade and the roll happens automatically; it does not, and an operator rotating a leaked credential gets a green upgrade and keeps serving on the retired one. There is no correction anywhere else in the render."
+fi
+
+# THE POSITIVE CONTROL, and without it the three arms above are satisfied by a
+# chart that hashes a constant, or by one that deleted the annotation. This is
+# also the assertion that fails if someone "fixes" the rotation gap by removing
+# the projection's input entirely.
+if [[ "$_dC" != "$_dA" ]]; then
+  pass "a non-credential change (database.name) DOES move checksum/settings, so the equalities above are the redaction working and not the digest having stopped"
+else
+  fail "checksum/settings did not move when database.name changed ($_dA). The digest has become a constant: settings changes will no longer roll the pods at all, and the equalities above are meaningless."
+fi
+
+# THE PLANTED MUTATION. Reverting the annotation to a digest of the raw template
+# output must make the password-only differential go RED. Without this the three
+# equalities above could be a property of the harness - two renders that differ
+# in nothing - rather than a property of the projection.
+_ckmut="$WORK/ck-unprojected"
+rm -rf "$_ckmut"; cp -a "$CHART_DIR" "$_ckmut"
+python3 - "$_ckmut/templates/deployment.yaml" <<'CKPY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'checksum/settings: {{ include "scion-hub.settingsChecksum" . }}'
+new = 'checksum/settings: {{ include (print $.Template.BasePath "/secret-settings.yaml") . | sha256sum }}'
+if s.count(old) != 1:
+    sys.exit("PLANT-FAILED: expected exactly 1 occurrence of the projected annotation, found %d" % s.count(old))
+open(p, 'w').write(s.replace(old, new))
+CKPY
+_ckmut_rc=0
+_ck_mut_render() { # <out> <password>
+  local rc=0
+  "$HELM" template "$RELEASE" "$_ckmut" --namespace "$NAMESPACE" \
+    --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+    --set-string database.auth=password --set-string database.user=probe-user \
+    --set-string database.password="$2" >"$1" 2>"$1.err" || rc=$?
+  return "$rc"
+}
+_ck_mut_render "$WORK/ck-mut-A.yaml" "$_ck_A" || _ckmut_rc=$?
+_ck_mut_render "$WORK/ck-mut-B.yaml" "$_ck_B" || _ckmut_rc=$?
+[[ "$_ckmut_rc" == 0 ]] || meta_failure "the un-projected control chart did not render (helm exit $_ckmut_rc): $(head -3 "$WORK/ck-mut-A.yaml.err"). The planted mutation below proves nothing."
+# BOTH arms, and by shape rather than by -n. The assertion below wants them to
+# DIFFER, so an empty _mB satisfies it against a real _mA - a pass produced by a
+# dead extractor, which is how this control was measured failing open at 297/297.
+# The -n guard that used to be here covered _mA only, which is the arm an empty
+# value could not have hidden in.
+_ck_require_live 2 "$WORK"/ck-mut-*.yaml
+_mA="$(_ck_digest "$WORK/ck-mut-A.yaml")"; _mB="$(_ck_digest "$WORK/ck-mut-B.yaml")"
+_ck_is_digest mA "$_mA"; _ck_is_digest mB "$_mB"
+[[ "$(_ck_count "$WORK/ck-mut-A.yaml")" == 1 && "$(_ck_count "$WORK/ck-mut-B.yaml")" == 1 ]] || meta_failure "an arm of the un-projected control chart does not carry exactly one checksum/settings annotation, so its differential is not a comparison of two digests."
+if [[ "$_mA" != "$_mB" ]]; then
+  pass "with the projection removed the SAME password-only differential goes red ($_mA -> $_mB), so the equalities above are caused by the redaction and not by the two renders being identical"
+else
+  fail "removing the projection did not restore the password-only difference. This step's equalities are therefore not evidence of redaction - the two renders it compares do not differ in anything the digest can see, and the whole step is measuring nothing."
+fi
+
+# The permutation where the chart renders no settings file at all. The helper
+# refuses a document with no server key, by design, so the annotation must not
+# be emitted here - and an absent annotation is also the only correct answer:
+# there is nothing for the chart to digest.
+_ck_es="$WORK/ck-existing-secret.yaml"
+# The rc is KEPT and stderr is KEPT. This line used to end `2>/dev/null` with no
+# `||`, which under `set -e` meant a failed render killed the run with the
+# diagnostic already thrown away - the exact pairing gd-p1-dev retracted their
+# clearance over. An absent render must arrive here as a meta-failure that says
+# so, because the assertion below is an ABSENCE and an empty file satisfies it.
+_ck_es_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-existing-secret.yaml" >"$_ck_es" 2>"$_ck_es.err" || _ck_es_rc=$?
+[[ "$_ck_es_rc" == 0 ]] || meta_failure "the config.existingSecret render failed (helm exit $_ck_es_rc): $(head -3 "$_ck_es.err"). The assertion below is an ABSENCE and an unrendered file satisfies it perfectly."
+[[ -s "$_ck_es" ]] || meta_failure "the config.existingSecret render is empty, so the absence asserted below is the absence of the whole manifest."
+# A PAIRED POSITIVE CONTROL ON THE INSTRUMENT, AT THE POINT OF USE. The assertion
+# below wants ZERO, which is also what a dead _ck_count returns, so the absence
+# is only evidence if the same function can still find a annotation that IS
+# there. Arm A has exactly one; if _ck_count cannot see it, it cannot be trusted
+# to have looked here either. This is the R1 rule applied to a counter rather
+# than to an extractor: the operand is a zero, and a zero needs a witness.
+[[ "$(_ck_count "$WORK/ck-A.yaml")" == 1 ]] || meta_failure "_ck_count no longer finds the single checksum/settings annotation in arm A, so the zero it is about to report for the config.existingSecret render is not evidence of an absence - it is the same blindness, measured twice."
+_ck_es_n="$(_ck_count "$_ck_es")"
+if [[ "$_ck_es_n" == 0 ]]; then
+  pass "under config.existingSecret no checksum/settings annotation is emitted at all, so the projection helper is never asked to parse a file the chart did not render"
+else
+  fail "under config.existingSecret the chart emitted $_ck_es_n checksum/settings annotations. There is no rendered settings document there, so the helper is digesting something it did not produce."
+fi
+
+# HALF B. The redaction removes the automatic roll on a credential-only change,
+# and the remedy is an explicit rollout restart. A remedy nobody is told about
+# is not a remedy, so it is asserted here in both directions - printed when a
+# password is set, absent when there is none to rotate.
+render_notes "$WORK/notes-rot-pw.txt" -f "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --set-string database.auth=password --set-string database.user=probe-user \
+  --set-string database.password="$_ck_A"
+_ck_rot_heading='ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP'
+if grep -qF -- "$_ck_rot_heading" "$WORK/notes-rot-pw.txt"; then
+  pass "NOTES.txt states that rotating database.password requires a manual restart"
+else
+  fail "NOTES.txt does not tell an operator that rotating database.password leaves the running pods on the old credential. The chart made the roll stop happening; the operator finds out from an authentication that keeps succeeding with a password they retired."
+fi
+# SUBSTITUTED, not a placeholder. An instruction an operator has to edit before
+# it runs is an instruction that gets edited wrong at the moment it is needed.
+if grep -qF -- "kubectl rollout restart deploy/$RELEASE-scion-hub -n $NAMESPACE" "$WORK/notes-rot-pw.txt"; then
+  pass "the restart command NOTES.txt prints names this release's deployment and namespace, so it runs as printed"
+else
+  fail "NOTES.txt prints a rollout restart command that does not name this release's deployment and namespace. Got: $(grep -F 'rollout restart' "$WORK/notes-rot-pw.txt" || printf '(no rollout restart line at all)')"
+fi
+# THE NEGATIVE ARM, held against a section already proven non-empty above. Under
+# iam there is no password in the DSN, nothing to rotate, and the paragraph
+# would be advice about a value the operator did not set.
+if grep -qF -- 'CLOUD SQL' "$WORK/notes-cloudsql.txt"; then
+  if grep -qF -- "$_ck_rot_heading" "$WORK/notes-cloudsql.txt"; then
+    fail "the iam permutation's NOTES prints the password-rotation restart step. Under iam the DSN carries no password, so this is instructions for a value that does not exist."
+  else
+    pass "the iam permutation's NOTES does not print the password-rotation step, and that absence is inside a render that does carry a CLOUD SQL section"
+  fi
+else
+  fail "the iam permutation's NOTES has no CLOUD SQL section, so the absence of the rotation step there is the absence of everything."
+fi
+
+# HALF C. THE TWO PLACES ONE RENDER TALKS ABOUT ROTATION MUST NOT DISAGREE.
+#
+# gd-p2-rev's C2. The credential-placement paragraph in the CLOUD SQL section
+# used to end "Rotating it is a helm upgrade, which rewrites the Secret and
+# rolls the pods", and ninety lines further down the SAME render said ROTATING
+# THE PASSWORD REQUIRES ONE MANUAL STEP. Both printed, to the same operator, on
+# the same install. The first one is the one a reader hits first and the one
+# that sounds like reassurance, so it is the one that gets believed - and it is
+# the false one, because the whole point of the redacted projection is that a
+# credential-only change does NOT move the annotation.
+#
+# WHAT THIS CAN AND CANNOT CHECK. A contradiction between two English sentences
+# is not something grep decides. What is checkable is narrower and still worth
+# pinning: the earlier paragraph must not make the claim in the wording that
+# was wrong, and it must send the reader to the section that states the truth.
+# The second arm is the one that generalises - a paragraph that names the
+# heading cannot be rewritten into a contradiction without someone reading the
+# heading it points at.
+sed -n '/Under password the credential lives/,/BEFORE THE POD CAN CONNECT/p' \
+  "$WORK/notes-rot-pw.txt" >"$WORK/notes-rot-place.txt"
+# The arm below is an ABSENCE and an empty file is the perfect absence, so the
+# region has to be proven to exist before it is allowed to be clean.
+[[ -s "$WORK/notes-rot-place.txt" ]] || meta_failure "the credential-placement paragraph could not be located in the password render (no text between 'Under password the credential lives' and 'BEFORE THE POD CAN CONNECT'). The contradiction arm below would report a clean paragraph because there is no paragraph."
+if grep -qEi 'rolls? the pods' "$WORK/notes-rot-place.txt"; then
+  fail "the credential-placement paragraph claims a pod roll: $(grep -Ei 'rolls? the pods' "$WORK/notes-rot-place.txt" | head -1 | sed 's/^ *//'). The same render says ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP. An operator who believes the first sentence rotates a leaked credential, sees a green upgrade and keeps serving on the retired one."
+else
+  pass "the credential-placement paragraph makes no pod-roll claim, so it does not contradict the manual-step section printed below it in the same render"
+fi
+if grep -qF -- "$_ck_rot_heading" "$WORK/notes-rot-place.txt"; then
+  pass "the credential-placement paragraph points the reader at [$_ck_rot_heading], so the two statements about rotation are joined rather than left to disagree"
+else
+  fail "the credential-placement paragraph does not name [$_ck_rot_heading]. A reader who stops at the placement paragraph - which reads like a complete account of where the credential lives and what changing it does - never reaches the step that keeps a retired password from staying live."
+fi
+
+# THE ONE ARM IN THIS STEP THAT READS SOURCE INSTEAD OF A RENDER, AND WHY IT HAS
+# TO. C1 made the redaction preserve the username, which gave the helper's own
+# output - ://user:[redacted...]@ - the exact shape the URL backstop below it
+# hunts for. The backstop would then fire on every render it had just correctly
+# redacted, so the known-redacted form is removed from the probe first. gd-em
+# asked whether that removal widens the door. It does not, and this is the
+# measurement rather than the argument (mutation rig, sub-floor 7-char password
+# so the 12-character value axis stays silent and the URL axis is the only thing
+# under test):
+#
+#   A  redaction disabled, raw credential URL in the digest input
+#      -> rc=1, the backstop fires and names itself. The door is not widened.
+#   B  the probe removal deleted entirely
+#      -> rc=1 on an ORDINARY render. The line is forced, not decorative.
+#   C  the probe removal rewritten from a literal to the pattern
+#      ":[^/@[:space:]]+@" -> "@", plus A's raw credential
+#      -> rc=0. THE CREDENTIAL REACHES THE DIGEST AND NOTHING SAYS SO.
+#
+# C is the whole risk in one line: a pattern that strips the marker also strips
+# real credentials that resemble it, and the failure is silent and green. A and
+# B are caught by any arm in this step, because they make the chart refuse to
+# render. C is caught by NOTHING that runs against a render, because everything
+# renders. It is not reachable from values either - assertNoCredential refuses a
+# credential URL at every values surface that feeds settings.yaml, which is what
+# makes the backstop a backstop - so there is no permutation to point at it.
+#
+# So this arm pins the SHAPE OF THE LINE, which is the weakest kind of assertion
+# in this file and is used here because the alternative is no assertion at all.
+# It is stated as a limit, not sold as a proof: it catches the rewrite that
+# mutation C performed, and it would not catch a literal that is merely wrong.
+# shellcheck disable=SC2016  # $redacted and $projection are literal Go template variables, not shell expansions
+_probe_src="$(grep -c 'probe := replace (printf ":%s@" \$redacted) "@" \$projection' "$CHART_DIR/templates/_helpers.tpl" || true)"
+_probe_any="$(grep -c 'probe :=' "$CHART_DIR/templates/_helpers.tpl" || true)"
+if [[ "$_probe_any" != "1" ]]; then
+  meta_failure "the settings-checksum backstop's probe assignment was expected exactly once in _helpers.tpl and grep found $_probe_any. The arm below cannot say which line it is reading, and an arm that cannot locate its subject reports on nothing."
+fi
+if [[ "$_probe_src" == "1" ]]; then
+  pass "the URL backstop's probe removes the redaction marker as a LITERAL, so it cannot also swallow a real credential that resembles it (mutation C, the rewrite to a pattern, renders clean with a credential in the digest)"
+else
+  fail "the URL backstop's probe is no longer the literal removal of the marker this helper writes. If it is now a pattern, it strips real credentials too and the backstop is disarmed silently - measured: the render succeeds and the credential reaches the digest input. Remove the exact literal, never a shape that resembles it."
+fi
+
+# --------------------------------------------------------------------------
+# THE BANNED READINESS LITERAL, SWEPT OVER THE WHOLE TREE.
+#
+# Phase 0's constraint is that the deprecated liveness path must not appear
+# anywhere in the chart tree. Until this block existed that constraint was
+# enforced by an author running an ad-hoc grep and reporting a zero - and on
+# 2026-08-17 the author of THIS block broke it, in the VALIDATION.md sentence
+# asserting the absence, and the ad-hoc zero was three commits stale by then.
+# Nothing went red, because nothing was watching. A rule is only in executable
+# form for as long as something can execute it.
+#
+# The literal is assembled from parts so that this file is not itself a hit.
+# That is not cleverness for its own sake: hack/ ships in neither the tarball
+# nor the render, but it is inside the tree being swept, and a sweep that
+# matches its own source is a sweep that can never return zero.
+_banned_path="/health""z"
+#
+# EXPLICIT FILE ARGUMENTS, NEVER -r. Recursion is the one axis on which a grep
+# wrapper was measured to silently narrow the file set on this project; an
+# explicit path is one the instrument cannot decline to visit. -F because the
+# pattern is a literal and -F is the only flag that cannot reinterpret it.
+# /usr/bin/grep BY FULL PATH, and no -z/-Z/--null anywhere in this block. Both
+# matter and neither is style. The stock binary sees binary files; the shell
+# function that shadows `grep` in some interactive environments passes -I and
+# --exclude-dir=.git, so it would skip a needle sitting in a binary or under
+# .git. MEASURED, planted needle in a binary blob: /usr/bin/grep -lF finds it,
+# the wrapped form does not. The chart tree holds 0 binaries and 0 .git paths
+# today, so this changes no current result - it means the gate keeps working if
+# that stops being true. Adding -z or -0 here to "harden" the list would switch
+# engines mid-gate, which is the opposite of hardening.
+# STDERR IS CAPTURED AND PUBLISHED, NOT SUPPRESSED, AND THE EXIT STATUS IS KEPT.
+# The first version of this line was `... 2>/dev/null || true`, and it was
+# FAIL-OPEN: grep exits 0 on a match, 1 on none and >=2 on an error, so an
+# unreadable file or a too-long argument list produced an empty stdout, a
+# discarded status and a discarded diagnostic - indistinguishable, byte for
+# byte, from a clean absence. The gate would have printed "appears in 0 of 41
+# files" and passed. `0 lines of stderr` is a finding; a suppressed stream is
+# not. Both sweeps below append here and both statuses are asserted afterwards.
+# Both call sites redirect to a FILE rather than into $(...) or < <(...), and
+# that is required, not tidiness. MEASURED: with the tree sweep behind a process
+# substitution, mapfile returned before the subshell's status append landed, and
+# the status file held 1 line where 2 invocations had run. Redirecting to a file
+# runs the function in THIS shell, so $? is the parent's and there is no write
+# to race. The count assertion below is what caught it - it demanded exactly 2
+# and got 1 - which is the whole argument for pinning an absolute count instead
+# of checking that the statuses seen so far look acceptable.
+_sweep_err="$(mktemp)"; _sweep_rc="$(mktemp)"; _sweep_out="$(mktemp)"
+# `|| _rc=$?` rather than `|| true`: this file runs under `set -euo pipefail`,
+# where grep's perfectly normal exit 1 for "no match" would abort the script.
+# That pressure is what produced the original `|| true`, and `|| true` is what
+# threw the status away. Putting grep on the left of `||` suspends errexit for
+# it AND keeps the number, so the guard and the reading survive together.
+_sweep() {
+  local _rc=0
+  if [[ $# -lt 2 ]]; then printf '99\n' >>"$_sweep_rc"; return 0; fi
+  /usr/bin/grep -lF -- "$1" "${@:2}" 2>>"$_sweep_err" || _rc=$?
+  printf '%s\n' "$_rc" >>"$_sweep_rc"
+  return 0
+}
+
+# THE NEEDLE'S IDENTITY, PINNED. Measured 2026-08-17: with the needle mutated
+# to a different assembled-from-parts string, this whole block passed 285/285
+# and reported "appears in 0 of 41 files". The planted positive above does NOT
+# catch that, because it plants whatever _banned_path holds and then finds it -
+# it proves the mechanism fires, and says nothing about WHICH string it fires
+# on. A scanner that can go blind and still report PASS is worse than no
+# scanner, so the needle is checked against a digest committed independently of
+# the expression that builds it.
+# `|| true` because this file is `set -euo pipefail` and pipefail hands back
+# sha256sum's status, not cut's: a sha256sum that exists but fails would abort
+# the script here instead of reaching the comparison below. There IS an upstream
+# `command -v sha256sum` guard at :864, but that answers callability and not
+# whether it works, and a site whose safety depends on a guard 500 lines away is
+# a site that changes meaning when either end moves. Empty is the outcome the
+# comparison below was written for, and it fails with a message.
+_needle_digest="$( (printf '%s' "$_banned_path" | sha256sum | cut -c1-16) || true )"
+if [[ "$_needle_digest" == "15a99506b4e1757d" ]]; then
+  pass "the banned-path needle is the string this gate was written for (sha256[0:16] 15a99506b4e1757d)"
+else
+  fail "the banned-path needle has been changed: sha256[0:16] is $_needle_digest, committed is 15a99506b4e1757d. Every absence this block reports is about some other string."
+fi
+
+# THE CORPUS, CLEARED ON EVERY KNOWN NARROWING AXIS AT EVERY DEPTH. A
+# .gitignore three directories down narrows a search rooted above it, so the
+# required form is a find at all depths, never a look at the root. Measured
+# 2026-08-17 over this chart:
+#   total files, all depths            41
+#   .gitignore  at any depth            0      .ugrep at any depth   0
+#   directories named .git              0
+# The row that USED to sit here said "non-text files 0 of 41", counted with a
+# -Il census, and it is withdrawn rather than corrected: "binary" under the
+# wrapper is a verdict on a (file, pattern) PAIR, not on a file, so a census
+# taken with one pattern cannot clear a sweep run with another. Measured
+# elsewhere in the fleet: a \377\376 file with NO NUL byte is called text by
+# one and dropped by the other, in both directions. The right statement is not
+# a cleaner census, it is that THIS GATE IS NOT EXPOSED TO THAT FILTER AT ALL -
+# it calls /usr/bin/grep, which has no -I unless asked, and stock grep -l does
+# report a match inside a high-byte file. The encoding question belongs to the
+# wrapped engine and this gate does not use it.
+#   .helmignore at any depth            1      (helm-only, not a grep input)
+#   positive control -name Chart.yaml   1      FIRES
+# None of it can reach this gate anyway - no traversal, stock binary, explicit
+# paths - but "cannot reach it" is an argument and the table is a measurement.
+# The enumerator itself was checked too: wrapped and stock find return the same
+# set in the same order, 8 runs each, one distinct order per arm.
+mapfile -t _tree < <(find "$CHART_DIR" -type f ! -path '*/.git/*' | sort)
+_tree_n="${#_tree[@]}"
+
+# THE DENOMINATOR, DERIVED INDEPENDENTLY RATHER THAN ASSERTED NON-ZERO.
+# Non-emptiness is not a denominator: a sweep over one file is non-empty and
+# proves nothing. find and git enumerate the tree by unrelated means, so a
+# disagreement means one of them is not seeing the chart.
+# `if _git_list=$(...)` and not `_git_n=$(git ... | wc -l)`. MEASURED: the
+# pipeline form made the meta_failure below UNREACHABLE. Under `set -euo
+# pipefail` a git that exits 128 - which is what git does outside a work tree -
+# takes the whole script down at that line, so the branch written to report
+# "git could not enumerate the chart" could never run. Tested by pointing the
+# gate at a non-repo copy: rc=128, output stopped mid-gate, no diagnostic.
+# An `if` suspends errexit, and git's stderr is kept and printed in the failure
+# rather than discarded, because the reason git could not read the tree is the
+# whole content of that report.
+_git_err="$(mktemp)"; _git_n=0
+if _git_list="$(git -C "$CHART_DIR" ls-files 2>"$_git_err")"; then
+  [[ -n "$_git_list" ]] && _git_n="$(printf '%s\n' "$_git_list" | wc -l)"
+fi
+if [[ "$_git_n" -eq 0 ]]; then
+  meta_failure "git could not enumerate the chart, so the tree sweep below has no independently-derived denominator and its zero would be unfalsifiable. git said: $(tr '\n' ' ' <"$_git_err")"
+elif [[ "$_tree_n" -lt "$_git_n" ]]; then
+  meta_failure "find saw $_tree_n files and git tracks $_git_n; the sweep below is reading a smaller tree than the chart and any zero it returns is a property of the aperture."
+fi
+
+# POSITIVE CONTROL FIRST, so the arms below are evidence rather than an inert
+# test. A control on a different input is not a control on your result - but a
+# sweep that cannot be shown to fire at all is not a measurement in the first
+# place.
+_probe="$(mktemp)"; printf 'livenessProbe: %s\n' "$_banned_path" >"$_probe"
+_sweep "$_banned_path" "$_probe" >"$_sweep_out"
+if [[ "$(wc -l <"$_sweep_out")" -eq 1 ]]; then
+  pass "the banned-path sweep fires on a planted occurrence, so its zero below is a reading and not a silence"
+else
+  fail "the banned-path sweep did not fire on a file that contains the banned path - every absence it reports is vacuous"
+fi
+rm -f "$_probe"
+
+_sweep "$_banned_path" "${_tree[@]}" >"$_sweep_out"
+mapfile -t _hits <"$_sweep_out"
+if [[ "${#_hits[@]}" -eq 0 ]]; then
+  pass "the banned readiness literal appears in 0 of $_tree_n files in the chart tree ($_git_n tracked)"
+else
+  fail "the banned readiness literal appears in ${#_hits[@]} of $_tree_n files: ${_hits[*]}. The readiness path is /readyz; this literal must not ship, and VALIDATION.md ships."
+fi
+
+# THE TWO ASSERTIONS THAT MAKE THE ZERO ABOVE MEAN ANYTHING. Without these the
+# sweep reports absence whether it read 41 files or none of them.
+_err_lines="$(wc -l <"$_sweep_err")"
+if [[ "$_err_lines" -eq 0 ]]; then
+  pass "the banned-path sweeps wrote 0 lines of stderr, so the zero above is not a diagnostic that was thrown away"
+else
+  fail "the banned-path sweeps wrote $_err_lines lines of stderr: $(tr '\n' ' ' <"$_sweep_err"). grep could not read part of the tree, so its zero is about the files it managed to open."
+fi
+
+# grep's status: 0 = matched, 1 = no match, >=2 = ERROR. 99 is this block's own
+# marker for a sweep called with no files to search. Only 0 and 1 are readings;
+# everything else is the sweep failing to run, which must not read as absence.
+_bad_rc="$(/usr/bin/grep -cvE '^[01]$' "$_sweep_rc" || true)"
+_rc_n="$(wc -l <"$_sweep_rc")"
+if [[ "$_rc_n" -eq 2 && "$_bad_rc" -eq 0 ]]; then
+  pass "both banned-path sweeps ran and exited 0 or 1 ($(tr '\n' ',' <"$_sweep_rc")) - a match and a clean absence, not an error mistaken for one"
+else
+  fail "the banned-path sweeps exited $(tr '\n' ',' <"$_sweep_rc") over $_rc_n invocations (expected exactly 2, each 0 or 1). A status of 2 or more is grep failing, and an empty result from a failed grep is not an absence."
+fi
+rm -f "$_sweep_err" "$_sweep_rc" "$_sweep_out" "$_git_err"
 
 # --------------------------------------------------------------------------
 printf '\n'

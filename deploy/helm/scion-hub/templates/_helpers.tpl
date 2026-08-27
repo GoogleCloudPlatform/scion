@@ -1336,17 +1336,23 @@ Exactly one list is.
    of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead. For base-url and storage-bucket that is the first list
-   above, and the answer is still not argv. For the other three it is nowhere
-   yet. None of the five is rendered as an argument ($setByChart), none selects
+   where it lands instead. For base-url, storage-bucket and - since the Cloud SQL
+   phase - db, that is the first list above, and the answer is still not argv.
+   For the other two, admin-emails and storage-dir, it is nowhere yet. None of
+   the five is rendered as an argument ($setByChart), none selects
    which configuration is loaded ($neverPassed), none is inert or misnamed
    ($aliasOrIgnored), and none weakens authentication ($unsafeToPass).
 
-   The harm is present for the first list and scheduled for the second. Passing
-   -base-url or -storage-bucket today makes argv the silent winner over a value
-   this chart rendered, and nothing logs the disagreement. Passing one of the
-   other three today changes a setting nothing else sets; the same silent
-   overriding starts the day its channel lands, with no edit here to mark it. The
+   The harm is present for three of the five and scheduled for the other two.
+   Passing -base-url, -storage-bucket or -db today makes argv the silent winner
+   over a value this chart rendered, and nothing logs the disagreement. -db
+   joined that group when the Cloud SQL phase started rendering
+   server.database.url, and the move was forced rather than remembered:
+   hack/verify.sh carries the delivery state as a committed number per flag and
+   goes red when a channel appears without this paragraph being re-tensed in the
+   same diff. Passing admin-emails or storage-dir today changes a setting nothing
+   else sets; the same silent overriding starts the day its channel lands, with
+   no edit here to mark it. The
    asymmetry is what decides it - reserving costs an operator a flag they have no
    reason to want, un-reserving is a deliberate act with a place to record itself
    (see the closing paragraph), and reserving after the fact requires somebody to
@@ -1919,16 +1925,38 @@ the same runtimes.kubernetes.namespace.
 {{- end }}
 
 {{/*
+The other half of the same partition: the settings values that are REFUSED
+alongside config.existingSecret rather than transferred. One define, because
+NOTES.txt prints this list to operators and scion-hub.assertConfigSource
+enforces it, and a second hand-written copy is how the two stop agreeing.
+
+hack/verify.sh checks these names against the leaves its values walk observed
+being refused BY NAME - not merely refused, which is the vacuity gd-p2-rev found
+as R4. Order is the order the guard appends them in, so the refusal message and
+this list read the same way.
+*/}}
+{{- define "scion-hub.existingSecretRefusals" -}}
+config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password
+{{- end }}
+
+{{/*
 config.existingSecret means "I supply the whole settings.yaml myself", so the
 chart renders none - and every value whose only effect is on the file it did not
 render becomes inert. An inert value is the same silent no-op this whole design
 exists to avoid, so supplying both is an error rather than a precedence rule.
 
-The three names below are the settings values with an empty default, which is
-what makes them refusable at all; the reasoning is in the comment above the
-transfer list, and the two lists are checked together as one partition of the
-values tree. Later phases append their own inline values here as they are
-introduced (the database password, the session secret, the OAuth client secret).
+The names below are the settings values with an empty default, which is what
+makes them refusable at all; the reasoning is in the comment above the transfer
+list, and the two lists are checked together as one partition of the values
+tree. Later phases append their own inline values here as they are introduced
+(the session secret, the OAuth client secret). Phase 2 appended three database
+leaves and deliberately did not append the fourth; see the PHASE 2 DELTA note in
+the body.
+
+THE SAME NAMES ARE PRINTED TO OPERATORS, so they come from one define rather
+than from a second hand-written copy in NOTES.txt. hack/verify.sh checks that
+define against the leaves its values walk observed being refused BY NAME, so a
+leaf added here and not there - or there and not here - goes red.
 
 Two settings values are missing from the list on purpose and are covered anyway.
 storage.provider and database.driver have non-empty defaults, so neither can be
@@ -1951,6 +1979,37 @@ it; keep that call.
 {{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- /*
+PHASE 2 DELTA. The three database leaves below are the append this comment asked
+later phases for, and phase 2 owed it: phase 2 is what introduced the database
+credential. gd-p2-rev found the omission as R3 and measured it - existingSecret
+plus database.password rendered BYTE-IDENTICAL manifests for two different
+passwords, zero occurrences of either in the output and no warning anywhere. An
+operator got a green upgrade and a hub authenticating with whatever their own
+Secret happened to hold.
+
+THREE, NOT THE FOUR THE REVIEW ASKED FOR, and the fourth is the interesting one.
+database.auth is NOT refused here because it is not inert: it selects the
+proxy's --auto-iam-authn flag, and the proxy is rendered under
+config.existingSecret like every other container. Measured, existingSecret +
+cloudsql + postgres, iam against password:
+
+  212d211
+  <             - "--auto-iam-authn"
+
+Refusing it would break a coherent install - "I supply my own settings.yaml AND
+I use IAM authentication" - by forbidding the only value that tells the proxy
+so. It is half-inert instead: the proxy half lands, the DSN half is the
+operator's own file to write, and NOTES.txt says that rather than this pretending
+to refuse it.
+
+The three below all have an empty default, which is what makes them refusable on
+truthiness. database.driver does not, and is covered by the storage.bucket
+companion instead; that pair is explained above.
+*/}}
+{{- if .Values.database.name }}{{- $inline = append $inline "database.name" }}{{- end }}
+{{- if .Values.database.user }}{{- $inline = append $inline "database.user" }}{{- end }}
+{{- if .Values.database.password }}{{- $inline = append $inline "database.password" }}{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
@@ -1987,7 +2046,6 @@ agreeing with the hub in none.
 ci/values-settings.yaml, in hub order:
 
   GATE TABLE BEGIN
-    server.database.url                        Cloud SQL phase
     a durable session/signing secret           session-secret phase
     server.auth.proxy.provider=iap             ingress/IAP phase
     server.auth.proxy.iap.audience             ingress/IAP phase
@@ -2021,9 +2079,16 @@ server.auth.proxy.iap.audience rather than a table row. Both mistakes are the
 same mistake: reporting what the probe reached as what the hub does.
 
 WHAT THIS CHART ALREADY SATISFIES, so nobody re-derives it: server.hub.hub_id,
-server.database.driver=postgres, and server.storage.provider=gcs with a bucket.
-Those three are why the refusal starts at the database URL rather than at gate
-one.
+server.database.driver=postgres, server.storage.provider=gcs with a bucket, and
+- since the Cloud SQL phase - server.database.url. Those four are why the refusal
+starts where it does rather than at the hub's first gate. The URL is satisfied
+only where the chart renders a settings.yaml, so under config.existingSecret it
+is the operator's again, and the table above is the list for the rendering case.
+
+server.database.url LEFT THE TABLE ABOVE BECAUSE THE WALK STOPPED NAMING IT, not
+because this phase decided it had landed. TestHelmChartHAGateWalk's authored
+tripwire went red with "gates the authored list names and the hub no longer
+refuses on: [server.database.url]" and this edit is the response to that line.
 
 THE ROUTE SET IS TRANSCRIBED FROM THE HUB, NOT INVENTED HERE.
 cmd/server_ha_preflight_test.go:248-256 (ab0d227, branch
@@ -2111,13 +2176,13 @@ minutes between 1b3c9418 landing and being noticed.
 {{- define "scion-hub.assertHAUnlanded" -}}
 {{- $routes := include "scion-hub.haRoutes" . }}
 {{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
-{{- $gates := "server.database.url, from the Cloud SQL phase, and a durable session/signing secret, from the session-secret phase. That is the whole list for auth.mode oauth: the hub's IAP gates sit inside `if cfg.Auth.Mode == \"proxy\"` in validateHostedHAPreflight, so this shape never reaches them and the ingress/IAP phase lands nothing this release is waiting on" }}
-{{- $removal := "That flag stops being needed for auth.mode oauth when the Cloud SQL phase and the session-secret phase have both landed. The ingress/IAP phase is not on this shape's path and waiting for it would hold the flag one phase too long; Filestore lands none of them either" }}
+{{- $gates := "a durable session/signing secret, from the session-secret phase. That is the whole list for auth.mode oauth: the hub's IAP gates sit inside `if cfg.Auth.Mode == \"proxy\"` in validateHostedHAPreflight, so this shape never reaches them and the ingress/IAP phase lands nothing this release is waiting on" }}
+{{- $removal := "That flag stops being needed for auth.mode oauth when the session-secret phase has landed. The ingress/IAP phase is not on this shape's path and waiting for it would hold the flag one phase too long; Filestore lands none of them either" }}
 {{- if eq (toString .Values.auth.mode) "proxy" }}
-{{- $gates = "server.database.url, from the Cloud SQL phase; a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase" }}
-{{- $removal = "That flag stops being needed for auth.mode proxy when the Cloud SQL phase, the session-secret phase and the ingress/IAP phase have all landed. Filestore lands none of them" }}
+{{- $gates = "a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase" }}
+{{- $removal = "That flag stops being needed for auth.mode proxy when the session-secret phase and the ingress/IAP phase have both landed. Filestore lands none of them" }}
 {{- end }}
-{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go, func validateHostedHAPreflight), and it aborts before serving where runServerForeground calls `if err := validateHostedHAPreflight(cfg); err != nil`. These preflight gates have no source in this chart, measured in hub order by walking the real preflight: %s. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. %s." $routes $gates $removal) }}
+{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go, func validateHostedHAPreflight), and it aborts before serving where runServerForeground calls `if err := validateHostedHAPreflight(cfg); err != nil`. These preflight gates have no source in this chart, measured in hub order by walking the real preflight: %s. The chart already satisfies server.hub.hub_id, the postgres driver, gcs storage with a bucket, and now the database URL, which is why the refusal starts at the session secret and not earlier. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. %s." $routes $gates $removal) }}
 {{- end }}
 {{- end }}
 
@@ -2418,8 +2483,7 @@ real deep merge rather than a text append.
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
 
 {{- /*
-server.database. The URL is Cloud SQL's, and lands with the proxy in the next
-change; the key for it is url, not dsn. Pool settings are here now because they
+server.database. The key is url, not dsn. Pool settings are here now because they
 are reachable no other way - SCION_SERVER_DATABASE_MAXOPENCONNS and its siblings
 have snake_case koanf tags with no camelCase entry, so mapper #1 produces
 database.max.open.conns and the variable never binds.
@@ -2429,6 +2493,18 @@ database.max.open.conns and the variable never binds.
     "max_idle_conns" (int .Values.database.maxIdleConns)
     "conn_max_lifetime" .Values.database.connMaxLifetime
     "conn_max_idle_time" .Values.database.connMaxIdleTime }}
+
+{{- /*
+The reserved position, now filled. Under password auth this value carries the
+credential, which is why it is built here - inside the document that becomes the
+settings Secret - and never passed through a ConfigMap, an argument vector or a
+pod annotation. Only under postgres: a sqlite hub has no URL and rendering an
+empty one would make server.database.url present-but-blank, which reads to the
+HA preflight as configured.
+*/}}
+{{- if eq $driver "postgres" }}
+{{- $database = set $database "url" (include "scion-hub.databaseUrl" .) }}
+{{- end }}
 
 {{- /* server.storage: the HUB'S BLOB STORE. Not the Filestore workspace share. */}}
 {{- $storage := dict "provider" .Values.storage.provider }}
@@ -2446,7 +2522,7 @@ database.max.open.conns and the variable never binds.
     "database" $database
     "storage" $storage
     "auth" (dict "mode" .Values.auth.mode)
-    "broker" (dict "host" "127.0.0.1" "port" 9800 "auto_provide" true) }}
+    "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
 
 {{- /*
 LOAD-BEARING. schema_version is not boilerplate and it is not redundant with
@@ -2562,4 +2638,505 @@ regression in every one of those cases.
 {{- fail (printf "config.extra overwrites %s, which the chart itself sets. config.extra is for settings the chart does not model; overriding one it does write is invisible afterwards, because the rendered file reports your value and every check downstream of the merge passes on it. If the chart's value is wrong for you, change the value that produces it - or say why it cannot, because that is a gap in the chart's own interface rather than a job for the escape hatch." (join ", " (uniq $collisions))) }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+================================================================================
+PHASE 2 - CLOUD SQL. Appended at end of file by agreement with gd-p1-dev and
+gd-p3-dev: three phases edit this file, and appending is the only edit that
+cannot collide with an insertion point somebody else is also moving.
+================================================================================
+*/}}
+
+{{/*
+Percent-encode one userinfo component of a URL.
+
+The IAM database role is a Google service account with the domain trimmed, so
+it CONTAINS AN @: "scion-hub@my-project.iam". Go's net/url splits the authority
+at the LAST @, so the raw two-@ form does in fact parse correctly - I measured
+it against the hub's real parser rather than assuming it. It is still encoded
+here, for two reasons that outlive that measurement:
+
+  - The last-@ rule is net/url's, not RFC 3986's. Any intermediary that splits
+    at the FIRST @ - a log scrubber, a URL rewriter, a different language's
+    parser - reads the host as "my-project.iam@127.0.0.1:5432" and is wrong in
+    a way that produces a connection error nobody can explain from the DSN as
+    written.
+  - The password arm has no such luck. A password containing @ or : is
+    misparsed outright, and that is an operator's arbitrary string, not a
+    Google-shaped identifier.
+
+% MUST BE FIRST or it re-encodes the escapes emitted after it. The set is the
+RFC 3986 userinfo-illegal characters that can plausibly occur here; a character
+outside it passes through unchanged, which is correct - over-encoding a legal
+character is as wrong as under-encoding an illegal one.
+
+Verified by round-trip through pgx's own parser, not by inspection: see
+hack/verify.sh dsn-roundtrip and tests/.
+*/}}
+{{- define "scion-hub.pctEncodeUserinfo" -}}
+{{- $s := toString . -}}
+{{- $s = replace "%" "%25" $s -}}
+{{- $s = replace "@" "%40" $s -}}
+{{- $s = replace ":" "%3A" $s -}}
+{{- $s = replace "/" "%2F" $s -}}
+{{- $s = replace "?" "%3F" $s -}}
+{{- $s = replace "#" "%23" $s -}}
+{{- $s = replace "[" "%5B" $s -}}
+{{- $s = replace "]" "%5D" $s -}}
+{{- $s = replace " " "%20" $s -}}
+{{- $s -}}
+{{- end }}
+
+{{/*
+The Postgres role, unencoded.
+
+Under auth: iam the role is the Google service account with the trailing
+".gserviceaccount.com" removed - Cloud SQL registers IAM principals under that
+truncated form, and the untruncated one is simply not a role that exists. The
+chart derives it from serviceAccount.gcpServiceAccount rather than asking for it
+twice, because two fields that must agree are two fields that can disagree.
+
+database.user still overrides, for the case the derivation does not cover: a
+user-managed role name, or a service account whose Cloud SQL role was created
+under a different spelling.
+*/}}
+{{- define "scion-hub.databaseUser" -}}
+{{- if .Values.database.user -}}
+{{- .Values.database.user -}}
+{{- else if eq .Values.database.auth "iam" -}}
+{{- $gsa := .Values.serviceAccount.gcpServiceAccount -}}
+{{- if not $gsa -}}
+{{- fail "database.auth is iam but neither database.user nor serviceAccount.gcpServiceAccount is set. IAM database authentication logs in AS the pod's Google service account, so with no service account there is no role to log in as. Either set serviceAccount.gcpServiceAccount and let the chart derive the role from it, or set database.user to the role name explicitly." -}}
+{{- end -}}
+{{- trimSuffix ".gserviceaccount.com" $gsa -}}
+{{- else -}}
+{{- fail "database.user is required when database.auth is password. Under password authentication the chart has nothing to derive a role name from - unlike iam, where the role is the service account." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+server.database.url, the position secret-settings.yaml reserves.
+
+Shape: postgres://USER[:PASSWORD]@127.0.0.1:PORT/NAME?sslmode=disable
+
+127.0.0.1 is not a placeholder. The proxy runs in this pod and every container
+in a pod shares one network namespace, so the loopback address IS the tunnel
+entrance. The port is cloudsql.port, read here and by the proxy's --port from
+the same key, so the DSN and the listener cannot drift apart.
+
+sslmode=disable is correct and is not a downgrade. The encrypted, mutually
+authenticated leg is proxy-to-Cloud-SQL; the hub-to-proxy leg never leaves the
+pod's network namespace. Asking for TLS on it fails, because the proxy's local
+listener does not serve TLS - so an operator who "hardens" this to require
+breaks the connection without adding a metre of protected path.
+
+UNDER auth: iam THERE IS NO PASSWORD IN THIS STRING AT ALL - not an empty one,
+no colon. The proxy mints an OAuth token per connection with --auto-iam-authn.
+Under auth: password the credential is here, and this string only ever exists
+inside the settings Secret.
+*/}}
+{{- define "scion-hub.databaseUrl" -}}
+{{- /*
+THE HOST IN THIS URL IS A CONSTANT, so the thing that makes it true has to be
+checked before it is written. 127.0.0.1 is correct only because the Auth Proxy
+is in this pod listening on it; with cloudsql.enabled false the chart would emit
+a DSN pointing at a loopback port nothing binds, the hub would come up, and the
+first database call would fail with connection refused - a runtime mystery
+manufactured at template time.
+
+The schema refuses this too. It is checked in both places on purpose and this
+layer is not redundant: the schema can only say WHICH key is wrong, and its
+message for a conditional is "(root): Must validate "then" as "if" was valid -
+cloudsql.enabled does not match: true", which does not tell an operator that the
+driver they chose is what demands the proxy. This layer is also the one an
+operator reaches with --skip-schema-validation.
+*/ -}}
+{{- if not .Values.cloudsql.enabled -}}
+{{- fail "database.driver is postgres but cloudsql.enabled is false. This chart reaches Postgres only through the Cloud SQL Auth Proxy: it renders server.database.url with the host fixed at 127.0.0.1 and the proxy is what listens there, so with the proxy off the hub would start and then fail every query with connection refused. There is no database.host key and this is deliberate - a direct-to-Postgres path needs its own TLS, credential and network-policy story, and none of it is written. Set cloudsql.enabled: true with cloudsql.instanceConnectionName, or set database.driver: sqlite." -}}
+{{- end -}}
+{{- $user := include "scion-hub.databaseUser" . | include "scion-hub.pctEncodeUserinfo" -}}
+{{- $cred := $user -}}
+{{- if eq .Values.database.auth "password" -}}
+{{- if not .Values.database.password -}}
+{{- fail "database.password is required when database.auth is password." -}}
+{{- end -}}
+{{- $cred = printf "%s:%s" $user (include "scion-hub.pctEncodeUserinfo" .Values.database.password) -}}
+{{- end -}}
+{{- printf "postgres://%s@127.0.0.1:%d/%s?sslmode=disable" $cred (int .Values.cloudsql.port) .Values.database.name -}}
+{{- end }}
+
+{{/*
+The Cloud SQL Auth Proxy container.
+
+ONE DEFINITION, TWO PLACEMENTS. As a native sidecar it is an initContainers
+entry carrying restartPolicy: Always; on clusters below 1.29 it is an ordinary
+container appended after the hub. Rendering it from one define means the two
+placements cannot drift into being two different proxies - the failure this
+would otherwise invite is a fix applied to the native path and not the fallback,
+which nobody runs until the day they run it on an old cluster.
+
+restartPolicy is added by the CALLER, not here, because it is the single field
+that distinguishes the two placements and putting it inside a conditional here
+would hide the distinction inside the thing being distinguished.
+*/}}
+{{- define "scion-hub.cloudsqlProxyContainer" -}}
+{{- $cs := .Values.cloudsql -}}
+{{- $args := list "--structured-logs" -}}
+{{- /*
+--port and the DSN's port come from the same value. They are the two ends of one
+loopback connection and a chart that let them disagree would produce a hub
+dialling a port nothing listens on, with both halves individually plausible.
+*/ -}}
+{{- $args = append $args (printf "--port=%d" (int $cs.port)) -}}
+{{- $args = append $args "--health-check" -}}
+{{- /*
+0.0.0.0 and not 127.0.0.1. The probes are issued by the kubelet from OUTSIDE the
+pod's network namespace, so a health server bound to loopback is unreachable by
+the very thing it exists to answer - and the symptom is a readiness probe that
+fails while the proxy is perfectly healthy.
+*/ -}}
+{{- $args = append $args "--http-address=0.0.0.0" -}}
+{{- $args = append $args (printf "--http-port=%d" (int $cs.healthCheckPort)) -}}
+{{- if eq .Values.database.auth "iam" -}}
+{{- $args = append $args "--auto-iam-authn" -}}
+{{- end -}}
+{{- if $cs.privateIp -}}
+{{- $args = append $args "--private-ip" -}}
+{{- end -}}
+{{- $args = append $args $cs.instanceConnectionName -}}
+{{- /*
+Phase 0's guard, reused rather than reimplemented. Every argument is checked for
+an embedded credential before it is rendered. Under auth: password the password
+must reach the process through the settings Secret and NOTHING else; argv is
+world-readable to anything that can read /proc in this pod, and it is echoed by
+kubectl describe, by the API server's audit log and by every controller that
+logs a pod spec.
+*/ -}}
+{{- range $a := $args -}}
+{{- include "scion-hub.assertNoCredential" (dict "value" $a "source" "cloud-sql-proxy argument") -}}
+{{- end -}}
+- name: cloud-sql-proxy
+  image: {{ include "scion-hub.cloudsqlProxyImage" . | quote }}
+  imagePullPolicy: {{ $cs.image.pullPolicy }}
+  args:
+    {{- range $a := $args }}
+    - {{ $a | quote }}
+    {{- end }}
+  {{- /*
+  /startup and /readiness are the PROXY's endpoints. They are not the hub's, and
+  the hub's /readyz is not the proxy's. Pointing either process's probe at the
+  other's path produces a probe that answers about the wrong process.
+
+  The startup probe is what makes the native sidecar worth having: the kubelet
+  holds the hub container until this one reports started, so the hub's
+  AutoMigrate does not race the tunnel.
+  */}}
+  startupProbe:
+    httpGet:
+      path: /startup
+      port: {{ int $cs.healthCheckPort }}
+    periodSeconds: 1
+    failureThreshold: 60
+    timeoutSeconds: 5
+  readinessProbe:
+    httpGet:
+      path: /readiness
+      port: {{ int $cs.healthCheckPort }}
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 5
+  securityContext:
+    {{- /*
+    Restated at container level for the same reason the hub container restates
+    it: a container-level securityContext shadows the pod-level one field by
+    field, so a change that only reaches the pod block cannot quietly return
+    this container to root.
+
+    THE PROXY DOES NOT RUN AS ITS IMAGE'S OWN UID. The image declares USER
+    65532, but this pod's securityContext sets runAsUser from
+    hub.securityContext.runAsUser (1000 by default) and that is inherited by
+    every container, so the proxy runs as the hub's uid. There is no way to
+    opt a single container back out of a pod-level runAsUser - it can be
+    overridden, not unset - so this is a property of the pod, not a choice made
+    here. It is recorded because the obvious reading of the image is wrong.
+
+    That is EXPECTED to be harmless: the proxy writes nothing, opens no
+    uid-owned files, and needs only a socket and the metadata server. It is
+    NOT VERIFIED, because verifying it requires running the pod and there is no
+    cluster - see VALIDATION.md, where it sits with the rest of the unrun smoke
+    test rather than being asserted here as though it had been checked.
+
+    readOnlyRootFilesystem is safe here and is NOT safe on the hub container -
+    the hub writes its state directory - which is why it appears on this
+    container only. It is unverified for the same reason and in the same place.
+    */}}
+    {{- include "scion-hub.nonRootSecurityContext" . | nindent 4 }}
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  {{- with $cs.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{/*
+The proxy image, pinned by digest.
+
+DIGEST ONLY, and there is deliberately no tag value to set. image.repository /
+image.digest for the hub refuse a tag and a digest together, on the grounds that
+two sources for one identity can disagree; the same reasoning applies here, and
+the proxy has no reason to ever run unpinned. A tag can be repointed underneath
+a running cluster by whoever owns the registry. A digest cannot.
+*/}}
+{{- define "scion-hub.cloudsqlProxyImage" -}}
+{{- $img := .Values.cloudsql.image -}}
+{{- $repo := required "cloudsql.image.repository is required when cloudsql.enabled." $img.repository -}}
+{{- $digest := required "cloudsql.image.digest is required: the Cloud SQL Auth Proxy is pinned by digest, not by tag. Resolve one with: curl -sSI -H 'Accept: application/vnd.oci.image.index.v1+json' https://gcr.io/v2/cloud-sql-connectors/cloud-sql-proxy/manifests/<version> and read the docker-content-digest header." $img.digest -}}
+{{- printf "%s@%s" $repo $digest -}}
+{{- end }}
+
+{{/*
+The hub's in-process runtime broker port. ONE SOURCE, TWO READERS.
+
+This number is written into server.broker.port in the settings document and is
+also an entry in the port-collision guard below, and those two are not
+independent facts: the guard's entire job is to refuse an operator port that
+collides with what the settings file actually configures. It was a bare 9800 in
+both places, including inside a human-readable message. Two fields that must
+agree are two fields that can disagree, and this pair would disagree SILENTLY -
+the settings file would move, the guard would keep refusing the old port, and
+the new collision it exists to catch would render clean.
+
+Nothing in the values surface sets this today and this helper deliberately does
+not add one: the broker is in-process and its port is not an operator's to
+choose. It is a helper so that the two readers cannot drift, not to make the
+number configurable. hack/verify.sh measures the linkage from outside, deriving
+the port from the rendered settings document rather than naming it.
+*/}}
+{{- define "scion-hub.brokerPort" -}}
+9800
+{{- end }}
+
+{{/*
+Port collisions inside the pod's single network namespace.
+
+EVERY CONTAINER IN A POD SHARES ONE NETWORK NAMESPACE. Two processes in
+different containers binding the same port is not isolated by the container
+boundary - it is an ordinary bind conflict, and the loser fails at startup with
+"address already in use" while the manifest looks entirely reasonable, because
+each port is declared in a different container's block and nothing in the
+Kubernetes API cross-checks them.
+
+Four ports live in this namespace once the proxy is added, and only two of them
+are visible in the Deployment: the hub's web port and the proxy's two. The
+fourth, the hub's in-process runtime broker on 9800, is set in settings.yaml and
+does not appear in the pod spec at all - so an operator who moves the proxy's
+health port onto it gets a conflict with a process they cannot see declared
+anywhere nearby. That is the case this guard is really for.
+*/}}
+{{- define "scion-hub.assertCloudsqlPorts" -}}
+{{- if .Values.cloudsql.enabled }}
+{{- $seen := dict }}
+{{- $ports := list
+    (dict "n" (int .Values.hub.webPort)              "name" "hub.webPort")
+    (dict "n" (int .Values.cloudsql.port)            "name" "cloudsql.port (the proxy's Postgres listener)")
+    (dict "n" (int .Values.cloudsql.healthCheckPort) "name" "cloudsql.healthCheckPort (the proxy's health server)")
+    (dict "n" (int (include "scion-hub.brokerPort" .)) "name" (printf "the hub's in-process runtime broker, fixed at %s in settings.yaml" (include "scion-hub.brokerPort" .))) }}
+{{- range $p := $ports }}
+{{- $k := printf "p%d" $p.n }}
+{{- if hasKey $seen $k }}
+{{- fail (printf "port %d is claimed by both %s and %s. Every container in a pod shares one network namespace, so these are the same port and the second process to bind it fails at startup with 'address already in use'. Container boundaries do not separate ports; only the namespace does, and there is one." $p.n (get $seen $k) $p.name) }}
+{{- end }}
+{{- $seen = set $seen $k $p.name }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The native sidecar's version requirement, asserted where it applies.
+
+THIS REPLACES A kubeVersion FLOOR IN Chart.yaml, AND THE REASON IT IS HERE
+INSTEAD OF THERE IS THAT THE REQUIREMENT IS CONDITIONAL ON A VALUE. Chart.yaml's
+kubeVersion is evaluated before any value is read, so ">=1.29.0-0" rejected
+every cluster below 1.29 - including the ones cloudsql.nativeSidecar: false
+exists to serve, and which values.yaml and NOTES.txt both tell the operator to
+use. gd-p2-rev measured that contradiction. The requirement is real, but it is
+the requirement of one branch of one template, so it is asserted from that
+branch.
+
+WHY Major/Minor AND NOT semverCompare. .Capabilities.KubeVersion.Version is
+whatever the API server reports, and real ones are not plain semver: GKE reports
+v1.29.4-gke.1043002, and Minor is frequently "28+" on managed distributions.
+semverCompare on those strings either errors or silently mis-orders them, and
+the usual workaround - stripping non-digits before comparing - turns
+1.28.5-gke.1200 into 1.28.51200, which compares as NEWER than 1.29. Comparing
+the two integers directly has none of those failure modes.
+
+WHY THIS DOES NOT REFUSE A VERSION IT CANNOT PARSE, AND WHY THAT IS NOT THE
+SAME AS PASSING. If Minor does not yield a number, the only honest statement is
+that this render does not know the cluster's version - and "unknown" is not
+"below 1.29". Refusing there would block a conformant 1.33 cluster whose only
+sin is an unusual version string, and the remedy the message names (set
+nativeSidecar false) would then push it into the crash-loop window NOTES.txt
+warns about, which is worse than where it started.
+
+🔴 SO THE THIRD OUTCOME IS LOUD. There are three results here, not two: refused,
+checked-and-fine, and NOT CHECKED. The third one emits a notice into the
+rendered manifest and into NOTES.txt naming the version string it could not
+read. A guard that silently declines to guard is indistinguishable from a guard
+that ran and approved, and the whole reason this replaced a kubeVersion floor is
+that an unasserted claim looked like a checked one for weeks. Per the lead's
+standing rule: pass, fail and did-not-measure are three outcomes and the third
+one says so.
+
+WHY THE DECISION TAKES ITS INPUTS AS ARGUMENTS. .Capabilities cannot be forged
+from the command line - helm parses --kube-version as semver and always hands
+the template a numeric Major and Minor - so the not-checked branch is
+UNREACHABLE FROM helm template AND WOULD HAVE SHIPPED UNTESTED. Taking the two
+strings as parameters makes the branch reachable from a probe template, which is
+how hack/verify.sh gets at it. The caller in deployment.yaml is what binds them
+to the real cluster; this define does the deciding and nothing else.
+*/}}
+{{- define "scion-hub.nativeSidecarGuard" -}}
+{{- $major := regexReplaceAll "[^0-9]" .major "" }}
+{{- $minor := regexReplaceAll "[^0-9]" .minor "" }}
+{{- if and (ne $major "") (ne $minor "") }}
+{{- if and (eq (int $major) 1) (lt (int $minor) 29) }}
+{{- fail (printf "cloudsql.nativeSidecar is true and this cluster reports Kubernetes %s, which is below 1.29. Native sidecars (an initContainers entry with restartPolicy: Always) are only honoured from 1.29. Below that the API server ACCEPTS the field and ignores it, so the proxy becomes an ordinary init container that never exits and the pod hangs in Init forever with no error anywhere - which is why this is refused at render time rather than left to be diagnosed in a cluster. Set cloudsql.nativeSidecar=false to run the proxy as a plain sidecar instead; read the warning NOTES.txt prints on that path first, because the hub crash-loops until the tunnel is up." .version) }}
+{{- end }}
+{{- else }}
+{{- printf "# scion-hub: NATIVE SIDECAR VERSION CHECK NOT RUN. cloudsql.nativeSidecar is true, which needs Kubernetes 1.29 or later, and this cluster reports a version this chart could not read a major/minor out of (version=%q major=%q minor=%q). The check was SKIPPED, not passed - nothing here has established that this cluster honours restartPolicy on an init container. If it does not, the pod hangs in Init forever with no error: set cloudsql.nativeSidecar=false. Verify with: kubectl version" .version .major .minor }}
+{{- end }}
+{{- end }}
+
+{{- /*
+scion-hub.settingsChecksum - ADOPTED FROM PHASE 3, NOT WRITTEN HERE.
+
+Provenance, because a reader who does not know this will "simplify" it. Author
+gd-p3-dev, branch scion/gke-chart-p3, handed over 2026-08-17 with a mutation
+matrix in which every row was run. The oauth branch below is theirs and is
+inert in this phase; the server.database.url branch is the one this phase
+reaches, and it was written before any input existed that could reach it. It
+arrived here as UNTESTED CODE and is labelled as such in their handover. The
+differential in hack/verify.sh is what turned it into a tested one - if you
+change this helper, that gate is where you find out.
+
+Keep the define body byte-identical to the phase 3 copy where you can: both
+branches carry it and the integration merge resolves by taking either side only
+for as long as that stays true. The known deltas are the floor constant and the
+paragraph that justifies it, both marked PHASE 2 DELTA below.
+*/}}
+{{- define "scion-hub.settingsChecksum" -}}
+{{- $obj := fromYaml (include (print .Template.BasePath "/secret-settings.yaml") .) }}
+{{- if hasKey $obj "Error" }}
+{{- fail (printf "scion-hub.settingsChecksum could not parse the rendered settings Secret as YAML: %s. This annotation is a digest of a redacted projection of that document, so a parse failure would digest an error string instead - a value that never changes, which is worse than no annotation because it looks like coverage." (get $obj "Error")) }}
+{{- end }}
+{{- $doc := fromYaml (dig "stringData" "settings.yaml" "" $obj) }}
+{{- if not (hasKey $doc "server") }}
+{{- fail "scion-hub.settingsChecksum parsed the settings Secret but the document has no top-level server key. Every settings document the chart renders has one, so this means the projection is operating on an empty or unexpected document - and a digest of an empty document is a constant, which would silently stop rolling pods on every future settings change. Failing instead." }}
+{{- end }}
+{{- $redacted := "[redacted-from-checksum]" }}
+{{- $marks := 0 }}
+{{- $rendered := list }}
+{{- range $provider, $entry := (dig "server" "oauth" "web" (dict) $doc) }}
+{{- if hasKey $entry "client_secret" }}
+{{- $rendered = append $rendered (toString (get $entry "client_secret")) }}
+{{- $_ := set $entry "client_secret" $redacted }}
+{{- $marks = add1 $marks }}
+{{- end }}
+{{- end }}
+{{- $db := dig "server" "database" (dict) $doc }}
+{{- if hasKey $db "url" }}
+{{- $was := toString (get $db "url") }}
+{{- /*
+PHASE 2 DELTA. THE USERNAME IS CAPTURED AND RE-EMITTED; only the password is
+replaced. gd-p2-rev found this as C1, measured: rotating database.user left
+checksum/settings byte-identical, so the pods did not roll, while NOTES.txt told
+the operator - in the section written to prevent exactly this - that rotating
+the user rolls them automatically. An operator rotating a LEAKED credential got
+a green upgrade and kept serving on the retired one.
+
+The old pattern consumed the username as part of the match and dropped it:
+
+  "://[^/@[:space:]]*:[^/@[:space:]]+@"  ->  "://[redacted-from-checksum]@"
+
+That is strictly more redaction than this projection was specified to do. The
+username is not a credential - it is in values.yaml, in NOTES.txt and in the
+plain settings document - and blanking it made a non-secret field invisible to
+the digest, which is how a real configuration change stopped rolling pods.
+Keeping it is what makes the annotation's promise true for every part of the DSN
+except the one part that must never be digested.
+*/}}
+{{- $now := regexReplaceAll "://([^:/@[:space:]]*):[^/@[:space:]]+@" $was (printf "://${1}:%s@" $redacted) }}
+{{- if ne $now $was }}
+{{- $_ := set $db "url" $now }}
+{{- $marks = add1 $marks }}
+{{- end }}
+{{- end }}
+{{- $projection := toYaml $doc }}
+{{- $found := sub (len (splitList $redacted $projection)) 1 }}
+{{- if ne (int $found) (int $marks) }}
+{{- fail (printf "scion-hub.settingsChecksum performed %d redactions but the projection carries %d redaction markers. The two must agree: this is how the helper proves its own edits reached the document that gets digested, rather than assuming the assignment landed. Either a `set` above did not take effect on the parsed document - in which case a credential is about to be digested - or some rendered settings value contains the literal marker text %q, which the chart cannot distinguish from its own mark. Fix the first; for the second, change the marker." (int $marks) (int $found) $redacted) }}
+{{- end }}
+{{- /* SECOND PROOF, AND IT HAS A FLOOR THAT IS THERE FOR A MEASURED REASON.
+The marker count above proves the edits landed at the paths the helper knows.
+It cannot prove the same credential is not ALSO sitting at some path the list
+does not know about, so each rendered credential is searched for by value in the
+finished projection.
+
+THE FLOOR. That search is a plain substring test, and a short credential
+collides with ordinary prose: measured, a client secret of "def" is found inside
+the word "default" in the rendered settings, and the render was refused with a
+message telling the maintainer to add a path that does not exist. False, loud,
+and with remediation advice that cannot be followed. So the value search applies
+only at 12 characters or more. Google issues 24-character client secrets and
+GitHub 40, so no real credential is below the floor.
+
+WHAT THE FLOOR CANNOT SEE, STATED PLAINLY: a credential shorter than 12
+characters copied to a path outside the redaction list would be digested and
+this check would not say so. The path redaction still applies to every path it
+knows, the marker count still proves those landed, and a secret that short is
+not a secret. This is a narrowed check, not a disabled one, and it is narrowed
+in the direction that removes false refusals rather than the direction that
+removes refusals.
+
+AND THE ONE CASE NEITHER HALF COVERS, BECAUSE A MUTATION FOUND IT RATHER THAN
+REASONING. The marker count proves a marker EXISTS; it does not prove the marker
+is at the right key. Rewriting the `set` above to a misspelled key leaves the
+credential in place AND inserts a marker, so the count still balances - and with
+a sub-floor credential the value check is silent too. Measured: the render
+succeeds and `client_secret: shrt` reaches the digest. Both guards see the same
+mutation the moment the credential is of realistic length, and removing the
+`set` outright is caught at any length, so what is uncovered is the intersection
+of two unlikely things. It is written down rather than closed because a guard
+whose gap is named is a guard someone can widen; an unnamed one is a guard
+people trust past its edge. */ -}}
+{{- range $s := $rendered }}
+{{- if and (ge (len $s) 12) (contains $s $projection) }}
+{{- fail (printf "scion-hub.settingsChecksum redacted the credential paths it knows about and a rendered credential is STILL present in the digest input. The path list above is missing the path this value came from. Do not silence this by widening the value check - add the path, because the annotation is published to a wider audience than the Secret and a digest of a credential is a verification oracle for it. Value begins %q." (trunc 4 $s)) }}
+{{- end }}
+{{- end }}
+{{- /*
+PHASE 2 DELTA, FORCED BY THE ONE ABOVE. The backstop below looks for a
+scheme://user:password@host URL surviving into the digest input. Now that the
+redaction preserves the username, its own output - ://user:[redacted...]@ - has
+the shape the backstop hunts for, and the backstop would fire on every render it
+had just correctly redacted. So the known-redacted form is removed first, by
+plain string replacement rather than by widening the pattern.
+
+The distinction matters: a WIDER pattern would also stop matching real
+credentials that happen to resemble the marker, which is how a backstop quietly
+stops backstopping. Removing the exact literal this helper just wrote leaves the
+pattern as strict as it was for everything the helper did not write.
+*/}}
+{{- $probe := replace (printf ":%s@" $redacted) "@" $projection }}
+{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $probe }}
+{{- fail "scion-hub.settingsChecksum found a scheme://user:password@host URL in the digest input AFTER redaction. This is a backstop and reaching it means an upstream guard was missed, so fix the upstream one rather than this: either some settings path now carries a credential-bearing URL and is not in the redaction list above (add the path), or a values surface that feeds settings.yaml is not running scion-hub.assertNoCredential (add the call, and prefer that - it names the value the operator actually set, which this message cannot)." }}
+{{- end }}
+{{- $_ := set $obj "stringData" (dict "settings.yaml" $projection) }}
+{{- toYaml $obj | sha256sum }}
 {{- end }}

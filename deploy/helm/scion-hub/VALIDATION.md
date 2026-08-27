@@ -389,3 +389,196 @@ under the name `migration-rename-hazard` across every values permutation.
 If you supply your own file through `config.existingSecret`, it must carry
 `schema_version`. If a hub ever fails with a rename or `EBUSY` error on the
 settings path, this is why.
+
+### Cloud SQL
+
+Five items, and **every one of them is UNRUN rather than pending.** The
+distinction is the point of this section, so it is stated once here and not
+softened below: *pending* describes work that is scheduled, and reads as a
+queue that will drain on its own. **Nothing here is scheduled.** No cluster and
+no Cloud SQL instance were reachable from the environment this phase was built
+in, the access needed to reach them was not held, and no request for it was
+outstanding at the time of writing. An item marked UNRUN stays UNRUN until
+somebody runs it and edits this file.
+
+#### 7.1 The connection budget's `S` has never been observed
+
+`NOTES.txt` prints the budget as `TOTAL = R * (M + S)` and requires the operator
+to supply `S` — every connection a replica holds that is not in the ent pool.
+**The chart does not default `S`, does not estimate it, and no one on this phase
+measured it.** The value shipped is an operator input for exactly that reason.
+
+`NOTES.txt` also prints a **structural maximum**, `S_max = 2 * max(4, NumCPU) + 2`,
+derived by reading pgx v5.9.2 (`pgxpool/pool.go:383`, `defaultMaxConns = 4`,
+raised to `runtime.NumCPU()` when larger) against the hub's two pool
+constructions. **That is a ceiling read out of source, not an overhead observed
+in a process**, and the two must not be confused: a ceiling tells you what the
+code cannot exceed, not what it typically holds. Sizing a Cloud SQL instance
+from `S_max` will over-provision; sizing it from an unmeasured guess will
+under-provision at the worst moment.
+
+**To run it**, once a hub is serving against Cloud SQL under representative
+load:
+
+```sql
+SELECT count(*) FROM pg_stat_activity WHERE datname = '<database.name>' AND usename = '<role>';
+```
+
+Subtract `database.maxOpenConns` and divide by `replicaCount`. Record the number
+and the load it was taken under — a value with no load beside it is not
+reusable.
+
+#### 7.2 The IAM verification: UNRUN, with the refusals that stopped it
+
+The design for this phase called for verifying, against the real project,
+whether Cloud SQL IAM database authentication is usable — and made the result
+of that verification the thing that would set `database.auth`'s default.
+
+**The verification could not be performed. It is UNRUN.** Measured
+`2026-08-17T10:24:24Z`, principal
+`scion-my-grove@deploy-demo-test.iam.gserviceaccount.com`:
+
+```
+$ kubectl config get-contexts
+CURRENT   NAME   CLUSTER   AUTHINFO   NAMESPACE
+                                                    <- header row only; zero contexts
+
+$ gcloud container clusters list
+ERROR: (gcloud.container.clusters.list) ResponseError: code=403, message=Required
+"container.clusters.list" permission(s) for "projects/deploy-demo-test". This command
+is authenticated as scion-my-grove@deploy-demo-test.iam.gserviceaccount.com which is
+the active account specified by the [core/account] property.
+
+$ gcloud sql instances list
+ERROR: (gcloud.sql.instances.list) [scion-my-grove@deploy-demo-test.iam.gserviceaccount.com]
+does not have permission to access projects instance [deploy-demo-test] (or it may not
+exist): The client is not authorized to make this request. This command is authenticated
+as scion-my-grove@deploy-demo-test.iam.gserviceaccount.com which is the active account
+specified by the [core/account] property.
+```
+
+`docker` is also absent, so there was no local Postgres fallback either.
+
+**What the chart did instead of guessing.** `database.auth` is **required and
+has no default.** It is the only value in this phase treated the way
+`image.repository` and `hub.hubId` are treated: the operator must state it. A
+default here would have been a parameter nobody chose, presented as one somebody
+did — and the two failure directions are not symmetric. Defaulting to `iam` on a
+project without IAM DB auth enabled produces an authentication failure at the
+first query, after a successful install. Defaulting to `password` silently
+selects the weaker credential path for operators who never read this file.
+Withholding the default costs one line in every values file and is the only one
+of the three that is reversible once somebody measures.
+
+**Do not restore a default to this key on the strength of this section being
+read.** The condition for adding one is a measurement, recorded here.
+
+**The `gcloud` commands `NOTES.txt` prints are derived from documentation and
+are themselves unrun.** They were checked against Google's Cloud SQL IAM
+documentation — including the detail that `gcloud sql users create` and the
+login role both take the service account **with `.gserviceaccount.com`
+stripped**, which was verified against the docs rather than assumed, an
+assumption having been drafted and caught first. Documentation-derived is not
+executed. No command in that section has been run against a real instance.
+
+**To run it**, with a project where the 403s above do not occur:
+
+1. Confirm the instance has IAM authentication on:
+   `gcloud sql instances describe <INSTANCE> --format='value(settings.databaseFlags)'`
+   and look for `cloudsql.iam_authentication=on`.
+2. Run the numbered commands from `helm install`'s `NOTES.txt` output in order.
+3. Install with `database.auth: iam`, then check `/readyz` (see 7.3).
+4. **Then edit this section**: replace it with what happened, whichever way it
+   went. A verification that failed is a result and belongs here; only an
+   unrun one belongs under this heading.
+
+> **This section moving off UNRUN is a registered trigger obligation.** See
+> `hack/trigger-entry-c.sh`, which is the executable form of the paragraph
+> above, and read its header before assuming CI is watching this for you. **It
+> is not.** The predicate is the state of a Google Cloud project, which no check
+> in this repository can observe.
+
+#### 7.3 The manual smoke test: UNRUN
+
+Three claims, none of them exercised, all of which the static checks are
+structurally unable to reach:
+
+1. **The hub reaches Postgres through the proxy.** The chart renders
+   `server.database.url` with the host fixed at `127.0.0.1` and the port shared
+   with the proxy's `--port` from one value. That they agree is asserted
+   statically. That a connection is established over the loopback the proxy
+   binds is not.
+2. **`AutoMigrate` completes.** The native sidecar's startup probe is what is
+   supposed to hold the hub container until the tunnel is up, so migration does
+   not race the proxy. **The ordering is a property of the kubelet, and no
+   kubelet has run this pod.**
+3. **`/readyz` returns 200.** The readiness path is `/readyz`; the chart
+   contains no occurrence of the deprecated liveness path Phase 0 banned. The
+   banned literal is deliberately NOT written out in this file: VALIDATION.md
+   is not in `.helmignore`, so it ships inside the chart, and a tree-wide sweep
+   for that literal would otherwise find its own documentation and go red on
+   the sentence claiming the absence. It did exactly that once - see the note
+   below. That absence is asserted statically. A 200
+   from a live hub is not.
+
+**To run it:** install against a real cluster and instance, then
+`kubectl exec` into the hub container and `curl -s -o /dev/null -w '%{http_code}' localhost:<port>/readyz`.
+Record all three outcomes, not just the last — a 200 tells you nothing about
+whether migration raced the tunnel on the way there.
+
+#### 7.4 The proxy container's runtime identity: UNVERIFIED
+
+Two properties of the rendered proxy container are asserted by the manifest and
+have never been observed in a running pod:
+
+- **The proxy runs as uid 1000, not 65532.** The upstream image declares
+  `USER 65532`, but this pod sets `runAsUser` at pod level from
+  `hub.securityContext.runAsUser`, and a pod-level `runAsUser` is inherited by
+  every container — it can be overridden, not unset. So the rendered spec puts
+  the proxy on the hub's uid. This is **expected** to be harmless: the proxy
+  writes nothing, opens no uid-owned files, and needs a socket and the metadata
+  server. It is **not verified**, and it is the sort of thing that is obvious in
+  hindsight either way.
+- **`readOnlyRootFilesystem: true` is survivable for the proxy.** It is set on
+  the proxy container and deliberately not on the hub container, which writes
+  its state directory. Whether the proxy genuinely writes nothing to its root
+  filesystem — under every code path, including error paths and credential
+  refresh — has been reasoned about and not observed.
+
+**To run it:** `kubectl get pod <pod> -o jsonpath='{.spec.initContainers[?(@.name=="cloud-sql-proxy")].securityContext}'`
+for what was admitted, then `kubectl exec -c cloud-sql-proxy <pod> -- id` for
+what is actually running. If the proxy crash-loops with a write error, this
+section is why.
+
+#### 7.5 The sub-1.29 plain-sidecar path: UNRUN, and newly reachable
+
+Until this phase's round-1 review, `Chart.yaml` declared `kubeVersion: ">=1.29.0-0"`,
+so **no cluster below 1.29 could install this chart at all** — including the ones
+`cloudsql.nativeSidecar: false` exists to serve, which `values.yaml` and
+`NOTES.txt` both told operators to use. That contradiction is fixed: the version
+requirement now belongs to the native-sidecar branch alone
+(`scion-hub.assertNativeSidecarSupported`), and below 1.29 with the flag false
+the chart renders the proxy as an ordinary sidecar.
+
+**That path has never been run on a cluster, and it is the only path this phase
+made newly reachable.** What is asserted about it is asserted from rendered YAML
+only: that the proxy appears as an ordinary container, that no `initContainers`
+block is emitted, and that `NOTES.txt` prints the crash-loop warning. The
+behavioural claim behind those — that the hub loses the startup race to the
+tunnel some number of times, logs `connection refused`, and then **recovers on
+its own** — is reasoning about a race, not an observation of one. Nobody here has
+seen it converge, and "self-healing" is precisely the kind of claim that is
+indistinguishable from "broken" for the first several minutes of watching it.
+
+**To run it**, on a cluster below 1.29 (or any cluster, with the flag forced):
+
+```
+helm install <release> . --set cloudsql.nativeSidecar=false ...
+kubectl get pod <pod> -w                     # count the restarts before Ready
+kubectl logs <pod> -c hub --previous         # expect 'connection refused' on the crashes
+```
+
+Record **how many restarts** it took to converge and how long that was. If it
+does not converge, the flag's documentation is wrong and `NOTES.txt` is
+under-warning; if it converges in one or two, the warning can say so instead of
+leaving the operator to guess.

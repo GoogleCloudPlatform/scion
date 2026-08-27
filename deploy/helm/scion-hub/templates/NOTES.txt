@@ -40,6 +40,273 @@ account before the hub needs Google APIs:
   Google identity.
 {{- end }}
 {{- end }}
+{{ if .Values.cloudsql.enabled }}
+{{- $icnParts := splitList ":" .Values.cloudsql.instanceConnectionName }}
+{{- $csProject := "PROJECT" }}{{- $csRegion := "REGION" }}{{- $csInstance := "INSTANCE" }}
+{{- if eq (len $icnParts) 3 }}
+{{- $csProject = index $icnParts 0 }}{{- $csRegion = index $icnParts 1 }}{{- $csInstance = index $icnParts 2 }}
+{{- end }}
+CLOUD SQL
+
+  Instance:  {{ .Values.cloudsql.instanceConnectionName }}
+  Proxy:     {{ include "scion-hub.cloudsqlProxyImage" . }}
+  Listening: 127.0.0.1:{{ .Values.cloudsql.port }}{{ if .Values.cloudsql.privateIp }} (via the instance's private IP){{ end }}
+  Health:    127.0.0.1:{{ .Values.cloudsql.healthCheckPort }}/startup, /readiness, /liveness
+{{- if not (eq .Values.database.driver "postgres") }}
+
+  database.driver is {{ .Values.database.driver }}, not postgres, so NOTHING IN THE POD WILL DIAL
+  THE PROXY. It is rendered, it will start, it will hold an open connection to
+  the instance above, and the hub will never use it - the hub is on
+  {{ .Values.database.driver }} and opens no connection to port {{ .Values.cloudsql.port }} at all. That is a
+  running cost and an idle instance connection in exchange for nothing. Either
+  set cloudsql.enabled: false, or set database.driver: postgres if the instance
+  above is the database you meant to use.
+{{- else }}
+
+  The hub reaches this instance ONLY through the proxy. The rendered DSN fixes
+  the host at 127.0.0.1 and the proxy is what listens there; there is no
+  database.host key. Authentication is {{ .Values.database.auth }}.
+{{- if eq .Values.database.auth "iam" }}
+  Under iam the DSN carries no password - the proxy obtains an OAuth token from
+  the pod's Google identity and presents it, so the credential never exists as
+  a string the chart could render, log or leak.
+{{- else }}
+  Under password the credential lives in the settings Secret and reaches the
+  hub inside the rendered settings.yaml. It is not on any container's argv, not
+  in a ConfigMap and not in a pod annotation; the chart asserts all three.
+  Rotating it is a helm upgrade, which rewrites the Secret - and leaves every
+  running pod on the OLD credential until you restart them by hand. Read
+  ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP below before you rotate: it
+  is the command, and the reason the chart cannot do it for you.
+{{- end }}
+
+  BEFORE THE POD CAN CONNECT. These are the exact commands for the values you
+  supplied, and they are DERIVED FROM GOOGLE'S DOCUMENTATION, NOT FROM A RUN.
+  Nothing below has been executed against a real project - see the unrun note
+  under WHAT THIS RELEASE DOES NOT YET DO. If one of them is rejected, the
+  command is wrong and this chart wants to hear about it.
+{{ if .Values.serviceAccount.gcpServiceAccount }}
+  1. Let the proxy open the instance.
+
+  gcloud projects add-iam-policy-binding {{ $csProject }} \
+    --member "serviceAccount:{{ .Values.serviceAccount.gcpServiceAccount }}" \
+    --role roles/cloudsql.client
+{{- if eq .Values.database.auth "iam" }}
+
+  2. Let that identity authenticate AS A DATABASE USER. This is a separate role
+     from cloudsql.client and omitting it is the most common cause of a proxy
+     that connects and a login that is then refused.
+
+  gcloud projects add-iam-policy-binding {{ $csProject }} \
+    --member "serviceAccount:{{ .Values.serviceAccount.gcpServiceAccount }}" \
+    --role roles/cloudsql.instanceUser
+
+  3. Create the database role. Note the SUFFIX IS OMITTED: Cloud SQL registers
+     the IAM principal under the service account email with
+     ".gserviceaccount.com" trimmed, because a PostgreSQL role name is limited
+     to 63 bytes. The untrimmed spelling is not a role that exists, and the
+     resulting error names neither the suffix nor the length.
+
+  gcloud sql users create {{ include "scion-hub.databaseUser" . }} \
+    --instance={{ $csInstance }} \
+    --project={{ $csProject }} \
+    --type=cloud_iam_service_account
+{{- else }}
+
+  2. Create the database role and set its password. Use the same value you put
+     in database.password; the chart does not create the role and cannot check
+     that the two agree.
+
+  gcloud sql users create {{ include "scion-hub.databaseUser" . }} \
+    --instance={{ $csInstance }} \
+    --project={{ $csProject }} \
+    --prompt-for-password
+
+     --prompt-for-password rather than --password=VALUE, deliberately. The
+     second form puts the credential in your shell history and in the argv of a
+     process on your workstation. This chart refuses to put a secret on a
+     container's argv; the same rule is worth keeping one hop upstream.
+{{- end }}
+
+  {{ if eq .Values.database.auth "iam" }}4{{ else }}3{{ end }}. Create the database, if it does not exist. The hub does not create it;
+     AutoMigrate creates TABLES inside a database that is already there.
+
+  gcloud sql databases create {{ .Values.database.name }} \
+    --instance={{ $csInstance }} \
+    --project={{ $csProject }}
+
+  {{ if eq .Values.database.auth "iam" }}5{{ else }}4{{ end }}. Grant the role enough to migrate. The hub runs ent AutoMigrate at
+     startup, which issues CREATE TABLE and ALTER TABLE, so SELECT is not
+     enough. On PostgreSQL 15 and later the public schema no longer grants
+     CREATE to PUBLIC, so a role that worked on 14 fails on 15 with
+     "permission denied for schema public" - which reads as a missing user
+     rather than a missing grant. Connect as a superuser and run:
+
+  GRANT ALL PRIVILEGES ON DATABASE "{{ .Values.database.name }}" TO "{{ include "scion-hub.databaseUser" . }}";
+  GRANT ALL ON SCHEMA public TO "{{ include "scion-hub.databaseUser" . }}";
+
+     The double quotes around the role name are not decoration. PostgreSQL
+     folds an unquoted identifier to lower case, so any capital letter in the
+     name is silently changed and the grant lands on a role that does not
+     exist{{ if eq .Values.database.auth "iam" }} - and under iam the name also contains an @, which is not a legal
+     unquoted identifier character at all{{ end }}.
+
+     THE MINIMAL grant set is not established here. These two are sufficient by
+     documentation and were not narrowed by experiment, because narrowing a
+     privilege you cannot test is how you ship an install that fails on its
+     second migration rather than its first.
+{{- else }}
+  serviceAccount.gcpServiceAccount is not set, so no
+  iam.gke.io/gcp-service-account annotation was rendered and there is no
+  identity here for these commands to bind. The proxy does not fail closed on
+  that: it falls back to whatever Application Default Credentials it can find,
+  which on GKE is the NODE's service account - an identity you did not choose,
+  shared with every other pod on that node, and either over-privileged or
+  refused. Set serviceAccount.gcpServiceAccount and re-read this section; the
+  commands then print with your values already substituted.
+{{- end }}
+
+{{- if eq .Values.database.auth "password" }}
+
+  ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP. THIS IS THE STEP.
+
+  When you change database.password, `helm upgrade` writes the new value into
+  the settings Secret and reports success - and every running pod keeps using
+  the OLD password until you also run:
+
+    kubectl rollout restart deploy/{{ include "scion-hub.fullname" . }} -n {{ .Release.Namespace }}
+
+  Nothing detects the omission. The upgrade is green, the Secret is correct, and
+  the hub is still authenticating with the credential you just retired. If you
+  rotated because the old one leaked, it is still live.
+
+  WHY, IN ONE PARAGRAPH, SO THE STEP IS NOT MISTAKEN FOR A BUG TO BE FIXED.
+  settings.yaml is a subPath mount and the kubelet never refreshes one, so the
+  chart rolls the pods by digesting the settings document into a pod annotation.
+  That annotation is readable by anyone who can get deployments - a wider
+  audience than the Secret - and the only unknown in a DSN is the password, so
+  a digest of the raw document lets that reader confirm a guessed password
+  offline. The digest is therefore taken over a projection with the credential
+  removed, and a change that touches nothing but the credential no longer moves
+  it. Everything else still rolls the pods on its own: host, port, database
+  name, pool sizes, config.extra.
+
+  If you would rather not hold the step in your head, rotate the database name
+  or the user in the same upgrade and the roll happens automatically - but do
+  that because it suits your operations, not as a workaround.
+{{- end }}
+
+  THE CONNECTION BUDGET, AND THE PART OF IT WE HAVE NOT MEASURED.
+
+  Cloud SQL enforces a hard max_connections per instance. Exceeding it does not
+  degrade: new connections are refused, and the hub's refusal surfaces during
+  AutoMigrate or mid-request rather than at startup, so it looks like an
+  intermittent application fault. Size it before you scale, not after.
+
+    TOTAL = R * (M + S)
+
+    R = replicaCount                     = {{ .Values.replicaCount }}
+    M = database.maxOpenConns            = {{ .Values.database.maxOpenConns }}   (the ent pool, per replica)
+    S = every other connection a replica holds
+        YOU MUST SUPPLY THIS. It is not a chart value and the chart does not
+        guess it, because we have not measured it.
+
+  WE HAVE NOT MEASURED S. No hub has been run against a Cloud SQL instance in
+  the course of building this chart - the deploying principal is refused by
+  sqladmin.googleapis.com with HTTP 403 - so there is no observation of steady
+  state to report, and a number invented here would be indistinguishable from
+  one. Measure it on your own instance, at your own load, with one replica:
+
+{{- if .Values.config.existingSecret }}
+
+    SELECT count(*) FROM pg_stat_activity
+     WHERE datname = '<the database in your own DSN>'
+       AND usename = '<the role in your own DSN>';
+
+  The chart cannot fill those in under config.existingSecret: database.name and
+  database.user are refused there precisely because they would go nowhere, and
+  the DSN the hub dials is the one in your settings.yaml. M below is the chart's
+  default rather than your value, for the same reason.
+{{- else }}
+
+    SELECT count(*) FROM pg_stat_activity
+     WHERE datname = '{{ .Values.database.name }}' AND usename = '{{ include "scion-hub.databaseUser" . }}';
+{{- end }}
+
+  Take that at steady state under representative traffic, subtract M, and the
+  remainder is your S. Re-measure after any change to replica count or
+  workload; S is not a constant of the software, it is a property of your load.
+
+  THE STRUCTURAL MAXIMUM, WHICH IS A CEILING AND NOT AN OVERHEAD. Read out of
+  the hub's source, so it says what the code CAN open, not what a running hub
+  DOES open. Do not budget with it as though it were an observation, and do not
+  substitute it for S:
+
+    S_max = 2 * max(4, NumCPU) + 2
+
+  per replica, when database.driver is postgres. Its terms:
+
+    - The Postgres event publisher's pool (pkg/hub/events_postgres.go:169) and
+      the Postgres command bus's pool (pkg/hub/command_bus.go:113). Both call
+      pgxpool.ParseConfig on this same DSN and neither overrides MaxConns -
+      applyEventPoolKeepalives sets only idle time and lifetime - and the DSN
+      the chart renders carries no pool_max_conns. So each defaults to
+      max(4, runtime.NumCPU()) (pgx v5.9.2, pgxpool/pool.go:383).
+    - One dedicated LISTEN connection each, outside those pools, held open for
+      the process lifetime (events_postgres.go:486, command_bus.go:259). These
+      two are not a maximum; they are always open.
+
+  NumCPU IS THE NODE'S CPU COUNT, NOT YOUR CPU LIMIT. The hub does not set
+  GOMAXPROCS and does not vendor automaxprocs, so a pod with a 500m limit on a
+  64-core node still reads 64. S_max there is 130 per replica, from a container
+  you sized at half a core. If you are on large nodes, this term dominates
+  everything else in the budget.
+
+  WHY IT IS A CEILING AND NOT A COUNT: pgxpool opens connections on demand and
+  closes them when idle, so a quiet hub sits far below this. How far below is
+  precisely the thing we did not measure.
+
+  database.maxOpenConns must be at least 2. The hub treats a value of 1 or less
+  as unset (pkg/config/hub_config.go:573) because a single-connection pool
+  self-deadlocks the moment one query waits on another, so a 1 you set to save
+  connections would silently become the hub's own default instead of failing.
+  The schema rejects it up front rather than letting that substitution happen.
+{{- end }}
+{{- if not .Values.cloudsql.nativeSidecar }}
+
+  WARNING: cloudsql.nativeSidecar IS FALSE. THE HUB WILL CRASH-LOOP AT STARTUP.
+
+  The proxy is rendered as a plain container in containers[], and Kubernetes
+  gives containers in that list NO START ORDER. The hub therefore races the
+  proxy for the loopback port, loses it most of the time, and exits; the
+  kubelet restarts it; eventually the proxy is up and a restart succeeds. The
+  pod reaches Ready after a handful of CrashLoopBackOff cycles and the events
+  say "connection refused", naming nothing that is actually wrong.
+
+  The second half is worse and is not self-correcting. Kubernetes has no
+  shutdown order either, so on pod termination the proxy can exit while the hub
+  is still draining, and in-flight queries fail against a socket that closed
+  under them. There is no backoff that recovers from that.
+
+  This exists ONLY for GKE below 1.29, where restartPolicy on an init container
+  is not honoured. On 1.29 or later set cloudsql.nativeSidecar: true and both
+  problems disappear - the proxy starts before the hub and is torn down after
+  it, by the API, not by luck. Check with: kubectl version
+{{- end }}
+{{- if .Values.cloudsql.nativeSidecar }}
+{{- with (include "scion-hub.nativeSidecarGuard" (dict "major" .Capabilities.KubeVersion.Major "minor" .Capabilities.KubeVersion.Minor "version" .Capabilities.KubeVersion.Version)) }}
+
+  NOTICE: THE 1.29 CHECK BEHIND cloudsql.nativeSidecar DID NOT RUN.
+
+  It is not a failure and it is not an approval. The chart could not read a
+  major/minor version out of what this cluster reported, so it declined to
+  judge - and it says so here rather than leaving you to assume a silent guard
+  is a satisfied one. The manifest carries the same notice above the sidecar.
+
+{{ . | trimPrefix "# " | wrapWith 74 "\n" | indent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}
 
 THE IMAGE
 
@@ -81,12 +348,31 @@ CONFIGURATION
 
 {{ include "scion-hub.existingSecretTransfers" . }}
 
-  This is the complete list as of this chart version, and it is checked against
-  the render rather than maintained by hand. Values not listed here still work
-  normally - they reach the Deployment, the RBAC or the Service. Three that also
-  write to settings.yaml are missing on purpose: config.extra, storage.bucket
-  and agents.imageRegistry fail the render outright when set alongside
-  config.existingSecret, so they cannot go quiet on you.
+  This list is written by hand AND checked against the render, in both
+  directions: a value that goes inert without appearing here fails the chart's
+  test suite, and an entry here that no longer writes the key it claims fails it
+  too. Neither half is worth much without the other, and the check was vacuous
+  once already - it read any refusal as coverage, including one fired by a
+  different value entirely.
+
+  Values not listed here still work normally - they reach the Deployment, the
+  RBAC or the Service. The cloudsql.* values in particular are fully live under
+  config.existingSecret: they configure the proxy sidecar, which the chart does
+  render. What YOUR settings.yaml must then match is the DSN the proxy expects -
+  127.0.0.1 and cloudsql.port - because nothing here writes it for you.
+
+  database.auth is the one value that is half of each, so it is worth a
+  sentence. It is LIVE for the proxy - iam is what adds --auto-iam-authn - and
+  INERT for the DSN, which is yours. Set it to the mode your own settings.yaml
+  actually uses. Setting it to iam while your DSN carries a password gets you a
+  proxy authenticating one way and a hub the other, and the failure arrives at
+  the first connection rather than at install.
+
+  These also write to settings.yaml and are missing on purpose: they fail the
+  render outright when set alongside config.existingSecret, so they cannot go
+  quiet on you.
+
+    {{ include "scion-hub.existingSecretRefusals" . }}
 {{- else }}
   From the Secret {{ include "scion-hub.settingsSecretName" . }}, key settings.yaml.
 
@@ -174,10 +460,20 @@ SCHEMA_VERSION IS LOAD-BEARING
 
 WHAT THIS RELEASE DOES NOT YET DO
 
-  The chart is being built incrementally. It renders the hub's settings.yaml,
-  but it does not yet configure Cloud SQL and the database URL, GCS credentials
-  beyond the bucket name, Filestore, the session secret, the OAuth client
-  secret, Ingress or IAP. Do not treat this as a production install.
+  The chart is being built incrementally. It renders the hub's settings.yaml and
+  it wires Cloud SQL and the database URL, but it does not yet configure GCS
+  credentials beyond the bucket name, Filestore, the session secret, the OAuth
+  client secret, Ingress or IAP. Do not treat this as a production install.
+
+  The Cloud SQL wiring is RENDERED BUT UNRUN. No part of it has been applied to
+  a cluster or dialled at a real instance: the deploying principal is refused by
+  both container.googleapis.com and sqladmin.googleapis.com with HTTP 403, so
+  there was no cluster to install into and no instance to connect to. What is
+  established is that the chart renders this shape and that the render passes
+  the schema and kubeconform. That the proxy authenticates, that the IAM role
+  name below is the one Cloud SQL expects, and that the hub completes
+  AutoMigrate through it are three further claims and all three are unrun. See
+  VALIDATION.md section 7.2, which records them as unrun rather than pending.
 
   THIS RELEASE CAN TURN THE HUB'S HA PREFLIGHT ON, AND IT CANNOT SATISFY IT, SO
   THE CHART REFUSES TO RENDER THOSE SHAPES. Three of the settings this chart
@@ -197,7 +493,6 @@ WHAT THIS RELEASE DOES NOT YET DO
   typed from memory:
 {{- if eq (toString .Values.auth.mode) "proxy" }}
 
-    server.database.url                     Cloud SQL phase
     a durable session secret                session-secret phase
     server.auth.proxy.provider: iap         }
     server.auth.proxy.iap.audience          }
@@ -207,7 +502,6 @@ WHAT THIS RELEASE DOES NOT YET DO
     server.auth.transport.platform_auth_sa  }
 {{- else }}
 
-    server.database.url                     Cloud SQL phase
     a durable session secret                session-secret phase
 
   That is the whole list for auth.mode: {{ .Values.auth.mode }}. The IAP gates
@@ -221,8 +515,13 @@ WHAT THIS RELEASE DOES NOT YET DO
   Set acknowledgeHAUnlanded: true to render anyway - for rendering the
   settings.yaml, which works, not for installing, which does not. The chart
   already satisfies the rest of what the preflight demands (the hub ID, the
-  postgres driver, gcs storage and the bucket), which is why the refusal starts
-  at the database URL and not earlier.
+  postgres driver, gcs storage, the bucket, and now the database URL), which is
+  why the refusal starts at the session secret and not earlier.
+
+  server.database.url headed this list until the Cloud SQL phase, which landed
+  it. The list is shorter because a gate was closed, not because it was re-read.
+  It stays yours under config.existingSecret, where the chart renders no
+  settings.yaml and so cannot supply it.
 
   The default install is unaffected: sqlite and local storage match none of the
   three routes, isHADeployment is false, and the preflight is skipped.
@@ -236,8 +535,8 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   THE RENDER IS NOT A VERDICT ON THE INSTALL. The settings.yaml above is
   correct, and the hub will still abort at the first of the gates listed
-  here - server.database.url - before it serves anything. Nothing in this
-  release closes any of them.
+  here - the durable session secret - before it serves anything. This release
+  closes server.database.url and none of the ones that remain.
 
   If you started from ci/values-settings.yaml or ci/values-settings-oauth.yaml,
   the flag arrived with the file. Those two fixtures set it so that the

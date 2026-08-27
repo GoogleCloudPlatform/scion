@@ -17,13 +17,36 @@ name: scion-hub
 description: The Scion hub and its in-process runtime broker, for Google Kubernetes Engine.
 type: application
 
-# Declared now rather than when it first bites. The hub deployment needs native
-# sidecar containers (init containers with restartPolicy: Always), which are
-# only honoured from 1.29 - below that the API server accepts the field and the
-# container runs as a plain init container that never exits, so the pod hangs in
-# Init with no error. Failing the install with a version message is cheaper than
-# diagnosing that.
-kubeVersion: ">=1.29.0-0"
+# NO kubeVersion FLOOR, AND THAT IS A CORRECTION RATHER THAN AN OMISSION.
+#
+# This file used to declare kubeVersion: ">=1.29.0-0", and gave as its reason
+# that the hub deployment "needs native sidecar containers". That reason was
+# true when it was written and stopped being true when Phase 2 added
+# cloudsql.nativeSidecar: false - the documented way to run on exactly the
+# clusters the floor was rejecting. gd-p2-rev measured the contradiction:
+#   helm template --kube-version 1.28.0 [--set cloudsql.nativeSidecar=false]
+#     -> rc=1, "chart requires kubeVersion: >=1.29.0-0"
+# while values.yaml said "Set false only for clusters below 1.29" and NOTES.txt
+# PRINTED "This exists ONLY for GKE below 1.29" on every install and upgrade.
+#
+# THE REQUIREMENT WAS NEVER UNCONDITIONAL, AND Chart.yaml CANNOT EXPRESS A
+# CONDITIONAL ONE. It is conditional on a value, so it now lives where values
+# can be read: scion-hub.assertNativeSidecarSupported refuses the render when
+# cloudsql.nativeSidecar is true on a cluster below 1.29, naming the flag and
+# the remedy instead of naming a version. Below 1.29 with the flag false, the
+# chart renders a plain sidecar - which is what design.md §7.1 says it is for.
+#
+# The floor is not replaced with a lower number because there is no number to
+# derive one from. Measured across all six ci/ value files, the chart renders
+# only apps/v1, rbac.authorization.k8s.io/v1 and core v1 objects - every one of
+# them GA since 1.9 - so any floor above that would be an invented support
+# claim, and this phase has no cluster on which to test one. The one construct
+# that IS version-sensitive is the native sidecar, and it is now guarded where
+# it is emitted.
+#
+# Note also what did NOT catch this: nothing in the repository referenced
+# kubeVersion at all. The guard was unasserted, so the contradiction could only
+# ever have been found by reading two files at once, which is what gd-p2-rev did.
 
 # The chart's own version. Bumped independently of appVersion.
 version: 0.1.0

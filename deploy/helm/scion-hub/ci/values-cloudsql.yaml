@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# THE CLOUD SQL PERMUTATION: Postgres behind the Auth Proxy, IAM database
+# authentication, proxy as a native sidecar. This is the shape the Cloud SQL
+# phase exists to produce, and it is the only permutation in this directory
+# whose golden file contains an initContainers entry.
+#
+# WHAT THIS FILE IS THE ONLY WITNESS TO, so that a "simplification" has to
+# argue with a list rather than with a shrug:
+#
+#   - database.user is ABSENT ON PURPOSE. Under IAM auth the chart derives the
+#     database role from serviceAccount.gcpServiceAccount by stripping the
+#     .gserviceaccount.com suffix, because that is the name Cloud SQL gives the
+#     IAM principal. No other permutation exercises the derivation; the two
+#     settings permutations set database.user explicitly so that a bug in the
+#     derivation surfaces HERE and not as a mystery in a file about something
+#     else. If you add database.user below, that derivation becomes untested.
+#   - The password branch is not exercised here and is not missing: it is
+#     covered by hack/verify.sh, which asserts in both directions that the
+#     credential reaches the settings Secret and reaches no args list. A ci
+#     permutation cannot make that assertion, because it renders one shape and
+#     the claim is about two.
+#   - cloudsql.nativeSidecar is left at its default true. The false branch
+#     renders a plain sidecar and is covered by the same script, for the same
+#     reason.
+#
+# UNVERIFIED AGAINST A RUNNING CLUSTER, and this is the file most likely to be
+# read as evidence that it was. Nothing here has been applied to a cluster,
+# because the phase had no cluster to apply it to: the deploying principal is
+# refused by both container.googleapis.com and sqladmin.googleapis.com with 403.
+# See VALIDATION.md section 7.2. What this file proves is that the chart RENDERS
+# this shape and that the render satisfies the schema and kubeconform. That the
+# proxy then connects, that the IAM role name is the one Cloud SQL expects, and
+# that the hub completes AutoMigrate through it are three separate claims and
+# all three are unrun.
+
+# STILL REQUIRED, AND THE REASON HAS CHANGED. The postgres driver alone makes
+# the hub's isHADeployment test true, so the hosted HA preflight runs. This
+# phase lands one of its unlandable gates - server.database.url, which is now
+# rendered - but the ingress/IAP gates remain, so the preflight would still
+# abort. The flag comes out when ingress/IAP lands, not when this file was
+# written.
+acknowledgeHAUnlanded: true
+
+hub:
+  hubId: ci-cloudsql
+  name: CI Cloud SQL Hub
+  baseUrl: https://ci-cloudsql.example.com
+
+image:
+  repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
+  tag: ci
+
+serviceAccount:
+  create: true
+  # The Workload Identity binding target, and - with the .gserviceaccount.com
+  # suffix stripped - the Cloud SQL IAM database role the proxy authenticates
+  # as. One value, two consumers: NOTES.txt prints the gcloud commands that
+  # bind both, substituted from this key.
+  gcpServiceAccount: scion-hub@example-project.iam.gserviceaccount.com
+
+database:
+  driver: postgres
+  # No default exists for this key. Not "iam by default because IAM is better",
+  # not "password by default because it always works" - the chart refuses to
+  # choose. The two branches differ in what has to exist outside the chart
+  # before the pod can start, and neither answer is safe to assume on an
+  # operator's behalf. See the header of database.auth in values.yaml.
+  auth: iam
+  name: scion
+
+cloudsql:
+  enabled: true
+  # PROJECT:REGION:INSTANCE. Obviously non-real; nothing here is ever dialled.
+  instanceConnectionName: example-project:us-central1:ci-cloudsql
+
+storage:
+  provider: gcs
+  bucket: ci-cloudsql-hub-blobs
+
+auth:
+  mode: proxy
