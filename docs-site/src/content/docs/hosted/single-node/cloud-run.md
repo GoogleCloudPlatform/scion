@@ -142,12 +142,12 @@ Or use the wrapper script:
    **fails the deploy** if the app answers. This is the safety gate.
 7. Prints the Instance URL.
 
-:::caution[IAP is mandatory]
-A deploy with IAP disabled is **refused, not warned about**. With the Cloud Run
-invoker check disabled (required for IAP to work on Instances), IAP is the **sole
-network perimeter**. Without it, the Instance is open to the internet with only Hub
-session auth in front of it. The deploy command enforces this invariant so an
-operator cannot accidentally omit it.
+:::caution[IAP is the only network guard]
+The Cloud Run invoker IAM check is disabled on this tier (`invokerIamDisabled:
+true`), because IAP's forwarded audience is incompatible with it. **IAP is
+therefore the sole network perimeter** — there is no second gate behind it. A
+deploy with IAP disabled is **refused, not warned about**, because without IAP the
+Instance is open to the internet with only Hub session auth in front of it.
 :::
 
 ### Optional flags
@@ -204,7 +204,10 @@ From the Hub web UI, click **New Project**. Provide a name and a git remote URL
 Create an agent via the web UI or the API. The web UI is the simplest path — click
 a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 
-For the API, specify `template`, `harnessConfig`, and `projectId` explicitly:
+For the API, specify `template`, `harnessConfig`, and `projectId` explicitly.
+The access token authenticates through IAP because the caller has
+`roles/iap.httpsResourceAccessor` (granted by the deploy command). Both the
+`Authorization` and `Proxy-Authorization` headers work.
 
 ```bash
 # Replace PROJECT_UUID with the project ID from the create-project response
@@ -218,6 +221,27 @@ curl -s -X POST "$HUB_URL/api/v1/agents" \
     "harnessConfig": "claude"
   }'
 ```
+
+:::note[Identity tokens as an alternative]
+For stricter or scripted environments, you can use an OIDC identity token instead
+of an access token. The audience **must** be the IAP OAuth client ID (not the
+resource path):
+
+```bash
+# Discover the auto-generated IAP OAuth client ID
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+gcloud alpha iap oauth-clients list \
+  "projects/$PROJECT_NUMBER/brands/$PROJECT_NUMBER" \
+  --format="value(name)" | sed 's|.*/||'
+
+# Use it as the audience
+curl -s "$HUB_URL/health" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token --audiences=CLIENT_ID)"
+```
+
+Using the resource path (`/projects/NUMBER/locations/REGION/services/NAME`) as the
+audience will fail with "Invalid JWT audience".
+:::
 
 :::caution[Always specify template and harnessConfig]
 An agent create that omits both `template` and `harnessConfig` will fail with a
