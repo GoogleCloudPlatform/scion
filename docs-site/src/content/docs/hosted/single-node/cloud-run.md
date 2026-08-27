@@ -48,18 +48,18 @@ gcloud services enable \
 | Tool | Verify |
 |------|--------|
 | `gcloud` (recent version, with `beta` component) | `gcloud beta run instances deploy --help` |
-| `scion` CLI (built from this branch) | `scion deploy-instance --help` |
+| `scion` CLI that includes `deploy-instance` (see below) | `scion deploy-instance --help` |
 
-The `deploy-instance` subcommand is part of the single-node Cloud Run tier and may
-not be in earlier `scion` releases. Build from source if your installed binary does
-not include it:
+The `deploy-instance` subcommand is not yet in any published `scion` release. Until
+one ships it, build the CLI from a clone of the repository at `main`:
 
 :::caution[Temporary workaround — check before you build]
 Building from source is a stopgap, accurate as of 2026-08-27. It stops being
 necessary the moment a published `scion` release ships `deploy-instance`. Run
 `scion deploy-instance --help` against your installed binary first — if it
 succeeds, skip the build. This section should be deleted once a release includes
-the subcommand.
+the subcommand — tracked by
+[ptone/scion#1314](https://github.com/ptone/scion/issues/1314).
 :::
 
 ```bash
