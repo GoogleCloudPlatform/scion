@@ -446,6 +446,31 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 	}
 }
 
+// fullGcloudStub records argv and answers every gcloud call di_main makes up
+// to and including the ADC mint, then refuses the deploy. The seam-rejection
+// tests below use it deliberately: with a stub that fails earlier — at the SDK
+// capability probe, say — deleting the host check would still turn those tests
+// red, but for a reason that has nothing to do with the rule. This stub makes
+// the mutation signal mean what it says: if validation is missing, di_main
+// reaches the mint and the argv log exists.
+func fullGcloudStub(argvLog string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")                   return 0 ;;
+    "config get account")                          printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)                         printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token") printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      echo "test stub: refusing to really deploy" >&2
+      return 1 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+}
+
 // TestScriptRejectsNonGoogleTokeninfoHost pins the _DI_TOKENINFO_URL seam at
 // the di_main level. The token reaches tokeninfo as a URL query parameter,
 // where the receiving host logs it, and the script is documented as curl-able
@@ -460,7 +485,7 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
-		adcGcloudStub(argvLog),
+		fullGcloudStub(argvLog),
 		"http://127.0.0.1:1", // permitted; never reached
 		"https://evil.example/tokeninfo")
 
@@ -488,7 +513,7 @@ func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
 func TestScriptRejectsNonGoogleAPIBase(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
-		adcGcloudStub(argvLog),
+		fullGcloudStub(argvLog),
 		"https://evil.example",
 		"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
 
