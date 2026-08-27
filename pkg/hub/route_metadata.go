@@ -632,12 +632,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/server-config": {
 		Pattern: "/api/v1/admin/server-config", RouteID: "admin.serverConfig",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		Permission:     "hub.config.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/project-defaults": {
 		Pattern: "/api/v1/admin/project-defaults", RouteID: "admin.projectDefaults",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.project_defaults.update", Resource: "hub", Action: "update",
+		Permission:     "hub.project_defaults.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",

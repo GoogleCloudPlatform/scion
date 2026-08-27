@@ -132,7 +132,25 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		switch r.Method {
 		case http.MethodGet:
 			s.handleGetServerConfigDB(w, r, ops)
-		case http.MethodPut:
+		case http.MethodPut, http.MethodPatch, http.MethodPost:
+			// Require write permission for mutating operations.
+			// The route guard already verified read access; this elevates to update.
+			if s.authzService != nil {
+				identity := GetIdentityFromContext(r.Context())
+				if user, ok := identity.(UserIdentity); ok {
+					decision := s.authzService.Decide(r.Context(), AuthzRequest{
+						Principal:  principalContextForIdentity(user),
+						Credential: credentialContextForIdentity(user),
+						Resource:   Resource{Type: "hub", ID: "hub"},
+						Action:     Action("update"),
+						Permission: "hub.config.update",
+					})
+					if !decision.Allowed {
+						Forbidden(w)
+						return
+					}
+				}
+			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
 			MethodNotAllowed(w)
@@ -143,7 +161,25 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetServerConfig(w)
-	case http.MethodPut:
+	case http.MethodPut, http.MethodPatch, http.MethodPost:
+		// Require write permission for mutating operations.
+		// The route guard already verified read access; this elevates to update.
+		if s.authzService != nil {
+			identity := GetIdentityFromContext(r.Context())
+			if user, ok := identity.(UserIdentity); ok {
+				decision := s.authzService.Decide(r.Context(), AuthzRequest{
+					Principal:  principalContextForIdentity(user),
+					Credential: credentialContextForIdentity(user),
+					Resource:   Resource{Type: "hub", ID: "hub"},
+					Action:     Action("update"),
+					Permission: "hub.config.update",
+				})
+				if !decision.Allowed {
+					Forbidden(w)
+					return
+				}
+			}
+		}
 		s.handlePutServerConfig(w, r)
 	default:
 		MethodNotAllowed(w)

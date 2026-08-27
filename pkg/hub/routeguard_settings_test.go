@@ -28,6 +28,10 @@ import (
 
 // TestRouteGuardSettingsConversion verifies that the 4 converted settings/config
 // endpoints enforce permissions via the Decide pipeline (PR-A2 conversion).
+//
+// The server-config and project-defaults routes use READ permission in the
+// route guard (so GET is allowed with read-only access), and the handlers
+// enforce UPDATE permission inline for mutating methods (PUT/PATCH/POST).
 func TestRouteGuardSettingsConversion(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -76,6 +80,8 @@ func TestRouteGuardSettingsConversion(t *testing.T) {
 	}
 
 	// The 4 converted route metadata entries.
+	// server-config and project-defaults now use READ permission in the guard;
+	// write checks are done inline by the handlers.
 	convertedRoutes := []struct {
 		name string
 		meta RouteMetadata
@@ -101,7 +107,7 @@ func TestRouteGuardSettingsConversion(t *testing.T) {
 			meta: RouteMetadata{
 				Pattern: "/api/v1/admin/server-config", RouteID: "admin.serverConfig",
 				Classification: RouteHubAdmin,
-				Permission:     "hub.config.update", Resource: "hub", Action: "update",
+				Permission:     "hub.config.read", Resource: "hub", Action: "read",
 			},
 		},
 		{
@@ -109,7 +115,7 @@ func TestRouteGuardSettingsConversion(t *testing.T) {
 			meta: RouteMetadata{
 				Pattern: "/api/v1/admin/project-defaults", RouteID: "admin.projectDefaults",
 				Classification: RouteHubAdmin,
-				Permission:     "hub.project_defaults.update", Resource: "hub", Action: "update",
+				Permission:     "hub.project_defaults.read", Resource: "hub", Action: "read",
 			},
 		},
 	}
@@ -151,6 +157,191 @@ func TestRouteGuardSettingsConversion(t *testing.T) {
 
 			if rr.Code != http.StatusForbidden {
 				t.Fatalf("member on %s: got %d, want 403; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestDualMethodRouteWritePermission verifies the inline write-permission checks
+// added to handleAdminServerConfig and handleAdminProjectDefaults. The route guard
+// uses READ permission, so GET is allowed for read-only users. PUT/PATCH/POST
+// require the UPDATE permission enforced inside the handler.
+func TestDualMethodRouteWritePermission(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Seed role definitions so hub-admin and hub-viewer exist.
+	seedRoleDefinitions(ctx, s)
+
+	// Create users.
+	adminUser := &store.User{
+		ID: tid("admin-dw"), Email: "admin-dw@test.com", DisplayName: "Admin",
+		Role: "admin", Status: "active",
+	}
+	memberUser := &store.User{
+		ID: tid("member-dw"), Email: "member-dw@test.com", DisplayName: "Member",
+		Role: "member", Status: "active",
+	}
+	hubAdminUser := &store.User{
+		ID: tid("hub-admin-dw"), Email: "hub-admin-dw@test.com", DisplayName: "Hub Admin",
+		Role: "member", Status: "active",
+	}
+	// A hub-viewer only has read permissions — no update.
+	hubViewerUser := &store.User{
+		ID: tid("hub-viewer-dw"), Email: "hub-viewer-dw@test.com", DisplayName: "Hub Viewer",
+		Role: "member", Status: "active",
+	}
+	for _, u := range []*store.User{adminUser, memberUser, hubAdminUser, hubViewerUser} {
+		if err := s.CreateUser(ctx, u); err != nil {
+			t.Fatalf("create user %s: %v", u.Email, err)
+		}
+	}
+
+	// Give hub-admin user the hub-admin role binding (includes read + update).
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get hub-admin role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      hubAdminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	if err != nil {
+		t.Fatalf("create hub-admin role binding: %v", err)
+	}
+
+	// Give hub-viewer user the hub-viewer role binding (read-only, no update).
+	hubViewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get hub-viewer role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubViewerRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      hubViewerUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	if err != nil {
+		t.Fatalf("create hub-viewer role binding: %v", err)
+	}
+
+	// Test inline write-permission checks on the two dual-method routes.
+	// We wrap the real handler method with the route guard (using the READ metadata)
+	// to simulate the full request flow.
+	dualRoutes := []struct {
+		name    string
+		pattern string
+		handler http.HandlerFunc
+	}{
+		{
+			name:    "server-config",
+			pattern: "/api/v1/admin/server-config",
+			handler: srv.handleAdminServerConfig,
+		},
+		{
+			name:    "project-defaults",
+			pattern: "/api/v1/admin/project-defaults",
+			handler: srv.handleAdminProjectDefaults,
+		},
+	}
+
+	for _, route := range dualRoutes {
+		route := route
+		meta := routeMetadataTable[route.pattern]
+		guarded := srv.routeGuard(meta, route.handler)
+
+		// 1. Hub-viewer (read-only) can GET (route guard allows read).
+		t.Run(route.name+"_hub_viewer_GET_allowed", func(t *testing.T) {
+			viewer := NewAuthenticatedUser(tid("hub-viewer-dw"), "hub-viewer-dw@test.com", "Hub Viewer", "member", "api")
+			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, viewer))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+				t.Fatalf("hub-viewer GET on %s should be allowed, got %d; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+
+		// 2. Hub-viewer (read-only) is DENIED PUT (inline write check blocks).
+		t.Run(route.name+"_hub_viewer_PUT_denied", func(t *testing.T) {
+			viewer := NewAuthenticatedUser(tid("hub-viewer-dw"), "hub-viewer-dw@test.com", "Hub Viewer", "member", "api")
+			req := httptest.NewRequest(http.MethodPut, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, viewer))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("hub-viewer PUT on %s: got %d, want 403; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+
+		// 3. Hub-admin (read + update) can GET.
+		t.Run(route.name+"_hub_admin_GET_allowed", func(t *testing.T) {
+			hubAdmin := NewAuthenticatedUser(tid("hub-admin-dw"), "hub-admin-dw@test.com", "Hub Admin", "member", "api")
+			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, hubAdmin))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+				t.Fatalf("hub-admin GET on %s should be allowed, got %d; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+
+		// 4. Hub-admin (read + update) can PUT (has update permission).
+		t.Run(route.name+"_hub_admin_PUT_allowed", func(t *testing.T) {
+			hubAdmin := NewAuthenticatedUser(tid("hub-admin-dw"), "hub-admin-dw@test.com", "Hub Admin", "member", "api")
+			req := httptest.NewRequest(http.MethodPut, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, hubAdmin))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			// Handler may fail for other reasons (no body, no DB), but must NOT be 403.
+			if rr.Code == http.StatusForbidden {
+				t.Fatalf("hub-admin PUT on %s should not be 403, got %d; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+
+		// 5. Member is denied even for GET (route guard denies read).
+		t.Run(route.name+"_member_GET_denied", func(t *testing.T) {
+			member := NewAuthenticatedUser(tid("member-dw"), "member-dw@test.com", "Member", "member", "api")
+			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, member))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("member GET on %s: got %d, want 403; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+
+		// 6. Super-admin GET is allowed (super-admin bypasses all).
+		t.Run(route.name+"_super_admin_GET_allowed", func(t *testing.T) {
+			admin := NewAuthenticatedUser(tid("admin-dw"), "admin-dw@test.com", "Admin", "admin", "api")
+			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, admin))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+				t.Fatalf("super-admin GET on %s should be allowed, got %d; body: %s", route.name, rr.Code, rr.Body.String())
+			}
+		})
+
+		// 7. Super-admin PUT is allowed (super-admin bypasses all).
+		t.Run(route.name+"_super_admin_PUT_allowed", func(t *testing.T) {
+			admin := NewAuthenticatedUser(tid("admin-dw"), "admin-dw@test.com", "Admin", "admin", "api")
+			req := httptest.NewRequest(http.MethodPut, route.pattern, nil)
+			req = req.WithContext(contextWithIdentity(ctx, admin))
+			rr := httptest.NewRecorder()
+			guarded(rr, req)
+
+			// Handler may fail for other reasons (no body, no DB), but must NOT be 403.
+			if rr.Code == http.StatusForbidden {
+				t.Fatalf("super-admin PUT on %s should not be 403, got %d; body: %s", route.name, rr.Code, rr.Body.String())
 			}
 		})
 	}

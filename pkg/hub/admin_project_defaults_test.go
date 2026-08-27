@@ -145,10 +145,11 @@ func TestHandleAdminProjectDefaults_PutInvalidPayload(t *testing.T) {
 // checks. See TestRouteGuardSettingsConversion in routeguard_settings_test.go.
 
 func TestHandleAdminProjectDefaults_MethodNotAllowed(t *testing.T) {
-	// POST and DELETE should return 405.
+	// DELETE should return 405. POST is now handled as a mutating operation
+	// (same as PUT) for the inline write-permission check.
 	srv := newAdminProjectDefaultsServer(t, newFakeHubSettingStore())
 
-	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+	for _, method := range []string{http.MethodDelete} {
 		req := httptest.NewRequest(method, "/api/v1/admin/project-defaults", nil)
 		req = adminContext(req)
 		rr := httptest.NewRecorder()

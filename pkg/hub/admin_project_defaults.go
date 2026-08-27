@@ -33,7 +33,25 @@ func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Reque
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetProjectDefaults(w)
-	case http.MethodPut:
+	case http.MethodPut, http.MethodPatch, http.MethodPost:
+		// Require write permission for mutating operations.
+		// The route guard already verified read access; this elevates to update.
+		if s.authzService != nil {
+			identity := GetIdentityFromContext(r.Context())
+			if user, ok := identity.(UserIdentity); ok {
+				decision := s.authzService.Decide(r.Context(), AuthzRequest{
+					Principal:  principalContextForIdentity(user),
+					Credential: credentialContextForIdentity(user),
+					Resource:   Resource{Type: "hub", ID: "hub"},
+					Action:     Action("update"),
+					Permission: "hub.project_defaults.update",
+				})
+				if !decision.Allowed {
+					Forbidden(w)
+					return
+				}
+			}
+		}
 		s.handlePutProjectDefaults(w, r)
 	default:
 		MethodNotAllowed(w)
