@@ -192,7 +192,7 @@ di_iap_patch_body() {
 # because the exact first version that ships 'instances' is not established.
 # Returns 0 if the capability is present, 1 with a diagnostic message if not.
 di_check_gcloud_instances() {
-  if gcloud beta run instances --help &>/dev/null; then
+  if gcloud beta run instances --help </dev/null &>/dev/null; then
     return 0
   fi
   cat >&2 <<'ERRMSG'
