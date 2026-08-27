@@ -79,17 +79,31 @@ func (r *storeGCPServiceAccountResolver) GetGCPServiceAccount(ctx context.Contex
 
 // handleAdminLifecycleHooks handles GET (list) and POST (create) on
 // /api/v1/admin/lifecycle-hooks.
+// Authorization: route guard checks hub.lifecycle_hooks.read for GET.
+// POST requires hub.lifecycle_hooks.update via inline Decide.
 func (s *Server) handleAdminLifecycleHooks(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
 		s.listLifecycleHooks(w, r)
 	case http.MethodPost:
+		// Inline authorization for write — route guard only checks read.
+		identity := GetIdentityFromContext(r.Context())
+		user, ok := identity.(UserIdentity)
+		if !ok {
+			Forbidden(w)
+			return
+		}
+		decision := s.authzService.Decide(r.Context(), AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: "hub", ID: "hub"},
+			Action:     Action("update"),
+			Permission: "hub.lifecycle_hooks.update",
+		})
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
 		s.createLifecycleHook(w, r, user)
 	default:
 		MethodNotAllowed(w)
@@ -98,13 +112,9 @@ func (s *Server) handleAdminLifecycleHooks(w http.ResponseWriter, r *http.Reques
 
 // handleAdminLifecycleHookByID handles GET / PUT / DELETE on
 // /api/v1/admin/lifecycle-hooks/{id}.
+// Authorization: route guard checks hub.lifecycle_hooks.read for GET.
+// PUT/DELETE require hub.lifecycle_hooks.update via inline Decide.
 func (s *Server) handleAdminLifecycleHookByID(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	id := extractID(r, "/api/v1/admin/lifecycle-hooks")
 	if id == "" {
 		BadRequest(w, "lifecycle hook ID is required")
@@ -114,10 +124,30 @@ func (s *Server) handleAdminLifecycleHookByID(w http.ResponseWriter, r *http.Req
 	switch r.Method {
 	case http.MethodGet:
 		s.getLifecycleHook(w, r, id)
-	case http.MethodPut:
-		s.updateLifecycleHook(w, r, id, user)
-	case http.MethodDelete:
-		s.deleteLifecycleHook(w, r, id, user)
+	case http.MethodPut, http.MethodDelete:
+		// Inline authorization for write — route guard only checks read.
+		identity := GetIdentityFromContext(r.Context())
+		user, ok := identity.(UserIdentity)
+		if !ok {
+			Forbidden(w)
+			return
+		}
+		decision := s.authzService.Decide(r.Context(), AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: "hub", ID: "hub"},
+			Action:     Action("update"),
+			Permission: "hub.lifecycle_hooks.update",
+		})
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+		if r.Method == http.MethodPut {
+			s.updateLifecycleHook(w, r, id, user)
+		} else {
+			s.deleteLifecycleHook(w, r, id, user)
+		}
 	default:
 		MethodNotAllowed(w)
 	}

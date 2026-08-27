@@ -92,14 +92,6 @@ func TestBypassCensus(t *testing.T) {
 		// The AdminModeMiddleware bypass at admin_mode.go:113 remains as infrastructure.
 		{file: "admin_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AdminModeMiddleware admin bypass (infrastructure, KEEP)"},
 
-		// Integrations and hooks (PR-A5)
-		{file: "handlers_integrations.go", lineSubstr: `user.Role() != "admin"`, description: "update integration (PR-A5)"},
-		{file: "handlers_integrations.go", lineSubstr: `user.Role() != "admin"`, description: "delete integration (PR-A5)"},
-		{file: "handlers_lifecycle_hooks.go", lineSubstr: `user.Role() != "admin"`, description: "create lifecycle hook (PR-A5)"},
-		{file: "handlers_lifecycle_hooks.go", lineSubstr: `user.Role() != "admin"`, description: "update lifecycle hook (PR-A5)"},
-		{file: "handlers_teams_manifest.go", lineSubstr: `user.Role() != "admin"`, description: "teams manifest (PR-A5)"},
-		{file: "passthrough_gate.go", lineSubstr: `userIdent.Role() != "admin"`, description: "passthrough gate (PR-A5)"},
-
 		// Resource handlers with existing types (PR-A6)
 		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "create policy (PR-A6)"},
 		{file: "handlers_policies.go", lineSubstr: "requireAdmin(w, r)", description: "update policy (PR-A6)"},

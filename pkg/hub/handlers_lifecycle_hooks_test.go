@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -139,82 +140,128 @@ func TestLifecycleHook_Create_ValidationError_UntrustedVarInHeader(t *testing.T)
 // Tests: Authz
 // ---------------------------------------------------------------------------
 
-func TestLifecycleHook_Create_Forbidden_NonAdmin(t *testing.T) {
-	srv := &Server{}
+// Auth tests below validate authorization via the route guard and inline
+// Decide checks (PR-A5 permission conversion). Non-admin users are denied
+// by the route guard for GET (read permission) and by inline Decide for
+// write operations (POST/PUT/DELETE).
 
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+func TestLifecycleHook_Create_Forbidden_NonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("lh-member1"), Email: "member@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks", srv.handleAdminLifecycleHooks)
+
+	member := NewAuthenticatedUser(tid("lh-member1"), "member@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/lifecycle-hooks", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHooks(rec, req)
+	handler(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestLifecycleHook_Create_Forbidden_Unauthenticated(t *testing.T) {
-	srv := &Server{}
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks", srv.handleAdminLifecycleHooks)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/lifecycle-hooks", nil)
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHooks(rec, req)
+	handler(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestLifecycleHook_Get_Forbidden_NonAdmin(t *testing.T) {
-	srv := &Server{}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("lh-member2"), Email: "member2@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks/", srv.handleAdminLifecycleHookByID)
 
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	member := NewAuthenticatedUser(tid("lh-member2"), "member2@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/lifecycle-hooks/some-id", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHookByID(rec, req)
+	handler(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestLifecycleHook_List_Forbidden_NonAdmin(t *testing.T) {
-	srv := &Server{}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("lh-member3"), Email: "member3@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks", srv.handleAdminLifecycleHooks)
 
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	member := NewAuthenticatedUser(tid("lh-member3"), "member3@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/lifecycle-hooks", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHooks(rec, req)
+	handler(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestLifecycleHook_Update_Forbidden_NonAdmin(t *testing.T) {
-	srv := &Server{}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("lh-member4"), Email: "member4@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks/", srv.handleAdminLifecycleHookByID)
 
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	member := NewAuthenticatedUser(tid("lh-member4"), "member4@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/lifecycle-hooks/some-id", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHookByID(rec, req)
+	handler(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestLifecycleHook_Update_Forbidden_Unauthenticated(t *testing.T) {
-	srv := &Server{}
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks/", srv.handleAdminLifecycleHookByID)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/lifecycle-hooks/some-id", nil)
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHookByID(rec, req)
+	handler(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestLifecycleHook_Delete_Forbidden_NonAdmin(t *testing.T) {
-	srv := &Server{}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("lh-member5"), Email: "member5@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/lifecycle-hooks/", srv.handleAdminLifecycleHookByID)
 
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	member := NewAuthenticatedUser(tid("lh-member5"), "member5@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/lifecycle-hooks/some-id", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rec := httptest.NewRecorder()
-	srv.handleAdminLifecycleHookByID(rec, req)
+	handler(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
