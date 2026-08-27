@@ -249,6 +249,11 @@ hub:
   # selector is immutable, so overriding one breaks the Deployment rather than
   # relabelling it.
   podLabels: {}
+  # Scheduling. These three are checked for credential material on the same
+  # terms as podAnnotations and podLabels above: they are free-form operator
+  # input and they land in the pod spec, which anyone with pod read access can
+  # read. A connection string with a password in it is rejected here rather than
+  # rendered. Ordinary labels, taints and affinity rules are unaffected.
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -671,52 +676,223 @@ auth:
   # five, which is what the paired ci fixtures actually diff.
   mode: proxy
 
-  # The oauth mode's supporting configuration - the client credentials - is not
-  # rendered by the chart yet; it lands with the session and client secrets.
+  # THE SESSION SECRET. One of the next two is REQUIRED - the render fails if
+  # neither is set, and it fails if both are.
   #
-  # It does not fail loudly. The credentials are wired without validation
-  # (cmd/server_foreground.go:1514-1544), so the hub starts, binds and passes
-  # /readyz, and the failure arrives once per login attempt as "OAuth provider
-  # is not configured" (pkg/hub/web.go:1770-1776) - a deployment that is green
-  # in every Kubernetes signal and that nobody can log in to.
+  # This one value backs BOTH the session cookie encryption key AND the hub's
+  # shared JWT signing keys (resolveSessionSecret,
+  # cmd/server_foreground.go:1452-1463), so every replica must see the same
+  # bytes or they reject each other's tokens.
   #
-  # Set this to true to acknowledge that and render anyway. Both the schema and
-  # the template enforce it, and neither applies under config.existingSecret,
-  # where the chart renders no auth mode at all.
-  acknowledgeOAuthUnlanded: false
+  # WHY THE CHART REFUSES RATHER THAN DEFAULTING OR GENERATING. The hub does not
+  # fail without one: it logs a single warning and derives a per-process key, so
+  # the deployment comes up green and users get logged out whenever the load
+  # balancer moves them - a symptom that reads as a flaky session store, not as
+  # a configuration error. And a generated secret is worse than none: it rotates
+  # on every helm upgrade, invalidating every live session and the shared
+  # signing key at once, and it cannot be rendered reproducibly because lookup
+  # returns empty under helm template, so the golden output would not match the
+  # installed output.
+  #
+  # ROTATING IT LATER NEEDS A RESTART, AND THE CHART WILL NOT TELL YOU. Both
+  # shapes below reach the container through the environment, which the kubelet
+  # resolves once at container start and never refreshes. So a helm upgrade that
+  # changes the session secret updates the Secret, reports success, and leaves
+  # every running replica on the old bytes until something else restarts them.
+  # If you are rotating because the old value leaked, the rotation has not
+  # happened yet at that point. Follow the upgrade with
+  # `kubectl rollout restart deploy/<release>-scion-hub`, and expect it to log
+  # everyone out - that is the rotation working, not a fault.
+  #
+  # There is no checksum/session pod annotation to automate that, and the
+  # omission is deliberate rather than forgotten. The annotation would have to
+  # be a digest over the secret, pod annotations are readable by anyone with pod
+  # read access - a strictly wider audience than the Secret's own RBAC - and a
+  # digest of a low-entropy secret is a secret you can recover offline.
+  #
+  # AND SAY THE UNCOMFORTABLE HALF FIRST, NOT LAST. The chart DOES render a
+  # checksum/settings annotation, and once auth.mode is oauth the document that
+  # annotation covers contains your OAuth client secret. Pod annotations are
+  # readable by anyone with pod read access - the same strictly wider audience
+  # named above, wider than the Secret's own RBAC.
+  #
+  # THAT DIGEST IS TAKEN OVER A REDACTED PROJECTION, NOT OVER THE DOCUMENT.
+  # scion-hub.settingsChecksum replaces every credential leaf in the rendered
+  # settings document with a constant before hashing, so rotating an OAuth
+  # client secret does not move the annotation, and the annotation is therefore
+  # not an offline verification oracle for the credential.
+  # tests/chart-integrity.sh section E9 asserts both halves: the digest is
+  # unchanged by rotating the client secret, AND it still moves when a
+  # non-secret settings field changes. Either half alone is satisfiable by a
+  # broken chart - a deleted annotation passes the first, the old un-redacted
+  # digest passes the second - so both are committed.
+  #
+  # THIS WAS AN ACCEPTED EXPOSURE UNTIL SOMEBODY MEASURED IT, AND THE
+  # MEASUREMENT IS WHY IT IS NOW FIXED. The text that stood here argued the
+  # residual protection was that an attacker must also guess every other field
+  # in the rendered settings.yaml. That argument is false for this chart. The
+  # rest of the document is chart-rendered and predictable from public values,
+  # so the preimage was reconstructed byte for byte and then used to predict the
+  # annotation for three client secrets that had never been rendered - 3 of 3,
+  # at roughly 300,000 candidates per second on one core. Against a
+  # provider-issued secret that is CONFIRMATION of a candidate an attacker
+  # already holds rather than recovery from nothing, including confirmation
+  # against superseded values still sitting in the ReplicaSet revision history.
+  # A lower bar than recovery, and the one that matters.
+  #
+  # WHAT THE ANNOTATION IS STILL FOR. It cannot simply be dropped: settings.yaml
+  # is a subPath mount, frozen for the container's lifetime, so with no pod
+  # annotation that moves, a settings upgrade would report success and change
+  # nothing. Redacting the credential leaves keeps that mechanism working for
+  # every non-credential change - and see auth.oauth below for what you must do
+  # yourself for the credential ones, which is the price of this fix and is not
+  # optional.
+  #
+  # TWO LIMITS, STATED RATHER THAN LEFT TO BE DISCOVERED. First, the projection
+  # redacts BY PATH, so a credential written to a path the helper does not know
+  # about would still be digested; a value-based backstop re-checks the finished
+  # projection for the credentials it just redacted and for any
+  # scheme://user:password@host URL, and fails the render rather than publishing
+  # one. Path to act, value to prove - the two fail in opposite directions and
+  # neither alone is sufficient. Second, because the digest is now taken over a
+  # re-serialised projection rather than over the raw rendered Secret, its value
+  # differs from the pre-fix value for every fixture, so the first upgrade
+  # across this change rolls the pods once. The chart is unreleased, so that
+  # roll costs nothing; it is called out here so it is not read as a regression.
+  #
+  # The session secret is treated differently rather than consistently, and it
+  # has no annotation at all: env is equally unrefreshable, but a restart IS a
+  # documented one-line remedy, and a digest over that one value would have the
+  # least around it to guess. See templates/deployment.yaml for the
+  # checksum/settings reasoning.
+  #
+  # PREFERRED. The name of a Secret you create and manage yourself. The chart
+  # renders no Secret in this shape, and the value never enters this file, your
+  # values overrides, or Helm's release storage - which is the whole reason to
+  # prefer it. Only the named key is bound into the hub's environment, so other
+  # keys in your Secret are not exposed to the hub.
+  existingSecret: ""
+
+  # The key inside auth.existingSecret holding the secret. Defaults to
+  # SCION_SERVER_SESSION_SECRET, which is what the hub reads; set it only if
+  # your Secret already uses a different key name. Meaningless without
+  # auth.existingSecret, and the chart refuses that combination rather than
+  # ignoring it.
+  existingSecretKey: ""
+
+  # The inline alternative: the chart renders secret-session.yaml holding this
+  # value. Convenient, and appropriate when your values file is itself managed
+  # as a secret - but note that this Secret is only as private as the values
+  # file and the Helm release that carry it. Generate with, for example,
+  # `openssl rand -base64 48`.
+  sessionSecret: ""
+
+  # THE OAUTH CLIENT CREDENTIALS. Required when auth.mode is oauth, and the
+  # render fails without them - which is what replaced the acknowledgement key
+  # that used to sit here.
+  #
+  # THE KEY THAT WAS HERE AND WHY IT IS GONE. auth.acknowledgeOAuthUnlanded was
+  # a required opt-in, added when this chart rendered oauth mode but had no
+  # channel for the credentials that mode needs. It asked the operator to
+  # confirm they understood the deployment would come up green and refuse every
+  # login. That was the right shape for a gap, and the wrong shape to keep once
+  # the gap closed: a permanent acknowledgement teaches operators to type true
+  # and move on. The chart now renders the credentials, so the honest guard is
+  # a refusal that names what is missing, not a checkbox.
+  #
+  # RENDERED INTO settings.yaml, WHICH IS A SECRET, NOT A ConfigMap. The client
+  # secret is secret material and never appears in args, in a ConfigMap or in an
+  # annotation. Like auth.sessionSecret, a value set here lives in your values
+  # file and in Helm's release storage; config.existingSecret is the shape where
+  # the whole settings file, credentials included, stays yours.
+  #
+  # WEB ONLY, DELIBERATELY. These are the credentials for the browser login
+  # flow. The hub also models cli and device clients; the chart does not model
+  # them. If you need them, set server.oauth.cli or server.oauth.device through
+  # config.extra.
+  #
+  # ROTATING A CLIENT SECRET REQUIRES A RESTART AND THE CHART WILL NOT DO IT FOR
+  # YOU. THIS IS THE PRICE OF THE checksum/settings REDACTION DESCRIBED UNDER
+  # auth.sessionSecret ABOVE, AND IT IS PAID HERE. settings.yaml reaches the
+  # container as a subPath mount, which the kubelet resolves once at container
+  # start and never refreshes. So a helm upgrade that changes clientId or
+  # clientSecret rewrites the Secret, reports success, and leaves every running
+  # replica using the old credential. The checksum/settings annotation does not
+  # rescue you, because it is now deliberately blind to credential changes:
+  # rotating a client secret is exactly the change that no longer moves it.
+  # Before the redaction the pods rolled by accident, as a side effect of the
+  # credential being inside the digest - and that same side effect was the
+  # verification oracle. The two were one mechanism and they are gone together.
+  #
+  # So after any upgrade that changes a value under auth.oauth:
+  #
+  #   kubectl rollout restart deploy/<release>-scion-hub
+  #
+  # Until you run it the rotation has not happened, and if you are rotating
+  # because the old secret leaked then the leaked secret is still the live one.
+  # FORGETTING IS SILENT IN BOTH DIRECTIONS. Logins keep working on the old
+  # credential, so nothing looks wrong - until the provider revokes it, at which
+  # point every login fails at once and the pods are still green, because a
+  # broken OAuth credential is not something /readyz can see. NOTES.txt prints
+  # this reminder on every install and upgrade that sets OAuth credentials, for
+  # the operator who reads release notes and not values.yaml.
+  #
+  # MIND THE SPELLING IF YOU GO THROUGH config.extra. These chart values are
+  # camelCase and the chart renders them into settings.yaml as client_id and
+  # client_secret, because that is what the settings schema binds
+  # (V1OAuthProviderConfig, pkg/config/settings_v1.go:635). The env-var mapper
+  # for the same values uses the OTHER spelling, clientId/clientSecret
+  # (pkg/config/hub_config.go:334) - so a clientId written into settings.yaml
+  # by hand binds nothing, silently. The chart refuses the camelCase spelling
+  # under server.oauth rather than letting it through.
+  oauth:
+    web:
+      google:
+        clientId: ""
+        clientSecret: ""
+      github:
+        clientId: ""
+        clientSecret: ""
 
   # When true the hub refuses to start rather than fall back to a signing key
   # generated per process. That fallback is fatal across replicas - each pod
   # signs tokens the others reject - and it is silent, so it presents as
   # intermittent logouts rather than as a configuration error.
   #
-  # DEFAULTED false, AND IT WILL BECOME true IN THE SESSION-SECRET PHASE. Not a
-  # judgement that the protection is unwanted - it is that in THIS release
-  # nothing can satisfy it. The hub resolves a stable key from, in order: a
-  # pre-configured key, SharedSigningSecret, a secret backend, then the store
-  # (pkg/hub/server.go:1445). SharedSigningSecret is resolveSessionSecret()
-  # (cmd/server_foreground.go:1556), which reads only --session-secret,
-  # SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
-  # (cmd/server_foreground.go:1452-1462) - it has no settings-file source at
-  # all, and this chart renders none of the three. On a first boot the store is
-  # empty too. So with true there is no key to find, and pkg/hub/server.go:1634
-  # returns an error that pkg/hub/server.go:1008 makes fatal and
-  # cmd/server_foreground.go:259 turns into log.Fatalf.
+  # DEFAULTED true SINCE THE SESSION-SECRET PHASE. It was false before, and the
+  # history matters because the reason was never "the protection is unwanted":
+  # it was that nothing in the release could satisfy it. The hub resolves a
+  # stable key from, in order, a pre-configured key, SharedSigningSecret, a
+  # secret backend, then the store (pkg/hub/server.go:1445). SharedSigningSecret
+  # is resolveSessionSecret() (cmd/server_foreground.go:1452-1463), which reads
+  # only --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET -
+  # it has no settings-file source at all - and the chart rendered none of the
+  # three. On a first boot the store is empty too. So true meant no key to find:
+  # pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes it fatal, and
+  # cmd/server_foreground.go:259 turns it into log.Fatalf.
   #
-  # MEASURED through the real hub.New, not read: ServerConfig{RequireStableSigningKey:
-  # true} refuses; adding only SharedSigningSecret makes the same call succeed.
-  # The missing session secret is the entire difference. Four of the five ci
-  # permutations rendered "true" and none rendered a secret, so four of five
-  # could not start - including minimal, which the rest of this chart's prose
-  # points at as the safe one.
+  # MEASURED through the real hub.New, not read, at both ends. Before:
+  # ServerConfig{RequireStableSigningKey: true} refuses with "refusing to
+  # generate a new signing key ... provide a SharedSigningSecret or
+  # pre-provision the key"; adding only SharedSigningSecret makes the same call
+  # succeed, so the missing session secret was the entire difference.
   #
-  # The harm the true setting prevents - replicas signing tokens each other
-  # reject - needs a replica set this release cannot start one member of. It
-  # arrives with the secret, so the two should arrive together. A guard that
-  # nothing can satisfy is worse than no guard, because it teaches operators to
-  # turn guards off.
+  # WHAT CHANGED IS NOT THIS LINE - IT IS THAT auth.sessionSecret /
+  # auth.existingSecret ARE NOW REQUIRED. The render fails when neither is set,
+  # so SCION_SERVER_SESSION_SECRET is delivered on every path that renders at
+  # all, and true is satisfiable everywhere rather than nowhere. A guard nothing
+  # can satisfy is worse than no guard, because it teaches operators to turn
+  # guards off; the fix was to make the guard satisfiable, not to keep it off.
   #
-  # tests/chart-integrity.sh asserts the flip: the day the default render gains
-  # a session-secret source, the LANDING limb fails and stays failing until this
-  # line reads true.
-  requireStableSigningKey: false
+  # SET IT false ONLY IF YOU SUPPLY A SIGNING KEY BY A ROUTE THE CHART CANNOT
+  # SEE - a secret backend configured through config.extra, or a key already in
+  # the hub's store from a previous release. Turning it off to make a failing
+  # install start is the wrong move: the failure means the hub found no durable
+  # key, and with the flag off it does not stop, it invents one per process. The
+  # symptom is users being logged out whenever the load balancer moves them.
+  #
+  # tests/chart-integrity.sh section E asserts the pairing in both directions:
+  # true with no session-secret source in the default render fails, and false
+  # while a source is present fails too. Neither the default nor the secret can
+  # be changed without the other.
+  requireStableSigningKey: true

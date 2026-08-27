@@ -109,19 +109,11 @@ probes:
     # liveness block and its coupling to hub.webPort render nowhere else.
     enabled: true
 
-# THE COVERAGE THIS FIXTURE USED TO PROVIDE MOVED, IT WAS NOT DROPPED. This file
-# held requireStableSigningKey: false back when the default was true, on the
-# principle that a ternary with one live branch is a constant. The Critical-2 fix
-# inverted the default, so false is now what every other permutation renders and
-# this entry would be the redundant one. The "true" branch is covered by
-# ci/values-existing-secret.yaml, the only shape where true is permitted at all -
-# see the refusal in templates/configmap-env.yaml.
-#
-# NO `auth:` KEY HERE, DELIBERATELY, AND THIS IS MEASURED RATHER THAN STYLE. A
-# bare `auth:` with nothing but comments under it parses as null and overrides
-# the entire default map, and the schema then reports "(root): auth is required".
-# I hit exactly that while making this edit.
-
+auth:
+  sessionSecret: ci-varied-session-secret-not-real
+  # The false branch of the ternary. Every other permutation renders true (the
+  # new default); this is the only one that tests the other arm.
+  requireStableSigningKey: false
 
 database:
   # Four rendered settings keys that otherwise carry one value each forever.

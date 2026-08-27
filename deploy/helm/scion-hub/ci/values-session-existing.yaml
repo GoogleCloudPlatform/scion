@@ -1,0 +1,63 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The recommended production shape for the session secret: the chart renders the
+# settings.yaml, and the operator manages the session secret themselves.
+#
+# WHY THIS PERMUTATION EXISTS AS A SEPARATE FIXTURE. It is the only one that
+# renders the chart's settings Secret AND takes the session secret from an
+# existing one. ci/values-existing-secret.yaml covers "the operator supplies
+# everything" and every other fixture covers "the chart renders everything";
+# without this file the combination in between - which is the one the values
+# documentation actually recommends - would render in no golden at all, and the
+# secretKeyRef branch in templates/deployment.yaml would be covered only by the
+# permutation that also drops the settings Secret. Two variables moving together
+# in every fixture is not coverage of either.
+#
+# It is also the ONLY fixture that sets auth.existingSecretKey, so the override
+# branch of scion-hub.sessionSecretKey renders here and its default branch
+# renders everywhere else. Both branches of that helper are therefore live, which
+# is the same rule the SCION_REQUIRE_STABLE_SIGNING_KEY ternary is held to.
+
+hub:
+  hubId: ci-session-existing
+  baseUrl: https://ci-session-existing.example.com
+
+image:
+  repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
+  tag: ci
+
+auth:
+  # The chart renders NO Secret for this. It binds the key below out of a Secret
+  # the operator creates, by secretKeyRef rather than envFrom - see
+  # templates/deployment.yaml for why the chart will not envFrom a Secret whose
+  # other keys it cannot see.
+  #
+  # NOTHING HERE VALIDATES THAT THIS SECRET EXISTS, or that the key holds a
+  # non-empty value. helm template cannot look, and lookup returns empty under
+  # --dry-run. A missing key resolves to an empty environment variable, and an
+  # empty session secret puts the hub back on a per-process signing key. With
+  # auth.requireStableSigningKey at its default of true the hub refuses to start,
+  # which is loud and therefore the good outcome; with it false the pod comes up
+  # green and logs users out at random. That residual risk is the price of the
+  # bring-your-own path and it is documented in values.yaml.
+  existingSecret: my-own-session-secret
+
+  # A NON-DEFAULT KEY NAME ON PURPOSE. The default is
+  # SCION_SERVER_SESSION_SECRET, which is also the environment variable the hub
+  # reads (resolveSessionSecret, cmd/server_foreground.go:1452-1463). Using a
+  # different name here proves the chart maps key -> variable rather than
+  # assuming they are the same string - a chart that ignored this key would
+  # still render a working-looking manifest against the default.
+  existingSecretKey: session-secret

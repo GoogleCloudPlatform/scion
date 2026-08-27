@@ -4,6 +4,39 @@
   "description": "Values understood by the scion-hub chart. Unknown keys are rejected rather than ignored, so a misspelled key is an error and not a silent no-op.",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "oauthProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "description": "OAuth client ID. Rendered into settings.yaml as client_id - that snake_case spelling is what the settings schema binds; the camelCase spelling used here is the chart's convention and also the env-var mapper's, and writing it into settings.yaml directly binds nothing."
+        },
+        "clientSecret": {
+          "type": "string",
+          "description": "OAuth client secret. Secret material: it is rendered into the settings Secret and never into args, a ConfigMap or an annotation. Set through auth.existingSecret-style external management by supplying the whole settings file with config.existingSecret."
+        }
+      }
+    },
+    "oauthProviderComplete": {
+      "type": "object",
+      "required": [
+        "clientId",
+        "clientSecret"
+      ],
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clientSecret": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
   "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "auth", "acknowledgeHAUnlanded"],
   "properties": {
     "global": {
@@ -531,9 +564,37 @@
           "enum": ["proxy", "oauth"],
           "description": "Selects which configuration subtree is rendered and nothing else. Every key the HA preflight requires renders identically in both modes."
         },
-        "acknowledgeOAuthUnlanded": {
-          "type": "boolean",
-          "description": "The oauth mode's client credentials are not rendered by the chart yet. An oauth install starts and passes its probes; every human login fails. Set true to render it anyway."
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of a Secret you manage holding the session secret. The chart renders no Secret in this shape. Mutually exclusive with auth.sessionSecret."
+        },
+        "existingSecretKey": {
+          "type": "string",
+          "description": "Key inside auth.existingSecret holding the secret. Defaults to SCION_SERVER_SESSION_SECRET."
+        },
+        "sessionSecret": {
+          "type": "string",
+          "description": "Inline session secret: the chart renders secret-session.yaml holding this value. Mutually exclusive with auth.existingSecret."
+        },
+        "oauth": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "OAuth client credentials, rendered into settings.yaml (a Secret) as server.oauth. Required when auth.mode is oauth. Only the web client is modelled here, because it is the browser login flow; server.oauth.cli and server.oauth.device are reachable through config.extra and are not refused.",
+          "properties": {
+            "web": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The web (browser login) OAuth client. The hub keys its login check by client type, so cli or device credentials do not substitute for these.",
+              "properties": {
+                "google": {
+                  "$ref": "#/$defs/oauthProvider"
+                },
+                "github": {
+                  "$ref": "#/$defs/oauthProvider"
+                }
+              }
+            }
+          }
         },
         "requireStableSigningKey": {
           "type": "boolean",
@@ -604,32 +665,76 @@
       }
     },
     {
-      "description": "oauth mode has no supporting configuration in the chart yet. Requiring an explicit acknowledgement keeps it from being selected by accident. Not applied under config.existingSecret: the chart renders no auth mode there, so auth.mode selects nothing and there is nothing to acknowledge. The same rule is enforced again in the template, on the rendered document, because --skip-schema-validation removes this one.",
+      "description": "oauth mode needs client credentials, and a deployment without them starts, passes its probes and refuses every login - so the schema demands them here rather than letting the failure reach a running pod. THIS RULE IS DELIBERATELY WEAKER THAN THE TEMPLATE'S. It can only see the chart's own values, so it cannot accept credentials supplied through config.extra, which are equally valid; requiring auth.oauth.web here would refuse a working configuration. It therefore checks the chart-value route only when config.extra is absent, and the template's check - which runs on the merged, rendered document and is the authoritative one - covers every route. Not applied under config.existingSecret: the chart renders no auth mode in that shape.",
       "if": {
         "properties": {
           "auth": {
             "properties": {
-              "mode": {"const": "oauth"}
+              "mode": {
+                "const": "oauth"
+              }
             },
-            "required": ["mode"]
+            "required": [
+              "mode"
+            ]
           },
           "config": {
             "properties": {
-              "existingSecret": {"const": ""}
+              "existingSecret": {
+                "const": ""
+              },
+              "extra": {
+                "maxProperties": 0
+              }
             },
-            "required": ["existingSecret"]
+            "required": [
+              "existingSecret"
+            ]
           }
         },
-        "required": ["auth", "config"]
+        "required": [
+          "auth",
+          "config"
+        ]
       },
       "then": {
         "properties": {
           "auth": {
-            "required": ["acknowledgeOAuthUnlanded"],
+            "required": [
+              "oauth"
+            ],
             "properties": {
-              "acknowledgeOAuthUnlanded": {
-                "const": true,
-                "description": "auth.mode oauth requires auth.acknowledgeOAuthUnlanded true: the client credentials that mode needs are not rendered by this chart yet, and nothing catches that at runtime - the hub starts, passes its probes, and refuses every login."
+              "oauth": {
+                "required": [
+                  "web"
+                ],
+                "properties": {
+                  "web": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "google"
+                        ],
+                        "properties": {
+                          "google": {
+                            "$ref": "#/$defs/oauthProviderComplete"
+                          }
+                        }
+                      },
+                      {
+                        "required": [
+                          "github"
+                        ],
+                        "properties": {
+                          "github": {
+                            "$ref": "#/$defs/oauthProviderComplete"
+                          }
+                        }
+                      }
+                    ],
+                    "description": "auth.mode oauth requires a complete web client credential - both clientId and clientSecret for google or for github. The hub copies these in without validating them, so a missing credential is not a startup failure: it is a hub that comes up green and answers every login with \"OAuth provider is not configured\"."
+                  }
+                }
               }
             }
           }

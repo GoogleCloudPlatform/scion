@@ -92,3 +92,4 @@ storage:
 
 auth:
   mode: proxy
+  sessionSecret: ci-cloudsql-session-secret-not-real

@@ -25,5 +25,8 @@ image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
 
+auth:
+  sessionSecret: ci-cluster-rbac-session-secret-not-real
+
 runtime:
   listAllNamespaces: true

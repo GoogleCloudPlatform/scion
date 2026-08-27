@@ -65,6 +65,7 @@ storage:
 
 auth:
   mode: proxy
+  sessionSecret: ci-settings-session-secret-not-real
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

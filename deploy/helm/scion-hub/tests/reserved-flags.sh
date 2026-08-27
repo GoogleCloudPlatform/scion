@@ -35,7 +35,12 @@ set -u
 EXPECTED_TOTAL=31          # 29 must-reject + 2 must-accept. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
-BASE=(--set image.repository=r --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+# auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
+# reason hub.baseUrl is: scion-hub.assertSessionSecret fails the render without it, so every
+# BASE render would return an error string instead of manifests and every check below would
+# accuse the chart of a fault it does not have. The chart will not default it - a generated
+# secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
+BASE=(--set image.repository=r --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.sessionSecret=harness-not-a-real-secret)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output

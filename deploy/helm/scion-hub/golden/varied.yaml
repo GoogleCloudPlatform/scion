@@ -15,6 +15,23 @@ metadata:
   annotations:
     iam.gke.io/gcp-service-account: "ci-varied-hub@example-project.iam.gserviceaccount.com"
 ---
+# Source: scion-hub/templates/secret-session.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scion-scion-hub-session
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+type: Opaque
+stringData:
+  SCION_SERVER_SESSION_SECRET: "ci-varied-session-secret-not-real"
+---
 # Source: scion-hub/templates/secret-settings.yaml
 apiVersion: v1
 kind: Secret
@@ -38,8 +55,11 @@ stringData:
     #   server.database.url        Cloud SQL. Note the key is url, not dsn.
     #   server.secrets             the secret backend (gcpsm).
     #   server.auth.proxy,
-    #   server.auth.transport,
-    #   server.oauth               the subtree selected by server.auth.mode.
+    #   server.auth.transport      the subtree selected by server.auth.mode.
+    #   server.oauth               NOW RENDERED: web client credentials land here
+    #                              as server.oauth.web.<provider>.client_id and
+    #                              client_secret, in snake_case. cli and device
+    #                              are reachable through config.extra.
     #   server.workspace_storage   Filestore NFS - a different subsystem from
     #                              server.storage, which is the hub's GCS blob
     #                              store and is rendered below.
@@ -115,27 +135,27 @@ data:
   # fall back to a per-process signing key, which across replicas would sign
   # tokens each of the others reject.
   #
-  # THE REFUSAL BELOW EXISTS BECAUSE THE HUB'S REFUSAL IS NOT SCOPED TO ITS OWN
-  # HARM. Setting this true in this release does not make the hub careful; it
-  # makes the hub refuse to boot, every time, on a first install, with nothing
-  # the operator can do about it from this chart. The hub resolves a stable key
-  # from a pre-configured key, then SharedSigningSecret, then a secret backend,
-  # then the store (pkg/hub/server.go:1445). SharedSigningSecret is
-  # resolveSessionSecret() (cmd/server_foreground.go:1556), which reads only
-  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
-  # (cmd/server_foreground.go:1452-1462); the chart renders none of them, and
-  # hub.extraEnv - the one operator-controlled env channel - refuses all three
-  # by name as credential material (_helpers.tpl:1306). The store is empty on a
-  # first boot. So there is no key, pkg/hub/server.go:1634 errors,
-  # pkg/hub/server.go:1008 makes it fatal, and cmd/server_foreground.go:259
-  # calls log.Fatalf.
+  # DEFAULTS TO true SINCE THE SESSION-SECRET PHASE, AND A REFUSAL WAS REMOVED
+  # HERE TO ALLOW IT. Until that phase this file carried a `fail` rejecting
+  # true unless config.existingSecret was set, because nothing the chart
+  # rendered could satisfy the flag: the hub resolves a stable key from a
+  # pre-configured key, then SharedSigningSecret, then a secret backend, then
+  # the store (pkg/hub/server.go:1445); SharedSigningSecret comes only from
+  # resolveSessionSecret (cmd/server_foreground.go:1452-1463), which reads
+  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET; the
+  # chart rendered none of the three, and a first boot has an empty store. With
+  # true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes
+  # it fatal, and cmd/server_foreground.go:259 turns it into log.Fatalf. Measured
+  # end-to-end through hub.New by gd-p1-dev, not inferred from the citations.
   #
-  # config.existingSecret is the one shape where true is satisfiable, and it is
-  # not hypothetical: the operator writes their own settings.yaml, so they can
-  # set server.secrets.backend and pre-provision the key there. The chart does
-  # not render that file and has no business second-guessing it.
-  #
-  # This turns a CrashLoopBackOff at 03:00 into a values error at install time.
+  # WHAT MAKES true SAFE NOW IS NOT THIS DEFAULT - IT IS THAT THE SECRET IS
+  # UNCONDITIONAL. scion-hub.assertSessionSecret fails the render when neither
+  # auth.sessionSecret nor auth.existingSecret is set, so there is no values
+  # combination that reaches this line with the flag true and no source for the
+  # variable. The refusal was not relaxed; its precondition was removed. If a
+  # later phase ever makes the session secret optional again, this default must
+  # go back to false in the same change - tests/chart-integrity.sh section E
+  # asserts exactly that pairing, in both directions.
   SCION_REQUIRE_STABLE_SIGNING_KEY: "false"
 
   # Truthy values are true, 1 and yes.
@@ -255,7 +275,7 @@ spec:
         team: platform
       annotations:
         scion.io/hub-id: "ci-varied"
-        checksum/env-config: 62cf51b08bc7f7bd03a4e5ba0761ff42a3fb4254da0c143708f33ee5f9b3d36f
+        checksum/env-config: 2de4f066a863fb877dec8904f0784d7fe6ccc69e2662ac70ac59370829ef2df2
         checksum/settings: 12009b2578aa834709bdb43a37297eb428020d5e2307b2282c0f9df215229d83
     spec:
       serviceAccountName: scion-scion-hub
@@ -287,6 +307,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: scion-scion-hub-env
+            - secretRef:
+                name: scion-scion-hub-session
           env:
             - name: POD_NAMESPACE
               valueFrom:

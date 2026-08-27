@@ -67,36 +67,40 @@ data:
   # fall back to a per-process signing key, which across replicas would sign
   # tokens each of the others reject.
   #
-  # THE REFUSAL BELOW EXISTS BECAUSE THE HUB'S REFUSAL IS NOT SCOPED TO ITS OWN
-  # HARM. Setting this true in this release does not make the hub careful; it
-  # makes the hub refuse to boot, every time, on a first install, with nothing
-  # the operator can do about it from this chart. The hub resolves a stable key
-  # from a pre-configured key, then SharedSigningSecret, then a secret backend,
-  # then the store (pkg/hub/server.go:1445). SharedSigningSecret is
-  # resolveSessionSecret() (cmd/server_foreground.go:1556), which reads only
-  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
-  # (cmd/server_foreground.go:1452-1462); the chart renders none of them, and
-  # hub.extraEnv - the one operator-controlled env channel - refuses all three
-  # by name as credential material (_helpers.tpl:1306). The store is empty on a
-  # first boot. So there is no key, pkg/hub/server.go:1634 errors,
-  # pkg/hub/server.go:1008 makes it fatal, and cmd/server_foreground.go:259
-  # calls log.Fatalf.
+  # DEFAULTS TO true SINCE THE SESSION-SECRET PHASE, AND A REFUSAL WAS REMOVED
+  # HERE TO ALLOW IT. Until that phase this file carried a `fail` rejecting
+  # true unless config.existingSecret was set, because nothing the chart
+  # rendered could satisfy the flag: the hub resolves a stable key from a
+  # pre-configured key, then SharedSigningSecret, then a secret backend, then
+  # the store (pkg/hub/server.go:1445); SharedSigningSecret comes only from
+  # resolveSessionSecret (cmd/server_foreground.go:1452-1463), which reads
+  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET; the
+  # chart rendered none of the three, and a first boot has an empty store. With
+  # true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes
+  # it fatal, and cmd/server_foreground.go:259 turns it into log.Fatalf. Measured
+  # end-to-end through hub.New by gd-p1-dev, not inferred from the citations.
   #
-  # config.existingSecret is the one shape where true is satisfiable, and it is
-  # not hypothetical: the operator writes their own settings.yaml, so they can
-  # set server.secrets.backend and pre-provision the key there. The chart does
-  # not render that file and has no business second-guessing it.
-  #
-  # This turns a CrashLoopBackOff at 03:00 into a values error at install time.
-  {{- if and .Values.auth.requireStableSigningKey (not .Values.config.existingSecret) }}
-  {{- fail "auth.requireStableSigningKey is true, but nothing in this release can satisfy it, so the hub would refuse to start on every first boot. The hub needs a pre-configured key, a SharedSigningSecret, a secret backend or a key already in its store (pkg/hub/server.go:1445); SharedSigningSecret comes only from --session-secret, SCION_SERVER_SESSION_SECRET or SESSION_SECRET (cmd/server_foreground.go:1452-1462), this chart renders none of them, hub.extraEnv refuses all three as credential material, and a first boot has an empty store. The failure is log.Fatalf at cmd/server_foreground.go:259, not a warning. Leave it false until the session-secret phase renders the Secret; that phase flips this default to true in the same change. Under config.existingSecret it is allowed, because your own settings.yaml can configure server.secrets and pre-provision the key." }}
-  {{- end }}
-  SCION_REQUIRE_STABLE_SIGNING_KEY: {{ ternary "true" "false" .Values.auth.requireStableSigningKey | quote }}
+  # WHAT MAKES true SAFE NOW IS NOT THIS DEFAULT - IT IS THAT THE SECRET IS
+  # UNCONDITIONAL. scion-hub.assertSessionSecret fails the render when neither
+  # auth.sessionSecret nor auth.existingSecret is set, so there is no values
+  # combination that reaches this line with the flag true and no source for the
+  # variable. The refusal was not relaxed; its precondition was removed. If a
+  # later phase ever makes the session secret optional again, this default must
+  # go back to false in the same change - tests/chart-integrity.sh section E
+  # asserts exactly that pairing, in both directions.
+  {{- $auth := .Values.auth | default (dict) }}
+  SCION_REQUIRE_STABLE_SIGNING_KEY: {{ ternary "true" "false" ($auth.requireStableSigningKey | default false) | quote }}
   {{- with .Values.hub.adminMode }}
 
   # Truthy values are true, 1 and yes.
   SCION_SERVER_ADMIN_MODE: {{ . | quote }}
   {{- end }}
   {{- with .Values.hub.maintenanceMessage }}
+  {{- /* Free operator text, and this is a ConfigMap - readable by a wider
+  audience than any Secret, and digested into checksum/env-config on top. The
+  guard only refuses credential SHAPES (a user:password@ URL, a credential query
+  parameter, a known token prefix), so an ordinary status-page link is
+  unaffected. */}}
+  {{- include "scion-hub.assertNoCredential" (dict "value" . "source" "hub.maintenanceMessage") }}
   SCION_SERVER_MAINTENANCE_MESSAGE: {{ . | quote }}
   {{- end }}

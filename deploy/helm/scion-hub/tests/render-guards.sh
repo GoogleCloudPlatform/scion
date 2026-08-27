@@ -21,10 +21,23 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=63
+EXPECTED_TOTAL=77   # 63 + 14 from the oauth credential section (Phase 3).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
-BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+# auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
+# reason hub.baseUrl is: scion-hub.assertSessionSecret fails the render without it, so every
+# BASE render would return an error string instead of manifests and every check below would
+# accuse the chart of a fault it does not have. The chart will not default it - a generated
+# secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
+BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+
+# A COMPLETE WEB CLIENT CREDENTIAL, for the rows that need auth.mode=oauth to
+# render at all. Not folded into BASE, because several rows below exist
+# specifically to assert that oauth WITHOUT this is refused - putting it in BASE
+# would make those rows unwriteable, and worse, would make them look written.
+# It replaces --set auth.acknowledgeOAuthUnlanded=true, which is what these rows
+# carried while the credentials had no channel.
+OAUTH_WEB=(--set auth.oauth.web.google.clientId=rg-web-google-id --set auth.oauth.web.google.clientSecret=rg-web-google-secret)
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -301,7 +314,7 @@ reject "r1: hub.extraEnv sets K_SERVICE" "hub.extraEnv sets K_SERVICE" \
 reject "r2: postgres driver, route 3 held off with oauth" "database.driver is postgres" \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
   "${CLOUDSQL_SET[@]}" \
-  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+  --set auth.mode=oauth "${OAUTH_WEB[@]}"
 reject "r3: gcs storage with proxy auth" "storage.provider is gcs and auth.mode is proxy" \
   --set storage.provider=gcs --set storage.bucket=b
 
@@ -313,7 +326,7 @@ accept "r1 + acknowledgeHAUnlanded" \
 accept "r2 + acknowledgeHAUnlanded" \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
   "${CLOUDSQL_SET[@]}" \
-  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true --set acknowledgeHAUnlanded=true
+  --set auth.mode=oauth "${OAUTH_WEB[@]}" --set acknowledgeHAUnlanded=true
 accept "r3 + acknowledgeHAUnlanded" \
   --set storage.provider=gcs --set storage.bucket=b --set acknowledgeHAUnlanded=true
 
@@ -327,7 +340,7 @@ accept "r3 + acknowledgeHAUnlanded" \
 accept "K_SERVICE present but with an explicit empty value" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value='
 accept "an unrelated extraEnv name"       --set 'hub.extraEnv[0].name=NOT_K_SERVICE' --set 'hub.extraEnv[0].value=svc'
-accept "sqlite + local storage + oauth"   --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+accept "sqlite + local storage + oauth"   --set auth.mode=oauth "${OAUTH_WEB[@]}"
 accept "the chart defaults, no route"
 
 # THE GATE LIST IS PART OF THE CONTRACT, SO IT IS ASSERTED RATHER THAN TRUSTED.
@@ -648,7 +661,7 @@ _ha_proxy_total="$_ha_total"
 _ha_arm "oauth" "===== settings-oauth.yaml [audience well-formed" 1 1 \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
   "${CLOUDSQL_SET[@]}" \
-  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+  --set auth.mode=oauth "${OAUTH_WEB[@]}"
 _ha_oauth_total="$_ha_total"
 
 # --- the differential itself -------------------------------------------------
@@ -662,6 +675,110 @@ else
   echo "FAIL  the proxy and oauth arms derived ${_ha_proxy_total} and ${_ha_oauth_total} gates. Since 1b3c9418 the hub's IAP gates run only under auth.mode=proxy, so proxy must be the longer list. Equal counts mean the two arms are reading the same canon block and the per-mode branch in scion-hub.assertHAUnlanded is untested."
   failed=$((failed + 1))
 fi
+
+echo "== oauth mode requires a complete web client credential =="
+# THIS SECTION REPLACES auth.acknowledgeOAuthUnlanded, and the replacement is not
+# like-for-like. The acknowledgement asked the operator to CONFIRM the deployment
+# would be unusable; these rows assert the chart REFUSES to render it. An
+# acknowledgement is satisfiable by anyone in a hurry, and the thing it guarded
+# against - a hub that starts, binds, passes /readyz and refuses every login - is
+# not a thing an operator should be able to opt into by typing true.
+#
+# TWO LAYERS, so two rows per case, per this file's convention. The schema layer
+# is what an operator hits; the template layer is what they hit with
+# --skip-schema-validation, and it is the one that must hold, because config.extra
+# reaches the settings document without passing through the schema at all.
+#
+# THE SCHEMA ROWS DISCRIMINATE, and that is asserted rather than assumed: the
+# id-only row demands the message name clientSecret and the secret-only row
+# demands clientId. A schema that listed both halves whatever was missing would
+# satisfy a looser pair of substrings while telling the operator nothing.
+reject "oauth, no credentials, schema layer"  "clientId" \
+  --set auth.mode=oauth
+reject "oauth, clientId only, schema layer"   "clientSecret" \
+  --set auth.mode=oauth --set auth.oauth.web.google.clientId=rg-id
+reject "oauth, clientSecret only, schema layer" "clientId" \
+  --set auth.mode=oauth --set auth.oauth.web.google.clientSecret=rg-sec
+
+reject "oauth, no credentials, template layer" "no complete OAuth web client credential is present" \
+  --skip-schema-validation --set auth.mode=oauth
+reject "oauth, clientId only, template layer"  "google (has client_id, missing client_secret)" \
+  --skip-schema-validation --set auth.mode=oauth --set auth.oauth.web.google.clientId=rg-id
+reject "oauth, clientSecret only, template layer" "google (has client_secret, missing client_id)" \
+  --skip-schema-validation --set auth.mode=oauth --set auth.oauth.web.google.clientSecret=rg-sec
+
+# CLI CREDENTIALS DO NOT SUBSTITUTE FOR WEB ONES, and this row is the reason the
+# guard walks the web subtree specifically instead of asking "is server.oauth
+# non-empty". The hub keys its login check by client type (pkg/hub/oauth.go:194),
+# so a complete cli credential renders, validates, looks like configuration in
+# the Secret, and satisfies no browser login. A guard written on presence rather
+# than on client type passes this input.
+reject "complete cli credential does not satisfy oauth mode" "no complete OAuth web client credential is present" \
+  --set auth.mode=oauth \
+  --set config.extra.server.oauth.cli.google.client_id=rg-cli-id \
+  --set config.extra.server.oauth.cli.google.client_secret=rg-cli-secret
+
+# THE SPELLING GUARD, WHICH IS THE ONE THAT CAUGHT ME. settings.yaml binds
+# client_id/client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go:635);
+# clientId/clientSecret is the SCION_SERVER_* environment mapper's spelling
+# (pkg/config/hub_config.go:334). Measured both directions in
+# harness/zz_p3_oauth_settings_probe_test.go: snake_case binds, camelCase leaves
+# the field empty with no error from yaml.v3. I wrote the positive case in
+# camelCase and expected it to pass.
+#
+# The first row carries a COMPLETE google credential as well, so the missing- and
+# incomplete-credential guards above cannot be what refuses it. Without that, the
+# row would go green on the wrong refusal and the spelling guard could be deleted
+# without turning anything red.
+reject "camelCase via config.extra, oauth mode" "server.oauth.web.github.clientId" \
+  --set auth.mode=oauth "${OAUTH_WEB[@]}" \
+  --set config.extra.server.oauth.web.github.clientId=rg-camel
+# AND IT IS NOT GATED ON auth.mode. A misspelled credential is inert in proxy
+# mode too - it just is not load-bearing there yet, which is exactly the state in
+# which a wrong spelling gets committed and survives until the mode changes.
+reject "camelCase via config.extra, proxy mode" "server.oauth.web.github.clientId" \
+  --set auth.mode=proxy \
+  --set config.extra.server.oauth.web.github.clientId=rg-camel
+
+accept "oauth with a complete google web credential" --set auth.mode=oauth "${OAUTH_WEB[@]}"
+accept "oauth with a complete github web credential" --set auth.mode=oauth \
+  --set auth.oauth.web.github.clientId=rg-gh-id --set auth.oauth.web.github.clientSecret=rg-gh-secret
+# config.extra IS A FIRST-CLASS WAY TO MEET THE REQUIREMENT, not a bypass of it.
+# The guard reads the rendered document, so an operator who supplies
+# server.oauth.web themselves has supplied it, and a guard that insisted on
+# auth.oauth.web specifically would refuse a correct deployment.
+accept "credentials supplied through config.extra in snake_case" --set auth.mode=oauth \
+  --set config.extra.server.oauth.web.google.client_id=rg-extra-id \
+  --set config.extra.server.oauth.web.google.client_secret=rg-extra-secret
+# WITH AN EXTERNAL SETTINGS SECRET THE CHART RENDERS NO SETTINGS DOCUMENT, so
+# there is nothing to inspect and nothing to refuse. Asserting this keeps the
+# guard from growing into a claim about a file the chart cannot see.
+accept "oauth with no credentials but an external settings Secret" \
+  --set auth.mode=oauth --set config.existingSecret=operator-owned
+
+# THE POSITIVE TWIN OF THE SPELLING GUARD: the chart's own render must land on
+# the side of the guard it enforces. A chart that refused camelCase from
+# config.extra while emitting camelCase itself would pass every row above -
+# the guard runs on the merged document, so it would refuse its own output, and
+# the accept rows would be the ones to fail... unless the guard were ever
+# narrowed to config.extra only. This asserts the emitted spelling directly.
+executed=$((executed + 1))
+_oa="$(render --set auth.mode=oauth "${OAUTH_WEB[@]}")"
+if [ -z "$_oa" ] || ! printf '%s\n' "$_oa" | grep -q '^kind: Secret$'; then
+  echo "FAIL  rendered oauth credentials: no Secret in the output, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_oa" | grep -qE '^ +client(Id|Secret):'; then
+  echo "FAIL  rendered oauth credentials: the chart emits camelCase, which binds nothing in settings.yaml"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_oa" | grep -q '^ *client_id: rg-web-google-id$' \
+  && printf '%s\n' "$_oa" | grep -q '^ *client_secret: rg-web-google-secret$'; then
+  echo "ok    the chart emits client_id/client_secret, the spelling settings.yaml binds"
+else
+  echo "FAIL  rendered oauth credentials: neither spelling reached the settings document"
+  echo "        got: $(printf '%s' "$_oa" | grep -c .) lines, no client_id/client_secret"
+  failed=$((failed + 1))
+fi
+unset _oa
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

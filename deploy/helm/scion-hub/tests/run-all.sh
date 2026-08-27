@@ -119,8 +119,8 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=179   # 35 chart-integrity + 63 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
-EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
+EXPECTED_ASSERTIONS=207   # 49 chart-integrity + 77 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
+EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
 # tests/stale-claim-triage.md; NOT_EXECUTABLE was emptied to match, so the
@@ -139,8 +139,8 @@ EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 SCRIPTS=(
   reserved-flags.sh     # 31 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
-  render-guards.sh      # 57 - every other render-time refusal, incl. the HA-unlanded gate
-  chart-integrity.sh    # 35 - .helmignore breadth, the packaged file set, base-url, signing key
+  render-guards.sh      # 77 - every other render-time refusal, incl. the HA-unlanded gate
+  chart-integrity.sh    # 49 - .helmignore breadth, the packaged file set, base-url, signing key, session annotation, checksum redaction, NOTES rotation, scheduling guards
   rbac-collision.sh     # 46 - the cluster-scoped RBAC name, and two pinned residuals
 )
 
@@ -176,6 +176,7 @@ NOT_RUN_HERE=(
 # reported as un-covered. Listing it here is the statement that it is data, not
 # an executable, and that no assertion total is expected from it.
 NOT_EXECUTABLE=(
+  stale-claim-triage.md
 )
 
 REQUIRED_TOOLS=("${HELM:-helm}" tar mktemp awk sha256sum)
@@ -343,10 +344,11 @@ done
 # gets its own committed number, failing in both directions like the others.
 # Phase 6 owns CI wiring and may move this; it must not delete it without
 # replacing the coverage.
-EXPECTED_VERIFY_ASSERTIONS=343
+EXPECTED_VERIFY_ASSERTIONS=364
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
-# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Four
-# entries, all stated: verify.sh, gated below; run-all-mutations.sh, which is
+# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Five
+# entries, all stated: verify.sh, gated below; check-secret-placement.sh, gated
+# below it, added by the session-secret phase; run-all-mutations.sh, which is
 # the driver that produces the MM table at the top of this file;
 # trigger-entry-c.sh with its fixtures/ directory, gated further down; and
 # ha-gates.txt, the derived artifact, checked with its producer. That driver is
@@ -373,6 +375,38 @@ else
     real_failure=1
   else
     echo ">>> hack/verify.sh: ok (${_vn} assertions, goldens current)"
+  fi
+fi
+
+# hack/check-secret-placement.sh -- criterion 4 of the session-secret phase: no
+# secret material in args, a ConfigMap, or an annotation, over every ci fixture.
+#
+# GATED HERE RATHER THAN LEFT FOR PHASE 6 because a check nothing runs is a check
+# that does not exist, and this one is all negative assertions - precisely the
+# shape that reports a clean result forever once it breaks. Its own --self-test
+# is run FIRST and its failure is a meta-failure, not a chart failure: the scan
+# saying "no leaks" means nothing until the scanner has been shown finding leaks
+# it was pointed at. Exit 2 from either arm is "nothing was analysed".
+#
+# NOT SUMMED INTO EXPECTED_ASSERTIONS, for the same reason hack/verify.sh is not:
+# it is not one of the enumerated scripts and does not emit ASSERTIONS_EXECUTED.
+# Phase 6 owns CI wiring and may move this; it must not delete it without
+# replacing the coverage.
+_placement="${HERE}/../hack/check-secret-placement.sh"
+if [ ! -f "$_placement" ]; then
+  note "hack/check-secret-placement.sh is missing, so nothing checked that the session secret stays out of argv, ConfigMaps and annotations."
+else
+  if _pself="$(bash "$_placement" --self-test 2>&1)"; then
+    _pout="$(bash "$_placement" 2>&1)"; _prc=$?
+    case "$_prc" in
+      0) echo ">>> hack/check-secret-placement.sh: ok ($(printf '%s\n' "$_pout" | tail -1 | sed 's/^check-secret-placement: //'))" ;;
+      1) echo ">>> hack/check-secret-placement.sh: LEAK FOUND (exit 1)"
+         printf '%s\n' "$_pout" | sed 's/^/    /'
+         real_failure=1 ;;
+      *) note "hack/check-secret-placement.sh exited ${_prc} - nothing was analysed. $(printf '%s\n' "$_pout" | tail -2 | tr '\n' ' ')" ;;
+    esac
+  else
+    note "hack/check-secret-placement.sh --self-test FAILED, so its scan is not evidence and was not run. $(printf '%s\n' "$_pself" | tail -1)"
   fi
 fi
 

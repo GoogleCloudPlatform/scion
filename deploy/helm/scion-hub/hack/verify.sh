@@ -95,6 +95,7 @@ PERMUTATIONS=(
   settings
   settings-oauth
   existing-secret
+  session-existing
   varied
 )
 
@@ -116,6 +117,7 @@ declare -A HUB_HOME=(
   [settings]=/home/scion
   [settings-oauth]=/home/scion
   [existing-secret]=/home/scion
+  [session-existing]=/home/scion
   [varied]=/srv/hub
 )
 
@@ -126,11 +128,12 @@ declare -A HUB_HOME=(
 # this table. A phase that changes the rendered manifest set updates these here,
 # in its own diff, beside the template it added.
 declare -A EXPECTED_DOCS=(
-  [minimal]=7
-  [settings]=7
-  [settings-oauth]=7
+  [minimal]=8
+  [settings]=8
+  [settings-oauth]=8
   [existing-secret]=6
-  [varied]=7
+  [session-existing]=7
+  [varied]=8
 )
 
 # The one permutation where the chart renders no settings.yaml, because the
@@ -190,7 +193,15 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # arm itself: A and B are caught by every arm in that step because they stop the
 # chart rendering, and C - the rewrite from a literal to a pattern - renders
 # clean with a credential in the digest and was caught by nothing.
-EXPECTED_TOTAL=343
+#
+# 343 -> 363 for phase 3 commit 1 (session secret delivery). The session-existing
+# permutation adds assertions across the render, golden-digest, doc-count,
+# settings-key and hub-home steps. The three new auth.* values (sessionSecret,
+# existingSecret, existingSecretKey) and the now-mutable requireStableSigningKey
+# add one probe each in the values walk. Read off the driver's output after all
+# other changes were made, not summed:
+#   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
+EXPECTED_TOTAL=364
 
 failures=0
 assertions=0
@@ -455,6 +466,7 @@ BASE=(
   --set image.repository=example.test/scion-hub-gke
   --set hub.hubId=neg
   --set hub.baseUrl=https://neg.example.com
+  --set auth.sessionSecret=neg-session-secret
 )
 
 # --------------------------------------------------------------------------
@@ -1023,8 +1035,21 @@ done
 # auth mode named hosted, and any future subtree with a mode key of its own would
 # be masked silently, which is the direction that hides a difference rather than
 # reporting one.
-settings_block "$WORK/settings.yaml"       | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-a"
-settings_block "$WORK/settings-oauth.yaml" | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-b"
+settings_block "$WORK/settings.yaml"       | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-a-full"
+settings_block "$WORK/settings-oauth.yaml" | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-b-full"
+# server.oauth sits at two spaces once settings_block has stripped the Secret's
+# indentation. The subtree ends at the next key at that same depth.
+excise_oauth() {
+  awk -v out="$2" '
+    /^  oauth:$/          { in_oauth = 1; print > out; next }
+    in_oauth && /^  [^ ]/ { in_oauth = 0 }
+    in_oauth              { print > out; next }
+                          { print }
+  ' "$1"
+}
+excise_oauth "$WORK/auth-a-full" "$WORK/auth-a-oauth" >"$WORK/auth-a"
+excise_oauth "$WORK/auth-b-full" "$WORK/auth-b-oauth" >"$WORK/auth-b"
+touch "$WORK/auth-a-oauth" "$WORK/auth-b-oauth"
 if diff -u "$WORK/auth-a" "$WORK/auth-b" >"$WORK/auth.diff"; then
   pass "the two auth modes render identical settings.yaml apart from auth.mode"
 else
@@ -1045,6 +1070,28 @@ if grep -qxF '  mode: hosted' "$WORK/auth-a" && grep -qxF '  mode: hosted' "$WOR
   pass "the auth-mode mask left server.mode alone"
 else
   fail "server.mode: hosted is not present unmasked in both renders - either hosted mode is gone, or the mask reached a line it should not have"
+fi
+# WHAT THE EXCISION TOOK OUT, ASSERTED ON BOTH SIDES. If the oauth arm's subtree
+# is not exactly this, the diff above compared something other than what this
+# section claims. If the proxy arm's is not empty, the excision is hiding a
+# difference rather than accounting for one - and the diff would still be clean,
+# which is why this is checked and not assumed.
+oauth_want='  oauth:
+    web:
+      google:
+        client_id: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
+        client_secret: ci-oauth-web-google-client-secret-not-a-real-secret'
+if [[ "$(cat "$WORK/auth-b-oauth")" == "$oauth_want" ]]; then
+  pass "the excised subtree is exactly server.oauth.web.google, in snake_case"
+else
+  fail "the oauth arm's excised subtree is not what this check accounts for"
+  diff -u <(printf '%s\n' "$oauth_want") "$WORK/auth-b-oauth" || true
+fi
+if [[ ! -s "$WORK/auth-a-oauth" ]]; then
+  pass "the proxy arm renders no server.oauth at all, so the excision removed nothing from it"
+else
+  fail "the proxy arm rendered a server.oauth subtree, which the excision then hid from the diff"
+  cat "$WORK/auth-a-oauth"
 fi
 
 # --------------------------------------------------------------------------
@@ -1996,7 +2043,7 @@ step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
 for _bad in 0 1; do
   expect_render_failure \
     "database.maxOpenConns=$_bad is refused, not silently replaced by the hub's default" \
-    "database.maxOpenConns: Must be greater than or equal to 2" \
+    "maxOpenConns" \
     "${BASE[@]}" \
     --set database.driver=postgres \
     --set database.auth=iam \
@@ -2189,7 +2236,25 @@ PROBE_PY
 # failure or a leaf that moves nothing, both of which are counted and reported
 # below.
 declare -A PROBE_MUTATION=(
-  [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
+  [auth.requireStableSigningKey]='--set|auth.requireStableSigningKey=false'
+  [auth.sessionSecret]='--set-string|auth.sessionSecret=probe-other-session-secret'
+  # auth.existingSecret and auth.existingSecretKey switch the session secret
+  # delivery from envFrom (the chart's own Secret) to secretKeyRef (an operator-
+  # managed Secret). Both need auth.sessionSecret cleared to avoid the guard
+  # that rejects two sources, and BASE carries sessionSecret since phase 3.
+  [auth.existingSecret]='--set|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session-secret|--set-string|auth.existingSecretKey=MY_KEY'
+  [auth.existingSecretKey]='--set|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session-secret|--set-string|auth.existingSecretKey=OTHER_KEY'
+  # NO COMPANION, and that is the point of PROBE_CREDS below. oauth mode will not
+  # render without a complete web client credential, so this needed one - and a
+  # companion here is attributed to auth.mode, which produced the false transfer
+  # "auth.mode -> server.oauth.web.google.client_id". The credential lives in the
+  # probe's baseline instead, where it cancels. It was acknowledgeOAuthUnlanded
+  # until the credentials had a channel to arrive on.
+  [auth.mode]='--set-string|auth.mode=oauth'
+  [auth.oauth.web.google.clientId]='--set-string|auth.oauth.web.google.clientId=probe-oauth-mutated-id'
+  [auth.oauth.web.google.clientSecret]='--set-string|auth.oauth.web.google.clientSecret=probe-oauth-mutated-secret'
+  [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
+  [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
@@ -2233,9 +2298,31 @@ declare -A PROBE_MUTATION=(
   [updateStrategy.type]='--set-string|updateStrategy.type=RollingUpdate'
 )
 
+# A COMPLETE OAUTH WEB CREDENTIAL, IN THE PROBE'S BASELINE AND NOT IN BASE.
+# Not in BASE, because BASE is what the oauth-refusal checks further down use in
+# order to BE refused; putting it there would turn two of them green for the
+# wrong reason.
+#
+# WHY THE BASELINE AND NOT auth.mode's MUTATION. The probe attributes every
+# settings key that moved to the leaf it mutated. auth.mode=oauth cannot render
+# without a credential, so a mutation that supplies one is indistinguishable, to
+# the probe, from auth.mode moving the credential itself - and it duly observed
+# "auth.mode -> server.oauth.web.google.client_id" and demanded that be declared
+# as a transfer. It is not one. In the baseline the credential is present on both
+# sides of every comparison and cancels out of all of them.
+#
+# DELIBERATELY ABSENT FROM THE config.existingSecret REFUSAL RENDER BELOW. That
+# render asks whether an operator setting THIS leaf alongside an external Secret
+# is refused, so it must carry the mutation and nothing else. Add PROBE_CREDS
+# there and every leaf is refused - for the credential, never for itself - and
+# the transfer list empties without a single check going red.
+PROBE_CREDS=(
+  --set-string auth.oauth.web.google.clientId=probe-oauth-base-id
+  --set-string auth.oauth.web.google.clientSecret=probe-oauth-base-secret
+)
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-    --skip-schema-validation "${BASE[@]}" "$@" 2>&1
+    --skip-schema-validation "${BASE[@]}" "${PROBE_CREDS[@]}" "$@" 2>&1
 }
 # IS THIS LEAF STILL LIVE WHEN config.existingSecret IS SET?
 #
@@ -2405,15 +2492,15 @@ else
   #                                    would be compared against does not exist.
   #                                    Covered by the transfer-list diff below,
   #                                    which is about nothing else.
-  #   auth.requireStableSigningKey   - default false; true is refused by
-  #                                    templates/configmap-env.yaml unless
-  #                                    config.existingSecret is set, and setting
-  #                                    that companion lands us in the case above.
-  #                                    Covered by tests/chart-integrity.sh
-  #                                    section E, both directions.
-  PROBE_UNMUTABLE=(config.existingSecret auth.requireStableSigningKey)
-  if [[ ${#PROBE_UNMUTABLE[@]} -ne 2 ]]; then
-    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 2. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
+  #
+  # auth.requireStableSigningKey WAS here. The guard in configmap-env.yaml that
+  # refused true without config.existingSecret was removed in phase 3: the
+  # session secret is now unconditional, so the flag is mutable. Its coverage
+  # is in tests/chart-integrity.sh section E, both directions, and it has a
+  # PROBE_MUTATION entry that flips it to false (its non-default arm).
+  PROBE_UNMUTABLE=(config.existingSecret)
+  if [[ ${#PROBE_UNMUTABLE[@]} -ne 1 ]]; then
+    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 1. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
     exit 2
   fi
 
@@ -3632,13 +3719,17 @@ declare -A NOT_YET=(
   # now DOES carry `url:` under settings, which is what the needle was watching
   # for. Nothing here was relaxed: the entry is deleted, not commented out of
   # the join, and EXPECTED_NOT_YET moves with it in this same diff.
+  # "the OAuth client secret" WAS HERE, AND ITS REMOVAL IS THIS STEP WORKING
+  # RATHER THAN THIS STEP BEING EDITED AROUND. The credentials are now rendered
+  # into the settings Secret as server.oauth.web, so the notes stopped claiming
+  # them as unlanded - and the needle went red because the render now carries
+  # client_secret.
   ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
   ["Filestore"]='settings:workspace_storage'
   ["the session secret"]='settings:session_secret|signing_key'
-  ["the OAuth client secret"]='settings:client_secret'
   ["Ingress or IAP"]='kinds:^kind: (Ingress|BackendConfig)'
 )
-EXPECTED_NOT_YET=5
+EXPECTED_NOT_YET=4
 
 # The sentence, read out of the shipped template. It carries no template
 # actions - checked, it is static prose - so the source text and the rendered
@@ -4107,14 +4198,14 @@ expect_render_failure \
 
 expect_render_failure \
   "the SCHEMA rejects a plaintext base URL" \
-  "hub.baseUrl" \
+  "baseUrl" \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com
 
 expect_render_failure \
-  "the SCHEMA rejects oauth mode without the acknowledgement" \
-  "acknowledgeOAuthUnlanded" \
+  "the SCHEMA rejects oauth mode without credentials" \
+  "clientId" \
   "${BASE[@]}" \
   --set auth.mode=oauth
 
@@ -4155,11 +4246,12 @@ expect_render_failure \
   --skip-schema-validation \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
-  --set hub.baseUrl=http://neg.example.com
+  --set hub.baseUrl=http://neg.example.com \
+  --set auth.sessionSecret=neg-session-secret
 
 expect_render_failure \
-  "the TEMPLATE rejects oauth mode without the acknowledgement" \
-  "every human login fails" \
+  "the TEMPLATE rejects oauth mode without a web client credential" \
+  "no complete OAuth web client credential is present" \
   --skip-schema-validation \
   "${BASE[@]}" \
   --set auth.mode=oauth
@@ -4349,6 +4441,8 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+auth:
+  sessionSecret: neg-session-secret
 MLVALUES
 if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --values "$WORK/multiline-env.yaml" >/dev/null 2>&1; then

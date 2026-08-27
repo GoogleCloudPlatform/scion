@@ -153,6 +153,7 @@ EXPECTED_TOTAL=46
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 BASE=(--set image.repository=r --set hub.hubId=h --set hub.baseUrl=https://test.example.com
+      --set auth.sessionSecret=harness-not-a-real-secret
       --set rbac.create=true --set runtime.listAllNamespaces=true)
 
 _missing=""
