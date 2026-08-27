@@ -393,6 +393,61 @@ func TestUpsertConversationByExternalRef_DifferentExternalRefsSameSurface(t *tes
 }
 
 // ---------------------------------------------------------------------------
+// Nil parameter guard tests
+// ---------------------------------------------------------------------------
+
+func TestCreateConversation_NilInput(t *testing.T) {
+	s := newTestConversationStore(t)
+	err := s.CreateConversation(context.Background(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestCreateConversation_ValidInput(t *testing.T) {
+	s := newTestConversationStore(t)
+	conv := newTestConversation()
+	err := s.CreateConversation(context.Background(), conv)
+	require.NoError(t, err, "valid input must succeed")
+}
+
+func TestUpdateConversation_NilInput(t *testing.T) {
+	s := newTestConversationStore(t)
+	err := s.UpdateConversation(context.Background(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestUpdateConversation_ValidInput(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+	// Create first, then update.
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	conv.DisplayName = "updated"
+	err := s.UpdateConversation(ctx, conv)
+	require.NoError(t, err, "valid input must succeed")
+}
+
+func TestUpsertConversationByExternalRef_NilInput(t *testing.T) {
+	s := newTestConversationStore(t)
+	_, err := s.UpsertConversationByExternalRef(context.Background(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestUpsertConversationByExternalRef_ValidInput(t *testing.T) {
+	s := newTestConversationStore(t)
+	conv := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "test-ref-" + uuid.NewString(),
+	}
+	result, err := s.UpsertConversationByExternalRef(context.Background(), conv)
+	require.NoError(t, err, "valid input must succeed")
+	require.NotNil(t, result)
+}
+
+// ---------------------------------------------------------------------------
 // Participant operations
 // ---------------------------------------------------------------------------
 

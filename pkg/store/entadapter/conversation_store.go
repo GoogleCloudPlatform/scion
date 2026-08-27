@@ -112,6 +112,9 @@ func validateDefaultAgentID(id *string) (*uuid.UUID, error) {
 
 // CreateConversation creates a new conversation.
 func (s *ConversationStore) CreateConversation(ctx context.Context, conv *store.Conversation) error {
+	if conv == nil {
+		return fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
+	}
 	if conv.ID == "" {
 		return fmt.Errorf("conversation ID is required: %w", store.ErrInvalidInput)
 	}
@@ -191,6 +194,9 @@ func (s *ConversationStore) GetConversation(ctx context.Context, id string) (*st
 
 // UpdateConversation updates an existing conversation.
 func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.Conversation) error {
+	if conv == nil {
+		return fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(conv.ID)
 	if err != nil {
 		return err
@@ -370,6 +376,9 @@ func (s *ConversationStore) GetConversationByExternalRef(ctx context.Context, su
 // duplicates; a constraint-violation on insert triggers a bounded retry that
 // updates the existing row instead.
 func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error) {
+	if conv == nil {
+		return nil, fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
+	}
 	if conv.ExternalRef == "" {
 		return nil, fmt.Errorf("externalRef is required for upsert: %w", store.ErrInvalidInput)
 	}
