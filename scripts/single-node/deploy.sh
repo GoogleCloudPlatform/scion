@@ -168,7 +168,13 @@ di_build_instance_url() {
 # Arguments: region project name
 di_build_iap_patch_url() {
   local region="$1" project="$2" name="$3"
-  echo "https://${region}-run.googleapis.com/v2/projects/${project}/locations/${region}/instances/${name}?updateMask=iapEnabled,invokerIamDisabled"
+  # _DI_API_BASE is the same TEST-ONLY seam the preflight GET uses, and the
+  # preflight validates its host (see di_validate_override_url) before any
+  # mutation runs. It is honoured here so a test can pin the property that
+  # broke in the field: that this PATCH carries the very token the preflight
+  # validated, rather than a freshly minted second one.
+  local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
+  echo "${api_base}/v2/projects/${project}/locations/${region}/instances/${name}?updateMask=iapEnabled,invokerIamDisabled"
 }
 
 # di_iap_patch_body returns the JSON body for the IAP enable PATCH.
@@ -216,6 +222,40 @@ ERRMSG
   return 1
 }
 
+# di_validate_override_url rejects a test-only URL override that would send an
+# access token somewhere other than Google or the local machine.
+#
+# Both _DI_TOKENINFO_URL and _DI_API_BASE are TEST-ONLY seams, and both now
+# carry the ADC token: tokeninfo takes it in a query string, and the API base
+# takes it in a Bearer header on a GET *and* on the step 3b PATCH — a mutating
+# call. One rule covers both: the host must be one of Google's own or loopback
+# (a stub that cannot move the token off the machine). Two seams under one rule
+# beats two seams under two rules.
+#
+# Arguments: var_name url
+# Returns 0 if the host is permitted, 1 with a diagnostic otherwise.
+di_validate_override_url() {
+  local var_name="$1"
+  local url="$2"
+
+  local host="${url#*://}"
+  host="${host%%/*}"
+  # Strip a :port suffix. Matching on the whole host first keeps a bare IPv6
+  # literal like [::1] (colons, no port) from being mangled.
+  if [[ "$host" =~ ^(.*):[0-9]+$ ]]; then
+    host="${BASH_REMATCH[1]}"
+  fi
+
+  case "$host" in
+    *.googleapis.com | 127.0.0.1 | localhost | '[::1]') return 0 ;;
+  esac
+
+  echo "Error: refusing to send an access token to host '$host'." >&2
+  echo "$var_name is a test-only override; it must name a *.googleapis.com" >&2
+  echo "host or loopback. Unset it and retry." >&2
+  return 1
+}
+
 # di_preflight_rest_credential mints an Application Default Credential (ADC)
 # token, validates it against the Cloud Run v2 API with a cheap GET, and
 # compares the ADC identity with the active gcloud account.
@@ -234,29 +274,22 @@ di_preflight_rest_credential() {
   local region="$2"
   local project="$3"
 
-  # --- Resolve the tokeninfo endpoint (TEST-ONLY seam) ---
-  # _DI_TOKENINFO_URL exists so the tests can point this call at a stub.
-  # Unlike the API base — which only redirects a Bearer header the operator
-  # already controls — the token travels to tokeninfo in a URL query string,
-  # where the receiving host logs it. So the override is restricted to
-  # Google's own hosts or to loopback (a stub that cannot move the token off
-  # the machine), and the URL is echoed below so a redirect is never
-  # invisible in the output.
+  # --- Resolve and validate the TEST-ONLY endpoint seams ---
+  # _DI_TOKENINFO_URL and _DI_API_BASE exist so the tests can point these calls
+  # at a stub. Both are validated HERE, at the top of the preflight, before a
+  # token is minted and before any resource is touched — so a bad override
+  # means no token exists to leak and no Instance exists to strand. _DI_API_BASE
+  # is validated here on behalf of step 3b too, which reads it via
+  # di_build_iap_patch_url and runs strictly after this function.
+  # Both URLs are echoed below, so a redirect is never invisible in the output.
   local tokeninfo_url="${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
-  local tokeninfo_host="${tokeninfo_url#*://}"
-  tokeninfo_host="${tokeninfo_host%%/*}"
-  if [[ "$tokeninfo_host" =~ ^(.*):[0-9]+$ ]]; then
-    tokeninfo_host="${BASH_REMATCH[1]}"
+  if ! di_validate_override_url "_DI_TOKENINFO_URL" "$tokeninfo_url"; then
+    return 1
   fi
-  case "$tokeninfo_host" in
-    *.googleapis.com|127.0.0.1|localhost|'[::1]') ;;
-    *)
-      echo "Error: refusing to send an access token to tokeninfo host '$tokeninfo_host'." >&2
-      echo "_DI_TOKENINFO_URL is a test-only override; it must name a *.googleapis.com" >&2
-      echo "host or loopback. Unset it and retry." >&2
-      return 1
-      ;;
-  esac
+  local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
+  if ! di_validate_override_url "_DI_API_BASE" "$api_base"; then
+    return 1
+  fi
 
   echo "    Minting ADC token..."
 
@@ -329,11 +362,6 @@ di_preflight_rest_credential() {
   # --- Validate with one cheap GET against the v2 surface ---
   # A non-2xx here means the token will be rejected at step 3b.
   # Abort NOW, before step 3a creates an Instance we cannot configure.
-  #
-  # _DI_API_BASE is a TEST-ONLY seam. It is left unrestricted because it only
-  # redirects a Bearer header — a credential the operator already holds — to a
-  # host of their own choosing, and the URL is printed on the next line.
-  local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
   local list_url="${api_base}/v2/projects/${project}/locations/${region}/instances"
   echo "    Validating ADC token against Cloud Run API..."
   echo "    GET $list_url"
@@ -349,6 +377,12 @@ di_preflight_rest_credential() {
     return 1
   }
 
+  # Unreachable by construction today: every curl exit path that yields no
+  # status also exits non-zero, and the || block above catches that first.
+  # Kept as a belt-and-braces guard because the alternative — an empty
+  # http_code falling into the numeric [[ -ge 300 ]] test below — is a silent
+  # pass, and this check must never fail open. Deliberately untested: a test
+  # would have to stub curl into a state curl does not produce.
   if [[ -z "$http_code" ]]; then
     echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
     rm -f "$resp_file"

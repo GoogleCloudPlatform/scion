@@ -16,12 +16,15 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -201,11 +204,13 @@ func TestScriptFormatStringsHavePlaceholders(t *testing.T) {
 // of the function still passed, because a unit test cannot see WHEN the
 // function is called. The whole suite was green with the bug restored.
 //
-// The stubbed deploy records its argv and then fails on purpose. Failing there
-// stops di_main at step 3a, which keeps this test off the network: the step 3b
-// PATCH URL is built from the real API host and has no test seam. It also
-// means that if the preflight is moved below step 3a, the ADC mint is never
-// recorded at all and this test fails on the first require below.
+// The stubbed deploy records its argv and then fails on purpose, stopping
+// di_main at step 3a. That is kept deliberately even though step 3b is now
+// stubbable (see TestScriptStep3bReusesPreflightToken): this pin is about the
+// ordering of two gcloud calls and nothing else, so it should not depend on
+// the _DI_API_BASE seam continuing to exist. It also means that if the
+// preflight is moved below step 3a, the ADC mint is never recorded at all and
+// this test fails on the first require below.
 func TestScriptPreflightRunsBeforeInstanceCreation(t *testing.T) {
 	server, _ := newPreflightStub(t, `{"email":"operator@example.com"}`, http.StatusOK, `{}`)
 	argvLog := filepath.Join(t.TempDir(), "gcloud-argv.log")
@@ -254,6 +259,107 @@ func TestScriptPreflightRunsBeforeInstanceCreation(t *testing.T) {
 	assert.Less(t, adcAt, deployAt,
 		"the ADC token must be minted and validated BEFORE the Instance is created, "+
 			"so a bad credential aborts with zero mutations.\nrecorded gcloud calls:\n%s", argv)
+}
+
+// TestScriptStep3bReusesPreflightToken pins the second half of the preflight's
+// contract. Ordering alone is not enough: validating a token before step 3a and
+// then minting a DIFFERENT one for the step 3b PATCH would satisfy the ordering
+// pin while restoring the original failure exactly — an Instance created, then
+// a PATCH rejected, then IAP off. "Step 3b reuses the preflight token" is the
+// line that broke in the field, and until now nothing checked it.
+//
+// The gcloud stub hands out a distinct token on every mint (…-mint-1, -mint-2,
+// …), which is what makes a re-mint visible: if step 3b minted its own, the
+// PATCH would carry -mint-2. So the test asserts two things that fail together
+// under that defect — the bearer the PATCH carries, and the number of mints.
+//
+// The PATCH is answered with a 500 so di_main aborts at step 3b rather than
+// running on into step 4, which polls for IAP enforcement for three minutes.
+func TestScriptStep3bReusesPreflightToken(t *testing.T) {
+	var mu sync.Mutex
+	var patchAuth string
+	patchCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("access_token") != "" {
+			_, _ = io.WriteString(w, `{"email":"operator@example.com"}`)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			mu.Lock()
+			patchAuth = r.Header.Get("Authorization")
+			patchCount++
+			mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"stub refuses to really enable IAP"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	tmp := t.TempDir()
+	argvLog := filepath.Join(tmp, "gcloud-argv.log")
+	mintCounter := filepath.Join(tmp, "mint-count")
+
+	// Note the `if [[ -f ]]; then` rather than `[[ -f ]] &&` — deploy.sh runs
+	// under `set -e`, where a bare failing AND-list would kill the shell.
+	gcloudStub := fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")
+      return 0 ;;
+    "config get account")
+      printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)
+      printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token")
+      local n=0
+      if [[ -f %[2]q ]]; then
+        n="$(cat %[2]q)"
+      fi
+      n=$((n + 1))
+      printf '%%s' "$n" > %[2]q
+      printf '%%s\n' "ya29.fake-token-mint-$n" ;;
+    "beta run instances deploy "*)
+      return 0 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog, mintCounter)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, preflightSetup(gcloudStub, server.URL),
+		"di_main",
+		"--name", "test-name",
+		"--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest",
+		"--region", "us-east4")
+
+	require.NotEqual(t, 0, exitCode,
+		"the stub answers the PATCH with a 500, so di_main must abort; stderr: %s", stderr)
+
+	mu.Lock()
+	gotAuth, gotPatches := patchAuth, patchCount
+	mu.Unlock()
+
+	argv := readGcloudArgvLog(t, argvLog)
+	require.Equal(t, 1, gotPatches,
+		"expected exactly one step 3b PATCH against the stub; if this is 0 the "+
+			"_DI_API_BASE seam is no longer reaching di_build_iap_patch_url and this "+
+			"test can no longer see what it pins.\nrecorded gcloud calls:\n%s", argv)
+
+	assert.Equal(t, "Bearer ya29.fake-token-mint-1", gotAuth,
+		"step 3b must send the ADC token the preflight already validated. A "+
+			"later mint (…-mint-2) means the PATCH is carrying an UNVALIDATED "+
+			"credential: the preflight would then be checking one token and the "+
+			"mutation using another, which is the original bug with extra "+
+			"steps.\nrecorded gcloud calls:\n%s", argv)
+
+	assert.Equal(t, 1, strings.Count(argv, "auth application-default print-access-token"),
+		"the ADC token must be minted exactly once and reused; a second mint is "+
+			"both a wasted round trip and an unvalidated credential.\n"+
+			"recorded gcloud calls:\n%s", argv)
 }
 
 // TestScriptAudienceFormatMatchesGoBuilder verifies that the format strings

@@ -370,6 +370,35 @@ func TestScriptPreflightRejectsNonGoogleTokeninfoHost(t *testing.T) {
 			"to leak in the first place")
 }
 
+// TestScriptPreflightRejectsNonGoogleAPIBase pins the same restriction on the
+// other seam. _DI_API_BASE was originally left unrestricted on the grounds
+// that it only redirects a Bearer header on a read. That premise no longer
+// holds: di_build_iap_patch_url honours it too, so the seam now spans the step
+// 3b PATCH — a mutating call. Both seams carry the ADC token, so both live
+// under one rule.
+func TestScriptPreflightRejectsNonGoogleAPIBase(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
+		adcGcloudStub(argvLog),
+		"https://evil.example",
+		"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_preflight_rest_credential",
+		"user@example.com", "us-east4", "test-project")
+
+	assert.NotEqual(t, 0, exitCode,
+		"must refuse to send an access token to a host outside googleapis.com")
+	assert.Contains(t, stderr, "evil.example",
+		"the rejection must name the offending host")
+	assert.Contains(t, stderr, "_DI_API_BASE",
+		"the rejection must name the variable at fault — with two seams under "+
+			"one rule, a message that does not say which one is a scavenger hunt")
+	assert.NoFileExists(t, argvLog,
+		"the check must run BEFORE the token is minted, and before step 3a "+
+			"creates an Instance that step 3b could not then configure")
+}
+
 // ---------------------------------------------------------------------------
 // Gate 2: Perimeter assertion tests (5 mandatory)
 // ---------------------------------------------------------------------------
