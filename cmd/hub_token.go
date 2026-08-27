@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -42,11 +43,11 @@ non-interactive authentication. Each token is scoped to a single project
 and carries a set of action permissions.
 
 Examples:
-  # Create a token for CI that can dispatch and monitor agents
+  # Create a token for CI that can create and monitor agents
   scion hub token create \
     --project my-project \
     --name "github-actions" \
-    --scopes agent:dispatch,agent:read,agent:stop \
+    --scopes agent:create,agent:read \
     --expires 90d
 
   # List your tokens
@@ -66,30 +67,20 @@ Examples:
 var hubTokenCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a new access token",
-	Long: `Create a new user access token scoped to a project.
+	Long: fmt.Sprintf(`Create a new user access token scoped to a project.
 
 The token value is displayed only once on creation. Store it securely.
 
 Available scopes:
-  project:read      Read project metadata
-  agent:create      Create agents
-  agent:read        Read agent status/metadata
-  agent:list        List agents
-  agent:start       Start/restart agents
-  agent:stop        Stop agents
-  agent:delete      Delete agents
-  agent:message     Send messages to agents
-  agent:attach      Attach to agent sessions
-  agent:dispatch    Dispatch agents (create + start)
-  agent:manage      All agent scopes (convenience alias)
+%s
 
 Expiry can be specified as a duration (e.g., 30d, 90d, 1y) or an
 RFC 3339 date (e.g., 2026-12-31T00:00:00Z). Default: 90 days.
 Maximum: 1 year.
 
 Examples:
-  scion hub token create --project my-project --name ci-token --scopes agent:dispatch,agent:read
-  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`,
+  scion hub token create --project my-project --name ci-token --scopes agent:create,agent:read
+  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp()),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }

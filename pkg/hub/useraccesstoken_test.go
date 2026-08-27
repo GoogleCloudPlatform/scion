@@ -210,7 +210,7 @@ func TestCreateToken(t *testing.T) {
 
 	t.Run("basic creation", func(t *testing.T) {
 		key, token, err := svc.CreateToken(ctx, tid("user-1"), "ci-token", tid("project-1"),
-			[]string{"agent:dispatch", "agent:read"}, nil)
+			[]string{"agent:create", "agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -267,6 +267,14 @@ func TestCreateToken(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects stale agent dispatch scope", func(t *testing.T) {
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "stale-token", tid("project-1"),
+			[]string{"agent:dispatch"}, nil)
+		if !errors.Is(err, ErrInvalidUATScope) {
+			t.Errorf("expected ErrInvalidUATScope, got %v", err)
+		}
+	})
+
 	t.Run("rejects missing project", func(t *testing.T) {
 		_, _, err := svc.CreateToken(ctx, tid("user-1"), "bad-token", "nonexistent",
 			[]string{"agent:read"}, nil)
@@ -297,8 +305,8 @@ func TestValidateToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, _, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
-		[]string{"agent:dispatch", "agent:read"}, nil)
+	key, token, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
+		[]string{"agent:attach", "agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
 	}
@@ -314,8 +322,11 @@ func TestValidateToken(t *testing.T) {
 		if identity.ScopedProjectID() != tid("project-1") {
 			t.Errorf("expected project 'project-1', got %q", identity.ScopedProjectID())
 		}
-		if !identity.HasScope("agent:dispatch") {
-			t.Error("expected identity to have scope agent:dispatch")
+		if identity.CredentialID() != token.ID {
+			t.Errorf("expected credential ID %q, got %q", token.ID, identity.CredentialID())
+		}
+		if !identity.HasScope("agent:attach") {
+			t.Error("expected identity to have scope agent:attach")
 		}
 		if identity.HasScope("agent:delete") {
 			t.Error("expected identity NOT to have scope agent:delete")
@@ -462,7 +473,7 @@ func TestExpandScopes(t *testing.T) {
 
 func TestScopedUserIdentity(t *testing.T) {
 	base := NewAuthenticatedUser(tid("user-1"), "test@example.com", "Test", "member", "api")
-	scoped := NewScopedUserIdentity(base, tid("project-1"), []string{"agent:dispatch", "agent:read"})
+	scoped := NewScopedUserIdentity(base, tid("project-1"), []string{"agent:attach", "agent:read"})
 
 	if scoped.ID() != tid("user-1") {
 		t.Errorf("expected ID 'user-1', got %q", scoped.ID())
@@ -473,8 +484,8 @@ func TestScopedUserIdentity(t *testing.T) {
 	if scoped.ScopedProjectID() != tid("project-1") {
 		t.Errorf("expected project 'project-1', got %q", scoped.ScopedProjectID())
 	}
-	if !scoped.HasScope("agent:dispatch") {
-		t.Error("expected HasScope('agent:dispatch') to be true")
+	if !scoped.HasScope("agent:attach") {
+		t.Error("expected HasScope('agent:attach') to be true")
 	}
 	if scoped.HasScope("agent:delete") {
 		t.Error("expected HasScope('agent:delete') to be false")

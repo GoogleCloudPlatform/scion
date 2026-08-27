@@ -272,6 +272,14 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 			if !contains(entry.config.AllowedRootUsers, claims.RootUser) {
 				return nil, fmt.Errorf("federation: root_user %q not in allowed_root_users", claims.RootUser)
 			}
+			// Phase 1G security fix 2: validate EVERY element in the ancestry
+			// array against allowed_root_users. Without this, a federated token
+			// could name arbitrary local principals in its ancestry chain.
+			for _, ancestorID := range claims.Ancestry {
+				if !contains(entry.config.AllowedRootUsers, ancestorID) {
+					return nil, fmt.Errorf("federation: ancestry element %q not in allowed_root_users", ancestorID)
+				}
+			}
 		}
 	case IssuerTypeServiceAccount, IssuerTypeUser:
 		if len(entry.config.AllowedEmails) > 0 {
@@ -303,6 +311,13 @@ func extractHubClaims(claims *federationClaims, issuerCfg config.TrustedIssuerCo
 	if claims.Subject == "" {
 		return nil, fmt.Errorf("federation: empty sub claim")
 	}
+	// Phase 1G security fix 1: ancestry[0] must agree with root_user when
+	// ancestry is present. A disagreement means the remote issuer composed
+	// an inconsistent token — rootUser and ancestry[0] name different principals.
+	if len(claims.Ancestry) > 0 && claims.Ancestry[0] != claims.RootUser {
+		return nil, fmt.Errorf("federation: ancestry[0] %q disagrees with root_user %q",
+			claims.Ancestry[0], claims.RootUser)
+	}
 	return NewFederatedAgentIdentity(
 		claims.Issuer, claims.Subject, claims.ProjectID,
 		claims.AgentName, claims.RootUser, claims.Ancestry, scopes,
@@ -330,7 +345,7 @@ func extractUserClaims(claims *federationClaims,
 		return nil, fmt.Errorf("federation: user token missing sub claim")
 	}
 	role := issuerCfg.DefaultRole
-	if role == "" {
+	if role == "" || role == "admin" {
 		role = "viewer"
 	}
 	return NewFederatedUserIdentity(

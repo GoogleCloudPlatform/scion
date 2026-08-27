@@ -16,11 +16,13 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -284,7 +286,7 @@ func TestAgentTokenService_RefreshToken(t *testing.T) {
 	require.NoError(t, err)
 
 	// Refresh the token
-	newToken, newExpiry, err := service.RefreshAgentToken(originalToken)
+	newToken, newExpiry, err := service.RefreshAgentToken(context.Background(), originalToken)
 	require.NoError(t, err)
 	assert.NotEmpty(t, newToken)
 	assert.NotEqual(t, originalToken, newToken)
@@ -311,9 +313,157 @@ func TestAgentTokenService_RefreshExpiredToken(t *testing.T) {
 	require.NoError(t, err)
 
 	// Refresh should fail for expired token
-	_, _, err = service.RefreshAgentToken(expiredToken)
+	_, _, err = service.RefreshAgentToken(context.Background(), expiredToken)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot refresh invalid token")
+}
+
+// mockCredentialChecker is a test double for CredentialChecker.
+type mockCredentialChecker struct {
+	credentials map[string]*store.AgentCredential
+	// err, when non-nil, is returned for every lookup (simulates store errors).
+	err error
+}
+
+func (m *mockCredentialChecker) GetAgentCredentialByJTIHash(_ context.Context, jtiHash string) (*store.AgentCredential, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if cred, ok := m.credentials[jtiHash]; ok {
+		return cred, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func TestAgentTokenService_RefreshRevokedTokenFails(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	// Generate a token
+	token, err := service.GenerateAgentToken("agent-123", "project-456",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
+	require.NoError(t, err)
+
+	// Extract the JTI so we can mark it revoked in the mock store
+	claims, err := service.ValidateAgentToken(token)
+	require.NoError(t, err)
+	jtiHash := hashJTI(claims.ID)
+
+	// Set up a mock credential checker with the token marked as revoked
+	revokedAt := time.Now()
+	checker := &mockCredentialChecker{
+		credentials: map[string]*store.AgentCredential{
+			jtiHash: {
+				ID:           "cred-1",
+				AgentID:      "agent-123",
+				ProjectID:    "project-456",
+				TokenJTIHash: jtiHash,
+				IssuedAt:     time.Now(),
+				ExpiresAt:    time.Now().Add(time.Hour),
+				RevokedAt:    &revokedAt,
+			},
+		},
+	}
+	service.SetCredentialChecker(checker)
+
+	// Attempt to refresh the revoked token — must fail
+	_, _, err = service.RefreshAgentToken(context.Background(), token)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot refresh revoked token")
+}
+
+func TestAgentTokenService_RefreshUnrevokedTokenSucceeds(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	// Generate a token
+	token, err := service.GenerateAgentToken("agent-123", "project-456",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
+	require.NoError(t, err)
+
+	// Extract the JTI
+	claims, err := service.ValidateAgentToken(token)
+	require.NoError(t, err)
+	jtiHash := hashJTI(claims.ID)
+
+	// Set up a mock credential checker with the token NOT revoked
+	checker := &mockCredentialChecker{
+		credentials: map[string]*store.AgentCredential{
+			jtiHash: {
+				ID:           "cred-1",
+				AgentID:      "agent-123",
+				ProjectID:    "project-456",
+				TokenJTIHash: jtiHash,
+				IssuedAt:     time.Now(),
+				ExpiresAt:    time.Now().Add(time.Hour),
+				RevokedAt:    nil, // not revoked
+			},
+		},
+	}
+	service.SetCredentialChecker(checker)
+
+	// Refresh should succeed
+	newToken, newExpiry, err := service.RefreshAgentToken(context.Background(), token)
+	require.NoError(t, err)
+	assert.NotEmpty(t, newToken)
+	assert.NotEqual(t, token, newToken)
+	assert.True(t, newExpiry.After(time.Now()))
+}
+
+func TestAgentTokenService_RefreshLegacyTokenAllowed(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	// Generate a token
+	token, err := service.GenerateAgentToken("agent-123", "project-456",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
+	require.NoError(t, err)
+
+	// Set up a mock credential checker with NO credentials (simulates pre-table token)
+	checker := &mockCredentialChecker{
+		credentials: map[string]*store.AgentCredential{},
+	}
+	service.SetCredentialChecker(checker)
+
+	// Refresh should succeed (compatibility window for legacy tokens)
+	newToken, newExpiry, err := service.RefreshAgentToken(context.Background(), token)
+	require.NoError(t, err)
+	assert.NotEmpty(t, newToken)
+	assert.True(t, newExpiry.After(time.Now()))
+}
+
+func TestAgentTokenService_RefreshStoreErrorFailsClosed(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	// Generate a valid token
+	token, err := service.GenerateAgentToken("agent-123", "project-456",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
+	require.NoError(t, err)
+
+	// Set up a credential checker that returns a store error (e.g. database unavailable)
+	checker := &mockCredentialChecker{
+		err: fmt.Errorf("connection refused"),
+	}
+	service.SetCredentialChecker(checker)
+
+	// Refresh must fail closed — store errors must not mint a new token
+	_, _, err = service.RefreshAgentToken(context.Background(), token)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential store unavailable")
+	assert.Contains(t, err.Error(), "connection refused")
 }
 
 func TestAgentTokenService_GenerateAgentTokenWithExpiry(t *testing.T) {

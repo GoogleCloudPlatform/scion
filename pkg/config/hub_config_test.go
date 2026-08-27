@@ -779,3 +779,58 @@ func TestApplyDatabasePoolDefaults_SqliteStaysSingleConnection(t *testing.T) {
 		t.Fatalf("sqlite MaxOpenConns must be 1, got %d", db.MaxOpenConns)
 	}
 }
+
+// --- D11-fix: SanitizeEmailList tests ---
+
+func TestSanitizeEmailList_TrimsWhitespace(t *testing.T) {
+	got := SanitizeEmailList([]string{"  admin@example.com  ", "\tuser@example.com\n"})
+	want := []string{"admin@example.com", "user@example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSanitizeEmailList_LowersCase(t *testing.T) {
+	got := SanitizeEmailList([]string{"Admin@Example.COM", "USER@TEST.ORG"})
+	want := []string{"admin@example.com", "user@test.org"}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSanitizeEmailList_DropsEmptyEntries(t *testing.T) {
+	got := SanitizeEmailList([]string{"admin@example.com", "", "  ", "\t", "user@example.com"})
+	want := []string{"admin@example.com", "user@example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSanitizeEmailList_NilInput(t *testing.T) {
+	got := SanitizeEmailList(nil)
+	if len(got) != 0 {
+		t.Fatalf("nil input should return empty slice, got %v", got)
+	}
+}
+
+func TestSanitizeEmailList_AllEmpty(t *testing.T) {
+	got := SanitizeEmailList([]string{"", "  ", "\t"})
+	if len(got) != 0 {
+		t.Fatalf("all-empty input should return empty slice, got %v", got)
+	}
+}

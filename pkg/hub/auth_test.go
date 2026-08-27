@@ -172,8 +172,12 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 
 	t.Run("agent token via X-Scion-Agent-Token header", func(t *testing.T) {
 		var gotIdentity Identity
+		var gotCredential CredentialContext
+		var gotRequest AuthzRequest
 		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotIdentity = GetIdentityFromContext(r.Context())
+			gotCredential = GetCredentialContextFromContext(r.Context())
+			gotRequest = AuthzRequestFromContext(r.Context(), Resource{Type: "agent", ID: "agent-456"}, ActionRead)
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -197,6 +201,15 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 
 		if gotIdentity.Type() != "agent" {
 			t.Errorf("expected identity type 'agent', got %q", gotIdentity.Type())
+		}
+		if gotCredential.Kind != CredentialKindAgentJWT {
+			t.Errorf("expected agent JWT credential, got %q", gotCredential.Kind)
+		}
+		if gotCredential.ID == "" {
+			t.Error("expected agent JWT credential ID")
+		}
+		if gotRequest.Principal.ID != "agent-456" || gotRequest.Credential.ID != gotCredential.ID {
+			t.Errorf("request context lost principal or credential: %+v", gotRequest)
 		}
 	})
 }
@@ -589,94 +602,128 @@ func TestIsEmailAuthorized(t *testing.T) {
 
 func TestDetermineUserRole(t *testing.T) {
 	tests := []struct {
-		name        string
-		email       string
-		adminEmails []string
-		currentRole string
-		expected    string
+		name         string
+		email        string
+		adminEmails  []string
+		currentRole  string
+		demotionSafe bool
+		expected     string
 	}{
 		{
-			name:        "in admin emails is admin",
-			email:       "admin@example.com",
-			adminEmails: []string{"admin@example.com"},
-			currentRole: "member",
-			expected:    "admin",
+			name:         "in admin emails is admin",
+			email:        "admin@example.com",
+			adminEmails:  []string{"admin@example.com"},
+			currentRole:  "member",
+			demotionSafe: true,
+			expected:     "admin",
 		},
 		{
-			name:        "in admin emails promotes new user",
-			email:       "admin@example.com",
-			adminEmails: []string{"admin@example.com"},
-			currentRole: "",
-			expected:    "admin",
+			name:         "in admin emails promotes new user",
+			email:        "admin@example.com",
+			adminEmails:  []string{"admin@example.com"},
+			currentRole:  "",
+			demotionSafe: true,
+			expected:     "admin",
 		},
 		{
-			name:        "admin emails match is case insensitive",
-			email:       "Admin@Example.com",
-			adminEmails: []string{"admin@example.com"},
-			currentRole: "",
-			expected:    "admin",
+			name:         "admin emails match is case insensitive",
+			email:        "Admin@Example.com",
+			adminEmails:  []string{"admin@example.com"},
+			currentRole:  "",
+			demotionSafe: true,
+			expected:     "admin",
 		},
 		{
-			name:        "not in admin emails and member stays member",
-			email:       "user@example.com",
-			adminEmails: []string{"admin@example.com"},
-			currentRole: "member",
-			expected:    "member",
+			name:         "not in admin emails and member stays member",
+			email:        "user@example.com",
+			adminEmails:  []string{"admin@example.com"},
+			currentRole:  "member",
+			demotionSafe: true,
+			expected:     "member",
 		},
 		{
-			name:        "new user with no admin emails is member",
-			email:       "user@example.com",
-			adminEmails: nil,
-			currentRole: "",
-			expected:    "member",
+			name:         "new user with no admin emails is member",
+			email:        "user@example.com",
+			adminEmails:  nil,
+			currentRole:  "",
+			demotionSafe: true,
+			expected:     "member",
 		},
 		{
-			// Regression: config must never demote a UI-promoted admin.
-			name:        "not in admin emails but already admin stays admin",
-			email:       "ui-admin@example.com",
-			adminEmails: []string{"admin@example.com"},
-			currentRole: "admin",
-			expected:    "admin",
+			// D11: removal from AdminEmails now demotes. The admin role is
+			// owned by config; a user not in adminEmails loses it on next
+			// login evaluation.
+			name:         "not in admin emails but already admin is demoted",
+			email:        "ui-admin@example.com",
+			adminEmails:  []string{"admin@example.com"},
+			currentRole:  "admin",
+			demotionSafe: true,
+			expected:     "member",
 		},
 		{
-			name:        "already admin with empty admin emails stays admin",
-			email:       "ui-admin@example.com",
-			adminEmails: nil,
-			currentRole: "admin",
-			expected:    "admin",
+			name:         "already admin with empty admin emails stays admin",
+			email:        "ui-admin@example.com",
+			adminEmails:  nil,
+			currentRole:  "admin",
+			demotionSafe: true,
+			expected:     "admin",
 		},
 		{
 			// Regression: config must not rewrite a UI-set viewer to member.
-			name:        "viewer is preserved",
-			email:       "viewer@example.com",
-			adminEmails: []string{"admin@example.com"},
-			currentRole: "viewer",
-			expected:    "viewer",
+			name:         "viewer is preserved",
+			email:        "viewer@example.com",
+			adminEmails:  []string{"admin@example.com"},
+			currentRole:  "viewer",
+			demotionSafe: true,
+			expected:     "viewer",
 		},
 		{
-			name:        "viewer with empty admin emails is preserved",
-			email:       "viewer@example.com",
-			adminEmails: nil,
-			currentRole: "viewer",
-			expected:    "viewer",
+			name:         "viewer with empty admin emails is preserved",
+			email:        "viewer@example.com",
+			adminEmails:  nil,
+			currentRole:  "viewer",
+			demotionSafe: true,
+			expected:     "viewer",
 		},
 		{
 			// Config always promotes, even over an established role.
-			name:        "viewer in admin emails is promoted to admin",
-			email:       "viewer@example.com",
-			adminEmails: []string{"viewer@example.com"},
-			currentRole: "viewer",
-			expected:    "admin",
+			name:         "viewer in admin emails is promoted to admin",
+			email:        "viewer@example.com",
+			adminEmails:  []string{"viewer@example.com"},
+			currentRole:  "viewer",
+			demotionSafe: true,
+			expected:     "admin",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole)
+			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe)
 			if got != tc.expected {
-				t.Errorf("determineUserRole(%q, %v, %q) = %q, expected %q",
-					tc.email, tc.adminEmails, tc.currentRole, got, tc.expected)
+				t.Errorf("determineUserRole(%q, %v, %q, %v) = %q, expected %q",
+					tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe, got, tc.expected)
 			}
 		})
+	}
+}
+
+// TestDetermineUserRole_GuardBlocksDemotion verifies that when the reconciler
+// sets demotionSafe=false (intended admin set is empty), the login path
+// preserves the admin role instead of demoting.
+func TestDetermineUserRole_GuardBlocksDemotion(t *testing.T) {
+	// Admin not in adminEmails, but demotionSafe is false → preserved.
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", false)
+	if got != "admin" {
+		t.Errorf("expected admin preserved when demotionSafe=false, got %q", got)
+	}
+}
+
+// TestDetermineUserRole_GuardAllowsDemotion verifies that when the reconciler
+// completed normally (demotionSafe=true), the login path demotes as expected.
+func TestDetermineUserRole_GuardAllowsDemotion(t *testing.T) {
+	// Admin not in adminEmails, demotionSafe is true → demoted.
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true)
+	if got != "member" {
+		t.Errorf("expected demotion to member when demotionSafe=true, got %q", got)
 	}
 }

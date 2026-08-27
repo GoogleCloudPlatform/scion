@@ -488,9 +488,13 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		query.Where(preds...)
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
@@ -502,16 +506,16 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	}
 
 	if opts.Cursor != "" {
-		pred, err := s.agentCursorPredicate(ctx, opts.Cursor)
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(pred)
+		query.Where(agentBeforeCursor(cursorCreated, cursorID))
 	}
 
 	// Fetch one extra row to detect whether a further page exists.
 	rows, err := query.
-		Order(agent.ByCreated(entsql.OrderDesc())).
+		Order(agent.ByCreated(entsql.OrderDesc()), agent.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -523,15 +527,20 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		items = append(items, *entAgentToStore(a))
 	}
 
-	result := &store.ListResult[store.Agent]{
-		Items:      items,
-		TotalCount: totalCount,
-	}
+	result := &store.ListResult[store.Agent]{TotalCount: totalCount}
 	if len(items) > limit {
 		result.Items = items[:limit]
-		result.NextCursor = items[limit-1].ID
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
 	}
 	return result, nil
+}
+
+// agentBeforeCursor returns a predicate for keyset pagination after the given cursor.
+func agentBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Agent {
+	return keysetBeforeCursor(agent.FieldCreated, agent.FieldID, cursorCreated, cursorID)
 }
 
 // agentFilterPredicates translates a store.AgentFilter into Ent predicates,

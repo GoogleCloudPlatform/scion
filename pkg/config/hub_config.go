@@ -839,7 +839,30 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		config.Auth.AuthorizedDomains = parseCommaSeparatedList(config.Auth.AuthorizedDomains[0])
 	}
 
+	// D11-fix: normalize AdminEmails for ALL list shapes (YAML list, env-var,
+	// comma-separated). Apply TrimSpace + ToLower and drop empty entries so
+	// that both matchers (determineUserRole, ReconcileSuperAdminBindings)
+	// compare against the same normalization the user store uses.
+	config.Hub.AdminEmails = SanitizeEmailList(config.Hub.AdminEmails)
+
 	return config, nil
+}
+
+// SanitizeEmailList normalizes an email list by trimming whitespace, lowering
+// case, and dropping empty entries. This ensures matchers (determineUserRole,
+// ReconcileSuperAdminBindings) compare against the same normalization the user
+// store uses (normalizeEmail: TrimSpace + ToLower). Exported so the hub server
+// can reuse it wherever AdminEmails enters the system (config load, operational
+// settings propagation, CLI flag parsing).
+func SanitizeEmailList(emails []string) []string {
+	result := make([]string, 0, len(emails))
+	for _, e := range emails {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" {
+			result = append(result, e)
+		}
+	}
+	return result
 }
 
 // parseCommaSeparatedList parses a comma-separated string into a slice.
@@ -1207,6 +1230,9 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 	if len(gc.Auth.AuthorizedDomains) == 1 && strings.Contains(gc.Auth.AuthorizedDomains[0], ",") {
 		gc.Auth.AuthorizedDomains = parseCommaSeparatedList(gc.Auth.AuthorizedDomains[0])
 	}
+
+	// D11-fix: normalize AdminEmails (same as primary config load path).
+	gc.Hub.AdminEmails = SanitizeEmailList(gc.Hub.AdminEmails)
 
 	return nil
 }

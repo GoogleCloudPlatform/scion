@@ -1253,6 +1253,31 @@ func TestFederationAuth_User_ConfiguredRole(t *testing.T) {
 	}
 }
 
+func TestFederationAuth_UserAdminDefaultRoleRejected(t *testing.T) {
+	_, jwksSrv, _ := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{{
+			IssuerURL:        issuer,
+			JWKSURL:          jwksSrv.URL,
+			ExpectedAudience: audience,
+			IssuerType:       "user",
+			DefaultRole:      "admin",
+		}},
+	}
+
+	_, err := NewFederationAuthenticator(cfg, audience, &http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
+	if err == nil {
+		t.Fatal("expected federated user default_role admin to be rejected")
+	}
+	if !strings.Contains(err.Error(), "default_role \"admin\" is not allowed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // User Test 9: User token with email not in allowed_emails -> reject
 func TestFederationAuth_User_EmailNotAllowed(t *testing.T) {
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
@@ -1610,5 +1635,75 @@ func TestFederationAuth_OIDCDiscovery_FailureNoEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "OIDC discovery failed") {
 		t.Errorf("expected 'OIDC discovery failed' in error, got: %v", err)
+	}
+}
+
+// ============================================================================
+// Phase 1G Federation Fix Tests
+// ============================================================================
+
+// Federation Fix 1: ancestry[0] disagrees with root_user → rejection
+func TestExtractHubClaims_AncestryDisagreesWithRootUser(t *testing.T) {
+	claims := &federationClaims{
+		Claims: jwt.Claims{
+			Subject: "agent-1",
+			Issuer:  "https://remote.example.com",
+		},
+		ProjectID: "proj-1",
+		AgentName: "test-agent",
+		RootUser:  "user:bob",
+		Ancestry:  []string{"user:alice"}, // disagrees with root_user
+	}
+
+	_, err := extractHubClaims(claims, config.TrustedIssuerConfig{}, nil)
+	if err == nil {
+		t.Fatal("expected error when ancestry[0] disagrees with root_user, got nil")
+	}
+	if !strings.Contains(err.Error(), "disagrees with root_user") {
+		t.Errorf("expected error mentioning 'disagrees with root_user', got: %v", err)
+	}
+}
+
+// Federation Fix 2: per-element ancestry validation against allowed_root_users
+func TestFederationAuth_AncestryPerElementRejection(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := jwksSrv.URL // Use the test server URL as issuer
+	audience := "https://hub.example.com"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "hub",
+				AllowedRootUsers: []string{"user:bob"}, // bob is allowed, eve is NOT
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":        issuer,
+		"sub":        "agent-fed-2",
+		"aud":        audience,
+		"iat":        now.Add(-1 * time.Minute).Unix(),
+		"exp":        now.Add(5 * time.Minute).Unix(),
+		"nbf":        now.Add(-1 * time.Minute).Unix(),
+		"project_id": "proj-1",
+		"agent_name": "test-agent",
+		"root_user":  "user:bob",                       // in allowed list
+		"ancestry":   []string{"user:bob", "user:eve"}, // user:eve NOT in allowed list
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	_, err := auth.Authenticate(token)
+	if err == nil {
+		t.Fatal("expected rejection when ancestry element not in allowed_root_users, got nil")
+	}
+	if !strings.Contains(err.Error(), "ancestry element") {
+		t.Errorf("expected error mentioning 'ancestry element', got: %v", err)
 	}
 }

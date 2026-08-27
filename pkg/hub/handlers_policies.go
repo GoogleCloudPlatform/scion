@@ -103,6 +103,13 @@ type EvaluateResponse struct {
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 	// Policy operations are gated to hub admins (ptone/scion#591). Before this
 	// gate, any authenticated caller could create or list policies.
+	//
+	// Phase 1F CanDelegate note: CanDelegate enforcement for policy creation
+	// is implicit via the requireAdmin gate — only super-admins can create,
+	// update, bind, or delete policies. The CanDelegate policy path returns
+	// "policy authoring requires super-admin" for any non-super-admin caller.
+	// If policy routes are ever opened to scoped admins, an explicit
+	// CanDelegate check must be added here.
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -214,6 +221,12 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject SourceIPs conditions (not currently enforced)
+	if req.Conditions != nil && len(req.Conditions.SourceIPs) > 0 {
+		BadRequest(w, "SourceIPs conditions are not currently enforced and cannot be set")
+		return
+	}
+
 	resourceType := req.ResourceType
 	if resourceType == "" {
 		resourceType = "*"
@@ -231,6 +244,7 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		Effect:       req.Effect,
 		Conditions:   req.Conditions,
 		Priority:     req.Priority,
+		PolicyKind:   store.PolicyKindExplicit, // User-created policies are always explicit
 		Labels:       req.Labels,
 		Annotations:  req.Annotations,
 	}
@@ -248,6 +262,13 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "policy_create",
+		TargetType:   "policy",
+		TargetID:     policy.ID,
+		AfterSummary: sanitizePolicySummary(policy),
+	})
 
 	writeJSON(w, http.StatusCreated, policy)
 }
@@ -343,6 +364,8 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	beforeSummary := sanitizePolicySummary(policy)
+
 	var req UpdatePolicyRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -371,7 +394,13 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 		}
 		policy.Effect = req.Effect
 	}
+	// PolicyKind is not user-updatable via API (only seed code sets 'default')
 	if req.Conditions != nil {
+		// Reject SourceIPs conditions (not currently enforced)
+		if len(req.Conditions.SourceIPs) > 0 {
+			BadRequest(w, "SourceIPs conditions are not currently enforced and cannot be set")
+			return
+		}
 		policy.Conditions = req.Conditions
 	}
 	if req.Priority != nil {
@@ -392,6 +421,14 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType:  "policy_update",
+		TargetType:    "policy",
+		TargetID:      policy.ID,
+		BeforeSummary: beforeSummary,
+		AfterSummary:  sanitizePolicySummary(policy),
+	})
 
 	writeJSON(w, http.StatusOK, policy)
 }
@@ -438,6 +475,13 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType:  "policy_delete",
+		TargetType:    "policy",
+		TargetID:      id,
+		BeforeSummary: sanitizePolicySummary(policy),
+	})
 
 	if policy.Origin == store.PolicyOriginSeeded {
 		slog.Info("seeded policy deleted; it will not be recreated on restart",
@@ -525,6 +569,13 @@ func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policy
 		return
 	}
 
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "policy_binding_add",
+		TargetType:   "policy",
+		TargetID:     policyID,
+		AfterSummary: `{"principalType":"` + binding.PrincipalType + `","principalId":"` + binding.PrincipalID + `"}`,
+	})
+
 	writeJSON(w, http.StatusCreated, binding)
 }
 
@@ -574,6 +625,13 @@ func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, pol
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType:  "policy_binding_remove",
+		TargetType:    "policy",
+		TargetID:      policyID,
+		BeforeSummary: `{"principalType":"` + principalType + `","principalId":"` + principalID + `"}`,
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -691,6 +749,7 @@ func (e *evaluateAgentIdentity) Scopes() []AgentTokenScope     { return nil }
 func (e *evaluateAgentIdentity) HasScope(AgentTokenScope) bool { return true }
 func (e *evaluateAgentIdentity) Ancestry() []string            { return nil }
 func (e *evaluateAgentIdentity) OriginUserID() string          { return "" }
+func (e *evaluateAgentIdentity) TokenID() string               { return "" }
 
 // populateResourceContext fills in owner/parent info from the store.
 func populateResourceContext(ctx context.Context, s *Server, resource *Resource, resourceType, resourceID string) {

@@ -16,6 +16,8 @@ type Tx struct {
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
 	Agent *AgentClient
+	// AgentCredential is the client for interacting with the AgentCredential builders.
+	AgentCredential *AgentCredentialClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
@@ -30,6 +32,10 @@ type Tx struct {
 	BrokerSecret *BrokerSecretClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
+	// DecisionAudit is the client for interacting with the DecisionAudit builders.
+	DecisionAudit *DecisionAuditClient
+	// DelegationEdge is the client for interacting with the DelegationEdge builders.
+	DelegationEdge *DelegationEdgeClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -62,6 +68,8 @@ type Tx struct {
 	MaintenanceOperationRun *MaintenanceOperationRunClient
 	// Message is the client for interacting with the Message builders.
 	Message *MessageClient
+	// MutationAudit is the client for interacting with the MutationAudit builders.
+	MutationAudit *MutationAuditClient
 	// NonceCache is the client for interacting with the NonceCache builders.
 	NonceCache *NonceCacheClient
 	// Notification is the client for interacting with the Notification builders.
@@ -78,6 +86,10 @@ type Tx struct {
 	ProjectPreStartHook *ProjectPreStartHookClient
 	// ProjectSyncState is the client for interacting with the ProjectSyncState builders.
 	ProjectSyncState *ProjectSyncStateClient
+	// RoleBinding is the client for interacting with the RoleBinding builders.
+	RoleBinding *RoleBindingClient
+	// RoleDefinition is the client for interacting with the RoleDefinition builders.
+	RoleDefinition *RoleDefinitionClient
 	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
 	RuntimeBroker *RuntimeBrokerClient
 	// Schedule is the client for interacting with the Schedule builders.
@@ -235,6 +247,7 @@ func (tx *Tx) Client() *Client {
 func (tx *Tx) init() {
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
+	tx.AgentCredential = NewAgentCredentialClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
 	tx.ApiKey = NewApiKeyClient(tx.config)
@@ -242,6 +255,8 @@ func (tx *Tx) init() {
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
+	tx.DecisionAudit = NewDecisionAuditClient(tx.config)
+	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
 	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)
@@ -258,6 +273,7 @@ func (tx *Tx) init() {
 	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
 	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)
+	tx.MutationAudit = NewMutationAuditClient(tx.config)
 	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)
 	tx.NotificationSubscription = NewNotificationSubscriptionClient(tx.config)
@@ -266,6 +282,8 @@ func (tx *Tx) init() {
 	tx.ProjectContributor = NewProjectContributorClient(tx.config)
 	tx.ProjectPreStartHook = NewProjectPreStartHookClient(tx.config)
 	tx.ProjectSyncState = NewProjectSyncStateClient(tx.config)
+	tx.RoleBinding = NewRoleBindingClient(tx.config)
+	tx.RoleDefinition = NewRoleDefinitionClient(tx.config)
 	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
 	tx.Schedule = NewScheduleClient(tx.config)
 	tx.ScheduledEvent = NewScheduledEventClient(tx.config)

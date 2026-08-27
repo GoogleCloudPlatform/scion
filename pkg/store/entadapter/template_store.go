@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -25,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	enttemplate "github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // TemplateStore implements store.TemplateStore and store.HarnessConfigStore
@@ -322,19 +324,30 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 		))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 50
 	}
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(templateBeforeCursor(cursorCreated, cursorID))
+	}
 
 	rows, err := query.
-		Order(enttemplate.ByCreated(entsql.OrderDesc())).
-		Limit(limit).
+		Order(enttemplate.ByCreated(entsql.OrderDesc()), enttemplate.ByID(entsql.OrderDesc())).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -345,10 +358,15 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 		items = append(items, *entTemplateRowToStore(e))
 	}
 
-	return &store.ListResult[store.Template]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+	result := &store.ListResult[store.Template]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
+	}
+	return result, nil
 }
 
 // =============================================================================
@@ -606,19 +624,30 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 		))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 50
 	}
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(harnessConfigBeforeCursor(cursorCreated, cursorID))
+	}
 
 	rows, err := query.
-		Order(entharnessconfig.ByCreated(entsql.OrderDesc())).
-		Limit(limit).
+		Order(entharnessconfig.ByCreated(entsql.OrderDesc()), entharnessconfig.ByID(entsql.OrderDesc())).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -629,8 +658,33 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 		items = append(items, *entHarnessConfigToStore(e))
 	}
 
-	return &store.ListResult[store.HarnessConfig]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+	result := &store.ListResult[store.HarnessConfig]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+func templateBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Template {
+	return keysetBeforeCursor(enttemplate.FieldCreated, enttemplate.FieldID, cursorCreated, cursorID)
+}
+
+func harnessConfigBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.HarnessConfig {
+	return keysetBeforeCursor(entharnessconfig.FieldCreated, entharnessconfig.FieldID, cursorCreated, cursorID)
+}
+
+func keysetBeforeCursor(createdField, idField string, cursorCreated time.Time, cursorID uuid.UUID) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		created := s.C(createdField)
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteString("((").WriteString(created).WriteString(" < ").Arg(cursorCreated).
+				WriteString(" AND ").WriteString(s.C(idField)).WriteString(" != ").Arg(cursorID).WriteString(")").
+				WriteString(" OR (").WriteString(created).WriteString(" = ").Arg(cursorCreated).
+				WriteString(" AND ").WriteString(s.C(idField)).WriteString(" < ").Arg(cursorID).WriteString("))")
+		}))
+	}
 }

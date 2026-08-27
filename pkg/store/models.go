@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
 // Agent represents an agent record in the Hub database.
@@ -174,6 +175,14 @@ type AgentAppliedConfig struct {
 	// AgentRole is the effective authorization role resolved at creation time.
 	// Determines which JWT scopes the agent receives. Immutable after creation.
 	AgentRole string `json:"agentRole,omitempty"`
+
+	// AgentRoleGrandfathered records that AgentRole was assigned by the
+	// pre-role backfill, not by an explicit grant. It is provenance only.
+	// No decision path may read this field to grant, widen, or exempt
+	// anything. If the sponsor later authorizes an exemption policy, that
+	// logic must read this at one named, tested gate — not as an ambient
+	// check inside evaluation.
+	AgentRoleGrandfathered bool `json:"agentRoleGrandfathered,omitempty"`
 
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
@@ -1076,11 +1085,17 @@ func (n *Notification) UnmarshalJSON(data []byte) error {
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
-	Limit   int               // Maximum results
-	Cursor  string            // Pagination cursor (opaque string)
-	Labels  map[string]string // Label selectors
-	SortBy  string            // Sort field (interpretation is store-specific)
-	SortDir string            // Sort direction: "asc" or "desc" (default depends on field)
+	Limit  int    // Maximum results
+	Cursor string // Pagination cursor (opaque string)
+	// SkipTotalCount avoids a full matching COUNT query when the caller only
+	// needs a bounded page scan.
+	SkipTotalCount bool
+	// CursorBinding binds cursors to a caller-defined endpoint and filter.
+	// Stores reject a cursor whose binding does not match.
+	CursorBinding string
+	Labels        map[string]string // Label selectors
+	SortBy        string            // Sort field (interpretation is store-specific)
+	SortDir       string            // Sort direction: "asc" or "desc" (default depends on field)
 }
 
 // ListResult is a generic result container for list operations.
@@ -1300,11 +1315,21 @@ type Policy struct {
 	// Origin tracks how the policy was created.
 	// "" (empty) = user-created (default), "seeded" = created by startup seeder.
 	Origin string `json:"origin,omitempty"`
+
+	// PolicyKind distinguishes user-created explicit policies from seeded defaults.
+	// "explicit" = user-created policy (default), "default" = seeded system default.
+	PolicyKind string `json:"policyKind,omitempty"`
 }
 
 // PolicyOrigin constants
 const (
 	PolicyOriginSeeded = "seeded"
+)
+
+// PolicyKind constants
+const (
+	PolicyKindExplicit = "explicit"
+	PolicyKindDefault  = "default"
 )
 
 // DelegatedFromCondition specifies a delegation source for policy matching.
@@ -1505,51 +1530,30 @@ func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
 const UATPrefix = "scion_pat_"
 
-// UAT scope constants define the allowed capability scopes.
+// UAT scope constants define the allowed capability scopes. Stale legacy
+// constants are retained for old stored-token metadata, but UATValidScopes below
+// is registry-derived and controls newly-created tokens.
 const (
-	UATScopeProjectRead     = "project:read"
-	UATScopeProjectUpdate   = "project:update"
-	UATScopeAgentCreate     = "agent:create"
-	UATScopeAgentRead       = "agent:read"
-	UATScopeAgentList       = "agent:list"
-	UATScopeAgentStart      = "agent:start"
-	UATScopeAgentStop       = "agent:stop"
-	UATScopeAgentDelete     = "agent:delete"
-	UATScopeAgentMessage    = "agent:message"
-	UATScopeAgentAttach     = "agent:attach"
-	UATScopeAgentPortAccess = "agent:port_access"
-	UATScopeAgentDispatch   = "agent:dispatch"
-	UATScopeAgentManage     = "agent:manage" // Convenience alias
+	UATScopeProjectRead     = permissions.ResourceProject + ":" + permissions.ActionRead
+	UATScopeProjectUpdate   = permissions.ResourceProject + ":" + permissions.ActionUpdate
+	UATScopeAgentCreate     = permissions.ResourceAgent + ":" + permissions.ActionCreate
+	UATScopeAgentRead       = permissions.ResourceAgent + ":" + permissions.ActionRead
+	UATScopeAgentList       = permissions.ResourceAgent + ":" + permissions.ActionList
+	UATScopeAgentStart      = "agent:start"    // legacy stale scope; not valid for new tokens
+	UATScopeAgentStop       = "agent:stop"     // legacy stale scope; not valid for new tokens
+	UATScopeAgentMessage    = "agent:message"  // legacy stale scope; not valid for new tokens
+	UATScopeAgentDispatch   = "agent:dispatch" // legacy stale scope; not valid for new tokens
+	UATScopeAgentDelete     = permissions.ResourceAgent + ":" + permissions.ActionDelete
+	UATScopeAgentAttach     = permissions.ResourceAgent + ":" + permissions.ActionAttach
+	UATScopeAgentPortAccess = permissions.ResourceAgent + ":" + permissions.ActionPortAccess
+	UATScopeAgentManage     = permissions.UATScopeAgentManage // Convenience alias
 )
 
 // UATValidScopes is the set of all valid UAT scope strings.
-var UATValidScopes = map[string]bool{
-	UATScopeProjectRead:     true,
-	UATScopeProjectUpdate:   true,
-	UATScopeAgentCreate:     true,
-	UATScopeAgentRead:       true,
-	UATScopeAgentList:       true,
-	UATScopeAgentStart:      true,
-	UATScopeAgentStop:       true,
-	UATScopeAgentDelete:     true,
-	UATScopeAgentMessage:    true,
-	UATScopeAgentAttach:     true,
-	UATScopeAgentPortAccess: true,
-	UATScopeAgentDispatch:   true,
-	UATScopeAgentManage:     true,
-}
+var UATValidScopes = permissions.UATValidScopes()
 
 // UATManageScopes are the scopes expanded from the agent:manage alias.
-var UATManageScopes = []string{
-	UATScopeAgentCreate,
-	UATScopeAgentRead,
-	UATScopeAgentList,
-	UATScopeAgentStart,
-	UATScopeAgentStop,
-	UATScopeAgentDelete,
-	UATScopeAgentPortAccess,
-	UATScopeAgentDispatch,
-}
+var UATManageScopes = permissions.UATManageScopes()
 
 // UATScopeToAction maps a UAT scope to its resource type and action.
 func UATScopeToAction(scope string) (resourceType string, action string) {
@@ -2332,6 +2336,124 @@ type AgentSessionMetricsAggregates struct {
 	SumTurnCount    int64 `json:"sumTurnCount"`
 }
 
+// =============================================================================
+// Role Definitions and Bindings (Permissions Foundation Phase 1E)
+// =============================================================================
+
+// RoleDefinition represents a named collection of permissions.
+type RoleDefinition struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"` // e.g. "super-admin", "hub-member", "project-owner"
+	Description string    `json:"description"`
+	ScopeType   string    `json:"scopeType"`   // "system", "project"
+	Permissions []string  `json:"permissions"` // permission IDs from registry
+	System      bool      `json:"system"`      // true = seeded, not user-modifiable
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// RoleBinding connects a principal to a role definition, optionally scoped.
+type RoleBinding struct {
+	ID               string    `json:"id"`
+	RoleDefinitionID string    `json:"roleDefinitionId"`
+	PrincipalType    string    `json:"principalType"` // "user", "agent"
+	PrincipalID      string    `json:"principalId"`
+	ScopeType        string    `json:"scopeType"` // "system", "project"
+	ScopeID          string    `json:"scopeId"`   // "" for system, project ID for project
+	CreatedBy        string    `json:"createdBy"`
+	CreatedAt        time.Time `json:"createdAt"`
+}
+
+// ProjectMembership is a convenience view of role bindings scoped to a project.
+// It is NOT a separate table -- project membership IS role bindings with scope_type="project".
+// This type is used only for query results and API compatibility.
+type ProjectMembership struct {
+	ProjectID     string `json:"projectId"`
+	UserID        string `json:"userId"`
+	Role          string `json:"role"` // "project-owner", "project-admin", "project-member"
+	RoleBindingID string `json:"roleBindingId"`
+}
+
+// RoleDefinition scope types
+const (
+	RoleScopeSystem  = "system"
+	RoleScopeProject = "project"
+)
+
+// System role names
+const (
+	SystemRoleSuperAdmin = "super-admin"
+	SystemRoleHubMember  = "hub-member"
+	SystemRoleHubViewer  = "hub-viewer"
+)
+
+// Project role names
+const (
+	ProjectRoleOwner  = "project-owner"
+	ProjectRoleAdmin  = "project-admin"
+	ProjectRoleMember = "project-member"
+)
+
+// Agent role definition names (matching existing AgentRole constants)
+const (
+	AgentRoleDefNone     = "agent-role-none"
+	AgentRoleDefReadonly = "agent-role-readonly"
+	AgentRoleDefBaseline = "agent-role-baseline"
+	AgentRoleDefFull     = "agent-role-full"
+)
+
+// RoleBinding principal types
+const (
+	RoleBindingPrincipalUser  = "user"
+	RoleBindingPrincipalAgent = "agent"
+)
+
+// =============================================================================
+// Delegation Edges (Permissions Foundation Phase 1G)
+// =============================================================================
+
+// DelegationEdge represents an authority-delegating relationship between principals.
+// Used by the live delegation ceiling to verify that every ancestor in an
+// agent's delegation chain still holds the permissions being exercised.
+type DelegationEdge struct {
+	ID            string    `json:"id"`
+	DelegatorType string    `json:"delegatorType"`
+	DelegatorID   string    `json:"delegatorId"`
+	DelegateType  string    `json:"delegateType"`
+	DelegateID    string    `json:"delegateId"`
+	ScopeType     string    `json:"scopeType"`
+	ScopeID       string    `json:"scopeId"`
+	Role          string    `json:"role"`
+	Active        bool      `json:"active"`
+	Grandfathered bool      `json:"grandfathered"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// Delegation edge principal types
+const (
+	DelegationPrincipalUser  = "user"
+	DelegationPrincipalAgent = "agent"
+)
+
+// =============================================================================
+// Agent Credentials (Permissions Foundation Phase 1H)
+// =============================================================================
+
+// AgentCredential represents a tracked agent JWT token credential.
+type AgentCredential struct {
+	ID           string     `json:"id"`
+	AgentID      string     `json:"agent_id"`
+	ProjectID    string     `json:"project_id"`
+	TokenJTIHash string     `json:"token_jti_hash"`
+	IssuedAt     time.Time  `json:"issued_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	RevokedBy    *string    `json:"revoked_by,omitempty"`
+	RevokeReason *string    `json:"revoke_reason,omitempty"`
+	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
+}
+
 // MarshalJSON implements custom marshaling to support legacy groveId field.
 func (m AgentSessionMetrics) MarshalJSON() ([]byte, error) {
 	type Alias AgentSessionMetrics
@@ -2360,4 +2482,80 @@ func (m *AgentSessionMetrics) UnmarshalJSON(data []byte) error {
 		m.ProjectID = aux.GroveID
 	}
 	return nil
+}
+
+// =============================================================================
+// Decision Audit (Authorization Decision Audit Phase 1I)
+// =============================================================================
+
+// DecisionAuditRecord represents an authorization decision audit record.
+type DecisionAuditRecord struct {
+	ID             string
+	Timestamp      time.Time
+	PrincipalKind  string
+	PrincipalID    string
+	CredentialID   string
+	CredentialType string
+	Route          string
+	ResourceType   string
+	ResourceID     string
+	Permission     string
+	Result         string
+	Reason         string
+	MatchedPolicy  string
+	MatchedGrant   string
+	PolicyID       string
+	CorrelationID  string
+	Sampled        bool
+}
+
+// DecisionAuditFilter defines query parameters for listing decision audit records.
+type DecisionAuditFilter struct {
+	PrincipalID   string
+	PrincipalKind string
+	CredentialID  string
+	Route         string
+	ResourceType  string
+	ResourceID    string
+	Result        string // "allow" or "deny"
+	Since         time.Time
+	Until         time.Time
+	CorrelationID string
+	Limit         int
+	Offset        int
+}
+
+// =============================================================================
+// Mutation Audit (Authorization Mutation Audit Phase 1I)
+// =============================================================================
+
+// MutationAuditRecord represents an authorization mutation audit record.
+type MutationAuditRecord struct {
+	ID                  string
+	Timestamp           time.Time
+	MutationType        string
+	ActorPrincipalKind  string
+	ActorPrincipalID    string
+	ActorCredentialID   string
+	ActorCredentialType string
+	TargetType          string
+	TargetID            string
+	BeforeSummary       string
+	AfterSummary        string
+	CanDelegateResult   string
+	CanDelegateReason   string
+}
+
+// MutationAuditFilter defines query parameters for listing mutation audit records.
+type MutationAuditFilter struct {
+	MutationType       string
+	ActorPrincipalID   string
+	ActorPrincipalKind string
+	ActorCredentialID  string
+	TargetType         string
+	TargetID           string
+	Since              time.Time
+	Until              time.Time
+	Limit              int
+	Offset             int
 }

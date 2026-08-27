@@ -17,12 +17,17 @@ package hub
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -84,10 +89,43 @@ type AgentTokenConfig struct {
 	TokenDuration time.Duration
 }
 
+// CredentialRecorder persists agent credentials after token generation.
+// Implementations should be safe to call concurrently.
+type CredentialRecorder interface {
+	RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error
+}
+
+// CredentialChecker looks up agent credentials for revocation checking.
+// Used by RefreshAgentToken to verify the source token has not been revoked
+// before minting a replacement.
+type CredentialChecker interface {
+	GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*store.AgentCredential, error)
+}
+
 // AgentTokenService handles agent token generation and validation.
 type AgentTokenService struct {
-	config AgentTokenConfig
-	signer jose.Signer
+	config             AgentTokenConfig
+	signer             jose.Signer
+	credentialRecorder CredentialRecorder
+	credentialChecker  CredentialChecker
+}
+
+// SetCredentialRecorder sets the credential recorder for persisting issued tokens.
+// This is nil-safe: if not set, token generation works without persistence.
+func (s *AgentTokenService) SetCredentialRecorder(cr CredentialRecorder) {
+	s.credentialRecorder = cr
+}
+
+// SetCredentialChecker sets the credential checker for revocation verification.
+// This is nil-safe: if not set, RefreshAgentToken skips the revocation check.
+func (s *AgentTokenService) SetCredentialChecker(cc CredentialChecker) {
+	s.credentialChecker = cc
+}
+
+// hashJTI returns the SHA-256 hex hash of a JWT ID (JTI).
+func hashJTI(jti string) string {
+	h := sha256.Sum256([]byte(jti))
+	return hex.EncodeToString(h[:])
 }
 
 // NewAgentTokenService creates a new agent token service.
@@ -130,15 +168,17 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 		scopes = []AgentTokenScope{ScopeAgentStatusUpdate}
 	}
 
+	jti := generateTokenID()
+	expiry := now.Add(s.config.TokenDuration)
 	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
 			Issuer:    AgentTokenIssuer,
 			Subject:   agentID,
 			Audience:  jwt.Audience{AgentTokenAudience},
 			IssuedAt:  jwt.NewNumericDate(now),
-			Expiry:    jwt.NewNumericDate(now.Add(s.config.TokenDuration)),
+			Expiry:    jwt.NewNumericDate(expiry),
 			NotBefore: jwt.NewNumericDate(now),
-			ID:        generateTokenID(),
+			ID:        jti,
 		},
 		ProjectID: projectID,
 		Scopes:    scopes,
@@ -148,6 +188,21 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
 	if err != nil {
 		return "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	// Record credential if recorder is configured (best-effort)
+	if s.credentialRecorder != nil {
+		cred := &store.AgentCredential{
+			AgentID:      agentID,
+			ProjectID:    projectID,
+			TokenJTIHash: hashJTI(jti),
+			IssuedAt:     now,
+			ExpiresAt:    expiry,
+		}
+		if err := s.credentialRecorder.RecordAgentCredential(context.Background(), cred); err != nil {
+			slog.Warn("Failed to record agent credential",
+				"agent_id", agentID, "error", err)
+		}
 	}
 
 	return token, nil
@@ -182,10 +237,50 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 // RefreshAgentToken validates an existing agent token and issues a new one
 // with the same claims but a refreshed expiry. The existing token must still
 // be valid (not expired) at the time of the call.
-func (s *AgentTokenService) RefreshAgentToken(tokenString string) (string, time.Time, error) {
+//
+// When a CredentialChecker is configured, the source token's JTI is looked up
+// in the credential store. If the credential has been revoked, the refresh is
+// refused — preventing a revoked-but-unexpired token from obtaining a clean
+// replacement. Pre-table tokens (not found in the store) are allowed through
+// during the compatibility window.
+//
+// This method fails closed on credential-store errors: if the store lookup
+// returns an unexpected error, the refresh is refused. This is stricter than
+// middleware (which fails open) because the consequences differ. Middleware
+// fail-open is bounded — the agent keeps its current token whose lifetime is
+// already capped. Refresh fail-open is unbounded — it mints a brand-new
+// credential, permanently defeating revocation. Failing closed here only
+// prevents session extension, not current operation: the agent still holds a
+// valid unexpired token and can continue working until it expires.
+func (s *AgentTokenService) RefreshAgentToken(ctx context.Context, tokenString string) (string, time.Time, error) {
 	claims, err := s.ValidateAgentToken(tokenString)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("cannot refresh invalid token: %w", err)
+	}
+
+	// Consult the credential store: refuse refresh when the source token is revoked.
+	if s.credentialChecker != nil && claims.ID != "" {
+		jtiHash := hashJTI(claims.ID)
+		cred, credErr := s.credentialChecker.GetAgentCredentialByJTIHash(ctx, jtiHash)
+		switch {
+		case credErr == nil && cred.RevokedAt != nil:
+			return "", time.Time{}, fmt.Errorf("cannot refresh revoked token")
+		case credErr == nil:
+			// Credential exists and is not revoked — proceed
+		case errors.Is(credErr, store.ErrNotFound):
+			// Compatibility window: pre-table token not yet in the credential store.
+			// Allow refresh; the new token will be recorded by GenerateAgentTokenWithExpiry.
+			slog.Warn("RefreshAgentToken: source token not in credential store (legacy/pre-table)",
+				"agent_id", claims.Subject, "jti_hash", jtiHash[:8])
+		default:
+			// Store error — fail closed. Unlike middleware (where fail-open is
+			// bounded by remaining token lifetime), fail-open here would mint a
+			// clean new credential, permanently defeating revocation. The agent
+			// still holds a valid unexpired token and can continue operating.
+			slog.Error("RefreshAgentToken: credential store lookup failed, refusing refresh",
+				"agent_id", claims.Subject, "error", credErr)
+			return "", time.Time{}, fmt.Errorf("cannot refresh token: credential store unavailable: %w", credErr)
+		}
 	}
 
 	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.ProjectID, claims.Scopes, claims.Ancestry)
@@ -200,6 +295,7 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, projectID stri
 		scopes = []AgentTokenScope{ScopeAgentStatusUpdate}
 	}
 
+	jti := generateTokenID()
 	expiry := now.Add(s.config.TokenDuration)
 	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
@@ -209,7 +305,7 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, projectID stri
 			IssuedAt:  jwt.NewNumericDate(now),
 			Expiry:    jwt.NewNumericDate(expiry),
 			NotBefore: jwt.NewNumericDate(now),
-			ID:        generateTokenID(),
+			ID:        jti,
 		},
 		ProjectID: projectID,
 		Scopes:    scopes,
@@ -219,6 +315,21 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, projectID stri
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	// Record credential if recorder is configured (best-effort)
+	if s.credentialRecorder != nil {
+		cred := &store.AgentCredential{
+			AgentID:      agentID,
+			ProjectID:    projectID,
+			TokenJTIHash: hashJTI(jti),
+			IssuedAt:     now,
+			ExpiresAt:    expiry,
+		}
+		if err := s.credentialRecorder.RecordAgentCredential(context.Background(), cred); err != nil {
+			slog.Warn("Failed to record agent credential",
+				"agent_id", agentID, "error", err)
+		}
 	}
 
 	return token, expiry, nil

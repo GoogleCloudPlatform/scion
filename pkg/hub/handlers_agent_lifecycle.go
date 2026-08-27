@@ -182,6 +182,17 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		}
 	}
 
+	// Revoke all credentials for the suspended agent (best-effort, Phase 1H)
+	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", "agent_suspended"); err != nil {
+		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agent.ID, "error", err)
+	}
+
+	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+		MutationType: "agent_credential_revoke",
+		TargetType:   "agent_credential",
+		TargetID:     agent.ID,
+	})
+
 	newPhase := string(state.PhaseSuspended)
 	if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 		Phase:           newPhase,
@@ -370,14 +381,14 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	if projectID == "" {
 		// Global stop-all: platform admin only
-		if userIdent.Role() != "admin" {
+		if !IsUnscopedLocalPlatformAdmin(userIdent) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only admins can stop all agents", nil)
 			return
 		}
 	} else {
 		// Project-scoped stop-all: any project member allowed
-		isAdmin := userIdent.Role() == "admin"
+		isAdmin := IsUnscopedLocalPlatformAdmin(userIdent)
 		if !isAdmin {
 			projectRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
 			if projectRole == "" {

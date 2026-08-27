@@ -29,6 +29,10 @@ import (
 )
 
 // authzTestSetup creates a test server with the authz service and pre-populated data.
+// Note: testServer() removes the delegation edge backfill marker so that
+// agents created directly via the store (without delegation edges) are
+// not denied by the post-backfill no-edge check. Tests that specifically
+// exercise post-backfill behavior re-create the marker explicitly.
 func authzTestSetup(t *testing.T) (*AuthzService, store.Store) {
 	t.Helper()
 	srv, s := testServer(t)

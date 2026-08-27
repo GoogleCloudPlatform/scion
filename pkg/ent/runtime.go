@@ -7,6 +7,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
@@ -14,6 +15,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -30,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
@@ -38,6 +42,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
@@ -146,6 +152,28 @@ func init() {
 	agentDescID := agentFields[0].Descriptor()
 	// agent.DefaultID holds the default value on creation for the id field.
 	agent.DefaultID = agentDescID.Default.(func() uuid.UUID)
+	agentcredentialFields := schema.AgentCredential{}.Fields()
+	_ = agentcredentialFields
+	// agentcredentialDescAgentID is the schema descriptor for agent_id field.
+	agentcredentialDescAgentID := agentcredentialFields[1].Descriptor()
+	// agentcredential.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	agentcredential.AgentIDValidator = agentcredentialDescAgentID.Validators[0].(func(string) error)
+	// agentcredentialDescProjectID is the schema descriptor for project_id field.
+	agentcredentialDescProjectID := agentcredentialFields[2].Descriptor()
+	// agentcredential.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	agentcredential.ProjectIDValidator = agentcredentialDescProjectID.Validators[0].(func(string) error)
+	// agentcredentialDescTokenJtiHash is the schema descriptor for token_jti_hash field.
+	agentcredentialDescTokenJtiHash := agentcredentialFields[3].Descriptor()
+	// agentcredential.TokenJtiHashValidator is a validator for the "token_jti_hash" field. It is called by the builders before save.
+	agentcredential.TokenJtiHashValidator = agentcredentialDescTokenJtiHash.Validators[0].(func(string) error)
+	// agentcredentialDescIssuedAt is the schema descriptor for issued_at field.
+	agentcredentialDescIssuedAt := agentcredentialFields[4].Descriptor()
+	// agentcredential.DefaultIssuedAt holds the default value on creation for the issued_at field.
+	agentcredential.DefaultIssuedAt = agentcredentialDescIssuedAt.Default.(func() time.Time)
+	// agentcredentialDescID is the schema descriptor for id field.
+	agentcredentialDescID := agentcredentialFields[0].Descriptor()
+	// agentcredential.DefaultID holds the default value on creation for the id field.
+	agentcredential.DefaultID = agentcredentialDescID.Default.(func() uuid.UUID)
 	agentsessionmetricsFields := schema.AgentSessionMetrics{}.Fields()
 	_ = agentsessionmetricsFields
 	// agentsessionmetricsDescAgentID is the schema descriptor for agent_id field.
@@ -306,6 +334,84 @@ func init() {
 	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
 	// chatlinkcode.DefaultID holds the default value on creation for the id field.
 	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
+	decisionauditFields := schema.DecisionAudit{}.Fields()
+	_ = decisionauditFields
+	// decisionauditDescTimestamp is the schema descriptor for timestamp field.
+	decisionauditDescTimestamp := decisionauditFields[1].Descriptor()
+	// decisionaudit.DefaultTimestamp holds the default value on creation for the timestamp field.
+	decisionaudit.DefaultTimestamp = decisionauditDescTimestamp.Default.(func() time.Time)
+	// decisionauditDescPrincipalKind is the schema descriptor for principal_kind field.
+	decisionauditDescPrincipalKind := decisionauditFields[2].Descriptor()
+	// decisionaudit.PrincipalKindValidator is a validator for the "principal_kind" field. It is called by the builders before save.
+	decisionaudit.PrincipalKindValidator = decisionauditDescPrincipalKind.Validators[0].(func(string) error)
+	// decisionauditDescPrincipalID is the schema descriptor for principal_id field.
+	decisionauditDescPrincipalID := decisionauditFields[3].Descriptor()
+	// decisionaudit.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	decisionaudit.PrincipalIDValidator = decisionauditDescPrincipalID.Validators[0].(func(string) error)
+	// decisionauditDescResourceType is the schema descriptor for resource_type field.
+	decisionauditDescResourceType := decisionauditFields[7].Descriptor()
+	// decisionaudit.ResourceTypeValidator is a validator for the "resource_type" field. It is called by the builders before save.
+	decisionaudit.ResourceTypeValidator = decisionauditDescResourceType.Validators[0].(func(string) error)
+	// decisionauditDescPermission is the schema descriptor for permission field.
+	decisionauditDescPermission := decisionauditFields[9].Descriptor()
+	// decisionaudit.PermissionValidator is a validator for the "permission" field. It is called by the builders before save.
+	decisionaudit.PermissionValidator = decisionauditDescPermission.Validators[0].(func(string) error)
+	// decisionauditDescResult is the schema descriptor for result field.
+	decisionauditDescResult := decisionauditFields[10].Descriptor()
+	// decisionaudit.ResultValidator is a validator for the "result" field. It is called by the builders before save.
+	decisionaudit.ResultValidator = decisionauditDescResult.Validators[0].(func(string) error)
+	// decisionauditDescReason is the schema descriptor for reason field.
+	decisionauditDescReason := decisionauditFields[11].Descriptor()
+	// decisionaudit.ReasonValidator is a validator for the "reason" field. It is called by the builders before save.
+	decisionaudit.ReasonValidator = decisionauditDescReason.Validators[0].(func(string) error)
+	// decisionauditDescSampled is the schema descriptor for sampled field.
+	decisionauditDescSampled := decisionauditFields[16].Descriptor()
+	// decisionaudit.DefaultSampled holds the default value on creation for the sampled field.
+	decisionaudit.DefaultSampled = decisionauditDescSampled.Default.(bool)
+	// decisionauditDescID is the schema descriptor for id field.
+	decisionauditDescID := decisionauditFields[0].Descriptor()
+	// decisionaudit.DefaultID holds the default value on creation for the id field.
+	decisionaudit.DefaultID = decisionauditDescID.Default.(func() uuid.UUID)
+	delegationedgeFields := schema.DelegationEdge{}.Fields()
+	_ = delegationedgeFields
+	// delegationedgeDescDelegatorID is the schema descriptor for delegator_id field.
+	delegationedgeDescDelegatorID := delegationedgeFields[2].Descriptor()
+	// delegationedge.DelegatorIDValidator is a validator for the "delegator_id" field. It is called by the builders before save.
+	delegationedge.DelegatorIDValidator = delegationedgeDescDelegatorID.Validators[0].(func(string) error)
+	// delegationedgeDescDelegateID is the schema descriptor for delegate_id field.
+	delegationedgeDescDelegateID := delegationedgeFields[4].Descriptor()
+	// delegationedge.DelegateIDValidator is a validator for the "delegate_id" field. It is called by the builders before save.
+	delegationedge.DelegateIDValidator = delegationedgeDescDelegateID.Validators[0].(func(string) error)
+	// delegationedgeDescScopeID is the schema descriptor for scope_id field.
+	delegationedgeDescScopeID := delegationedgeFields[6].Descriptor()
+	// delegationedge.DefaultScopeID holds the default value on creation for the scope_id field.
+	delegationedge.DefaultScopeID = delegationedgeDescScopeID.Default.(string)
+	// delegationedgeDescRole is the schema descriptor for role field.
+	delegationedgeDescRole := delegationedgeFields[7].Descriptor()
+	// delegationedge.RoleValidator is a validator for the "role" field. It is called by the builders before save.
+	delegationedge.RoleValidator = delegationedgeDescRole.Validators[0].(func(string) error)
+	// delegationedgeDescActive is the schema descriptor for active field.
+	delegationedgeDescActive := delegationedgeFields[8].Descriptor()
+	// delegationedge.DefaultActive holds the default value on creation for the active field.
+	delegationedge.DefaultActive = delegationedgeDescActive.Default.(bool)
+	// delegationedgeDescGrandfathered is the schema descriptor for grandfathered field.
+	delegationedgeDescGrandfathered := delegationedgeFields[9].Descriptor()
+	// delegationedge.DefaultGrandfathered holds the default value on creation for the grandfathered field.
+	delegationedge.DefaultGrandfathered = delegationedgeDescGrandfathered.Default.(bool)
+	// delegationedgeDescCreated is the schema descriptor for created field.
+	delegationedgeDescCreated := delegationedgeFields[10].Descriptor()
+	// delegationedge.DefaultCreated holds the default value on creation for the created field.
+	delegationedge.DefaultCreated = delegationedgeDescCreated.Default.(func() time.Time)
+	// delegationedgeDescUpdated is the schema descriptor for updated field.
+	delegationedgeDescUpdated := delegationedgeFields[11].Descriptor()
+	// delegationedge.DefaultUpdated holds the default value on creation for the updated field.
+	delegationedge.DefaultUpdated = delegationedgeDescUpdated.Default.(func() time.Time)
+	// delegationedge.UpdateDefaultUpdated holds the default value on update for the updated field.
+	delegationedge.UpdateDefaultUpdated = delegationedgeDescUpdated.UpdateDefault.(func() time.Time)
+	// delegationedgeDescID is the schema descriptor for id field.
+	delegationedgeDescID := delegationedgeFields[0].Descriptor()
+	// delegationedge.DefaultID holds the default value on creation for the id field.
+	delegationedge.DefaultID = delegationedgeDescID.Default.(func() uuid.UUID)
 	envvarFields := schema.EnvVar{}.Fields()
 	_ = envvarFields
 	// envvarDescKey is the schema descriptor for key field.
@@ -792,6 +898,36 @@ func init() {
 	messageDescID := messageFields[0].Descriptor()
 	// message.DefaultID holds the default value on creation for the id field.
 	message.DefaultID = messageDescID.Default.(func() uuid.UUID)
+	mutationauditFields := schema.MutationAudit{}.Fields()
+	_ = mutationauditFields
+	// mutationauditDescTimestamp is the schema descriptor for timestamp field.
+	mutationauditDescTimestamp := mutationauditFields[1].Descriptor()
+	// mutationaudit.DefaultTimestamp holds the default value on creation for the timestamp field.
+	mutationaudit.DefaultTimestamp = mutationauditDescTimestamp.Default.(func() time.Time)
+	// mutationauditDescMutationType is the schema descriptor for mutation_type field.
+	mutationauditDescMutationType := mutationauditFields[2].Descriptor()
+	// mutationaudit.MutationTypeValidator is a validator for the "mutation_type" field. It is called by the builders before save.
+	mutationaudit.MutationTypeValidator = mutationauditDescMutationType.Validators[0].(func(string) error)
+	// mutationauditDescActorPrincipalKind is the schema descriptor for actor_principal_kind field.
+	mutationauditDescActorPrincipalKind := mutationauditFields[3].Descriptor()
+	// mutationaudit.ActorPrincipalKindValidator is a validator for the "actor_principal_kind" field. It is called by the builders before save.
+	mutationaudit.ActorPrincipalKindValidator = mutationauditDescActorPrincipalKind.Validators[0].(func(string) error)
+	// mutationauditDescActorPrincipalID is the schema descriptor for actor_principal_id field.
+	mutationauditDescActorPrincipalID := mutationauditFields[4].Descriptor()
+	// mutationaudit.ActorPrincipalIDValidator is a validator for the "actor_principal_id" field. It is called by the builders before save.
+	mutationaudit.ActorPrincipalIDValidator = mutationauditDescActorPrincipalID.Validators[0].(func(string) error)
+	// mutationauditDescTargetType is the schema descriptor for target_type field.
+	mutationauditDescTargetType := mutationauditFields[7].Descriptor()
+	// mutationaudit.TargetTypeValidator is a validator for the "target_type" field. It is called by the builders before save.
+	mutationaudit.TargetTypeValidator = mutationauditDescTargetType.Validators[0].(func(string) error)
+	// mutationauditDescTargetID is the schema descriptor for target_id field.
+	mutationauditDescTargetID := mutationauditFields[8].Descriptor()
+	// mutationaudit.TargetIDValidator is a validator for the "target_id" field. It is called by the builders before save.
+	mutationaudit.TargetIDValidator = mutationauditDescTargetID.Validators[0].(func(string) error)
+	// mutationauditDescID is the schema descriptor for id field.
+	mutationauditDescID := mutationauditFields[0].Descriptor()
+	// mutationaudit.DefaultID holds the default value on creation for the id field.
+	mutationaudit.DefaultID = mutationauditDescID.Default.(func() uuid.UUID)
 	noncecacheFields := schema.NonceCache{}.Fields()
 	_ = noncecacheFields
 	// noncecacheDescNonce is the schema descriptor for nonce field.
@@ -976,6 +1112,48 @@ func init() {
 	projectsyncstateDescID := projectsyncstateFields[0].Descriptor()
 	// projectsyncstate.DefaultID holds the default value on creation for the id field.
 	projectsyncstate.DefaultID = projectsyncstateDescID.Default.(func() uuid.UUID)
+	rolebindingFields := schema.RoleBinding{}.Fields()
+	_ = rolebindingFields
+	// rolebindingDescPrincipalID is the schema descriptor for principal_id field.
+	rolebindingDescPrincipalID := rolebindingFields[3].Descriptor()
+	// rolebinding.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	rolebinding.PrincipalIDValidator = rolebindingDescPrincipalID.Validators[0].(func(string) error)
+	// rolebindingDescScopeID is the schema descriptor for scope_id field.
+	rolebindingDescScopeID := rolebindingFields[5].Descriptor()
+	// rolebinding.DefaultScopeID holds the default value on creation for the scope_id field.
+	rolebinding.DefaultScopeID = rolebindingDescScopeID.Default.(string)
+	// rolebindingDescCreated is the schema descriptor for created field.
+	rolebindingDescCreated := rolebindingFields[7].Descriptor()
+	// rolebinding.DefaultCreated holds the default value on creation for the created field.
+	rolebinding.DefaultCreated = rolebindingDescCreated.Default.(func() time.Time)
+	// rolebindingDescID is the schema descriptor for id field.
+	rolebindingDescID := rolebindingFields[0].Descriptor()
+	// rolebinding.DefaultID holds the default value on creation for the id field.
+	rolebinding.DefaultID = rolebindingDescID.Default.(func() uuid.UUID)
+	roledefinitionFields := schema.RoleDefinition{}.Fields()
+	_ = roledefinitionFields
+	// roledefinitionDescName is the schema descriptor for name field.
+	roledefinitionDescName := roledefinitionFields[1].Descriptor()
+	// roledefinition.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	roledefinition.NameValidator = roledefinitionDescName.Validators[0].(func(string) error)
+	// roledefinitionDescSystem is the schema descriptor for system field.
+	roledefinitionDescSystem := roledefinitionFields[5].Descriptor()
+	// roledefinition.DefaultSystem holds the default value on creation for the system field.
+	roledefinition.DefaultSystem = roledefinitionDescSystem.Default.(bool)
+	// roledefinitionDescCreated is the schema descriptor for created field.
+	roledefinitionDescCreated := roledefinitionFields[6].Descriptor()
+	// roledefinition.DefaultCreated holds the default value on creation for the created field.
+	roledefinition.DefaultCreated = roledefinitionDescCreated.Default.(func() time.Time)
+	// roledefinitionDescUpdated is the schema descriptor for updated field.
+	roledefinitionDescUpdated := roledefinitionFields[7].Descriptor()
+	// roledefinition.DefaultUpdated holds the default value on creation for the updated field.
+	roledefinition.DefaultUpdated = roledefinitionDescUpdated.Default.(func() time.Time)
+	// roledefinition.UpdateDefaultUpdated holds the default value on update for the updated field.
+	roledefinition.UpdateDefaultUpdated = roledefinitionDescUpdated.UpdateDefault.(func() time.Time)
+	// roledefinitionDescID is the schema descriptor for id field.
+	roledefinitionDescID := roledefinitionFields[0].Descriptor()
+	// roledefinition.DefaultID holds the default value on creation for the id field.
+	roledefinition.DefaultID = roledefinitionDescID.Default.(func() uuid.UUID)
 	runtimebrokerFields := schema.RuntimeBroker{}.Fields()
 	_ = runtimebrokerFields
 	// runtimebrokerDescName is the schema descriptor for name field.

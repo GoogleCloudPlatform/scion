@@ -545,6 +545,10 @@ func TestRequireAdmin_IdentityKinds(t *testing.T) {
 			wantOK: false, wantStatus: http.StatusForbidden, wantPrincipalType: "user",
 		},
 		{
+			name: "federated admin user is forbidden", identity: NewFederatedUserIdentity("https://issuer.example", "admin", "admin@example.com", "Admin", "admin", nil),
+			wantOK: false, wantStatus: http.StatusForbidden, wantPrincipalType: "federated_user",
+		},
+		{
 			name: "dev-auth identity is treated as a user", identity: NewDevUser(DevUserConfig{Username: "dev"}),
 			wantOK: true,
 		},

@@ -751,6 +751,12 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "credential_revoke",
+		TargetType:   "user_access_token",
+		TargetID:     id,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1277,7 +1283,11 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				user.AvatarURL = info.AvatarURL
 			}
 			user.LastLogin = time.Now()
+			oldRole := user.Role
 			user.Role = s.getUserRole(info.Email, user.Role)
+			if oldRole == "admin" && user.Role != "admin" {
+				s.deleteSuperAdminBinding(ctx, user.ID)
+			}
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
 		} else {
 			// Update last login and backfill profile
@@ -1288,10 +1298,19 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			if info.DisplayName != "" && user.DisplayName == "" {
 				user.DisplayName = info.DisplayName
 			}
-			// Re-evaluate admin status on every login
+			// Re-evaluate admin status on every login.
+			// D11-fix2: when demotion actually happens (admin → non-admin),
+			// also delete the super-admin binding so IsSystemAdmin immediately
+			// agrees with IsUnscopedLocalPlatformAdmin. The empty-list guard
+			// is inherited: determineUserRole refuses to demote when AdminEmails
+			// is nil/empty, so oldRole == newRole and this branch is skipped.
 			if newRole := s.getUserRole(info.Email, user.Role); user.Role != newRole {
-				slog.Info("User role changed on login", "email", info.Email, "old_role", user.Role, "new_role", newRole)
+				oldRole := user.Role
+				slog.Info("User role changed on login", "email", info.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
+				if oldRole == "admin" {
+					s.deleteSuperAdminBinding(ctx, user.ID)
+				}
 			}
 		}
 		if err := s.store.UpdateUser(ctx, user); err != nil {
@@ -1430,21 +1449,46 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 // determineUserRole returns the role for a user based on their email and the
 // role they currently hold.
 //
-// The adminEmails config list is additive-only: it acts as a floor, not a
-// ceiling. A user is "admin" if their email is in adminEmails, so config always
-// promotes. Otherwise any role the user already holds is preserved verbatim —
-// including "viewer" and any role added in future — so config never demotes or
-// rewrites a role set through the admin UI/API. Only a user with no stored role
-// (that is, one that does not exist yet) defaults to "member".
+// The adminEmails config list is the sole authority for the "admin" role:
+//   - Present in adminEmails → always "admin" (promotion).
+//   - Absent from adminEmails AND currentRole is "admin" → demoted to "member"
+//     (D11: removal from AdminEmails is no longer a no-op).
+//   - Absent from adminEmails AND currentRole is anything else → preserved
+//     verbatim (including "viewer" and any role added in future).
+//   - No stored role (new user) → "member".
+//
+// This function intentionally does NOT demote non-admin roles: a "viewer" set
+// through the admin UI stays "viewer". Only the "admin" role is owned by
+// config; all other roles are owned by the database.
+//
+// demotionSafe gates whether demotion is permitted: it is set to true by the
+// startup reconciler only when the intended admin set is non-empty. When false
+// (reconciler refused demotions, never ran, or errored), login-time demotion
+// is blocked to prevent one-at-a-time admin loss through the interactive path.
 //
 // currentRole is the user's role as stored in the database; pass "" for a user
 // that does not exist yet.
-func determineUserRole(email string, adminEmails []string, currentRole string) string {
+func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool) string {
 	emailLower := strings.ToLower(email)
 	for _, adminEmail := range adminEmails {
 		if strings.ToLower(adminEmail) == emailLower {
 			return "admin"
 		}
+	}
+	// D11: if the user currently holds "admin" but is no longer in adminEmails,
+	// demote to "member". The admin role is owned by config, not by the store.
+	//
+	// Empty-list safety: when adminEmails is nil or empty, do NOT demote.
+	// An empty list is almost always a config load failure, not an instruction
+	// to remove every administrator. The reconciliation function has its own
+	// empty-list guard, but login-time evaluation must be equally safe.
+	//
+	// Reconciler guard: when demotionSafe is false (reconciler refused batch
+	// demotions because the intended admin set was empty, or reconciler never
+	// ran), refuse login-time demotion too — the same condition that prevents
+	// mass demotion at startup must prevent one-at-a-time demotion at login.
+	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe {
+		return "member"
 	}
 	if currentRole != "" {
 		return currentRole
@@ -1453,8 +1497,12 @@ func determineUserRole(email string, adminEmails []string, currentRole string) s
 }
 
 // (s *Server) getUserRole is a convenience method to determine role using server config.
+// It consults the process-level demotionSafe flag set by the startup reconciler:
+// when the reconciler refused demotions (zero intended admins, empty config, or
+// reconciler never ran), demotionSafe is false and login-time demotion is blocked
+// to prevent one-at-a-time admin loss through the interactive path.
 func (s *Server) getUserRole(email, currentRole string) string {
-	return determineUserRole(email, s.AdminEmails(), currentRole)
+	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load())
 }
 
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.
@@ -1530,4 +1578,35 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 			"email": user.Email(),
 		},
 	})
+}
+
+// deleteSuperAdminBinding removes the system-scoped super-admin role binding for
+// a user, if one exists. Called at login time when demotion actually happened
+// (D11-fix2, Finding 3) so that IsSystemAdmin immediately agrees with
+// IsUnscopedLocalPlatformAdmin. Best-effort: errors are logged but do not fail
+// the login — the next startup reconciliation will clean up.
+func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
+	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		slog.Warn("deleteSuperAdminBinding: super-admin role definition not found", "user_id", userID, "error", err)
+		return
+	}
+
+	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		slog.Warn("deleteSuperAdminBinding: failed to list bindings", "user_id", userID, "error", err)
+		return
+	}
+
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			if err := s.store.DeleteRoleBinding(ctx, b.ID); err != nil {
+				slog.Warn("deleteSuperAdminBinding: failed to delete binding",
+					"user_id", userID, "binding_id", b.ID, "error", err)
+			} else {
+				slog.Info("deleted super-admin binding at login-time demotion",
+					"user_id", userID, "binding_id", b.ID)
+			}
+		}
+	}
 }

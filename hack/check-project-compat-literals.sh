@@ -179,6 +179,7 @@ allowed_paths=(
   "^pkg/hub/project_compat.go$"
   "^pkg/hub/project_webdav.go$"
   "^pkg/hub/response_types.go$"
+  "^pkg/hub/route_metadata.go$"
   "^pkg/hub/server.go$"
   "^pkg/hub/system_handlers.go$"
   "^pkg/hub/template_handlers.go$"

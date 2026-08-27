@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -64,13 +65,97 @@ type Resource struct {
 	Ancestry   []string          // Ordered ancestor chain [root, ..., parent] for transitive access
 }
 
+// PrincipalKind describes the authenticated actor evaluated by an authorization request.
+type PrincipalKind string
+
+const (
+	PrincipalKindUser             PrincipalKind = "user"
+	PrincipalKindAgent            PrincipalKind = "agent"
+	PrincipalKindFederatedUser    PrincipalKind = "federated_user"
+	PrincipalKindFederatedAgent   PrincipalKind = "federated_agent"
+	PrincipalKindFederatedService PrincipalKind = "federated_service"
+	PrincipalKindBroker           PrincipalKind = "broker"
+	PrincipalKindDev              PrincipalKind = "dev"
+)
+
+// CredentialKind describes the authentication material that established a principal.
+// Credential constraints are caveats: they may narrow authority but never grant it.
+type CredentialKind string
+
+const (
+	CredentialKindInteractive CredentialKind = "interactive"
+	CredentialKindUAT         CredentialKind = "uat"
+	CredentialKindAgentJWT    CredentialKind = "agent_jwt"
+	CredentialKindFederation  CredentialKind = "federation"
+	CredentialKindBroker      CredentialKind = "broker"
+	CredentialKindDev         CredentialKind = "dev"
+)
+
+// PrincipalContext identifies the authenticated actor for an authorization request.
+// Identity remains available during the migration so existing policy evaluation can
+// use the established identity interfaces.
+type PrincipalContext struct {
+	Kind     PrincipalKind
+	ID       string
+	Identity Identity
+}
+
+// CredentialContext records the credential used for an authorization request.
+// ProjectID and Scopes are caveats for scoped bearer credentials.
+type CredentialContext struct {
+	Kind      CredentialKind
+	ID        string
+	Type      string
+	ProjectID string
+	Scopes    []string
+}
+
+// AuthzRequest carries both the acting principal and the credential caveats.
+type AuthzRequest struct {
+	Principal  PrincipalContext
+	Credential CredentialContext
+	Resource   Resource
+	Action     Action
+	Explain    bool // When true, collect step-by-step trace in Decision
+}
+
+// AuthzRequestFromContext builds a request from authentication middleware
+// context. Legacy callers that supplied only an identity receive a derived
+// credential context, keeping the compatibility adapter safe during migration.
+func AuthzRequestFromContext(ctx context.Context, resource Resource, action Action) AuthzRequest {
+	identity := GetIdentityFromContext(ctx)
+	credential := GetCredentialContextFromContext(ctx)
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(identity)
+	}
+	return AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credential,
+		Resource:   resource,
+		Action:     action,
+	}
+}
+
+// DecisionStep represents a single step in the authorization explain trace.
+type DecisionStep struct {
+	Step   string `json:"step"`
+	Detail string `json:"detail"`
+}
+
 // Decision represents the result of an authorization check.
 type Decision struct {
-	Allowed    bool   // Whether access is allowed
-	Reason     string // Human-readable explanation
-	PolicyID   string // ID of the matched policy (if any)
-	PolicyName string // Name of the matched policy (if any)
-	Scope      string // Scope level that decided (hub, project, resource)
+	Allowed        bool   // Whether access is allowed
+	Reason         string // Human-readable explanation
+	PolicyID       string // ID of the matched policy (if any)
+	PolicyName     string // Name of the matched policy (if any)
+	Scope          string // Scope level that decided (hub, project, resource)
+	MatchedGrant   string // Audit-ready matched grant identifier
+	MatchedPolicy  string // Audit-ready matched policy identifier
+	PrincipalKind  PrincipalKind
+	CredentialID   string
+	CredentialType string
+	CredentialKind string
+	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
 }
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
@@ -81,50 +166,319 @@ type EvaluationDetail struct {
 	EffectiveGroups   []string `json:"effectiveGroups,omitempty"`
 }
 
+// DecisionAuditEmitter is an interface for emitting decision audit records.
+type DecisionAuditEmitter interface {
+	EmitDecisionAudit(ctx context.Context, record *store.DecisionAuditRecord)
+}
+
 // AuthzService provides authorization checks using the policy evaluation engine.
 type AuthzService struct {
-	store  store.Store
-	logger *slog.Logger
+	store                   store.Store
+	logger                  *slog.Logger
+	decisionAuditEmitter    DecisionAuditEmitter
+	DecisionAuditSampleRate float64 // 1.0 = audit everything, <1.0 = sample allow decisions
+
+	// backfillDone caches the delegation edge backfill completion check.
+	// The marker is write-once: once latched to true it never reverts.
+	// Uses atomic.Bool for thread safety — only the false→true transition
+	// is cached; a false result is re-queried on every call so that the
+	// latch catches up as soon as the backfill completes.
+	backfillDone atomic.Bool
 }
 
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 	return &AuthzService{
-		store:  s,
-		logger: logger,
+		store:                   s,
+		logger:                  logger,
+		DecisionAuditSampleRate: 1.0,
 	}
+}
+
+// SetDecisionAuditEmitter configures the decision audit emitter.
+func (a *AuthzService) SetDecisionAuditEmitter(emitter DecisionAuditEmitter) {
+	a.decisionAuditEmitter = emitter
 }
 
 // CheckAccess evaluates whether the given identity is allowed to perform
 // the specified action on the resource.
 func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resource Resource, action Action) Decision {
-	switch identity.Type() {
-	case "user", "dev":
-		if user, ok := identity.(UserIdentity); ok {
-			return a.checkAccessForUser(ctx, user, resource, action)
-		}
-		return Decision{Allowed: false, Reason: "invalid user identity"}
-	case "agent":
-		if agent, ok := identity.(AgentIdentity); ok {
-			return a.checkAccessForAgent(ctx, agent, resource, action)
-		}
-		return Decision{Allowed: false, Reason: "invalid agent identity"}
-	default:
-		return Decision{Allowed: false, Reason: "unknown identity type"}
+	return a.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   resource,
+		Action:     action,
+	})
+}
+
+// Decide evaluates an authorization request. Credential caveats are applied
+// before legacy principal baselines, so a scoped credential can never inherit
+// an admin or super-admin bypass from its principal.
+func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+	principal := request.Principal
+	if principal.Identity == nil {
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential)
 	}
+	derivedPrincipal := principalContextForIdentity(principal.Identity)
+	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
+	}
+	principal.Kind = derivedPrincipal.Kind
+	if principal.ID == "" {
+		principal.ID = derivedPrincipal.ID
+	}
+
+	credential := request.Credential
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(principal.Identity)
+	}
+
+	// Initialize explain trace if requested
+	var trace []DecisionStep
+	if request.Explain {
+		trace = make([]DecisionStep, 0)
+		trace = append(trace, DecisionStep{Step: "principal_resolved", Detail: string(principal.Kind) + ":" + principal.ID})
+		credDetail := string(credential.Kind) + " credential"
+		if credential.ID != "" {
+			credDetail += ", id=" + credential.ID
+		}
+		trace = append(trace, DecisionStep{Step: "credential_checked", Detail: credDetail})
+	}
+
+	var decision Decision
+	switch principal.Kind {
+	case PrincipalKindUser, PrincipalKindDev, PrincipalKindFederatedUser:
+		user, ok := principal.Identity.(UserIdentity)
+		if !ok {
+			decision = Decision{Allowed: false, Reason: "invalid user identity"}
+			break
+		}
+		if credential.Kind == CredentialKindUAT {
+			user = NewScopedUserIdentity(user, credential.ProjectID, credential.Scopes)
+		}
+		decision = a.checkAccessForUser(ctx, user, request.Resource, request.Action)
+	case PrincipalKindAgent, PrincipalKindFederatedAgent:
+		agent, ok := principal.Identity.(AgentIdentity)
+		if !ok {
+			decision = Decision{Allowed: false, Reason: "invalid agent identity"}
+			break
+		}
+		// Ensure delegation ceiling cache is available for this request.
+		if getDelegationCeilingCache(ctx) == nil {
+			ctx = contextWithDelegationCeilingCache(ctx)
+		}
+		decision = a.checkAccessForAgent(ctx, agent, request.Resource, request.Action)
+
+		// Step 2.5: Live delegation ceiling (Phase 1G).
+		// If the agent was allowed by policy/role, verify the delegation chain
+		// still supports it. The ceiling intersects with, not replaces, the
+		// existing permission determination.
+		if decision.Allowed {
+			var ceilingExplain *[]DecisionStep
+			if request.Explain && trace != nil {
+				ceilingExplain = &trace
+			}
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), ceilingExplain)
+			if ceilingErr != nil {
+				// Fail-closed for all non-read-only operations
+				if !isReadOnlyOperation(request.Action) {
+					decision.Allowed = false
+					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+				}
+				// For read-only operations (read, list, verify), log and allow
+			} else if !ceilingAllowed {
+				decision.Allowed = false
+				decision.Reason = ceilingReason
+			}
+		}
+	case PrincipalKindFederatedService:
+		decision = Decision{Allowed: false, Reason: "federated service identities are not supported"}
+	case PrincipalKindBroker:
+		decision = Decision{Allowed: false, Reason: "broker identities are not supported by policy authorization"}
+	default:
+		decision = Decision{Allowed: false, Reason: "unknown identity type"}
+	}
+
+	// Attach explain trace
+	if request.Explain && trace != nil {
+		// Check admin bypass
+		adminDetail := "not admin, skipped"
+		if user, ok := principal.Identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
+			adminDetail = "admin bypass active"
+		}
+		trace = append(trace, DecisionStep{Step: "admin_bypass_checked", Detail: adminDetail})
+
+		resultDetail := "denied: " + decision.Reason
+		if decision.Allowed {
+			resultDetail = "allowed by " + decision.Reason
+			if decision.PolicyName != "" {
+				resultDetail += " (policy: " + decision.PolicyName + ")"
+			}
+		}
+		trace = append(trace, DecisionStep{Step: "decision", Detail: resultDetail})
+		decision.ExplainTrace = trace
+	}
+
+	result := decorateDecision(decision, principal, credential)
+
+	// Emit decision audit if emitter is configured
+	if a.decisionAuditEmitter != nil {
+		a.emitDecisionAudit(ctx, request, result)
+	}
+
+	return result
+}
+
+// DecideFromContext evaluates a request using the authenticated principal and
+// credential metadata established by middleware.
+func (a *AuthzService) DecideFromContext(ctx context.Context, resource Resource, action Action) Decision {
+	return a.Decide(ctx, AuthzRequestFromContext(ctx, resource, action))
+}
+
+// AuthorizeReadBatch evaluates read enforcement decisions without converting
+// authorization-store failures into denials. Capability projections retain
+// their best-effort behavior; list enforcement must fail closed instead.
+func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
+		return makeAllowed(len(resources)), nil
+	}
+
+	principals, err := a.authorizationPrincipals(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.store.GetPoliciesForPrincipals(ctx, principals); err != nil {
+		return nil, err
+	}
+	if GetIdentityFromContext(ctx) != identity {
+		ctx = contextWithIdentity(ctx, identity)
+	}
+	allowed := make([]bool, len(resources))
+	for i := range resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		decision := a.DecideFromContext(ctx, resources[i], ActionRead)
+		if decision.Reason == "policy lookup error" {
+			return nil, errors.New("authorization policy lookup failed")
+		}
+		allowed[i] = decision.Allowed
+	}
+	return allowed, nil
+}
+
+func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Identity) ([]store.PrincipalRef, error) {
+	principals := []store.PrincipalRef{{Type: identity.Type(), ID: identity.ID()}}
+	var (
+		groups []string
+		err    error
+	)
+	switch identity.Type() {
+	case "user", "dev", "federated_user":
+		principals[0].Type = "user"
+		groups, err = a.store.GetEffectiveGroups(ctx, identity.ID())
+	case "agent", "federated_agent":
+		principals[0].Type = "agent"
+		groups, err = a.store.GetEffectiveGroupsForAgent(ctx, identity.ID())
+	default:
+		return principals, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	for _, groupID := range groups {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: groupID})
+	}
+	return principals, nil
+}
+
+func makeAllowed(n int) []bool {
+	allowed := make([]bool, n)
+	for i := range allowed {
+		allowed[i] = true
+	}
+	return allowed
+}
+
+func principalContextForIdentity(identity Identity) PrincipalContext {
+	if identity == nil {
+		return PrincipalContext{}
+	}
+	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
+	switch identity.Type() {
+	case "user":
+		principal.Kind = PrincipalKindUser
+	case "agent":
+		principal.Kind = PrincipalKindAgent
+	case "federated_user":
+		principal.Kind = PrincipalKindFederatedUser
+	case "federated_agent":
+		principal.Kind = PrincipalKindFederatedAgent
+	case "federated_service":
+		principal.Kind = PrincipalKindFederatedService
+	case "broker":
+		principal.Kind = PrincipalKindBroker
+	case "dev":
+		principal.Kind = PrincipalKindDev
+	}
+	return principal
+}
+
+func credentialContextForIdentity(identity Identity) CredentialContext {
+	if identity == nil {
+		return CredentialContext{}
+	}
+	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+	}
+	switch identity.Type() {
+	case "agent":
+		credential := CredentialContext{Kind: CredentialKindAgentJWT}
+		if agent, ok := identity.(*agentIdentityWrapper); ok && agent.AgentTokenClaims != nil {
+			credential.ID = agent.Claims.ID
+		}
+		return credential
+	case "federated_user", "federated_agent", "federated_service":
+		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
+	case "broker":
+		return CredentialContext{Kind: CredentialKindBroker}
+	case "dev":
+		return CredentialContext{Kind: CredentialKindDev}
+	default:
+		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
+	}
+}
+
+func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext) Decision {
+	decision.PrincipalKind = principal.Kind
+	decision.CredentialID = credential.ID
+	decision.CredentialType = credential.Type
+	decision.CredentialKind = string(credential.Kind)
+	if decision.MatchedPolicy == "" {
+		decision.MatchedPolicy = decision.PolicyID
+	}
+	if decision.MatchedGrant == "" {
+		decision.MatchedGrant = decision.PolicyName
+	}
+	return decision
 }
 
 // checkAccessForUser evaluates access for a user principal.
 func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action) Decision {
 	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
-	if scoped, ok := user.(*ScopedUserIdentity); ok {
-		if denied := a.enforceUATConstraints(scoped, resource, action); denied != nil {
+	if scopedIdentity, ok := user.(*ScopedUserIdentity); ok {
+		if denied := a.enforceUATConstraints(scopedIdentity, resource, action); denied != nil {
 			return *denied
 		}
 	}
 
-	// 1. Admin bypass
-	if user.Role() == "admin" {
+	// 1. Admin bypass. Scoped UAT credentials must not inherit hub-admin
+	// semantics from the underlying user after their project/scope constraints
+	// pass; they continue through owner, project membership, and policy grants.
+	if IsUnscopedLocalPlatformAdmin(user) {
 		return Decision{
 			Allowed: true,
 			Reason:  "admin bypass",
@@ -428,7 +782,14 @@ func (a *AuthzService) checkDelegation(ctx context.Context, agent AgentIdentity,
 		// If store-level delegation didn't match, check ancestry chain.
 		// This supports progeny access: the DelegatedFrom principal may be
 		// an ancestor (not the direct creator) of this agent.
-		if !allowed && policy.Conditions.DelegatedFrom != nil {
+		//
+		// Phase 1G security fix 3: the ancestry fallback is gated on
+		// AncestryIsHubAttested. For federated agents, the ancestry array
+		// is a remote claim and must not be used for local delegation
+		// matching. Federated ancestry was already validated at auth time
+		// (fixes 1 and 2), but fix 3 is the load-bearing fix — it does
+		// not depend on optional AllowedRootUsers config.
+		if !allowed && policy.Conditions.DelegatedFrom != nil && AncestryIsHubAttested(agent) {
 			ancestry := agent.Ancestry()
 			for _, ancestorID := range ancestry {
 				if policy.Conditions.DelegatedFrom.PrincipalID == ancestorID {
@@ -453,8 +814,26 @@ func (a *AuthzService) checkDelegation(ctx context.Context, agent AgentIdentity,
 }
 
 // evaluatePolicies applies the policy evaluation loop against a set of policies.
-// Policies are expected to be ordered by scope_type ASC, priority ASC.
-// Lower scope overrides higher scope; higher priority overrides lower within scope.
+// Policies are expected to be ordered by a deterministic total order (ascending):
+//
+//  1. scope_type: hub < project < resource (more specific scope wins)
+//  2. priority: lower number < higher number (higher priority wins)
+//  3. policy_kind: default < explicit (explicit wins over default at same priority)
+//  4. created: earlier < later (later-created wins as tiebreaker)
+//  5. id: lexicographic order (stable final tiebreaker)
+//
+// The evaluation uses "last match wins at same or higher scope level": as we iterate
+// through the sorted policies, each matching policy overwrites the previous match if
+// it is at the same scope level or a more specific (higher) scope level. This means:
+//
+//   - Resource-scoped policy overrides project-scoped and hub-scoped policies (local override)
+//   - Project-scoped policy overrides hub-scoped policies (local override)
+//   - Within the same scope, higher priority wins (comes later in sort)
+//   - At same scope and priority, explicit kind wins over default kind (comes later)
+//   - At same scope, priority, and kind, later-created wins (comes later)
+//
+// This preserves local override behavior: a project admin can override hub-level
+// policies for their project, and resource-specific policies override broader scopes.
 func (a *AuthzService) evaluatePolicies(policies []store.Policy, resource Resource, action Action) Decision {
 	var matched *Decision
 
@@ -634,26 +1013,88 @@ func projectIDForResource(r Resource) string {
 	return ""
 }
 
-// isProjectOwnerOrAdmin reports whether the user is recorded with role=owner
-// or role=admin in the canonical project members group. These users get the
-// same access as the project's creator-owner.
+// isProjectOwnerOrAdmin reports whether the user has project-owner or
+// project-admin role in the given project. Uses role bindings as the sole
+// source of truth (Phase 1F: legacy group-based fallback removed).
 func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
 	if userID == "" || projectID == "" {
 		return false
 	}
-	project, err := a.store.GetProject(ctx, projectID)
+
+	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
+	if err != nil || membership == nil {
+		return false
+	}
+	return membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin
+}
+
+// getEffectivePermissions resolves the set of permission IDs granted to a
+// principal via role bindings. It collects all bindings for the principal,
+// filters by scope, resolves each binding's role definition, and returns a
+// deduplicated list of permission IDs.
+func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalType, principalID string, scopeType, scopeID string) ([]string, error) {
+	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	var result []string
+
+	for _, b := range bindings {
+		// Filter by scope: system bindings always apply; project bindings
+		// apply only if the scope matches.
+		if b.ScopeType == store.RoleScopeProject {
+			if scopeType != store.RoleScopeProject || b.ScopeID != scopeID {
+				continue
+			}
+		}
+
+		// Resolve role definition to get permissions
+		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			a.logger.Warn("failed to resolve role definition for binding",
+				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", err)
+			continue
+		}
+
+		for _, permID := range rd.Permissions {
+			if !seen[permID] {
+				seen[permID] = true
+				result = append(result, permID)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// IsSystemAdmin checks whether the given user has a system-scoped super-admin
+// role binding. This is the role-binding-based authority check (Phase 1F),
+// complementing the fast-path IsUnscopedLocalPlatformAdmin which uses
+// User.Role == "admin". The startup reconciliation ensures these always agree.
+func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	// Check if the user has a super-admin role binding directly.
+	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return false
 	}
-	group, err := a.store.GetGroupBySlug(ctx, projectMembersGroupSlug(project.Slug))
-	if err != nil || group.ProjectID != projectID {
-		return false
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			continue
+		}
+		if rd.Name == store.SystemRoleSuperAdmin {
+			return true
+		}
 	}
-	membership, err := a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
-	if err != nil {
-		return false
-	}
-	return membership.Role == store.GroupMemberRoleOwner || membership.Role == store.GroupMemberRoleAdmin
+	return false
 }
 
 // hubMembersSlug is the slug of the seeded hub-members group. It is the same

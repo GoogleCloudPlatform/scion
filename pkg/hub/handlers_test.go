@@ -52,6 +52,14 @@ func testServer(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
+	// Remove the delegation edge backfill marker. Migrate() sets it (the
+	// backfill processes zero agents and writes the completion marker).
+	// Tests that create agents directly via the store bypass the HTTP handler
+	// which normally creates delegation edges, so they would fail the
+	// post-backfill no-edge check. Tests that specifically exercise
+	// post-backfill behavior re-create the marker explicitly.
+	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
+
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
 	cfg.DevUserConfig = DevUserConfig{
@@ -64,7 +72,10 @@ func testServer(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		_ = srv.Shutdown(context.Background())
+		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
+	})
 	return srv, s
 }
 
@@ -1929,7 +1940,10 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		_ = srv.Shutdown(context.Background())
+		_ = s.Close()
+	})
 	return srv, s
 }
 

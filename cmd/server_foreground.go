@@ -1464,6 +1464,9 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 	if len(adminEmailList) == 0 && len(cfg.Hub.AdminEmails) > 0 {
 		adminEmailList = cfg.Hub.AdminEmails
 	}
+	// D11-fix: normalize (TrimSpace + ToLower, drop empties) so matchers
+	// compare against the same normalization the user store applies.
+	adminEmailList = config.SanitizeEmailList(adminEmailList)
 	if len(adminEmailList) > 0 {
 		log.Printf("Admin emails configured: %v", adminEmailList)
 	}
@@ -2263,6 +2266,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())
 		webSrv.SetMaintenanceState(hubSrv.GetMaintenanceState())
+		webSrv.SetDemotionSafe(hubSrv.GetDemotionSafe())
 		webSrv.SetAuthzService(hubSrv.GetAuthzService())
 		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupResources)
 

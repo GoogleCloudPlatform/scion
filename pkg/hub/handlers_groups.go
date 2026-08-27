@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -26,6 +25,13 @@ import (
 
 // ============================================================================
 // Group Endpoints
+//
+// Phase 1E separation: GroupMembership.Role is now used ONLY for group
+// governance (who can add/remove members, who can change group settings).
+// It is NOT used for resource authorization decisions. Project membership
+// and resource authorization are determined by role bindings (RoleBinding
+// with scope_type="project"). See pkg/hub/authz.go:isProjectOwnerOrAdmin
+// for the canonical project authorization check.
 // ============================================================================
 
 // ListGroupsResponse is the response for listing groups.
@@ -98,37 +104,56 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		ProjectID: query.Get("projectId"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListGroups(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	identity := GetIdentityFromContext(ctx)
+	limit, err := parseAuthorizedListLimit(query.Get("limit"))
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		BadRequest(w, err.Error())
 		return
 	}
-
-	// Compute per-item and scope capabilities
-	identity := GetIdentityFromContext(ctx)
-	groups := make([]GroupWithCapabilities, len(result.Items))
-	if identity != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = groupResource(&result.Items[i])
+	cursor := query.Get("cursor")
+	cursorBinding := authorizedListCursorBinding("groups", filter)
+	if cursor != "" {
+		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
+			BadRequest(w, err.Error())
+			return
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group")
-		for i := range result.Items {
-			groups[i] = GroupWithCapabilities{Group: result.Items[i], Cap: caps[i]}
+	}
+	var groupItems []store.Group
+	var nextCursor string
+	var totalCount int
+	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
+		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
+			page, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
+			if err != nil {
+				return authorizedCandidatePage[store.Group]{}, err
+			}
+			return authorizedCandidatePage[store.Group]{Items: page.Items, NextCursor: page.NextCursor}, nil
+		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
+		if err != nil {
+			writeAuthorizedListError(w, err)
+			return
+		}
+		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	} else {
+		result, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	}
+	groups := make([]GroupWithCapabilities, 0, len(groupItems))
+	if identity == nil {
+		for i := range groupItems {
+			groups = append(groups, GroupWithCapabilities{Group: groupItems[i]})
 		}
 	} else {
-		for i := range result.Items {
-			groups[i] = GroupWithCapabilities{Group: result.Items[i]}
+		resources := make([]Resource, len(groupItems))
+		for i := range groupItems {
+			resources[i] = groupResource(&groupItems[i])
+		}
+		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "group") {
+			groups = append(groups, GroupWithCapabilities{Group: groupItems[i], Cap: cap})
 		}
 	}
 
@@ -136,11 +161,10 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "group")
 	}
-
 	writeJSON(w, http.StatusOK, ListGroupsResponse{
 		Groups:       groups,
-		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
+		NextCursor:   nextCursor,
+		TotalCount:   totalCount,
 		Capabilities: scopeCap,
 	})
 }
@@ -540,7 +564,7 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	} else {
 		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
-		isPlatformAdmin := userIdent.Role() == "admin"
+		isPlatformAdmin := IsUnscopedLocalPlatformAdmin(userIdent)
 		if !isResourceOwner && !isPlatformAdmin {
 			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
 			switch req.Role {
@@ -633,6 +657,43 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	}
 
+	// CanDelegate check (Phase 1F): ensure the actor has sufficient authority
+	// to grant the membership. For project member groups, adding a member with
+	// an elevated role (admin/owner) grants project-level authority, so the
+	// actor must hold at least that level of project authority.
+	//
+	// This applies to BOTH user-type and group-type member additions by user
+	// callers. When a group is added as a member of a project members group,
+	// the members of the nested group inherit the GroupRole level of access
+	// in the project. The CanDelegate check ensures the actor can delegate
+	// that authority level.
+	//
+	// Agent callers are already constrained by the role-hierarchy check above
+	// (agents can only add plain members).
+	var canDelegateResult, canDelegateReason string
+	if s.authzService != nil && (req.MemberType == store.GroupMemberTypeUser || req.MemberType == store.GroupMemberTypeGroup) && isUserCaller {
+		actorIdentity := GetIdentityFromContext(ctx)
+		if actorIdentity != nil {
+			grantDesc := GrantDescriptor{
+				Type:      GrantTypeGroupMembership,
+				GroupID:   groupID,
+				GroupRole: req.Role,
+				ScopeType: store.RoleScopeProject,
+				ScopeID:   group.ProjectID,
+				ProjectID: group.ProjectID,
+			}
+			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
+			canDelegateResult = "allow"
+			canDelegateReason = delegateDecision.Reason
+			if !delegateDecision.Allowed {
+				logAuthzDenial(r, actorIdentity, groupResource(group), ActionAddMember,
+					"CanDelegate denied: "+delegateDecision.Reason)
+				writeForbidden(w, "Cannot grant authority you do not hold: "+delegateDecision.Reason)
+				return
+			}
+		}
+	}
+
 	member := &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: req.MemberType,
@@ -653,6 +714,16 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	auditRecord := &store.MutationAuditRecord{
+		MutationType:      "group_member_add",
+		TargetType:        "group_membership",
+		TargetID:          group.ID,
+		AfterSummary:      `{"groupId":"` + group.ID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
+		CanDelegateResult: canDelegateResult,
+		CanDelegateReason: canDelegateReason,
+	}
+	s.emitMutationAudit(r.Context(), auditRecord)
 
 	s.groupsLogger().Info("group member added",
 		"group_id", groupID,
@@ -755,6 +826,13 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType:  "group_member_remove",
+		TargetType:    "group_membership",
+		TargetID:      group.ID,
+		BeforeSummary: `{"groupId":"` + group.ID + `","memberType":"` + memberType + `","memberId":"` + memberID + `"}`,
+	})
 
 	s.groupsLogger().Info("group member removed",
 		"group_id", group.ID,

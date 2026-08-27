@@ -261,12 +261,6 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 		Unauthorized(w)
 		return nil, false
 	}
-	if _, scoped := identity.(*ScopedUserIdentity); scoped {
-		logAuthzDenial(r, identity, resource, ActionManage, "scoped user access token")
-		Forbidden(w)
-		return nil, false
-	}
-
 	// The assertion, rather than a switch on Type(), is deliberate: the question
 	// this helper asks is "can this caller answer Role()". It admits both "user"
 	// and dev-auth "dev" identities (DevUser implements UserIdentity) and denies
@@ -278,8 +272,14 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 		Forbidden(w)
 		return nil, false
 	}
-	if user.Role() != store.UserRoleAdmin {
-		logAuthzDenial(r, identity, resource, ActionManage, "not an admin")
+	if !IsUnscopedLocalPlatformAdmin(user) {
+		reason := "not an admin"
+		if IsScopedUserIdentity(user) {
+			reason = "scoped user access token"
+		} else if _, federated := user.(FederatedIdentity); federated {
+			reason = "federated identity is not a local platform admin"
+		}
+		logAuthzDenial(r, identity, resource, ActionManage, reason)
 		Forbidden(w)
 		return nil, false
 	}

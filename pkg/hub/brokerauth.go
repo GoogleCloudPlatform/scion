@@ -971,6 +971,7 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 			if !ok {
 				return
 			}
+			ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: identity.ID(), Type: identity.Type()})
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
