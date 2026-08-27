@@ -199,10 +199,20 @@ func newPreflightStub(t *testing.T, tokeninfoJSON string, apiStatus int, apiBody
 	return server, &hits
 }
 
+// stubTokeninfoURL gives the stub's tokeninfo endpoint a path of its own. Both
+// seams point at the same server, so without a distinct path an assertion
+// about the tokeninfo URL would also be satisfied by the API URL — which
+// shares the host and port. Mutation-testing caught exactly that: deleting the
+// tokeninfo echo left the assertion passing on the "GET <api url>" line.
+func stubTokeninfoURL(serverURL string) string {
+	return serverURL + "/tokeninfo"
+}
+
 // preflightSetup composes the bash prelude for a preflight test: the gcloud
 // stub, plus both test-only URL seams pointed at the stub server.
 func preflightSetup(gcloudStub, serverURL string) string {
-	return fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q", gcloudStub, serverURL, serverURL)
+	return fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
+		gcloudStub, serverURL, stubTokeninfoURL(serverURL))
 }
 
 func TestScriptPreflightFailsWithoutADC(t *testing.T) {
@@ -327,7 +337,7 @@ func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
 		"must NOT warn when identities match")
 	assert.Contains(t, stdout, "ADC credential validated successfully",
 		"must confirm successful validation")
-	assert.Contains(t, stdout, server.URL,
+	assert.Contains(t, stdout, stubTokeninfoURL(server.URL),
 		"the tokeninfo URL must be echoed: the token travels to it in a query "+
 			"string, so a redirected endpoint must not be invisible in the output")
 	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
