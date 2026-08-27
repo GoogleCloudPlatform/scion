@@ -249,6 +249,11 @@ hub:
   # selector is immutable, so overriding one breaks the Deployment rather than
   # relabelling it.
   podLabels: {}
+  # Scheduling. These three are checked for credential material on the same
+  # terms as podAnnotations and podLabels above: they are free-form operator
+  # input and they land in the pod spec, which anyone with pod read access can
+  # read. A connection string with a password in it is rejected here rather than
+  # rendered. Ordinary labels, taints and affinity rules are unaffected.
   nodeSelector: {}
   tolerations: []
   affinity: {}

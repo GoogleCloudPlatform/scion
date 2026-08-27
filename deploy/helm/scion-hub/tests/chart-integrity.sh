@@ -73,7 +73,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=45
+EXPECTED_TOTAL=49
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -1010,6 +1010,84 @@ else
   pass "NOTES.txt omits the OAuth rotation restart when no OAuth credentials are set (the condition is a condition, not a constant)"
 fi
 rm -f "$_e11_on" "$_e11_off"
+
+# ---------------------------------------------------------------------------
+# E12. The credential guard reaches the SCHEDULING fields, not just the two
+# pod-spec fields somebody thought of.
+# ---------------------------------------------------------------------------
+#
+# The pass that guarded hub.podAnnotations and hub.podLabels enumerated the
+# fields an operator thinks of as carrying text, and stopped there.
+# hub.nodeSelector, hub.tolerations and hub.affinity are the same disclosure
+# surface - free-form operator input, rendered verbatim into a pod spec that
+# anyone with pod read access can read - and all three rendered a DSN clean while
+# the identical string on hub.podAnnotations was refused. Measured before the
+# fix, not reasoned about.
+#
+# THE ENUMERATION IS THE FRAGILE PART, NOT THE MATCHER. Every one of these
+# assertions passes by the guard being CALLED on a surface; none of them can tell
+# you about a surface with no call. That is not a hole this file can close - a
+# test can only plant into fields it knows about, which is the same blindness
+# that produced the gap. It is stated so the next reader does not mistake five
+# green rows for coverage of the pod spec.
+#
+# PLANTED VIA A VALUES FILE, NEVER --set-string. `--set-string` runs its own
+# escape parser: 'Sc2\Back\Alpha' arrives as 'Sc2BackAlpha', so the chart is
+# handed a DIFFERENT credential than the one written here, the guard correctly
+# does not find the one we planted, and the arm records a false pass.
+#
+# ASSERTED ON THE ERROR STRING AND THE SOURCE NAME TOGETHER. A non-zero exit is
+# not evidence that the guard fired: the first draft of this measurement was 13
+# apparent confirmations that were all schema rejections, because the values
+# overlay had been concatenated onto the base file and a duplicate `hub:` key
+# silently replaced the base mapping. Nothing had reached a template. The clean
+# arm at the end is what exposed it, and it is why that arm is here.
+_e12_vals="$(mktemp)"
+_e12_dsn='postgres://u:hunter2AAA@10.0.0.1/db'
+_e12_arm() { # $1 = values yaml, $2 = expected source name in the failure
+  local _out
+  _out="$(printf '%s\n' "$1" >"$_e12_vals"; "$HELM" template t "$CHART" "${BASE[@]}" -f "$_e12_vals" 2>&1)"
+  if printf '%s' "$_out" | grep -qF "don't meet the specifications of the schema"; then
+    echo "META-FAILURE: E12 arm for $2 was rejected by the values schema and never reached a template." >&2
+    rm -f "$_e12_vals"; exit 2
+  fi
+  printf '%s' "$_out" | grep -qF "embeds credentials in a URL" \
+    && printf '%s' "$_out" | grep -qF "$2"
+}
+for _e12_case in \
+  "hub.nodeSelector:hub:
+  nodeSelector:
+    disk: \"$_e12_dsn\"" \
+  "hub.tolerations:hub:
+  tolerations:
+    - key: \"$_e12_dsn\"
+      operator: Exists" \
+  "hub.affinity:hub:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: \"$_e12_dsn\"
+                operator: Exists"
+do
+  _e12_name="${_e12_case%%:*}"
+  if _e12_arm "${_e12_case#*:}" "$_e12_name"; then
+    pass "${_e12_name} refuses a credential (the scheduling fields reach the guard)"
+  else
+    fail "${_e12_name} renders a DSN into the pod spec without a word. The pod spec is readable by anyone with pod read access - a wider audience than the Secret's RBAC - and hub.podAnnotations refuses the identical string, so this is an unguarded surface beside a guarded one rather than a decision to allow it."
+  fi
+done
+# The arm that caught the empty corpus. Without it, every row above is satisfied
+# by a chart that refuses everything, including values an operator must be able
+# to set.
+printf 'hub:\n  nodeSelector:\n    disk: ssd\n  tolerations:\n    - key: dedicated\n      operator: Exists\n' >"$_e12_vals"
+if "$HELM" template t "$CHART" "${BASE[@]}" -f "$_e12_vals" >/dev/null 2>&1; then
+  pass "ordinary scheduling values still render (the guard above refuses credentials, not scheduling)"
+else
+  fail "a plain nodeSelector/toleration no longer renders. The credential guard has been widened into legitimate operator input, which is worse than the hole it closed: the hole leaked a value the operator chose to put there, this rejects a value they must set, with no override."
+fi
+rm -f "$_e12_vals"
 
 # ---------------------------------------------------------------------------
 # Fail closed.

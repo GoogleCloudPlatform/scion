@@ -31,6 +31,23 @@ limitations under the License.
    template happens to render - see its definition for why it is not a list.
 */}}
 {{- include "scion-hub.assertNoCredentialsInValues" . }}
+{{- /*
+The three scheduling fields are the same disclosure surface and were missed by
+the pass that guarded podAnnotations and podLabels. nodeSelector, tolerations
+and affinity are free-form operator input, they land in the pod spec verbatim,
+and the pod spec is readable by anyone with pod read access - the identical
+audience, reached by a field nobody would think to look at. Measured before
+writing this: a DSN in any of the three rendered clean while the same string on
+hub.podAnnotations was refused.
+
+The enumeration is the fragile part of this guard, not the matcher. A surface
+added to this template later gets no protection from the calls above, and
+nothing here will say so - the render simply succeeds. If you add a field that
+carries operator-supplied text into the pod spec, add a call beside these.
+*/}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.nodeSelector | default dict) "source" "hub.nodeSelector") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.tolerations | default list) "source" "hub.tolerations") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.affinity | default dict) "source" "hub.affinity") }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 {{- include "scion-hub.assertExtraEnv" . }}
 {{- include "scion-hub.assertHAUnlanded" . }}
