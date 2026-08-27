@@ -286,7 +286,7 @@ func diGcloudDeploy(name, image, project, region, serviceAccount, memory, cpu, i
 		"--region", region,
 		"--project", project,
 		"--set-env-vars",
-		fmt.Sprintf("SCION_SERVER_MODE=hosted,SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=%s,SCION_SEED_SERVER_HUB_ADMINEMAILS=%s,SCION_IMAGE_REGISTRY=%s",
+		fmt.Sprintf("SCION_SERVER_MODE=hosted,SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=%s,SCION_SERVER_HUB_ADMINEMAILS=%s,SCION_IMAGE_REGISTRY=%s",
 			iapAudience, adminEmail, imageRegistry),
 	}
 

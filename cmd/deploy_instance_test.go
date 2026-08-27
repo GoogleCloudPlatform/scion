@@ -601,14 +601,14 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 	scionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(scionDir, 0755))
 
-	// Set env vars exactly as diGcloudDeploy formats them (auth vars via
-	// SCION_SERVER_*, admin email via SCION_SEED_SERVER_*).
+	// Set env vars exactly as diGcloudDeploy formats them (all via
+	// SCION_SERVER_*, which maps through normal koanf config loading).
 	t.Setenv("SCION_SERVER_MODE", "hosted")
 	t.Setenv("SCION_SERVER_AUTH_MODE", "proxy")
 	t.Setenv("SCION_SERVER_AUTH_PROXY_PROVIDER", "iap")
 	t.Setenv("SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE",
 		"/projects/123456789/locations/us-east4/services/test-instance")
-	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "admin@example.com")
+	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "admin@example.com")
 
 	// --- Part 1: Auth vars through LoadGlobalConfig (the hub's startup path) ---
 	gc, err := config.LoadGlobalConfig("")
@@ -630,18 +630,14 @@ func TestDeployEnvVarsRoundTrip(t *testing.T) {
 		gc.Auth.Proxy.IAP.Audience,
 		"Auth.Proxy.IAP.Audience must match the IAP audience path")
 
-	// --- Part 2: Admin email through LoadSeedEnvKoanf (SEED prefix path) ---
-	seedK := config.LoadSeedEnvKoanf()
-	assert.Equal(t, "admin@example.com",
-		seedK.String("server.hub.admin_emails"),
-		"SCION_SEED_SERVER_HUB_ADMINEMAILS must map to server.hub.admin_emails in seed koanf")
-
-	// --- Part 3: Admin email through LoadBootstrapKoanf (full merge path) ---
-	// This is how opsettings seeding resolves the admin email at startup.
-	bk := config.LoadBootstrapKoanf()
-	emails := bk.Strings("server.hub.admin_emails")
-	assert.Contains(t, emails, "admin@example.com",
-		"admin email must appear in bootstrap koanf server.hub.admin_emails")
+	// --- Part 2: Admin email reaches cfg.Hub.AdminEmails (the decision path) ---
+	// On SQLite the admin role is decided by hub.Server.AdminEmails(), which is
+	// populated from cfg.Hub.AdminEmails via parseAdminEmails (server_foreground.go).
+	// SCION_SERVER_HUB_ADMINEMAILS must land in that field through normal koanf
+	// config loading — the SCION_SEED_* prefix only works on postgres.
+	assert.Contains(t, gc.Hub.AdminEmails, "admin@example.com",
+		"SCION_SERVER_HUB_ADMINEMAILS must populate cfg.Hub.AdminEmails — "+
+			"this is the field parseAdminEmails reads to set the admin role")
 }
 
 // ---------------------------------------------------------------------------
@@ -724,12 +720,12 @@ func TestDeployRejectsCommaInAdminEmail(t *testing.T) {
 func TestDeployCommaInEmailBreaksGcloud(t *testing.T) {
 	// Simulate the format string from diGcloudDeploy with a comma in email.
 	envVarStr := fmt.Sprintf(
-		"SCION_SERVER_AUTH_MODE=proxy,SCION_SEED_SERVER_HUB_ADMINEMAILS=%s",
+		"SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_HUB_ADMINEMAILS=%s",
 		"alice@example.com,bob@example.com")
 
 	// gcloud splits on commas, so the above would produce three "env vars":
 	//   1. SCION_SERVER_AUTH_MODE=proxy
-	//   2. SCION_SEED_SERVER_HUB_ADMINEMAILS=alice@example.com
+	//   2. SCION_SERVER_HUB_ADMINEMAILS=alice@example.com
 	//   3. bob@example.com   (← broken: not a valid KEY=VALUE)
 	parts := strings.Split(envVarStr, ",")
 	assert.Equal(t, 3, len(parts),
