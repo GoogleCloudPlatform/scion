@@ -1,0 +1,83 @@
+# Cloud Build source upload filter for the omni target.
+#
+# The default .gcloudignore excludes web source files (web/*.json,
+# web/src/, etc.) because existing Cloud Build configs only compile Go
+# with -tags no_embed_web. The omni Dockerfile rebuilds scion WITHOUT
+# that tag, running `npm install && npm run build` to embed the web
+# frontend. Without this file, the omni build fails at step 8 with
+# "ENOENT: no such file or directory, open '/src/web/package.json'".
+#
+# Usage: pass --ignore-file=image-build/gcloudignore-omni to
+# gcloud builds submit when building the omni target.
+
+#!include:.gitignore
+
+# ---------------------------------------------------------------------------
+# Directories not needed by omni builds
+# ---------------------------------------------------------------------------
+changelog/
+docs/
+docs-repo/
+docs-site/
+examples/
+extras/
+hack/
+/internal/
+reviews/
+scratch/
+/scripts/
+shared-dirs/
+/skills/
+
+# ---------------------------------------------------------------------------
+# Web frontend — INCLUDE source for omni (unlike .gcloudignore).
+# Only exclude build artifacts and tooling detritus.
+# ---------------------------------------------------------------------------
+web/node_modules/
+web/coverage/
+web/.screenshots/
+web/.env*
+
+# ---------------------------------------------------------------------------
+# Test files — Cloud Build compiles Go but never runs tests
+# ---------------------------------------------------------------------------
+*_test.go
+
+# ---------------------------------------------------------------------------
+# Build artifacts and tool state
+# ---------------------------------------------------------------------------
+.git/
+.claude/
+.design/
+.scratch/
+.tasks/
+.scion/
+build/
+.build/
+testdata/
+downloads/
+
+# ---------------------------------------------------------------------------
+# CI / IDE / config files not needed for image builds
+# ---------------------------------------------------------------------------
+.gemini/
+.geminiignore
+.github/
+.gitignore
+
+# ---------------------------------------------------------------------------
+# Root files not needed for image builds
+# ---------------------------------------------------------------------------
+claude.md
+gemini.md
+.claudeignore
+.dockerignore
+.coordinator-state.md
+.eng-manager-state.md
+agents.md
+CHANGELOG.md
+GLOSSARY.md
+LICENSE
+Makefile
+README.md
+pr-*-review*.md

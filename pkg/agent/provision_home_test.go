@@ -100,6 +100,68 @@ func TestProvisionAgentHomeCopy(t *testing.T) {
 	}
 }
 
+// TestProvisionAgentEmptyChainAppliesEmbeddedHome verifies the safety net:
+// when the template chain is empty (no "default" template found locally),
+// ProvisionAgent still copies the embedded default template home files into
+// the agent home. This guards against the sandbox exit-detection failure:
+// .tmux.conf contains the pane-exited hook that triggers sandbox shutdown.
+func TestProvisionAgentEmptyChainAppliesEmbeddedHome(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Move to tmpDir to avoid being inside the project's git repo
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Initialize dummy git repo
+	runCmd(t, tmpDir, "git", "init")
+	runCmd(t, tmpDir, "git", "config", "user.email", "test@example.com")
+	runCmd(t, tmpDir, "git", "config", "user.name", "Test User")
+	_ = os.WriteFile(filepath.Join(tmpDir, "initial"), []byte("initial"), 0644)
+	runCmd(t, tmpDir, "git", "add", "initial")
+	runCmd(t, tmpDir, "git", "commit", "-m", "initial commit")
+
+	// Mock HOME to a location with NO templates directory — this forces
+	// GetTemplateChainInProject("default", ...) to return an empty chain.
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", oldWd) }()
+
+	projectScionDir := filepath.Join(tmpDir, ".scion")
+
+	// Add .scion/agents/ to gitignore
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+	runCmd(t, tmpDir, "git", "add", ".gitignore")
+	runCmd(t, tmpDir, "git", "commit", "-m", "add gitignore")
+
+	// Create harness-config (step 1 of home composition) but NO template.
+	// The harness-config provides .bashrc etc.; the template provides
+	// .tmux.conf, .zshrc, .gitconfig. Without the safety net, the latter
+	// would be missing.
+	seedTestHarnessConfig(t, projectScionDir, "test", "test")
+
+	// Create a minimal settings file pointing to the harness-config,
+	// since there's no template to provide default_harness_config.
+	settingsDir := filepath.Join(tmpDir, ".scion")
+	_ = os.MkdirAll(settingsDir, 0755)
+	_ = os.WriteFile(filepath.Join(settingsDir, "settings.yaml"),
+		[]byte("default_harness_config: test\n"), 0644)
+
+	// Provision agent with template "default" — which cannot be found.
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "empty-chain-agent", "default", "", "test", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	// The embedded default template home MUST contain .tmux.conf.
+	// This is the critical file: it carries the pane-exited hook that
+	// triggers sandbox shutdown. Its absence means the sandbox runs forever.
+	tmuxConf := filepath.Join(agentHome, ".tmux.conf")
+	if _, err := os.Stat(tmuxConf); os.IsNotExist(err) {
+		t.Errorf(".tmux.conf must exist in agent home even with an empty template chain — " +
+			"the embedded default template home should have been applied as a floor")
+	}
+}
+
 func TestProvisionAgentLegacyTemplateRejected(t *testing.T) {
 	tmpDir := t.TempDir()
 

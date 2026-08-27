@@ -873,6 +873,14 @@ type V1CloudRunInstancesConfig struct {
 	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
 }
 
+// V1CloudRunSandboxConfig holds Cloud Run Sandbox runtime settings.
+// The sandbox runtime runs agents as sandboxes inside a Cloud Run Instance.
+type V1CloudRunSandboxConfig struct {
+	// SandboxBin is the path to the sandbox CLI binary.
+	// Defaults to /usr/local/gcp/bin/sandbox.
+	SandboxBin string `json:"sandbox_bin,omitempty" yaml:"sandbox_bin,omitempty" koanf:"sandbox_bin"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
@@ -887,6 +895,8 @@ type V1RuntimeConfig struct {
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
+	// CloudRunSandbox holds Cloud Run Sandbox-specific settings when Type is "cloudrun-sandbox".
+	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to

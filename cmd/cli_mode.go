@@ -108,6 +108,7 @@ var agentAllowed = map[string]bool{
 	"project.skills.list":         true,
 	"project.skills.add":          true,
 	"project.skills.remove":       true,
+	"deploy-instance":             true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

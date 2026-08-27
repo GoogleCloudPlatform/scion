@@ -61,6 +61,13 @@ func isCloudRunEnv() bool {
 	return os.Getenv("K_SERVICE") != ""
 }
 
+// isCloudRunInstance reports whether the hub is running on a Cloud Run Instance.
+// CLOUD_RUN_INSTANCE is set by the platform on Instances but NOT on Cloud Run
+// Services (which use K_SERVICE instead). See design doc section 4.6.
+func isCloudRunInstance() bool {
+	return os.Getenv("CLOUD_RUN_INSTANCE") != ""
+}
+
 // workspaceWriteBlocked returns true when workspace writes should be rejected
 // with 503 Service Unavailable. This happens when the hub is running on Cloud
 // Run (K_SERVICE is set) and no durable storage backend is configured.
@@ -69,11 +76,26 @@ func isCloudRunEnv() bool {
 // an unrecognized backend value fails closed (blocked) rather than silently
 // writing to ephemeral storage.
 func (s *Server) workspaceWriteBlocked() bool {
-	// Not on Cloud Run → writes are fine (self-hosted with local disk)
-	if !isCloudRunEnv() {
+	// Not on Cloud Run (K_SERVICE) and not on a Cloud Run Instance
+	// → writes are fine (self-hosted with local disk)
+	if !isCloudRunEnv() && !isCloudRunInstance() {
 		return false
 	}
-	// On Cloud Run — only allow writes if a known durable backend is configured
+
+	// Cloud Run Instance (single-node hosted tier, Tier 0): writes are
+	// permitted to ephemeral storage. This is a deliberate, documented
+	// decision -- the tier is ephemeral by design (workspaces are lost on
+	// redeploy) and the UI banner (below) makes this visible to users.
+	// Without this explicit check, writes happen to work because K_SERVICE
+	// is not set on Instances, but that is an accident that would break the
+	// first time someone makes isCloudRunEnv() aware of Instances.
+	// See design doc section 5.2 and section 4.6.
+	if isCloudRunInstance() {
+		return false
+	}
+
+	// On Cloud Run Services — only allow writes if a known durable backend
+	// is configured
 	wsCfg := s.config.WorkspaceStorageConfig
 	if wsCfg != nil {
 		switch wsCfg.Backend {

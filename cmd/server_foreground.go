@@ -2445,6 +2445,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
 		HubEndpoint:                   hubEndpointForRH,
 		ContainerHubEndpoint:          containerHubEndpoint,
+		HubListenPort:                 resolveHubListenPort(cfg),
 		BrokerID:                      brokerID,
 		BrokerName:                    brokerName,
 		CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
@@ -2831,6 +2832,28 @@ func resolveBrokerName(cfg *config.GlobalConfig, settings *config.Settings, vsBr
 	return brokerName
 }
 
+// resolveHubListenPort returns the port the co-located hub HTTP server is
+// listening on. In combined web+API mode (--enable-web) this is --web-port;
+// in standalone hub mode it is --port. Returns 0 when the hub is not
+// co-located (enableHub false).
+//
+// This is the single source of truth for the hub's listen port. Two callers
+// depend on it: resolveHubEndpointForBroker (which formats it into a
+// localhost URL for the broker's own hub communication) and the broker config's
+// HubListenPort (which cloudrunSandboxHubEndpoint uses to construct the
+// link-local endpoint for sandboxes). Keeping the derivation here rather
+// than duplicating it prevents one caller from drifting when the other is
+// updated — a failure whose symptom is agents that start but never register.
+func resolveHubListenPort(cfg *config.GlobalConfig) int {
+	if !enableHub {
+		return 0
+	}
+	if enableWeb {
+		return webPort
+	}
+	return cfg.Hub.Port
+}
+
 // resolveHubEndpointForBroker determines the Hub endpoint URL for the
 // runtime broker's internal communication (heartbeat, control channel).
 // In co-located mode (enableHub true), this always resolves to localhost
@@ -2838,10 +2861,7 @@ func resolveBrokerName(cfg *config.GlobalConfig, settings *config.Settings, vsBr
 func resolveHubEndpointForBroker(cfg *config.GlobalConfig, settings *config.Settings) string {
 	hubEndpointForRH := cfg.RuntimeBroker.HubEndpoint
 	if hubEndpointForRH == "" && enableHub {
-		port := cfg.Hub.Port
-		if enableWeb {
-			port = webPort
-		}
+		port := resolveHubListenPort(cfg)
 		hubEndpointForRH = fmt.Sprintf("http://localhost:%d", port)
 		if enableDebug {
 			log.Printf("Co-located Hub detected: using %s for heartbeat and template hydration", hubEndpointForRH)

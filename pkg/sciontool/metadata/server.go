@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,6 +45,15 @@ type Config struct {
 	Mode string
 	// Port is the local port to listen on (default: 18380).
 	Port int
+	// BindAddress is the IP address to bind the listener to. Defaults to
+	// "127.0.0.1" when empty. On Cloud Run Instances the emulator must bind
+	// the launcher's link-local address so sandboxes can reach it; set to
+	// "link-local" to auto-discover, or to an explicit IPv4 address.
+	//
+	// Security: the emulator does not authenticate callers (§4.11 S5).
+	// Never bind "0.0.0.0" — it exposes credential minting to every peer
+	// on the network. The guard test TestBindAddress_Never0000 enforces this.
+	BindAddress string
 	// SAEmail is the service account email (required for assign mode).
 	SAEmail string
 	// ProjectID is the GCP project ID.
@@ -149,6 +159,7 @@ func ConfigFromEnv() *Config {
 	return &Config{
 		Mode:        mode,
 		Port:        port,
+		BindAddress: os.Getenv("SCION_METADATA_BIND_ADDRESS"),
 		SAEmail:     os.Getenv("SCION_METADATA_SA_EMAIL"),
 		ProjectID:   os.Getenv("SCION_METADATA_PROJECT_ID"),
 		HubURL:      hubURL,
@@ -159,9 +170,10 @@ func ConfigFromEnv() *Config {
 
 // Server is the metadata HTTP server.
 type Server struct {
-	config Config
-	srv    *http.Server
-	client *http.Client
+	config         Config
+	resolvedBindIP string // resolved bind IP from config.BindAddress; set by Start()
+	srv            *http.Server
+	client         *http.Client
 
 	// Token cache
 	mu          sync.RWMutex
@@ -226,6 +238,110 @@ var (
 	activeServer   *Server
 )
 
+// resolveBindAddress returns the IP address the server should listen on.
+// Priority:
+//   - "link-local": auto-discover the host's IPv4 link-local address (169.254.0.0/16).
+//   - explicit IP: use as-is (but reject "0.0.0.0" — see §4.11 S5).
+//   - empty: default to "127.0.0.1".
+func resolveBindAddress(raw string) (string, error) {
+	switch raw {
+	case "":
+		return "127.0.0.1", nil
+	case "link-local":
+		addr, err := DiscoverLinkLocalAddress()
+		if err != nil {
+			return "", fmt.Errorf("metadata bind: %w", err)
+		}
+		return addr, nil
+	case "0.0.0.0":
+		return "", fmt.Errorf("metadata bind: refusing to bind 0.0.0.0 — " +
+			"the emulator does not authenticate callers (§4.11 S5)")
+	default:
+		return raw, nil
+	}
+}
+
+// DiscoverLinkLocalAddress enumerates the host's network interfaces and
+// returns an IPv4 link-local address (169.254.0.0/16). When exactly one is
+// found it is returned directly. When multiple are found, candidates outside
+// 169.254.169.0/24 (the GCP metadata subnet) are preferred, then the
+// numerically lowest IP is selected. It returns an error only when no
+// link-local address is found.
+func DiscoverLinkLocalAddress() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", fmt.Errorf("enumerating interfaces: %w", err)
+	}
+
+	_, linkLocalNet, _ := net.ParseCIDR("169.254.0.0/16")
+
+	var found []string
+	for _, a := range addrs {
+		ipStr := a.String()
+		// InterfaceAddrs returns CIDR notation (e.g. "169.254.8.1/20").
+		ip, _, err := net.ParseCIDR(ipStr)
+		if err != nil {
+			// Try as bare IP (shouldn't happen, but be safe).
+			ip = net.ParseIP(ipStr)
+		}
+		if ip == nil {
+			continue
+		}
+		ip = ip.To4()
+		if ip == nil {
+			continue // skip IPv6
+		}
+		if linkLocalNet.Contains(ip) {
+			found = append(found, ip.String())
+		}
+	}
+
+	return selectLinkLocalAddress(found)
+}
+
+// metadataNet is 169.254.169.0/24 — the subnet containing the GCP metadata
+// server (169.254.169.254). No collision has been observed, but placing hub
+// traffic on an address in this /24 invites untested interactions with
+// GCE_METADATA_HOST, the metadata emulator, and platform iptables rules.
+// This is precautionary, not measured.
+var metadataNet = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("169.254.169.0/24")
+	return n
+}()
+
+// selectLinkLocalAddress picks one address from the candidate list.
+// It returns an error when the list is empty. When multiple addresses are
+// present, it prefers candidates outside the GCP metadata /24 and sorts
+// by numeric IP value within that preference.
+func selectLinkLocalAddress(found []string) (string, error) {
+	switch len(found) {
+	case 0:
+		return "", fmt.Errorf("no IPv4 link-local address (169.254.0.0/16) found on any interface")
+	case 1:
+		return found[0], nil
+	default:
+		// Multiple link-local addresses found. On Cloud Run Instances, all of
+		// them reach the launcher from inside a sandbox (measured: every
+		// 169.254.x.x on the launcher returns HTTP 200 against 0.0.0.0).
+		// Any deterministic choice is safe. We prefer addresses outside
+		// 169.254.169.0/24 (precautionary — no collision observed, but that
+		// /24 contains the GCP metadata server and we avoid untested
+		// interactions), then sort by numeric IP value for stability.
+		sort.Slice(found, func(i, j int) bool {
+			iIP := net.ParseIP(found[i]).To4()
+			jIP := net.ParseIP(found[j]).To4()
+			iMeta := metadataNet.Contains(iIP)
+			jMeta := metadataNet.Contains(jIP)
+			if iMeta != jMeta {
+				return !iMeta // prefer non-metadata-adjacent
+			}
+			return bytes.Compare(iIP, jIP) < 0
+		})
+		log.Info("Multiple link-local addresses found %v; selecting %s", found, found[0])
+		return found[0], nil
+	}
+}
+
 // New creates a new metadata server.
 func New(cfg Config) *Server {
 	return &Server{
@@ -250,7 +366,13 @@ func (s *Server) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	addr := fmt.Sprintf("127.0.0.1:%d", s.config.Port)
+	bindIP, err := resolveBindAddress(s.config.BindAddress)
+	if err != nil {
+		cancel()
+		return err
+	}
+	s.resolvedBindIP = bindIP
+	addr := fmt.Sprintf("%s:%d", bindIP, s.config.Port)
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil && errors.Is(err, syscall.EADDRINUSE) {
@@ -430,8 +552,12 @@ func (s *Server) Stop() {
 // by sending a POST to its /_scion/shutdown endpoint. This handles the case
 // where a stale server from a previous init cycle holds the port.
 func (s *Server) shutdownExisting() {
+	bindIP := s.resolvedBindIP
+	if bindIP == "" {
+		bindIP = "127.0.0.1"
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	url := fmt.Sprintf("http://127.0.0.1:%d/_scion/shutdown", s.config.Port)
+	url := fmt.Sprintf("http://%s:%d/_scion/shutdown", bindIP, s.config.Port)
 	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		return
@@ -506,8 +632,12 @@ func writeShutdownToken(path, token string) error {
 }
 
 func (s *Server) probeHealth() bool {
+	bindIP := s.resolvedBindIP
+	if bindIP == "" {
+		bindIP = "127.0.0.1"
+	}
 	client := &http.Client{Timeout: healthCheckTimeout}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", s.config.Port))
+	resp, err := client.Get(fmt.Sprintf("http://%s:%d/", bindIP, s.config.Port))
 	if err != nil {
 		return false
 	}
@@ -582,7 +712,11 @@ func (s *Server) restartHTTP(ctx context.Context) error {
 	_ = s.srv.Shutdown(shutdownCtx)
 	shutdownCancel()
 
-	addr := fmt.Sprintf("127.0.0.1:%d", s.config.Port)
+	bindIP := s.resolvedBindIP
+	if bindIP == "" {
+		bindIP = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", bindIP, s.config.Port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("restart listen: %w", err)

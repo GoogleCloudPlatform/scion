@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,42 @@ const (
 // PTY endpoint configuration
 const (
 	ptyMaxDataSize = 32 * 1024 // 32KB max per message
+
+	// cloudRunSandboxBin is the platform-injected sandbox binary path.
+	// It is injected at deploy time when --sandbox-launcher is enabled
+	// and is never part of the container image.
+	cloudRunSandboxBin = "/usr/local/gcp/bin/sandbox"
 )
+
+// resizeSandboxTerminal relays a terminal resize event. For cloudrun-sandbox
+// runtimes, it sends the resize through the sandbox boundary via tmux
+// resize-window because SIGWINCH does not cross the boundary — PTY fd
+// properties propagate but signal delivery does not (design doc section
+// 4.4a-rev). NOTE: NOT refresh-client -C — that needs a control-mode client
+// and is the wrong tool (confirmed by spike-uds-b).
+//
+// It also applies pty.Setsize to the launcher-side PTY master when present —
+// both are needed.
+func resizeSandboxTerminal(ctx context.Context, runtimeCmd, containerID, logID string, cols, rows int, ptyMaster *os.File) {
+	if runtimeCmd == "cloudrun-sandbox" {
+		resizeCmd := exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+			"/usr/bin/tmux", "resize-window", "-t", "scion",
+			"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+		if err := resizeCmd.Run(); err != nil {
+			slog.Debug("Sandbox tmux resize failed", "id", logID, "error", err)
+		}
+	}
+	if ptyMaster != nil {
+		if err := pty.Setsize(ptyMaster, &pty.Winsize{
+			Cols: uint16(cols),
+			Rows: uint16(rows),
+		}); err != nil {
+			slog.Debug("PTY resize failed", "id", logID, "error", err)
+		} else {
+			slog.Debug("PTY resized", "id", logID, "cols", cols, "rows", rows)
+		}
+	}
+}
 
 // sanitizeExecUser returns user if it matches runtime.ValidExecUserName,
 // otherwise returns "scion" and logs a warning. Callers default to
@@ -85,8 +121,15 @@ func queryTmuxActiveWindow(ctx context.Context, runtimeCmd, containerID, execUse
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
-		"tmux", "display-message", "-t", "scion", "-p", "#{window_name}")
+	var cmd *exec.Cmd
+	if runtimeCmd == "cloudrun-sandbox" {
+		// sandbox exec has no --user flag; absolute paths required (PATH is empty).
+		cmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+			"/usr/bin/tmux", "display-message", "-t", "scion", "-p", "#{window_name}")
+	} else {
+		cmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
+			"tmux", "display-message", "-t", "scion", "-p", "#{window_name}")
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		slog.Debug("Failed to query tmux active window", "containerID", containerID, "error", err)
@@ -150,6 +193,23 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 	execUser = sanitizeExecUser(execUser)
 
 	isK8s := runtimeCmd == "kubernetes" || runtimeCmd == "k8s"
+	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
+
+	if isCloudRunSandbox {
+		for {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("timed out waiting for tmux session in sandbox '%s'", containerID)
+			case <-ticker.C:
+				cmd := exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+					"/usr/bin/tmux", "has-session", "-t", "scion")
+				if cmd.Run() == nil {
+					return nil
+				}
+				slog.Debug("Waiting for tmux session", "sandbox", containerID, "runtime", runtimeCmd)
+			}
+		}
+	}
 
 	for {
 		select {
@@ -352,21 +412,32 @@ func newLocalPTYSession(ctx context.Context, agentID, containerID, runtimeCmd, e
 // Run starts the PTY session.
 func (s *LocalPTYSession) Run() error {
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
+	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
 
-	if isK8s {
+	if isCloudRunSandbox {
+		if err := s.startCloudRunSandboxExec(); err != nil {
+			return fmt.Errorf("failed to start sandbox exec: %w", err)
+		}
+		// Send initial active window.
+		if wn := queryTmuxActiveWindow(s.ctx, s.runtimeCmd, s.containerID, s.execUser); wn != "" {
+			msg := wsprotocol.NewPTYDataMessage(activeWindowOSC(wn))
+			_ = s.writeToWebSocket(msg)
+		}
+		// Fall through to the same read/write/resize loop as Docker.
+	} else if isK8s {
 		return s.runK8sExec()
-	}
+	} else {
+		// Start docker/container exec with PTY
+		if err := s.startDockerExec(); err != nil {
+			return fmt.Errorf("failed to start exec: %w", err)
+		}
 
-	// Start docker/container exec with PTY
-	if err := s.startDockerExec(); err != nil {
-		return fmt.Errorf("failed to start exec: %w", err)
-	}
-
-	// Send the active tmux window name so the web toolbar reflects the
-	// correct initial state (the default assumption is "agent").
-	if wn := queryTmuxActiveWindow(s.ctx, s.runtimeCmd, s.containerID, s.execUser); wn != "" {
-		msg := wsprotocol.NewPTYDataMessage(activeWindowOSC(wn))
-		_ = s.writeToWebSocket(msg)
+		// Send the active tmux window name so the web toolbar reflects the
+		// correct initial state (the default assumption is "agent").
+		if wn := queryTmuxActiveWindow(s.ctx, s.runtimeCmd, s.containerID, s.execUser); wn != "" {
+			msg := wsprotocol.NewPTYDataMessage(activeWindowOSC(wn))
+			_ = s.writeToWebSocket(msg)
+		}
 	}
 
 	defer func() {
@@ -537,6 +608,36 @@ func (s *LocalPTYSession) runK8sExec() error {
 	return err
 }
 
+// startCloudRunSandboxExec starts a sandbox exec session with tmux attach using a real PTY.
+// Unlike Docker, sandbox exec has no --user flag and requires --env for TERM.
+// TERM=xterm-256color is load-bearing: without it the inner tmux sees TERM=dumb
+// and exits with "terminal does not support clear" (design doc section 4.4a-rev).
+func (s *LocalPTYSession) startCloudRunSandboxExec() error {
+	if err := waitForTmuxSession(s.ctx, s.runtimeCmd, s.containerID, s.namespace, s.execUser, nil, nil); err != nil {
+		return err
+	}
+
+	args := []string{
+		"exec", s.containerID,
+		"--env", "TERM=xterm-256color",
+		"--", "/usr/bin/tmux", "attach-session", "-t", "scion",
+	}
+
+	s.cmd = exec.CommandContext(s.ctx, cloudRunSandboxBin, args...)
+
+	ptmx, err := pty.StartWithSize(s.cmd, &pty.Winsize{
+		Cols: uint16(s.cols),
+		Rows: uint16(s.rows),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to start sandbox exec with PTY: %w", err)
+	}
+
+	s.ptyMaster = ptmx
+	s.ptySlave = ptmx
+	return nil
+}
+
 // startDockerExec starts a docker exec session with tmux attach using a real PTY.
 func (s *LocalPTYSession) startDockerExec() error {
 	if err := waitForTmuxSession(s.ctx, s.runtimeCmd, s.containerID, s.namespace, s.execUser, nil, nil); err != nil {
@@ -625,16 +726,7 @@ func (s *LocalPTYSession) readFromWebSocket() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			if s.ptyMaster != nil {
-				if err := pty.Setsize(s.ptyMaster, &pty.Winsize{
-					Cols: uint16(msg.Cols),
-					Rows: uint16(msg.Rows),
-				}); err != nil {
-					slog.Debug("PTY resize failed", "agent_id", s.agentID, "error", err)
-				} else {
-					slog.Debug("PTY resized", "agent_id", s.agentID, "cols", msg.Cols, "rows", msg.Rows)
-				}
-			}
+			resizeSandboxTerminal(s.ctx, s.runtimeCmd, s.containerID, s.agentID, msg.Cols, msg.Rows, s.ptyMaster)
 		}
 	}
 }
@@ -696,20 +788,30 @@ func (h *StreamPTYHandler) Run() error {
 		runtimeCmd = "docker"
 	}
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
+	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
 
-	if isK8s {
+	if isCloudRunSandbox {
+		if err := h.startCloudRunSandboxExec(); err != nil {
+			return err
+		}
+		// Send initial active window.
+		if wn := queryTmuxActiveWindow(h.ctx, runtimeCmd, h.containerID, h.execUser); wn != "" {
+			_ = h.client.SendStreamData(h.handler.streamID, activeWindowOSC(wn))
+		}
+		// Fall through to the same read/write/resize loop as Docker.
+	} else if isK8s {
 		return h.runK8sExec()
-	}
+	} else {
+		// Start docker/container exec with tmux attach
+		if err := h.startDockerExec(); err != nil {
+			return err
+		}
 
-	// Start docker/container exec with tmux attach
-	if err := h.startDockerExec(); err != nil {
-		return err
-	}
-
-	// Send the active tmux window name so the web toolbar reflects the
-	// correct initial state (the default assumption is "agent").
-	if wn := queryTmuxActiveWindow(h.ctx, runtimeCmd, h.containerID, h.execUser); wn != "" {
-		_ = h.client.SendStreamData(h.handler.streamID, activeWindowOSC(wn))
+		// Send the active tmux window name so the web toolbar reflects the
+		// correct initial state (the default assumption is "agent").
+		if wn := queryTmuxActiveWindow(h.ctx, runtimeCmd, h.containerID, h.execUser); wn != "" {
+			_ = h.client.SendStreamData(h.handler.streamID, activeWindowOSC(wn))
+		}
 	}
 
 	defer func() {
@@ -901,18 +1003,39 @@ func (h *StreamPTYHandler) handleResize() {
 			return
 		case size := <-h.handler.resizeCh:
 			cols, rows := size[0], size[1]
-			if h.ptyMaster != nil {
-				if err := pty.Setsize(h.ptyMaster, &pty.Winsize{
-					Cols: uint16(cols),
-					Rows: uint16(rows),
-				}); err != nil {
-					slog.Debug("PTY resize failed", "slug", h.slug, "error", err)
-				} else {
-					slog.Debug("PTY resized", "slug", h.slug, "cols", cols, "rows", rows)
-				}
-			}
+			resizeSandboxTerminal(h.ctx, h.runtimeCmd, h.containerID, h.slug, cols, rows, h.ptyMaster)
 		}
 	}
+}
+
+// startCloudRunSandboxExec starts a sandbox exec session with tmux attach using a real PTY.
+// Unlike Docker, sandbox exec has no --user flag and requires --env for TERM.
+// TERM=xterm-256color is load-bearing: without it the inner tmux sees TERM=dumb
+// and exits with "terminal does not support clear" (design doc section 4.4a-rev).
+func (h *StreamPTYHandler) startCloudRunSandboxExec() error {
+	if err := waitForTmuxSession(h.ctx, h.runtimeCmd, h.containerID, h.namespace, h.execUser, nil, nil); err != nil {
+		return err
+	}
+
+	args := []string{
+		"exec", h.containerID,
+		"--env", "TERM=xterm-256color",
+		"--", "/usr/bin/tmux", "attach-session", "-t", "scion",
+	}
+
+	h.cmd = exec.CommandContext(h.ctx, cloudRunSandboxBin, args...)
+
+	ptmx, err := pty.StartWithSize(h.cmd, &pty.Winsize{
+		Cols: uint16(h.cols),
+		Rows: uint16(h.rows),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to start sandbox exec with PTY: %w", err)
+	}
+
+	h.ptyMaster = ptmx
+	h.ptySlave = ptmx
+	return nil
 }
 
 // startDockerExec starts container exec with tmux attach using the configured runtime.

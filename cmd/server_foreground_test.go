@@ -34,6 +34,35 @@ func TestIsSupportedIAPAudience(t *testing.T) {
 			audience: "/projects/123/locations/us-central1/services/my-svc",
 			want:     true,
 		},
+		// Cloud Run Instance audience — the path says "services" even though
+		// the backend is a Cloud Run Instance, not a Service. This is correct:
+		// IAP uses a fixed resource vocabulary ("/services/") for every backend
+		// type, including Instances. It is NOT a bug and NOT a mismatch to
+		// correct.
+		//
+		// Changing "services" to "instances" in the audience would produce an
+		// audience mismatch on every request: the IAP edge would still stamp
+		// the JWT with a "/services/" audience, but the hub would be
+		// configured to expect "/instances/", and every comparison would fail
+		// with a 401 that does not obviously point back to this code.
+		//
+		// Region-scope note: IAP policy binding is at region level
+		// (projects/{PROJECT}/iap_web/cloud_run-{REGION}), not per-instance —
+		// per-instance setIamPolicy returns 404 for Cloud Run Instances. This
+		// is acceptable when the project hosts a single tenant, because a
+		// region-level grant admits the holder to exactly one resource.
+		//
+		// ⚠️ Revisit trigger: if this tier ever hosts more than one tenant in
+		// one project, region scope is immediately wrong and per-resource auth
+		// must come back (see design doc §11.2, §11.1).
+		//
+		// Reference: design doc §11.3 (identity flow), OQ-17 (audience
+		// confirmation), §11.2 (region-scope IAP policy).
+		{
+			name:     "cloud run Instance audience uses services path",
+			audience: "/projects/123456789/locations/us-east4/services/my-instance",
+			want:     true,
+		},
 		{
 			name:     "GCLB backend-service format",
 			audience: "/projects/123/global/backendServices/456",

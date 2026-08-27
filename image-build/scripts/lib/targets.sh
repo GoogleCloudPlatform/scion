@@ -60,6 +60,7 @@ while IFS= read -r harness_step; do
 done < <(emit_harness_steps)
 ALL_STEP_IDS+=(
   scion-hub
+  scion-omni
 )
 
 # All known target names. Used by the orchestrator's --help and --target
@@ -71,6 +72,7 @@ ALL_TARGETS=(
   scion-base
   harnesses
   hub
+  omni
   common
   all
   thick
@@ -93,6 +95,9 @@ resolve_targets() {
       ;;
     hub)
       echo scion-hub
+      ;;
+    omni)
+      printf '%s\n' "${_OMNI_CHAIN[@]}"
       ;;
     common)
       printf '%s\n' scion-base
@@ -133,6 +138,7 @@ step_dockerfile() {
     thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep/Dockerfile" ;;
     scion-base)    echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
+    scion-omni)    echo "${IMAGE_BUILD_DIR}/omni/Dockerfile" ;;
     *)
       if is_harness_step "$1"; then
         echo "${REPO_ROOT}/harnesses/${1#scion-}/Dockerfile"
@@ -154,6 +160,7 @@ step_context_dir() {
     thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep" ;;
     scion-base)    echo "${REPO_ROOT}" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
+    scion-omni)    echo "${REPO_ROOT}" ;;
     *)
       if is_harness_step "$1"; then
         echo "${REPO_ROOT}/harnesses/${1#scion-}"
@@ -162,6 +169,34 @@ step_context_dir() {
       fi
       ;;
   esac
+}
+
+# Omni chain order — single source for the harness subset included in the
+# single-node omni image. resolve_targets (above) and step_build_args (below)
+# both consume this array. cloudbuild-omni.yaml has a static copy that must
+# be kept in sync manually.
+# When OMNI_BUILD is true, harnesses chain to each other instead of all
+# branching from scion-base:
+#   scion-base -> claude -> codex -> opencode -> antigravity -> grok-build -> omni
+_OMNI_CHAIN=(scion-claude scion-codex scion-opencode scion-antigravity scion-grok-build scion-omni)
+
+# _omni_chain_parent <step_id>
+#
+# Returns the parent step for the given step in the omni chain, or empty if
+# the step is not in the chain. The first element chains from scion-base;
+# each subsequent element chains from the previous one.
+_omni_chain_parent() {
+  local step="$1"
+  local prev="scion-base"
+  local s
+  for s in "${_OMNI_CHAIN[@]}"; do
+    if [[ "${s}" == "${step}" ]]; then
+      echo "${prev}"
+      return 0
+    fi
+    prev="${s}"
+  done
+  return 1
 }
 
 # step_build_args <step_id>
@@ -197,9 +232,27 @@ step_build_args() {
     scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
+    scion-omni)
+      if [[ "${OMNI_BUILD:-}" == "true" ]]; then
+        local parent
+        parent="$(_omni_chain_parent "scion-omni")"
+        echo "BASE_IMAGE=${prefix}${parent}:${BASE_TAG}"
+      else
+        echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+      fi
+      if [[ -n "${COMMIT_SHA:-}" ]]; then
+        echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
+      ;;
     *)
       if is_harness_step "$1"; then
-        echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+        if [[ "${OMNI_BUILD:-}" == "true" ]] && _omni_chain_parent "$1" >/dev/null 2>&1; then
+          local parent
+          parent="$(_omni_chain_parent "$1")"
+          echo "BASE_IMAGE=${prefix}${parent}:${BASE_TAG}"
+        else
+          echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+        fi
       else
         return 1
       fi
@@ -224,9 +277,20 @@ step_parent() {
       fi
       ;;
     scion-hub)     echo "scion-base" ;;
+    scion-omni)
+      if [[ "${OMNI_BUILD:-}" == "true" ]]; then
+        _omni_chain_parent "scion-omni"
+      else
+        echo "scion-base"
+      fi
+      ;;
     *)
       if is_harness_step "$1"; then
-        echo "scion-base"
+        if [[ "${OMNI_BUILD:-}" == "true" ]] && _omni_chain_parent "$1" >/dev/null 2>&1; then
+          _omni_chain_parent "$1"
+        else
+          echo "scion-base"
+        fi
       else
         return 1
       fi

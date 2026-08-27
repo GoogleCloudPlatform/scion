@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -813,12 +814,55 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Step 2: Copy template home → agentHome (overlay; template files win on conflict)
+	templateHomeCopied := false
 	for _, tpl := range chain {
 		templateHome := filepath.Join(tpl.Path, "home")
 		if info, err := os.Stat(templateHome); err == nil && info.IsDir() {
 			if err := util.CopyDir(templateHome, agentHome); err != nil {
 				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", tpl.Name, err)
 			}
+			templateHomeCopied = true
+		}
+	}
+
+	// Safety net: an agent must never come up without its base home files.
+	// When the template chain is empty (e.g. the "default" template was not
+	// found locally during resolution), copy the EMBEDDED default template
+	// home directly from the binary. This is a floor, not a workaround for
+	// a single broker — the embedded home contains .tmux.conf (pane-exited
+	// hook for sandbox exit detection), .zshrc, .gitconfig, and .gemini.
+	if !templateHomeCopied {
+		slog.Warn("template chain produced no home files — applying embedded default template home as floor",
+			"agent", agentName, "template", templateName)
+		embeddedHome := "embeds/templates/default/home"
+		if err := fs.WalkDir(config.EmbedsFS, embeddedHome, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			relPath, err := filepath.Rel(embeddedHome, path)
+			if err != nil {
+				return err
+			}
+			if relPath == "." {
+				return nil
+			}
+			targetPath := filepath.Join(agentHome, relPath)
+			if d.IsDir() {
+				return os.MkdirAll(targetPath, 0755)
+			}
+			// Only write if the file does not already exist (harness-config
+			// step 1 may have written files we should not overwrite).
+			if _, statErr := os.Stat(targetPath); statErr == nil {
+				return nil
+			}
+			data, readErr := config.EmbedsFS.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			return os.WriteFile(targetPath, data, 0644)
+		}); err != nil {
+			slog.Warn("failed to apply embedded default template home",
+				"agent", agentName, "error", err)
 		}
 	}
 

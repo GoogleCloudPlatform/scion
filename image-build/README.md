@@ -60,6 +60,7 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 | `scion-base` | `scion-base` | Adds sciontool. Uses existing `core-base:<tag>`. |
 | `harnesses` | All catalog harness images with `harnesses/<name>/Dockerfile` | Uses existing `scion-base:<tag>`. Builds recipes from the root Harness-config catalog. |
 | `hub` | `scion-hub` | Hub server image. Uses existing `scion-base:<tag>`. |
+| `omni` | `scion-omni` | Single-node deployment image: selected harnesses (claude, codex, opencode, antigravity, grok-build) chained into one image with embedded web UI. amd64 only. |
 | `common` (default) | `scion-base` + catalog harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
 | `thick-prep` | `thick-prep` | Prep layer for thick base. amd64 only. |
@@ -132,6 +133,7 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `scion-base` | `cloudbuild-scion-base.yaml` |
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
+| `omni` | `cloudbuild-omni.yaml` |
 | `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
 | `thick` | `cloudbuild-thick.yaml` |
 
@@ -139,6 +141,13 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 chain (thick-prep + scion-base + harnesses + hub), since both `thick-prep` and
 `thick` map to the same `cloudbuild-thick.yaml`. With per-image builders
 (`local-docker`, `local-podman`), `--target thick-prep` builds only thick-prep.
+
+**Builder divergence for `omni`:** Under `cloud-build`, the omni target builds the
+full chain from `thick-prep` (amd64 only, no buildx cache); under `local-docker`,
+it chains from whatever `scion-base:<tag>` already exists. Same target name, two
+lineages. The `cloud-build` path uses `gcloudignore-omni` to include web source
+files that the default `.gcloudignore` excludes (the omni Dockerfile runs
+`npm install && npm run build` to embed the web frontend).
 
 These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator.
 
