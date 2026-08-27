@@ -283,7 +283,13 @@ what makes ADC work inside a sandbox.
 ## 5. Durability — Tier 0, pure ephemeral
 
 Workspaces and the SQLite control plane live on the Instance's ephemeral filesystem.
-A redeploy loses both.
+Two events destroy that state:
+
+- **Redeploy** — chosen by the operator, who can save work first.
+- **Exceeding the agent ceiling** (ptone/scion#1303) — not chosen and, on this tier,
+  not currently anticipatable. There is no per-agent memory or CPU instrument (§9.1),
+  so nothing warns before the Instance is destroyed and self-recovers empty. See §9.1
+  for measured agent counts at each Instance size.
 
 This is a deliberate trade for G5, not an oversight. The tier is aimed at cheap,
 fast, disposable deployments. Operators who need durability want the GCE VM baseline
