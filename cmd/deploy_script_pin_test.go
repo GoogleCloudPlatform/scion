@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -182,6 +183,77 @@ func TestScriptFormatStringsHavePlaceholders(t *testing.T) {
 		"audience format string must have exactly 3 %%s placeholders: %q", audienceFmt)
 	assert.Equal(t, 3, strings.Count(urlFmt, "%s"),
 		"URL format string must have exactly 3 %%s placeholders: %q", urlFmt)
+}
+
+// ---------------------------------------------------------------------------
+// Ordering pin: the ADC credential is proven BEFORE the first mutation
+// ---------------------------------------------------------------------------
+
+// TestScriptPreflightRunsBeforeInstanceCreation pins the ORDER of the ADC
+// preflight relative to step 3a. This is the defect the preflight exists to
+// fix: the original script discovered its REST credential was unusable only
+// after `gcloud beta run instances deploy` had already created the Instance,
+// leaving a half-built deploy — Instance running, IAP off, no rollback.
+//
+// This pin is deliberately a di_main test, not a unit test of
+// di_preflight_rest_credential. Review r1 moved the entire preflight block to
+// after step 3a — reintroducing the original bug in full — and every unit test
+// of the function still passed, because a unit test cannot see WHEN the
+// function is called. The whole suite was green with the bug restored.
+//
+// The stubbed deploy records its argv and then fails on purpose. Failing there
+// stops di_main at step 3a, which keeps this test off the network: the step 3b
+// PATCH URL is built from the real API host and has no test seam. It also
+// means that if the preflight is moved below step 3a, the ADC mint is never
+// recorded at all and this test fails on the first require below.
+func TestScriptPreflightRunsBeforeInstanceCreation(t *testing.T) {
+	server, _ := newPreflightStub(t, `{"email":"operator@example.com"}`, http.StatusOK, `{}`)
+	argvLog := filepath.Join(t.TempDir(), "gcloud-argv.log")
+
+	gcloudStub := fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")
+      return 0 ;;
+    "config get account")
+      printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)
+      printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token")
+      printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      echo "test stub: recorded the deploy, refusing to really run it" >&2
+      return 1 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, preflightSetup(gcloudStub, server.URL),
+		"di_main",
+		"--name", "test-name",
+		"--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest",
+		"--region", "us-east4")
+
+	require.NotEqual(t, 0, exitCode,
+		"the stubbed deploy fails on purpose, so di_main must abort; stderr: %s", stderr)
+
+	argv := readGcloudArgvLog(t, argvLog)
+	adcAt := strings.Index(argv, "auth application-default print-access-token")
+	deployAt := strings.Index(argv, "beta run instances deploy ")
+
+	require.NotEqual(t, -1, adcAt,
+		"di_main never minted an ADC token. The preflight must run before the "+
+			"Instance is created — if it moved below step 3a, a credential failure "+
+			"again leaves a created Instance with IAP off.\nrecorded gcloud calls:\n%s", argv)
+	require.NotEqual(t, -1, deployAt,
+		"di_main never called 'gcloud beta run instances deploy' — this test can no "+
+			"longer see the ordering it exists to pin.\nrecorded gcloud calls:\n%s", argv)
+	assert.Less(t, adcAt, deployAt,
+		"the ADC token must be minted and validated BEFORE the Instance is created, "+
+			"so a bad credential aborts with zero mutations.\nrecorded gcloud calls:\n%s", argv)
 }
 
 // TestScriptAudienceFormatMatchesGoBuilder verifies that the format strings
