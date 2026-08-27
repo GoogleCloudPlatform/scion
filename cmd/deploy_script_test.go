@@ -75,6 +75,165 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 }
 
 // ---------------------------------------------------------------------------
+// Helpers: invoke bash functions with custom setup (e.g. mock gcloud)
+// ---------------------------------------------------------------------------
+
+// runBashFuncWithSetup is like runBashFunc but injects setup commands
+// between sourcing deploy.sh and calling the function. This allows
+// mocking gcloud or setting environment variables for testing.
+func runBashFuncWithSetup(t *testing.T, setup, funcName string, args ...string) (string, string, int) {
+	t.Helper()
+	scriptPath := deployScriptPath(t)
+
+	bashCmd := fmt.Sprintf("set -euo pipefail; source %q; %s; %s", scriptPath, setup, funcName)
+	for _, a := range args {
+		bashCmd += fmt.Sprintf(" %q", a)
+	}
+
+	cmd := exec.Command("bash", "-c", bashCmd)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("failed to run bash function %s: %v", funcName, err)
+		}
+	}
+
+	return stdout.String(), stderr.String(), exitCode
+}
+
+// ---------------------------------------------------------------------------
+// Preflight: ADC credential check tests
+// ---------------------------------------------------------------------------
+
+func TestScriptPreflightFailsWithoutADC(t *testing.T) {
+	// Mock gcloud so ADC print-access-token fails (simulates no ADC configured).
+	setup := `gcloud() {
+		if [[ "${1:-}" == "auth" ]] && [[ "${2:-}" == "application-default" ]] && [[ "${3:-}" == "print-access-token" ]]; then
+			echo "ERROR: Application Default Credentials are not available." >&2
+			return 1
+		fi
+		command gcloud "$@"
+	}`
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_preflight_rest_credential",
+		"user@example.com", "us-east4", "test-project", "test-name")
+
+	assert.NotEqual(t, 0, exitCode, "must fail when ADC is unavailable")
+	assert.Contains(t, stderr, "gcloud auth application-default login",
+		"error must name the exact remedy: gcloud auth application-default login")
+}
+
+func TestScriptPreflightAbortsOnNon2xxGet(t *testing.T) {
+	// Stub server: tokeninfo returns OK, but instances API returns 403.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("access_token") != "" {
+			// tokeninfo request
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"email":"user@example.com","email_verified":"true"}`)
+			return
+		}
+		// Instances API — reject
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprintf(w, `{"error":{"code":403,"message":"permission denied"}}`)
+	}))
+	defer server.Close()
+
+	setup := fmt.Sprintf(`gcloud() {
+		echo "ya29.fake-test-token"
+	}
+	_DI_API_BASE="%s"
+	_DI_TOKENINFO_URL="%s"`, server.URL, server.URL)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_preflight_rest_credential",
+		"user@example.com", "us-east4", "test-project", "test-name")
+
+	assert.NotEqual(t, 0, exitCode,
+		"must fail when validating GET returns non-2xx — this abort prevents "+
+			"step 3a from creating an Instance that step 3b cannot configure")
+	assert.Contains(t, stderr, "403",
+		"error must include the HTTP status code")
+	assert.Contains(t, stderr, "gcloud auth application-default login",
+		"error must name the remedy")
+}
+
+func TestScriptPreflightWarnsOnIdentityMismatch(t *testing.T) {
+	// Stub server: tokeninfo returns a different email than the gcloud account.
+	// Instances API returns 200.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("access_token") != "" {
+			// tokeninfo request — return a different identity
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"email":"adc-user@example.com","email_verified":"true"}`)
+			return
+		}
+		// Instances API — success
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{}`)
+	}))
+	defer server.Close()
+
+	setup := fmt.Sprintf(`gcloud() {
+		echo "ya29.fake-test-token"
+	}
+	_DI_API_BASE="%s"
+	_DI_TOKENINFO_URL="%s"`, server.URL, server.URL)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_preflight_rest_credential",
+		"gcloud-user@example.com", "us-east4", "test-project", "test-name")
+
+	assert.Equal(t, 0, exitCode,
+		"identity mismatch is a warning, not a failure — a deliberate mismatch "+
+			"is legitimate; stderr: %s", stderr)
+	assert.Contains(t, stderr, "WARNING",
+		"must emit a warning")
+	assert.Contains(t, stderr, "gcloud-user@example.com",
+		"warning must name the gcloud account")
+	assert.Contains(t, stderr, "adc-user@example.com",
+		"warning must name the ADC identity")
+}
+
+func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
+	// Stub server: tokeninfo returns the same email as the gcloud account.
+	// Instances API returns 200.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("access_token") != "" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"email":"user@example.com","email_verified":"true"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{}`)
+	}))
+	defer server.Close()
+
+	setup := fmt.Sprintf(`gcloud() {
+		echo "ya29.fake-test-token"
+	}
+	_DI_API_BASE="%s"
+	_DI_TOKENINFO_URL="%s"`, server.URL, server.URL)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, setup,
+		"di_preflight_rest_credential",
+		"user@example.com", "us-east4", "test-project", "test-name")
+
+	assert.Equal(t, 0, exitCode, "must succeed when all checks pass; stderr: %s", stderr)
+	assert.NotContains(t, stderr, "WARNING",
+		"must NOT warn when identities match")
+	assert.Contains(t, stdout, "ADC credential validated successfully",
+		"must confirm successful validation")
+}
+
+// ---------------------------------------------------------------------------
 // Gate 2: Perimeter assertion tests (5 mandatory)
 // ---------------------------------------------------------------------------
 

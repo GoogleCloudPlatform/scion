@@ -216,6 +216,130 @@ ERRMSG
   return 1
 }
 
+# di_preflight_rest_credential mints an Application Default Credential (ADC)
+# token, validates it against the Cloud Run v2 API with a cheap GET, and
+# compares the ADC identity with the active gcloud account.
+#
+# This runs BEFORE any resource is created or modified. If the token cannot
+# be minted or the API rejects it, the deploy aborts with zero mutations —
+# preventing a half-built deploy (Instance created, IAP not enabled).
+#
+# The validated token is stored in the caller's _di_adc_token variable
+# (bash dynamic scope) for reuse in step 3b, avoiding a second mint.
+#
+# Arguments: gcloud_account region project name
+# Returns 0 on success, 1 on failure.
+di_preflight_rest_credential() {
+  local gcloud_account="$1"
+  local region="$2"
+  local project="$3"
+  local name="$4"
+
+  echo "    Minting ADC token..."
+
+  # Capture stderr so we can print it on failure (never suppress with 2>/dev/null).
+  local adc_stderr_file
+  adc_stderr_file="$(mktemp)"
+
+  local tok
+  tok="$(gcloud auth application-default print-access-token 2>"$adc_stderr_file" | tr -d '[:space:]')" || {
+    echo "Error: 'gcloud auth application-default print-access-token' failed." >&2
+    echo "stderr from gcloud:" >&2
+    cat "$adc_stderr_file" >&2
+    rm -f "$adc_stderr_file"
+    echo "" >&2
+    echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    return 1
+  }
+
+  if [[ -z "$tok" ]]; then
+    echo "Error: ADC returned an empty access token." >&2
+    if [[ -s "$adc_stderr_file" ]]; then
+      echo "stderr from gcloud:" >&2
+      cat "$adc_stderr_file" >&2
+    fi
+    rm -f "$adc_stderr_file"
+    echo "" >&2
+    echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    return 1
+  fi
+  rm -f "$adc_stderr_file"
+
+  echo "    ADC token minted (${#tok} chars, prefix: ${tok:0:4}...)"
+
+  # --- Resolve ADC identity via tokeninfo ---
+  # tokeninfo may not carry "email" for all token types (e.g. a
+  # service-account token scoped to cloud-platform returns azp but no
+  # email). Handle the missing-email case: print whatever identifier is
+  # available rather than printing nothing.
+  local tokeninfo_url="${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
+  local tokeninfo_resp
+  tokeninfo_resp="$(curl -s "${tokeninfo_url}?access_token=${tok}" 2>&1)" || true
+
+  local adc_identity=""
+  # Try email first, fall back to azp.
+  adc_identity="$(echo "$tokeninfo_resp" | grep '"email"' | sed 's/.*"email"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
+  if [[ -z "$adc_identity" ]]; then
+    adc_identity="$(echo "$tokeninfo_resp" | grep '"azp"' | sed 's/.*"azp"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
+  fi
+
+  if [[ -n "$adc_identity" ]]; then
+    echo "    ADC identity: $adc_identity"
+  else
+    echo "    ADC identity: (could not resolve — tokeninfo returned no email or azp)"
+  fi
+
+  # Warn on identity mismatch — not a hard failure (a deliberate mismatch
+  # is legitimate), but it must be visible.
+  if [[ -n "$adc_identity" ]] && [[ "$adc_identity" != "$gcloud_account" ]]; then
+    echo "" >&2
+    echo "    WARNING: ADC identity does not match the active gcloud account." >&2
+    echo "      gcloud account: $gcloud_account" >&2
+    echo "      ADC identity:   $adc_identity" >&2
+    echo "    Step 3a (gcloud) will run as the gcloud account." >&2
+    echo "    Step 3b (REST PATCH) will run as the ADC identity." >&2
+    echo "    If this is unintentional, run: gcloud auth application-default login" >&2
+    echo ""
+  fi
+
+  # --- Validate with one cheap GET against the v2 surface ---
+  # A non-2xx here means the token will be rejected at step 3b.
+  # Abort NOW, before step 3a creates an Instance we cannot configure.
+  local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
+  local list_url="${api_base}/v2/projects/${project}/locations/${region}/instances"
+  echo "    Validating ADC token against Cloud Run API..."
+  echo "    GET $list_url"
+
+  local resp_file
+  resp_file="$(mktemp)"
+  local http_code
+  http_code="$(curl -s -o "$resp_file" -w "%{http_code}" \
+    -H "Authorization: Bearer ${tok}" \
+    "$list_url")" || {
+    echo "Error: could not connect to $list_url — check network connectivity" >&2
+    rm -f "$resp_file"
+    return 1
+  }
+
+  if [[ "$http_code" -ge 300 ]]; then
+    echo "Error: ADC credential check failed — GET $list_url returned HTTP $http_code:" >&2
+    head -c 500 "$resp_file" >&2
+    echo >&2
+    rm -f "$resp_file"
+    echo "" >&2
+    echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
+    echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    return 1
+  fi
+  rm -f "$resp_file"
+  echo "    ADC credential validated successfully."
+
+  # Store token for step 3b (bash dynamic scope — the caller declares
+  # _di_adc_token as a local, and this assignment writes to it).
+  # NEVER print the full token to stdout.
+  _di_adc_token="$tok"
+}
+
 # ---------------------------------------------------------------------------
 # Gate functions — testable with stub HTTP servers
 # ---------------------------------------------------------------------------
@@ -465,6 +589,19 @@ di_main() {
   echo "    Image registry: $image_registry"
 
   # ===================================================================
+  # Preflight: Validate REST credential (ADC) before any mutations
+  # The REST PATCH in step 3b requires an Application Default Credential.
+  # If the token cannot be minted or the API rejects it, abort NOW —
+  # before step 3a creates an Instance that 3b cannot configure.
+  # ===================================================================
+  echo "==> Preflight: Validating REST credential (ADC)..."
+
+  local _di_adc_token=""
+  if ! di_preflight_rest_credential "$operator_email" "$DI_REGION" "$DI_PROJECT" "$DI_NAME"; then
+    return 1
+  fi
+
+  # ===================================================================
   # Step 3a: Create/update the Instance via gcloud (v1 surface)
   # gcloud speaks v1, which is the ONLY surface that has sandboxLauncher.
   # REST v2 neither sets nor returns sandboxLauncher.
@@ -506,14 +643,11 @@ di_main() {
   # ===================================================================
   echo "==> Step 3b: Enabling IAP (REST v2 PATCH)..."
 
-  # Get access token — NEVER print it to stdout.
+  # Reuse the ADC token validated in preflight — never mint twice.
   local access_token
-  access_token="$(gcloud auth print-access-token 2>/dev/null | tr -d '[:space:]')" || {
-    echo "Error: 'gcloud auth print-access-token' failed — is gcloud authenticated?" >&2
-    return 1
-  }
+  access_token="$_di_adc_token"
   if [[ -z "$access_token" ]]; then
-    echo "Error: gcloud returned empty access token" >&2
+    echo "Error: ADC token from preflight is empty — this should not happen" >&2
     return 1
   fi
 
