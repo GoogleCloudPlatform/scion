@@ -1,5 +1,5 @@
 ---
-title: Deploy on Cloud Run (Single-Node)
+title: Deploy on Cloud Run (Sandbox)
 description: Deploy a single-node Scion Hub on a Cloud Run Instance with sandbox-based agent execution and IAP protection.
 ---
 

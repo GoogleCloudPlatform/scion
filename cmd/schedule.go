@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -116,6 +117,70 @@ var scheduleHistoryCmd = &cobra.Command{
 	Short: "View execution history for a schedule",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runScheduleHistory,
+}
+
+// resolveScheduleID resolves a potentially truncated schedule/event ID to its full UUID.
+// If the input is already a full UUID (36 chars), it is returned as-is with an empty resourceType.
+// Otherwise, it lists schedules and/or events and finds a unique prefix match.
+// The targetType parameter controls which resources are searched:
+//   - "" (empty) — search both events and schedules
+//   - "event" — search only scheduled events
+//   - "schedule" — search only recurring schedules
+//
+// Returns (fullID, resourceType, error) where resourceType is "schedule" or "event".
+func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefix, targetType string) (string, string, error) {
+	if prefix == "" {
+		return "", "", fmt.Errorf("schedule/event ID is required")
+	}
+
+	if len(prefix) == 36 {
+		return prefix, "", nil
+	}
+
+	type match struct {
+		id           string
+		resourceType string
+	}
+	var matches []match
+
+	// List one-shot events when targeting events or both
+	if targetType == "" || targetType == "event" {
+		evtResp, err := hubCtx.Client.ScheduledEvents(projectID).List(ctx, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to list scheduled events for prefix resolution: %w", err)
+		}
+		for _, evt := range evtResp.Events {
+			if strings.HasPrefix(evt.ID, prefix) {
+				matches = append(matches, match{id: evt.ID, resourceType: "event"})
+			}
+		}
+	}
+
+	// List recurring schedules when targeting schedules or both
+	if targetType == "" || targetType == "schedule" {
+		schedResp, err := hubCtx.Client.Schedules(projectID).List(ctx, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to list schedules for prefix resolution: %w", err)
+		}
+		for _, sched := range schedResp.Schedules {
+			if strings.HasPrefix(sched.ID, prefix) {
+				matches = append(matches, match{id: sched.ID, resourceType: "schedule"})
+			}
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", "", fmt.Errorf("no schedule or event found with ID prefix %q", prefix)
+	case 1:
+		return matches[0].id, matches[0].resourceType, nil
+	default:
+		ids := make([]string, len(matches))
+		for i, m := range matches {
+			ids[i] = m.id
+		}
+		return "", "", fmt.Errorf("ambiguous ID prefix %q matches %d resources: %s", prefix, len(matches), strings.Join(ids, ", "))
+	}
 }
 
 func runScheduleList(cmd *cobra.Command, args []string) error {
@@ -260,49 +325,48 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Try as one-shot event first
-	evt, evtErr := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, resourceID)
+	// Resolve potentially truncated ID to full UUID (get handles both types)
+	fullID, resourceType, err := resolveScheduleID(ctx, hubCtx, projectID, resourceID, "")
+	if err != nil {
+		return err
+	}
+
+	// If we know the resource type from prefix resolution, try that first
+	if resourceType == "event" {
+		evt, err := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, fullID)
+		if err != nil {
+			return wrapHubError(fmt.Errorf("failed to get scheduled event: %w", err))
+		}
+		if isJSONOutput() {
+			return outputJSON(evt)
+		}
+		printEventDetail(evt)
+		return nil
+	}
+	if resourceType == "schedule" {
+		sched, err := hubCtx.Client.Schedules(projectID).Get(ctx, fullID)
+		if err != nil {
+			return wrapHubError(fmt.Errorf("failed to get recurring schedule: %w", err))
+		}
+		if isJSONOutput() {
+			return outputJSON(sched)
+		}
+		printScheduleDetail(sched)
+		return nil
+	}
+
+	// Full UUID provided (resourceType is empty) — try as one-shot event first
+	evt, evtErr := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, fullID)
 	if evtErr == nil {
 		if isJSONOutput() {
 			return outputJSON(evt)
 		}
-
-		fmt.Printf("Scheduled Event: %s\n", evt.ID)
-		fmt.Printf("  Type:       %s\n", evt.EventType)
-		fmt.Printf("  Status:     %s\n", evt.Status)
-		fmt.Printf("  Fire At:    %s (%s)\n", evt.FireAt.Format(time.RFC3339), formatScheduleTime(evt.FireAt, evt.Status))
-		fmt.Printf("  Project:      %s\n", evt.ProjectID)
-		fmt.Printf("  Created:    %s\n", evt.CreatedAt.Format(time.RFC3339))
-		if evt.CreatedBy != "" {
-			fmt.Printf("  Created By: %s\n", evt.CreatedBy)
-		}
-		if evt.FiredAt != nil {
-			fmt.Printf("  Fired At:   %s\n", evt.FiredAt.Format(time.RFC3339))
-		}
-		if evt.Error != "" {
-			fmt.Printf("  Error:      %s\n", evt.Error)
-		}
-		if evt.ScheduleID != "" {
-			fmt.Printf("  Schedule:   %s\n", evt.ScheduleID)
-		}
-
-		// Parse and display payload details
-		if evt.Payload != "" {
-			var payload map[string]interface{}
-			if json.Unmarshal([]byte(evt.Payload), &payload) == nil {
-				if agentName, ok := payload["agentName"].(string); ok && agentName != "" {
-					fmt.Printf("  Agent:      %s\n", agentName)
-				}
-				if message, ok := payload["message"].(string); ok && message != "" {
-					fmt.Printf("  Message:    %q\n", message)
-				}
-			}
-		}
+		printEventDetail(evt)
 		return nil
 	}
 
 	// Try as recurring schedule
-	sched, schedErr := hubCtx.Client.Schedules(projectID).Get(ctx, resourceID)
+	sched, schedErr := hubCtx.Client.Schedules(projectID).Get(ctx, fullID)
 	if schedErr == nil {
 		if isJSONOutput() {
 			return outputJSON(sched)
@@ -313,6 +377,40 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 
 	// Both failed — return the event error (most likely "not found")
 	return wrapHubError(fmt.Errorf("failed to get scheduled event or recurring schedule: %w", evtErr))
+}
+
+func printEventDetail(evt *hubclient.ScheduledEvent) {
+	fmt.Printf("Scheduled Event: %s\n", evt.ID)
+	fmt.Printf("  Type:       %s\n", evt.EventType)
+	fmt.Printf("  Status:     %s\n", evt.Status)
+	fmt.Printf("  Fire At:    %s (%s)\n", evt.FireAt.Format(time.RFC3339), formatScheduleTime(evt.FireAt, evt.Status))
+	fmt.Printf("  Project:      %s\n", evt.ProjectID)
+	fmt.Printf("  Created:    %s\n", evt.CreatedAt.Format(time.RFC3339))
+	if evt.CreatedBy != "" {
+		fmt.Printf("  Created By: %s\n", evt.CreatedBy)
+	}
+	if evt.FiredAt != nil {
+		fmt.Printf("  Fired At:   %s\n", evt.FiredAt.Format(time.RFC3339))
+	}
+	if evt.Error != "" {
+		fmt.Printf("  Error:      %s\n", evt.Error)
+	}
+	if evt.ScheduleID != "" {
+		fmt.Printf("  Schedule:   %s\n", evt.ScheduleID)
+	}
+
+	// Parse and display payload details
+	if evt.Payload != "" {
+		var payload map[string]interface{}
+		if json.Unmarshal([]byte(evt.Payload), &payload) == nil {
+			if agentName, ok := payload["agentName"].(string); ok && agentName != "" {
+				fmt.Printf("  Agent:      %s\n", agentName)
+			}
+			if message, ok := payload["message"].(string); ok && message != "" {
+				fmt.Printf("  Message:    %q\n", message)
+			}
+		}
+	}
 }
 
 func printScheduleDetail(sched *hubclient.Schedule) {
@@ -391,14 +489,20 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := hubCtx.Client.ScheduledEvents(projectID).Cancel(ctx, eventID); err != nil {
+	// Resolve potentially truncated ID to full UUID (cancel only targets events)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, eventID, "event")
+	if err != nil {
+		return err
+	}
+
+	if err := hubCtx.Client.ScheduledEvents(projectID).Cancel(ctx, fullID); err != nil {
 		return wrapHubError(fmt.Errorf("failed to cancel scheduled event: %w", err))
 	}
 
 	return outputActionResult(ActionResult{
 		Status:  "ok",
 		Command: "schedule cancel",
-		Message: fmt.Sprintf("Scheduled event %s cancelled.", eventID),
+		Message: fmt.Sprintf("Scheduled event %s cancelled.", fullID),
 	})
 }
 
@@ -564,14 +668,20 @@ func runSchedulePause(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := hubCtx.Client.Schedules(projectID).Pause(ctx, scheduleID); err != nil {
+	// Resolve potentially truncated ID to full UUID (pause only targets schedules)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
+	if err != nil {
+		return err
+	}
+
+	if _, err := hubCtx.Client.Schedules(projectID).Pause(ctx, fullID); err != nil {
 		return wrapHubError(fmt.Errorf("failed to pause schedule: %w", err))
 	}
 
 	return outputActionResult(ActionResult{
 		Status:  "ok",
 		Command: "schedule pause",
-		Message: fmt.Sprintf("Schedule %s paused.", scheduleID),
+		Message: fmt.Sprintf("Schedule %s paused.", fullID),
 	})
 }
 
@@ -598,12 +708,18 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sched, err := hubCtx.Client.Schedules(projectID).Resume(ctx, scheduleID)
+	// Resolve potentially truncated ID to full UUID (resume only targets schedules)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
+	if err != nil {
+		return err
+	}
+
+	sched, err := hubCtx.Client.Schedules(projectID).Resume(ctx, fullID)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to resume schedule: %w", err))
 	}
 
-	msg := fmt.Sprintf("Schedule %s resumed.", scheduleID)
+	msg := fmt.Sprintf("Schedule %s resumed.", fullID)
 	if sched.NextRunAt != nil {
 		msg += fmt.Sprintf(" Next run: %s", sched.NextRunAt.Format(time.RFC3339))
 	}
@@ -638,14 +754,20 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := hubCtx.Client.Schedules(projectID).Delete(ctx, scheduleID); err != nil {
+	// Resolve potentially truncated ID to full UUID (delete only targets schedules)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
+	if err != nil {
+		return err
+	}
+
+	if err := hubCtx.Client.Schedules(projectID).Delete(ctx, fullID); err != nil {
 		return wrapHubError(fmt.Errorf("failed to delete schedule: %w", err))
 	}
 
 	return outputActionResult(ActionResult{
 		Status:  "ok",
 		Command: "schedule delete",
-		Message: fmt.Sprintf("Schedule %s deleted.", scheduleID),
+		Message: fmt.Sprintf("Schedule %s deleted.", fullID),
 	})
 }
 
@@ -676,7 +798,14 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	scheduleID := args[0]
-	resp, err := hubCtx.Client.Schedules(projectID).History(ctx, scheduleID, nil)
+
+	// Resolve potentially truncated ID to full UUID (history only targets schedules)
+	fullID, _, resolveErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
+	if resolveErr != nil {
+		return resolveErr
+	}
+
+	resp, err := hubCtx.Client.Schedules(projectID).History(ctx, fullID, nil)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to get schedule history: %w", err))
 	}

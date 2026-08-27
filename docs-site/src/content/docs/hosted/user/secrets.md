@@ -135,6 +135,17 @@ Secrets can be projected into the agent container in three ways:
 2.  **File**: Written to a specific path on the agent's filesystem.
 3.  **Variable**: Added to a JSON file at `~/.scion/secrets.json` for programmatic access by the harness.
 
+### Updating Secret Metadata
+
+You can update a secret's configuration metadata (like its `type`, `target` path, or injection mode) without needing to re-enter its sensitive value or create a new version in the backend. This is supported via the Web UI "Edit Settings" dialog and the CLI:
+
+```bash
+# Change an existing secret's type to file and specify a target path
+scion hub secret update MY_SECRET --type file --target ~/.my-secret
+```
+
+This metadata-only update (PATCH) guarantees that path traversal protections and scope validations are applied correctly without re-writing the encrypted payload.
+
 ### Mounting Files as Secrets
 You can use the `@` prefix to read a secret's value from a local file. This is particularly useful for SSH keys or service account JSONs.
 

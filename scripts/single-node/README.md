@@ -63,4 +63,4 @@ gcloud iap web remove-iam-policy-binding \
 If the instance you tore down was the last one in the region, there is no reason
 to keep any of these bindings.
 
-See the full tutorial: [Deploy on Cloud Run (Single-Node)](../../docs-site/src/content/docs/hosted/single-node/cloud-run.md).
+See the full tutorial: [Deploy on Cloud Run (Sandbox)](../../docs-site/src/content/docs/hosted/single-node/hub-setup-cloudrun.md).

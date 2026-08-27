@@ -88,6 +88,7 @@ OpenCode supports two authentication methods (auto-detected in this order):
 - **Config File**: `~/.config/opencode/opencode.json`.
 - **Environment**: Respects standard OpenCode environment variables.
 - **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. When `ctx.model_resolution` is empty, the provisioning script automatically falls back to `SCION_MODEL` to resolve and configure the underlying model.
+- **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is copied only when the agent is **created**. If you update your host credentials, you may need to manually update the file in the agent or recreate the agent.
@@ -197,9 +198,9 @@ a containerized workspace agent; choose the managed agent for repo-less, broker-
 :::
 
 ### Authentication
-Antigravity uses **OAuth** (auth type `oauth-token`), with an optional **Vertex AI**
-(`vertex-ai`) mode for enterprise/GCP deployments. It does not use API keys.
+Antigravity supports three authentication methods:
 
+- **API Key** (`api-key`): Provide an environment secret named `GEMINI_API_KEY`. The provisioner will set `modelProvider` in the agent's `settings.json` and authenticate using this key.
 - **OAuth token** (`oauth-token`): provide a JSON file secret named `AGY_TOKEN` containing a `refresh_token`. Scion stages it at `~/.gemini/antigravity-cli/antigravity-oauth-token` and injects it into the container's gnome-keyring at launch.
 - **Vertex AI** (`vertex-ai`): Google Cloud's Vertex AI mode using Google Cloud Application Default Credentials (ADC) plus `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (or `GOOGLE_CLOUD_REGION`). This mode no longer requires `AGY_TOKEN`. It uses the `gcloud-adc` file secret or automatically resolves ADC via the assigned GCP Service Account (Hub-managed GCP Identity). Requires AGY CLI >= 1.1.10.
 
