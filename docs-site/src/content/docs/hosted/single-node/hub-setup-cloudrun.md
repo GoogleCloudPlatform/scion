@@ -48,64 +48,7 @@ gcloud services enable \
 | Tool | Verify |
 |------|--------|
 | `gcloud` (recent version, with `beta` component) | `gcloud beta run instances deploy --help` |
-| `scion` CLI that includes `deploy-instance` (see below) | `scion deploy-instance --help` |
-| `git` and `go` — only needed to build `scion` from source (see below) | `git --version`, `go version` |
-
-The `deploy-instance` subcommand is not yet in any published `scion` release. Until
-one ships it, build the CLI from a clone of the repository at `main`:
-
-:::caution[Temporary workaround — check before you build]
-Building from source is a stopgap, accurate as of 2026-08-27. It stops being
-necessary the moment a published `scion` release ships `deploy-instance`. Run
-`scion deploy-instance --help` against your installed binary first — if it
-succeeds, skip the build. This section should be deleted once a release includes
-the subcommand — tracked by
-[ptone/scion#1314](https://github.com/ptone/scion/issues/1314).
-:::
-
-```bash
-git clone https://github.com/GoogleCloudPlatform/scion.git
-cd scion
-go build -tags no_embed_web -o ./scion ./cmd/scion/
-mkdir -p "$(go env GOPATH)/bin" && mv ./scion "$(go env GOPATH)/bin/scion"
-```
-
-The last line moves the binary into your Go bin directory (`~/go/bin` unless you
-have overridden `GOPATH`) — the conventional location for Go-built commands, and
-one that needs no `sudo`. Every `scion` command in this guide is then invoked
-bare, exactly as it will be once a release ships `deploy-instance`.
-
-Verify before continuing — this is the `scion` row of the [CLI tools](#cli-tools)
-table:
-
-```bash
-scion deploy-instance --help
-```
-
-If it prints the help text, you are done with this section. Two failures are
-possible, and both are fixed the same way:
-
-- `scion: command not found` — your Go bin directory is not on your `PATH`.
-- `unknown command "deploy-instance"` — an older `scion` **earlier** on your
-  `PATH` (a Homebrew or release install) is shadowing the binary you just built.
-
-```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
-
-Prepending, not appending, is what makes the freshly built binary win over an
-older install. Re-run the verify command.
-
-:::caution[Scope this `PATH` change to your deploy shell]
-This build uses `-tags no_embed_web`, so it has **no web UI assets** — `scion
-server start` from it would serve a blank UI. If you already have a full `scion`
-install, export the `PATH` line in the shell you deploy from rather than in your
-shell profile, so the web-less build does not shadow it everywhere.
-:::
-
-**Stay in the clone directory for the rest of this guide** — the optional wrapper
-scripts in [Section 1](#1-deploy) and [Section 6](#6-teardown) are
-repository-relative paths.
+| `git` | `git --version` |
 
 :::caution[gcloud version]
 `gcloud beta run instances deploy` requires a recent gcloud SDK. If `beta run
@@ -132,33 +75,47 @@ automatically, but Hub admin is seeded from the deployer identity by default.
 ### Container image
 
 The deploy requires a pre-built **omni image** — a single image containing the Hub
-and all supported harnesses. There is no default public image; you must specify one
-explicitly.
+and all supported harnesses. There is no public image; you must build your own.
 
-For this guide, use the image built from commit `f99a818`:
+**Build your own image with Cloud Build:**
 
-```
-# Tag (readable, but tags can be moved):
-us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
-
-# Digest (immutable — this identifies the exact artifact):
-us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni@sha256:e3eab113675848be634513b1e35bb40a03c0ba109b4ce771eac4b8905beafaaa
-```
-
-A tag is a pointer that can be reassigned; only the `@sha256:` digest guarantees
-you are running the same build. Use the tag for readability and the digest when
-pinning a known-good version.
-
-To build your own image, see the [Image Build README](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md)
-and target `omni`:
+The repository includes a Cloud Build config that builds the full omni image chain.
+Before building, create an Artifact Registry repository to push to:
 
 ```bash
-image-build/scripts/build-images.sh --target omni --registry $YOUR_REGISTRY --push
+gcloud artifacts repositories create scion \
+  --repository-format=docker \
+  --location=us-central1 \
+  --project=$PROJECT_ID
+```
+
+Then submit the build:
+
+```bash
+git clone https://github.com/GoogleCloudPlatform/scion.git
+cd scion
+
+gcloud builds submit \
+  --project=$PROJECT_ID \
+  --config=image-build/cloudbuild-omni.yaml \
+  --substitutions="_TAG=$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_REGISTRY=us-central1-docker.pkg.dev/$PROJECT_ID/scion" \
+  --ignore-file=image-build/gcloudignore-omni \
+  .
+```
+
+The build takes roughly ten minutes. Only `scion-omni` is pushed to your registry.
+When it completes, your image is:
+
+```
+us-central1-docker.pkg.dev/$PROJECT_ID/scion/scion-omni:$(git rev-parse --short HEAD)
 ```
 
 The deploy derives the agent image registry from `--image` automatically; if
 derivation fails, the error names `--image-registry` as the explicit override.
 When this value is wrong, agent creation fails — not the deploy itself.
+
+**Stay in the clone directory for the rest of this guide** — the deploy script and
+teardown script are repository-relative paths.
 
 ---
 
@@ -167,21 +124,11 @@ When this value is wrong, agent creation fails — not the deploy itself.
 A single command creates the Instance, enables IAP, and verifies the perimeter:
 
 ```bash
-scion deploy-instance \
-  --name my-scion-hub \
-  --project $PROJECT_ID \
-  --region us-east4 \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
-```
-
-Or use the wrapper script:
-
-```bash
 ./scripts/single-node/deploy.sh \
   --name my-scion-hub \
   --project $PROJECT_ID \
   --region us-east4 \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 ```
 
 **What the command does, step by step:**
@@ -355,11 +302,11 @@ memory budget. A single compute-heavy agent can starve its neighbours.
 To change the Instance size:
 
 ```bash
-scion deploy-instance \
+./scripts/single-node/deploy.sh \
   --name my-scion-hub \
   --project $PROJECT_ID \
   --cpu 8 --memory 32Gi \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 ```
 
 ---
