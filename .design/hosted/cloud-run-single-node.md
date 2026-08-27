@@ -244,7 +244,7 @@ eight upstream commits the branch was behind. I concluded the predicted conflict
 been overtaken by landing order, wrote that here, and told the rebase developer
 explicitly not to go looking for it.
 
-That measurement was accurate and the conclusion drawn from it was not. #1302 — the
+That measurement was accurate and the conclusion drawn from it was not. GoogleCloudPlatform/scion#1302 — the
 Instances runtime, the *other* half of the pair this section is about — merged
 upstream as `83ee4bd9` roughly twenty minutes after I measured. Re-measured at 00:49,
 the branch was behind by eleven rather than eight, and the conflict surface was
@@ -425,37 +425,37 @@ surfaced first.
 
 | Issue | Problem |
 |---|---|
-| #1273 | A hosted hub drops template and harness-config identity on agent create, and the broker then falls back to a local disk search that is always empty in hosted mode. |
-| #1274 | `GitCloneConfig.Depth` is documented as `0 = full clone` and implemented as depth 1, in three independent call sites. A depth-1 workspace cannot push to any remote but origin. |
-| #1275 | `noAuth: true` on agent create makes a request fail that succeeds without it. |
-| #1276 | The auth preflight counts only `metadata_mode: assign` as an assigned GCP identity, so a host with ambient credentials from the real metadata server never satisfies `skipped_when_gcp_service_account_assigned`. Runtime-agnostic: affects GCE and GKE workload identity too. |
+| ptone/scion#1273 | A hosted hub drops template and harness-config identity on agent create, and the broker then falls back to a local disk search that is always empty in hosted mode. |
+| ptone/scion#1274 | `GitCloneConfig.Depth` is documented as `0 = full clone` and implemented as depth 1, in three independent call sites. A depth-1 workspace cannot push to any remote but origin. |
+| ptone/scion#1275 | `noAuth: true` on agent create makes a request fail that succeeds without it. |
+| ptone/scion#1276 | The auth preflight counts only `metadata_mode: assign` as an assigned GCP identity, so a host with ambient credentials from the real metadata server never satisfies `skipped_when_gcp_service_account_assigned`. Runtime-agnostic: affects GCE and GKE workload identity too. |
 
-Until #1273 and #1276 land, this tier needs deploy-time workarounds. They are
+Until ptone/scion#1273 and ptone/scion#1276 land, this tier needs deploy-time workarounds. They are
 stopgaps and should be removed when the fixes arrive.
 
 **Update, 2026-08-27 — three of the four have landed upstream.**
 
 | Issue | Fix | Landed as |
 |---|---|---|
-| #1273 | resolve implicit `default` template when none is specified | `fc523ecd` (PR #1305) |
-| #1275 | skip env-gather when `noAuth` is true | `6edf6ed0` (PR #1304) |
-| #1276 | auth preflight recognises passthrough GCP identity mode | `a30368aa` (PR #1306) |
+| ptone/scion#1273 | resolve implicit `default` template when none is specified | `fc523ecd` (PR GoogleCloudPlatform/scion#1305) |
+| ptone/scion#1275 | skip env-gather when `noAuth` is true | `6edf6ed0` (PR GoogleCloudPlatform/scion#1304) |
+| ptone/scion#1276 | auth preflight recognises passthrough GCP identity mode | `a30368aa` (PR GoogleCloudPlatform/scion#1306) |
 
-So **the deploy-time stopgaps for #1273 and #1276 are now obsolete and should be
+So **the deploy-time stopgaps for ptone/scion#1273 and ptone/scion#1276 are now obsolete and should be
 deleted.** They were operator settings rather than code, which is why this tier never
 had to carry a workaround for them and never blocked on them — the §1 walkthrough was
 completed end to end on 2026-08-25 with all four open.
 
-**#1274 remains open** and is the one with a live consequence: a depth-1 workspace
+**ptone/scion#1274 remains open** and is the one with a live consequence: a depth-1 workspace
 cannot push to any remote but `origin`. That constrains §1's final step to
 origin-only pushes. It is a real limitation of the tier as shipped, not a
 theoretical one.
 
-A fifth defect was filed after this section was first written — **#1281**, session-end
+A fifth defect was filed after this section was first written — **ptone/scion#1281**, session-end
 telemetry rejected with a 400 because `SessionID` is dropped in `Finalize()`, so
 `exit_code` is never persisted. Also open, also not blocking.
 
-A sixth, the `WebServer` access-settings split-brain, was **fixed upstream by #1300**
+A sixth, the `WebServer` access-settings split-brain, was **fixed upstream by GoogleCloudPlatform/scion#1300**
 (`AccessSettingsProvider`) before it was ever filed from here. All browser login paths
 now read live settings, so tightening access mode in the admin UI reaches browser
 logins. Verified by reading the merged code, **not yet exercised on a live deployment** —
