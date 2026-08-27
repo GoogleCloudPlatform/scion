@@ -47,291 +47,87 @@
 #   --memory          Memory limit (default: 8Gi)
 #   --cpu             CPU limit (default: 4)
 #   --image-registry  Override image registry (default: derived from --image)
-
-set -euo pipefail
-
-# ---------------------------------------------------------------------------
-# Defaults (must match the Go command's defaults byte-for-byte)
-# ---------------------------------------------------------------------------
-NAME=""
-IMAGE=""
-PROJECT=""
-REGION="us-east4"
-ADMIN_EMAIL=""
-SERVICE_ACCOUNT=""
-MEMORY="8Gi"
-CPU="4"
-IMAGE_REGISTRY=""
+#
+# Sourceable: this file can be sourced to access individual di_* functions
+# for testing. Sourcing has no side effects — no gcloud calls, no output,
+# no argument parsing at file scope.
 
 # ---------------------------------------------------------------------------
-# Parse flags
+# Pure functions — no side effects, testable in isolation
 # ---------------------------------------------------------------------------
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --name)           NAME="$2"; shift 2 ;;
-    --image)          IMAGE="$2"; shift 2 ;;
-    --project)        PROJECT="$2"; shift 2 ;;
-    --region)         REGION="$2"; shift 2 ;;
-    --admin-email)    ADMIN_EMAIL="$2"; shift 2 ;;
-    --service-account) SERVICE_ACCOUNT="$2"; shift 2 ;;
-    --memory)         MEMORY="$2"; shift 2 ;;
-    --cpu)            CPU="$2"; shift 2 ;;
-    --image-registry) IMAGE_REGISTRY="$2"; shift 2 ;;
-    --help|-h)
-      sed -n '/^# deploy\.sh/,/^[^#]/{ /^#/s/^# \?//p }' "$0"
-      exit 0
-      ;;
-    *)
-      echo "Error: unknown flag: $1" >&2
-      exit 1
-      ;;
-  esac
-done
 
-# ---------------------------------------------------------------------------
-# Validate required flags
-# ---------------------------------------------------------------------------
-missing=()
-[[ -z "$NAME" ]]    && missing+=("--name")
-[[ -z "$IMAGE" ]]   && missing+=("--image")
-[[ -z "$PROJECT" ]] && missing+=("--project")
-if [[ ${#missing[@]} -gt 0 ]]; then
-  echo "Error: missing required flag(s): ${missing[*]}" >&2
-  exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Helper: run gcloud, capturing only stdout (stderr goes to stderr).
-# gcloud writes diagnostic messages (notably the impersonation warning
-# "WARNING: This command is using service account impersonation...") to
-# stderr. Using only stdout prevents those from contaminating data values
-# like project numbers and URLs.
-# ---------------------------------------------------------------------------
-run_gcloud() {
-  gcloud "$@"
+# di_validate_project_number rejects anything that is not a pure numeric string.
+# gcloud under service-account impersonation prepends a WARNING to stderr; if
+# stderr leaks into the captured value, the project number becomes garbage and
+# every consumer silently embeds it.
+# Prints error to stderr and returns 1 on failure.
+di_validate_project_number() {
+  local num="$1"
+  if [[ -z "$num" ]]; then
+    echo "Error: project number is empty" >&2
+    return 1
+  fi
+  if ! [[ "$num" =~ ^[0-9]+$ ]]; then
+    echo "Error: project number '$num' is not purely numeric — gcloud output may be contaminated (stderr mixed into stdout?)" >&2
+    return 1
+  fi
+  return 0
 }
 
-# ===================================================================
-# Step 1: Resolve identity
-# ===================================================================
-echo "==> Step 1: Resolving deployer identity..."
-OPERATOR_EMAIL="$(run_gcloud config get account 2>/dev/null)"
-OPERATOR_EMAIL="$(echo "$OPERATOR_EMAIL" | tr -d '[:space:]')"
-if [[ -z "$OPERATOR_EMAIL" ]]; then
-  echo "Error: gcloud returned empty account — is gcloud configured?" >&2
-  exit 1
-fi
-echo "    Deployer: $OPERATOR_EMAIL"
+# di_validate_instance_url rejects anything that does not look like an https
+# Cloud Run URL (https://<something>.run.app).
+# Prints error to stderr and returns 1 on failure.
+di_validate_instance_url() {
+  local url="$1"
+  if [[ -z "$url" ]]; then
+    echo "Error: instance URL is empty" >&2
+    return 1
+  fi
+  if ! [[ "$url" =~ ^https://[^/]+\.run\.app$ ]]; then
+    echo "Error: computed instance URL '$url' is invalid (project number may be contaminated)" >&2
+    return 1
+  fi
+  return 0
+}
 
-# Determine admin email: use --admin-email override if provided, otherwise operator
-admin_email="$OPERATOR_EMAIL"
-if [[ -n "$ADMIN_EMAIL" ]]; then
-  admin_email="$ADMIN_EMAIL"
-  echo "    Admin override: $admin_email"
-fi
-
-# Guard: gcloud --set-env-vars is comma-delimited. A comma in the email
-# would silently split into a second env var, breaking the command.
-if [[ "$admin_email" == *","* ]]; then
-  echo "Error: --admin-email value '$admin_email' contains a comma, which would break gcloud --set-env-vars" >&2
-  exit 1
-fi
-
-# ===================================================================
-# Step 2: Resolve project number
-# ===================================================================
-echo "==> Step 2: Resolving project number..."
-PROJECT_NUMBER="$(run_gcloud projects describe "$PROJECT" --format='value(projectNumber)' 2>/dev/null)"
-PROJECT_NUMBER="$(echo "$PROJECT_NUMBER" | tr -d '[:space:]')"
-if [[ -z "$PROJECT_NUMBER" ]]; then
-  echo "Error: gcloud returned empty project number for '$PROJECT'" >&2
-  exit 1
-fi
-# Validate: reject anything that is not a pure numeric string.
-# gcloud under service-account impersonation prepends a WARNING to stderr;
-# if stderr leaks into the captured value, the project number becomes
-# garbage and every consumer silently embeds it.
-if ! [[ "$PROJECT_NUMBER" =~ ^[0-9]+$ ]]; then
-  echo "Error: project number '$PROJECT_NUMBER' is not purely numeric — gcloud output may be contaminated (stderr mixed into stdout?)" >&2
-  exit 1
-fi
-echo "    Project: $PROJECT (number: $PROJECT_NUMBER)"
-
-# Compute the IAP audience and instance URL.
-# NOTE: The audience uses "services" even though this is an Instance.
-# This is IAP's fixed resource vocabulary across every backend type.
-# Do NOT change to "instances".
-# FORMAT STRING: /projects/%s/locations/%s/services/%s
-IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/locations/${REGION}/services/${NAME}"
-# FORMAT STRING: https://%s-%s.%s.run.app
-INSTANCE_URL="https://${NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
-
-# Validate the computed URL before using it in gates and deploy.
-if ! [[ "$INSTANCE_URL" =~ ^https://[^/]+\.run\.app$ ]]; then
-  echo "Error: computed instance URL '$INSTANCE_URL' is invalid (project number may be contaminated)" >&2
-  exit 1
-fi
-
-# Resolve the image registry: --image-registry override, or derived from --image.
-# The broker requires SCION_IMAGE_REGISTRY to pull agent images.
-if [[ -z "$IMAGE_REGISTRY" ]]; then
-  # Derive registry from image reference.
-  # Strip tag (:...) or digest (@sha256:...) first.
-  ref="$IMAGE"
-  # Strip digest
+# di_derive_registry extracts the registry prefix from a container image
+# reference. For example:
+#   ghcr.io/ptone/scion-omni:latest       → ghcr.io/ptone
+#   us-docker.pkg.dev/proj/repo/img:tag    → us-docker.pkg.dev/proj/repo
+#   ghcr.io/ptone/scion-omni@sha256:abc    → ghcr.io/ptone
+#   localhost:5000/myimage:latest           → localhost:5000
+# Prints the registry to stdout, or prints error to stderr and returns 1.
+di_derive_registry() {
+  local image="$1"
+  local ref="$image"
+  # Strip digest (@sha256:...)
   ref="${ref%%@*}"
   # Strip tag (only if the colon is after the last slash)
   if [[ "$ref" == */* ]]; then
-    last_component="${ref##*/}"
-    prefix="${ref%/*}"
+    local last_component="${ref##*/}"
+    local prefix="${ref%/*}"
     last_component="${last_component%%:*}"
     ref="${prefix}/${last_component}"
   fi
   # The registry is everything before the last path component
-  IMAGE_REGISTRY="${ref%/*}"
-  if [[ -z "$IMAGE_REGISTRY" ]] || [[ "$IMAGE_REGISTRY" == "$ref" ]]; then
-    echo "Error: cannot derive registry from image '$IMAGE' — expected host/org/name format (e.g. us-docker.pkg.dev/project/repo/image)" >&2
-    echo "Use --image-registry to set it explicitly" >&2
-    exit 1
+  local registry="${ref%/*}"
+  if [[ -z "$registry" ]] || [[ "$registry" == "$ref" ]]; then
+    echo "Error: cannot derive registry from image '$image' — expected host/org/name format (e.g. us-docker.pkg.dev/project/repo/image)" >&2
+    return 1
   fi
   # Sanity: registry must contain a dot (hostname) or colon (port)
-  if [[ "$IMAGE_REGISTRY" != *"."* ]] && [[ "$IMAGE_REGISTRY" != *":"* ]]; then
-    echo "Error: derived registry '$IMAGE_REGISTRY' from image '$IMAGE' does not look like a hostname — use --image-registry to override" >&2
-    exit 1
+  if [[ "$registry" != *"."* ]] && [[ "$registry" != *":"* ]]; then
+    echo "Error: derived registry '$registry' from image '$image' does not look like a hostname — use --image-registry to override" >&2
+    return 1
   fi
-fi
-echo "    Image registry: $IMAGE_REGISTRY"
+  echo "$registry"
+  return 0
+}
 
-# ===================================================================
-# Step 3a: Create/update the Instance via gcloud (v1 surface)
-# gcloud speaks v1, which is the ONLY surface that has sandboxLauncher.
-# REST v2 neither sets nor returns sandboxLauncher.
-# ===================================================================
-echo "==> Step 3a: Creating/updating Cloud Run Instance (gcloud, v1 surface)..."
-
-gcloud_args=(
-  beta run instances deploy "$NAME"
-  --image "$IMAGE"
-  --sandbox-launcher
-  --region "$REGION"
-  --project "$PROJECT"
-  --set-env-vars "SCION_SERVER_MODE=hosted,SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=${IAP_AUDIENCE},SCION_SERVER_HUB_ADMINEMAILS=${admin_email},SCION_IMAGE_REGISTRY=${IMAGE_REGISTRY}"
-)
-
-if [[ -n "$SERVICE_ACCOUNT" ]]; then
-  gcloud_args+=(--service-account "$SERVICE_ACCOUNT")
-fi
-if [[ -n "$MEMORY" ]]; then
-  gcloud_args+=(--memory "$MEMORY")
-fi
-if [[ -n "$CPU" ]]; then
-  gcloud_args+=(--cpu "$CPU")
-fi
-
-echo "    gcloud ${gcloud_args[*]:0:6}"
-run_gcloud "${gcloud_args[@]}"
-echo "    Instance deployed successfully."
-
-# ===================================================================
-# Step 3b: Enable IAP via REST v2 PATCH
-# iapEnabled and invokerIamDisabled are v2-only fields. gcloud has no
-# --iap flag, so we flip both booleans with a single REST PATCH.
-#
-# This PATCH is safe because it uses updateMask to touch ONLY the IAP
-# booleans, leaving all v1-only fields (like sandboxLauncher) untouched.
-#
-# Invariant: invokerIamDisabled: true is NEVER sent without iapEnabled: true.
-# ===================================================================
-echo "==> Step 3b: Enabling IAP (REST v2 PATCH)..."
-
-# Get access token — NEVER print it to stdout.
-ACCESS_TOKEN="$(gcloud auth print-access-token 2>/dev/null)"
-ACCESS_TOKEN="$(echo "$ACCESS_TOKEN" | tr -d '[:space:]')"
-if [[ -z "$ACCESS_TOKEN" ]]; then
-  echo "Error: gcloud returned empty access token" >&2
-  exit 1
-fi
-
-PATCH_URL="https://${REGION}-run.googleapis.com/v2/projects/${PROJECT}/locations/${REGION}/instances/${NAME}?updateMask=iapEnabled,invokerIamDisabled"
-echo "    PATCH $PATCH_URL"
-
-PATCH_RESP_FILE="$(mktemp)"
-trap 'rm -f "$PATCH_RESP_FILE"' EXIT
-HTTP_CODE="$(curl -s -o "$PATCH_RESP_FILE" -w "%{http_code}" \
-  -X PATCH \
-  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"iapEnabled":true,"invokerIamDisabled":true}' \
-  "$PATCH_URL")"
-
-if [[ "$HTTP_CODE" -ge 300 ]]; then
-  echo "Error: REST PATCH returned $HTTP_CODE:" >&2
-  head -c 500 "$PATCH_RESP_FILE" >&2
-  echo >&2
-  exit 1
-fi
-echo "    IAP enabled on instance."
-
-# ===================================================================
-# Step 4: Gate 1 — Wait for IAP reconcile
-# 30-75s observed. The API returns before enforcement is live.
-# ===================================================================
-echo "==> Step 4: Waiting for IAP enforcement to activate..."
-echo "    (This typically takes 30-75 seconds)"
-
-MAX_WAIT=180   # 3 minutes
-POLL_INTERVAL=5
-ELAPSED=0
-LAST_STATUS=""
-GATE1_HEADERS="$(mktemp)"
-
-while [[ $ELAPSED -lt $MAX_WAIT ]]; do
-  # Unauthenticated probe: no credentials, no redirect following.
-  # Capture both status code and headers in a single request.
-  PROBE_CODE="$(curl -s -o /dev/null -D "$GATE1_HEADERS" -w "%{http_code}" \
-    --max-time 15 \
-    "$INSTANCE_URL" 2>/dev/null)" || PROBE_CODE="000"
-
-  if [[ "$PROBE_CODE" == "302" ]]; then
-    LOCATION="$(grep -i '^location:' "$GATE1_HEADERS" | head -1 | tr -d '\r')"
-    if [[ "$LOCATION" == *"accounts.google.com"* ]]; then
-      rm -f "$GATE1_HEADERS"
-      echo "    IAP enforcement is active."
-      break
-    fi
-  fi
-
-  LAST_STATUS="$PROBE_CODE"
-  if [[ "$PROBE_CODE" == "000" ]]; then
-    echo "    Polling... (not ready yet: connection failed)"
-  else
-    echo "    Polling... (status $PROBE_CODE, waiting for IAP 302)"
-  fi
-  sleep "$POLL_INTERVAL"
-  ELAPSED=$((ELAPSED + POLL_INTERVAL))
-done
-rm -f "$GATE1_HEADERS" 2>/dev/null
-
-if [[ $ELAPSED -ge $MAX_WAIT ]]; then
-  diag="Error: timed out after ${MAX_WAIT}s waiting for IAP to enforce on $INSTANCE_URL"
-  if [[ "$LAST_STATUS" == "502" ]] || [[ "$LAST_STATUS" == "503" ]]; then
-    diag="$diag — last seen: $LAST_STATUS (instance may not be serving — check CMD, port, and container health)"
-  elif [[ "$LAST_STATUS" == "000" ]]; then
-    diag="$diag — last probe: connection failed (instance may not be serving on port 8080)"
-  elif [[ -n "$LAST_STATUS" ]]; then
-    diag="$diag — last seen: HTTP $LAST_STATUS"
-  fi
-  echo "$diag" >&2
-  exit 1
-fi
-
-# ===================================================================
-# Step 5: Bind IAP access policy at the region level
-# ===================================================================
-echo "==> Step 5: Binding IAP access policy..."
-
-# Determine IAM member prefix: serviceAccount: or user:
-iam_member_prefix() {
+# di_iam_member_prefix returns the correct IAM member prefix for the given email.
+# Service accounts (ending in .gserviceaccount.com) use "serviceAccount:";
+# all other emails use "user:".
+di_iam_member_prefix() {
   local email="$1"
   if [[ "$email" == *".gserviceaccount.com" ]]; then
     echo "serviceAccount:"
@@ -340,128 +136,458 @@ iam_member_prefix() {
   fi
 }
 
-MEMBER_PREFIX="$(iam_member_prefix "$OPERATOR_EMAIL")"
-run_gcloud iap web add-iam-policy-binding \
-  "--project=${PROJECT}" \
-  "--region=${REGION}" \
-  --resource-type=cloud-run \
-  "--member=${MEMBER_PREFIX}${OPERATOR_EMAIL}" \
-  --role=roles/iap.httpsResourceAccessor
-echo "    IAP access granted to $OPERATOR_EMAIL"
+# di_validate_admin_email rejects admin emails containing commas.
+# gcloud --set-env-vars is comma-delimited, so a comma in the value
+# would silently split into a second env var, breaking the command.
+# Prints error to stderr and returns 1 on failure.
+di_validate_admin_email() {
+  local email="$1"
+  if [[ "$email" == *","* ]]; then
+    echo "Error: --admin-email value '$email' contains a comma, which would break gcloud --set-env-vars" >&2
+    return 1
+  fi
+  return 0
+}
 
-# If admin-email differs from operator, also bind for the admin
-if [[ -n "$ADMIN_EMAIL" ]] && [[ "$ADMIN_EMAIL" != "$OPERATOR_EMAIL" ]]; then
-  ADMIN_MEMBER_PREFIX="$(iam_member_prefix "$ADMIN_EMAIL")"
-  run_gcloud iap web add-iam-policy-binding \
-    "--project=${PROJECT}" \
-    "--region=${REGION}" \
-    --resource-type=cloud-run \
-    "--member=${ADMIN_MEMBER_PREFIX}${ADMIN_EMAIL}" \
-    --role=roles/iap.httpsResourceAccessor
-  echo "    IAP access granted to $ADMIN_EMAIL"
-fi
+# di_build_iap_audience computes the IAP audience path.
+# NOTE: Uses "services" (not "instances") — this is IAP's fixed vocabulary.
+# Arguments: project_number region name
+# FORMAT STRING: /projects/%s/locations/%s/services/%s
+di_build_iap_audience() {
+  echo "/projects/$1/locations/$2/services/$3"
+}
 
-# ===================================================================
-# Step 6: Read back and print effective access
-# Both project-level and region-level, because project-level grants
-# inherit invisibly.
-# ===================================================================
-echo "==> Step 6: Reading effective access..."
+# di_build_instance_url computes the Cloud Run Instance URL.
+# Arguments: name project_number region
+# FORMAT STRING: https://%s-%s.%s.run.app
+di_build_instance_url() {
+  echo "https://$1-$2.$3.run.app"
+}
 
-echo "    --- Region-level IAP bindings ---"
-region_policy="$(run_gcloud iap web get-iam-policy \
-  "--project=${PROJECT}" \
-  "--region=${REGION}" \
-  --resource-type=cloud-run 2>/dev/null)" || true
-if [[ -n "$region_policy" ]]; then
-  while IFS= read -r line; do echo "    $line"; done <<< "$region_policy"
-else
-  echo "    (no bindings)"
-fi
+# di_build_iap_patch_url constructs the REST v2 PATCH URL for enabling IAP.
+# Arguments: region project name
+di_build_iap_patch_url() {
+  local region="$1" project="$2" name="$3"
+  echo "https://${region}-run.googleapis.com/v2/projects/${project}/locations/${region}/instances/${name}?updateMask=iapEnabled,invokerIamDisabled"
+}
 
-echo "    --- Project-level IAP bindings (inherited) ---"
-project_policy="$(run_gcloud projects get-iam-policy "$PROJECT" \
-  --format=yaml 2>/dev/null)" || true
-if [[ -n "$project_policy" ]]; then
-  # Filter for iap.httpsResourceAccessor bindings
-  echo "$project_policy" | awk '
-    /^- members:/ || /^- role:/ { flush() }
-    { current = current "\n" $0 }
-    /role:.*iap\.httpsResourceAccessor/ { has_iap = 1 }
-    END { flush() }
-    function flush() {
-      if (has_iap && current != "") {
-        gsub(/^\n/, "", current)
-        print current
-      }
-      current = ""
-      has_iap = 0
-    }
-  ' | sed 's/^/    /' || echo "    (no project-level iap.httpsResourceAccessor bindings)"
-else
-  echo "    Warning: could not read project-level IAM policy"
-fi
+# di_iap_patch_body returns the JSON body for the IAP enable PATCH.
+# Invariant: invokerIamDisabled: true is NEVER sent without iapEnabled: true.
+di_iap_patch_body() {
+  echo '{"iapEnabled":true,"invokerIamDisabled":true}'
+}
 
-# ===================================================================
-# Step 7: Gate 2 — Assert the perimeter (MOST VALUABLE DELIVERABLE)
+# ---------------------------------------------------------------------------
+# Gate functions — testable with stub HTTP servers
+# ---------------------------------------------------------------------------
+
+# di_assert_perimeter fetches the instance URL with NO credential and requires
+# a 302 to accounts.google.com. FAILS if the app answers — this is the guard
+# for the single point of failure. With invoker IAM disabled, iapEnabled=false
+# leaves the Instance open to the internet with nothing but hub session auth.
 #
-# Fetch with NO credential. Require 302 to accounts.google.com.
-# FAIL the deploy if the app answers. This is the guard for the
-# single point of failure: with invoker IAM disabled, iapEnabled=false
-# leaves the Instance open to the internet with nothing but hub
-# session auth.
-#
-# This gate doubles as the post-deploy smoke check: if the Instance
-# is dead (wrong port, crash loop, missing binary, bad CMD), Cloud Run
-# returns 502/503, NOT the IAP 302. So a passing gate proves both
+# This gate doubles as the post-deploy smoke check: if the Instance is dead
+# (wrong port, crash loop, missing binary, bad CMD), Cloud Run returns its
+# own error (502/503), NOT the IAP 302. So a passing gate 2 proves both
 # that IAP is enforcing AND that the Instance is serving behind it.
 #
-# Do NOT use curl -f here. curl -f exits non-zero on 403, which is
-# the exact response that means the gate PASSED. Capture the status
-# code explicitly and branch on it.
-# ===================================================================
-echo "==> Step 7: Asserting IAP perimeter enforcement..."
+# Do NOT use curl -f. Do NOT use curl -L.
+# curl -f exits non-zero on error codes we need to inspect.
+# curl -L follows redirects, hiding the 302 we need to see.
+#
+# Five cases:
+#   302 → accounts.google.com, IAP header present:  PASS
+#   302 → accounts.google.com, no IAP header:       PASS (redirect alone proves IAP)
+#   200 (app answers directly):                     FAIL — UNPROTECTED
+#   302 to anywhere else:                           FAIL — not to accounts.google.com
+#   502 or 503 (Cloud Run error page):              FAIL — not be serving, CMD
+#
+# Arguments: instance_url
+# Returns 0 on pass, 1 on fail (with diagnostic on stderr).
+di_assert_perimeter() {
+  local instance_url="$1"
+  local headers_file
+  headers_file="$(mktemp)"
 
-# Capture both status code and headers from an unauthenticated request.
-GATE2_HEADERS="$(mktemp)"
-GATE2_CODE="$(curl -s -o /dev/null -D "$GATE2_HEADERS" -w "%{http_code}" \
-  --max-time 15 \
-  "$INSTANCE_URL" 2>/dev/null)" || GATE2_CODE="000"
+  local status_code
+  status_code="$(curl -s -o /dev/null -D "$headers_file" -w "%{http_code}" \
+    --max-time 15 \
+    "$instance_url" 2>/dev/null)" || status_code="000"
 
-if [[ "$GATE2_CODE" == "000" ]]; then
-  rm -f "$GATE2_HEADERS"
-  echo "SECURITY FAILURE: could not reach instance URL $INSTANCE_URL" >&2
-  exit 1
-fi
-
-if [[ "$GATE2_CODE" != "302" ]]; then
-  rm -f "$GATE2_HEADERS"
-  if [[ "$GATE2_CODE" == "502" ]] || [[ "$GATE2_CODE" == "503" ]]; then
-    echo "SECURITY FAILURE: expected 302 redirect but got $GATE2_CODE — the instance may not be serving (check Dockerfile CMD, port configuration, and container logs). Cloud Run returns $GATE2_CODE when the container is unhealthy or not listening on port 8080" >&2
-  else
-    echo "SECURITY FAILURE: expected 302 redirect but got $GATE2_CODE — IAP may not be enforcing! An unauthenticated request reached the app, which means the instance is UNPROTECTED" >&2
+  if [[ "$status_code" == "000" ]]; then
+    rm -f "$headers_file"
+    echo "SECURITY FAILURE: could not reach instance URL $instance_url" >&2
+    return 1
   fi
-  exit 1
+
+  if [[ "$status_code" != "302" ]]; then
+    rm -f "$headers_file"
+    if [[ "$status_code" == "502" ]] || [[ "$status_code" == "503" ]]; then
+      echo "SECURITY FAILURE: expected 302 redirect but got $status_code — the instance may not be serving (check Dockerfile CMD, port configuration, and container logs). Cloud Run returns $status_code when the container is unhealthy or not listening on port 8080" >&2
+    else
+      echo "SECURITY FAILURE: expected 302 redirect but got $status_code — IAP may not be enforcing! An unauthenticated request reached the app, which means the instance is UNPROTECTED" >&2
+    fi
+    return 1
+  fi
+
+  # Got 302 — verify it points to accounts.google.com
+  local location
+  location="$(grep -i '^location:' "$headers_file" | head -1 | tr -d '\r')"
+  rm -f "$headers_file"
+
+  if [[ "$location" != *"accounts.google.com"* ]]; then
+    echo "SECURITY FAILURE: got 302 but not to accounts.google.com (Location: $location) — IAP may not be enforcing" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# di_wait_for_iap polls the instance URL with an unauthenticated HTTP client
+# until IAP responds with a 302 to accounts.google.com.
+# Arguments: instance_url [max_wait_seconds] [poll_interval_seconds]
+# Returns 0 on success, 1 on timeout.
+di_wait_for_iap() {
+  local instance_url="$1"
+  local max_wait="${2:-180}"   # default 3 minutes
+  local poll_interval="${3:-5}"
+  local elapsed=0
+  local last_status=""
+  local headers_file
+  headers_file="$(mktemp)"
+
+  while [[ $elapsed -lt $max_wait ]]; do
+    local probe_code
+    probe_code="$(curl -s -o /dev/null -D "$headers_file" -w "%{http_code}" \
+      --max-time 15 \
+      "$instance_url" 2>/dev/null)" || probe_code="000"
+
+    if [[ "$probe_code" == "302" ]]; then
+      local location
+      location="$(grep -i '^location:' "$headers_file" | head -1 | tr -d '\r')"
+      if [[ "$location" == *"accounts.google.com"* ]]; then
+        rm -f "$headers_file"
+        return 0
+      fi
+    fi
+
+    last_status="$probe_code"
+    if [[ "$probe_code" == "000" ]]; then
+      echo "    Polling... (not ready yet: connection failed)" >&2
+    else
+      echo "    Polling... (status $probe_code, waiting for IAP 302)" >&2
+    fi
+    sleep "$poll_interval"
+    elapsed=$((elapsed + poll_interval))
+  done
+  rm -f "$headers_file" 2>/dev/null
+
+  local diag="timed out after ${max_wait}s waiting for IAP to enforce on $instance_url"
+  if [[ "$last_status" == "502" ]] || [[ "$last_status" == "503" ]]; then
+    diag="$diag — last seen: $last_status (instance may not be serving — check CMD, port, and container health)"
+  elif [[ "$last_status" == "000" ]]; then
+    diag="$diag — last probe: connection failed (instance may not be serving on port 8080)"
+  elif [[ -n "$last_status" ]]; then
+    diag="$diag — last seen: HTTP $last_status"
+  fi
+  echo "Error: $diag" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Main function — orchestrates all eight steps
+# ---------------------------------------------------------------------------
+
+di_main() {
+  set -euo pipefail
+
+  # Defaults (must match the Go command's defaults byte-for-byte)
+  local DI_NAME=""
+  local DI_IMAGE=""
+  local DI_PROJECT=""
+  local DI_REGION="us-east4"
+  local DI_ADMIN_EMAIL=""
+  local DI_SERVICE_ACCOUNT=""
+  local DI_MEMORY="8Gi"
+  local DI_CPU="4"
+  local DI_IMAGE_REGISTRY=""
+
+  # Parse flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)           DI_NAME="$2"; shift 2 ;;
+      --image)          DI_IMAGE="$2"; shift 2 ;;
+      --project)        DI_PROJECT="$2"; shift 2 ;;
+      --region)         DI_REGION="$2"; shift 2 ;;
+      --admin-email)    DI_ADMIN_EMAIL="$2"; shift 2 ;;
+      --service-account) DI_SERVICE_ACCOUNT="$2"; shift 2 ;;
+      --memory)         DI_MEMORY="$2"; shift 2 ;;
+      --cpu)            DI_CPU="$2"; shift 2 ;;
+      --image-registry) DI_IMAGE_REGISTRY="$2"; shift 2 ;;
+      --help|-h)
+        sed -n '/^# deploy\.sh/,/^[^#]/{ /^#/s/^# \?//p }' "${BASH_SOURCE[0]}"
+        return 0
+        ;;
+      *)
+        echo "Error: unknown flag: $1" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  # Validate required flags
+  local missing=()
+  [[ -z "$DI_NAME" ]]    && missing+=("--name")
+  [[ -z "$DI_IMAGE" ]]   && missing+=("--image")
+  [[ -z "$DI_PROJECT" ]] && missing+=("--project")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "Error: missing required flag(s): ${missing[*]}" >&2
+    return 1
+  fi
+
+  # ===================================================================
+  # Step 1: Resolve identity
+  # ===================================================================
+  echo "==> Step 1: Resolving deployer identity..."
+  local operator_email
+  operator_email="$(gcloud config get account 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$operator_email" ]]; then
+    echo "Error: gcloud returned empty account — is gcloud configured?" >&2
+    return 1
+  fi
+  echo "    Deployer: $operator_email"
+
+  # Determine admin email: use --admin-email override if provided, otherwise operator
+  local admin_email="$operator_email"
+  if [[ -n "$DI_ADMIN_EMAIL" ]]; then
+    admin_email="$DI_ADMIN_EMAIL"
+    echo "    Admin override: $admin_email"
+  fi
+
+  # Guard: comma in admin email breaks gcloud --set-env-vars
+  if ! di_validate_admin_email "$admin_email"; then
+    return 1
+  fi
+
+  # ===================================================================
+  # Step 2: Resolve project number
+  # ===================================================================
+  echo "==> Step 2: Resolving project number..."
+  local project_number
+  project_number="$(gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$project_number" ]]; then
+    echo "Error: gcloud returned empty project number for '$DI_PROJECT'" >&2
+    return 1
+  fi
+  if ! di_validate_project_number "$project_number"; then
+    return 1
+  fi
+  echo "    Project: $DI_PROJECT (number: $project_number)"
+
+  # Compute the IAP audience and instance URL.
+  local iap_audience
+  iap_audience="$(di_build_iap_audience "$project_number" "$DI_REGION" "$DI_NAME")"
+  local instance_url
+  instance_url="$(di_build_instance_url "$DI_NAME" "$project_number" "$DI_REGION")"
+
+  # Validate the computed URL before using it in gates and deploy.
+  if ! di_validate_instance_url "$instance_url"; then
+    return 1
+  fi
+
+  # Resolve the image registry: --image-registry override, or derived from --image.
+  # The broker requires SCION_IMAGE_REGISTRY to pull agent images.
+  local image_registry="$DI_IMAGE_REGISTRY"
+  if [[ -z "$image_registry" ]]; then
+    if ! image_registry="$(di_derive_registry "$DI_IMAGE")"; then
+      echo "Use --image-registry to set it explicitly" >&2
+      return 1
+    fi
+  fi
+  echo "    Image registry: $image_registry"
+
+  # ===================================================================
+  # Step 3a: Create/update the Instance via gcloud (v1 surface)
+  # gcloud speaks v1, which is the ONLY surface that has sandboxLauncher.
+  # REST v2 neither sets nor returns sandboxLauncher.
+  # ===================================================================
+  echo "==> Step 3a: Creating/updating Cloud Run Instance (gcloud, v1 surface)..."
+
+  local gcloud_args=(
+    beta run instances deploy "$DI_NAME"
+    --image "$DI_IMAGE"
+    --sandbox-launcher
+    --region "$DI_REGION"
+    --project "$DI_PROJECT"
+    --set-env-vars "SCION_SERVER_MODE=hosted,SCION_SERVER_AUTH_MODE=proxy,SCION_SERVER_AUTH_PROXY_PROVIDER=iap,SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE=${iap_audience},SCION_SERVER_HUB_ADMINEMAILS=${admin_email},SCION_IMAGE_REGISTRY=${image_registry}"
+  )
+
+  if [[ -n "$DI_SERVICE_ACCOUNT" ]]; then
+    gcloud_args+=(--service-account "$DI_SERVICE_ACCOUNT")
+  fi
+  if [[ -n "$DI_MEMORY" ]]; then
+    gcloud_args+=(--memory "$DI_MEMORY")
+  fi
+  if [[ -n "$DI_CPU" ]]; then
+    gcloud_args+=(--cpu "$DI_CPU")
+  fi
+
+  echo "    gcloud ${gcloud_args[*]:0:6}"
+  gcloud "${gcloud_args[@]}"
+  echo "    Instance deployed successfully."
+
+  # ===================================================================
+  # Step 3b: Enable IAP via REST v2 PATCH
+  # iapEnabled and invokerIamDisabled are v2-only fields. gcloud has no
+  # --iap flag, so we flip both booleans with a single REST PATCH.
+  #
+  # This PATCH is safe because it uses updateMask to touch ONLY the IAP
+  # booleans, leaving all v1-only fields (like sandboxLauncher) untouched.
+  #
+  # Invariant: invokerIamDisabled: true is NEVER sent without iapEnabled: true.
+  # ===================================================================
+  echo "==> Step 3b: Enabling IAP (REST v2 PATCH)..."
+
+  # Get access token — NEVER print it to stdout.
+  local access_token
+  access_token="$(gcloud auth print-access-token 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$access_token" ]]; then
+    echo "Error: gcloud returned empty access token" >&2
+    return 1
+  fi
+
+  local patch_url
+  patch_url="$(di_build_iap_patch_url "$DI_REGION" "$DI_PROJECT" "$DI_NAME")"
+  echo "    PATCH $patch_url"
+
+  local patch_resp_file
+  patch_resp_file="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$patch_resp_file'" RETURN
+  local http_code
+  http_code="$(curl -s -o "$patch_resp_file" -w "%{http_code}" \
+    -X PATCH \
+    -H "Authorization: Bearer ${access_token}" \
+    -H "Content-Type: application/json" \
+    -d "$(di_iap_patch_body)" \
+    "$patch_url")"
+
+  if [[ "$http_code" -ge 300 ]]; then
+    echo "Error: REST PATCH returned $http_code:" >&2
+    head -c 500 "$patch_resp_file" >&2
+    echo >&2
+    return 1
+  fi
+  echo "    IAP enabled on instance."
+
+  # ===================================================================
+  # Step 4: Gate 1 — Wait for IAP reconcile
+  # 30-75s observed. The API returns before enforcement is live.
+  # ===================================================================
+  echo "==> Step 4: Waiting for IAP enforcement to activate..."
+  echo "    (This typically takes 30-75 seconds)"
+
+  if ! di_wait_for_iap "$instance_url"; then
+    return 1
+  fi
+  echo "    IAP enforcement is active."
+
+  # ===================================================================
+  # Step 5: Bind IAP access policy at the region level
+  # ===================================================================
+  echo "==> Step 5: Binding IAP access policy..."
+
+  local member_prefix
+  member_prefix="$(di_iam_member_prefix "$operator_email")"
+  gcloud iap web add-iam-policy-binding \
+    "--project=${DI_PROJECT}" \
+    "--region=${DI_REGION}" \
+    --resource-type=cloud-run \
+    "--member=${member_prefix}${operator_email}" \
+    --role=roles/iap.httpsResourceAccessor
+  echo "    IAP access granted to $operator_email"
+
+  # If admin-email differs from operator, also bind for the admin
+  if [[ -n "$DI_ADMIN_EMAIL" ]] && [[ "$DI_ADMIN_EMAIL" != "$operator_email" ]]; then
+    local admin_member_prefix
+    admin_member_prefix="$(di_iam_member_prefix "$DI_ADMIN_EMAIL")"
+    gcloud iap web add-iam-policy-binding \
+      "--project=${DI_PROJECT}" \
+      "--region=${DI_REGION}" \
+      --resource-type=cloud-run \
+      "--member=${admin_member_prefix}${DI_ADMIN_EMAIL}" \
+      --role=roles/iap.httpsResourceAccessor
+    echo "    IAP access granted to $DI_ADMIN_EMAIL"
+  fi
+
+  # ===================================================================
+  # Step 6: Read back and print effective access
+  # Both project-level and region-level, because project-level grants
+  # inherit invisibly.
+  # ===================================================================
+  echo "==> Step 6: Reading effective access..."
+
+  echo "    --- Region-level IAP bindings ---"
+  local region_policy
+  region_policy="$(gcloud iap web get-iam-policy \
+    "--project=${DI_PROJECT}" \
+    "--region=${DI_REGION}" \
+    --resource-type=cloud-run 2>/dev/null)" || true
+  if [[ -n "$region_policy" ]]; then
+    while IFS= read -r line; do echo "    $line"; done <<< "$region_policy"
+  else
+    echo "    (no bindings)"
+  fi
+
+  echo "    --- Project-level IAP bindings (inherited) ---"
+  local project_policy
+  project_policy="$(gcloud projects get-iam-policy "$DI_PROJECT" \
+    --format=yaml 2>/dev/null)" || true
+  if [[ -n "$project_policy" ]]; then
+    echo "$project_policy" | awk '
+      /^- members:/ || /^- role:/ { flush() }
+      { current = current "\n" $0 }
+      /role:.*iap\.httpsResourceAccessor/ { has_iap = 1 }
+      END { flush() }
+      function flush() {
+        if (has_iap && current != "") {
+          gsub(/^\n/, "", current)
+          print current
+        }
+        current = ""
+        has_iap = 0
+      }
+    ' | sed 's/^/    /' || echo "    (no project-level iap.httpsResourceAccessor bindings)"
+  else
+    echo "    Warning: could not read project-level IAM policy"
+  fi
+
+  # ===================================================================
+  # Step 7: Gate 2 — Assert the perimeter (MOST VALUABLE DELIVERABLE)
+  # ===================================================================
+  echo "==> Step 7: Asserting IAP perimeter enforcement..."
+
+  if ! di_assert_perimeter "$instance_url"; then
+    return 1
+  fi
+  echo "    IAP perimeter verified: unauthenticated requests are blocked."
+  echo "    Instance is serving and IAP-protected."
+
+  # ===================================================================
+  # Step 8: Print the URL
+  # ===================================================================
+  echo ""
+  echo "=== Deploy Complete ==="
+  echo "Instance URL: $instance_url"
+  echo "Admin email:  $admin_email"
+  echo ""
+  echo "Open the URL in a browser to log in. The deployer is seeded as admin."
+}
+
+# ---------------------------------------------------------------------------
+# Main guard: only run when executed directly, not when sourced.
+# Sourcing this file has NO side effects.
+# ---------------------------------------------------------------------------
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  di_main "$@"
 fi
-
-# Got 302 — verify it points to accounts.google.com
-GATE2_LOCATION="$(grep -i '^location:' "$GATE2_HEADERS" | head -1 | tr -d '\r')"
-rm -f "$GATE2_HEADERS"
-
-if [[ "$GATE2_LOCATION" != *"accounts.google.com"* ]]; then
-  echo "SECURITY FAILURE: got 302 but not to accounts.google.com (Location: $GATE2_LOCATION) — IAP may not be enforcing" >&2
-  exit 1
-fi
-
-echo "    IAP perimeter verified: unauthenticated requests are blocked."
-echo "    Instance is serving and IAP-protected."
-
-# ===================================================================
-# Step 8: Print the URL
-# ===================================================================
-echo ""
-echo "=== Deploy Complete ==="
-echo "Instance URL: $INSTANCE_URL"
-echo "Admin email:  $admin_email"
-echo ""
-echo "Open the URL in a browser to log in. The deployer is seeded as admin."
