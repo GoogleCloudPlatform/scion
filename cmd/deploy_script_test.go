@@ -605,3 +605,25 @@ func TestScriptEnableIAPPatchBodyViaStubServer(t *testing.T) {
 	assert.Contains(t, string(capturedBody), `"iapEnabled":true`)
 	assert.Contains(t, string(capturedBody), `"invokerIamDisabled":true`)
 }
+
+// ---------------------------------------------------------------------------
+// Preflight: gcloud capability check
+// ---------------------------------------------------------------------------
+
+func TestScriptCheckGcloudInstances_FailureMessage(t *testing.T) {
+	// On this container (gcloud 575.0.0), the preflight SHOULD fail.
+	// On a container with gcloud 582+, skip this test.
+	_, stderr, exitCode := runBashFunc(t, "di_check_gcloud_instances")
+
+	if exitCode == 0 {
+		t.Skip("gcloud beta run instances is available — cannot test failure path")
+	}
+
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, stderr, "gcloud beta run instances")
+	assert.Contains(t, stderr, "575.0.0")
+	assert.Contains(t, stderr, "582.0.0")
+	assert.Contains(t, stderr, "gcloud components update")
+	assert.Contains(t, stderr, "DO NOT use 'gcloud alpha run instances'")
+	assert.Contains(t, stderr, "--sandbox-launcher")
+}

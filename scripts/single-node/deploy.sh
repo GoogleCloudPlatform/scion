@@ -178,6 +178,45 @@ di_iap_patch_body() {
 }
 
 # ---------------------------------------------------------------------------
+# Preflight checks — verify prerequisites before any side effects
+# ---------------------------------------------------------------------------
+
+# di_check_gcloud_instances probes whether 'gcloud beta run instances' is
+# available in the installed SDK. On older versions (measured absent at
+# 575.0.0, measured present at 582.0.0) the noun does not exist and gcloud
+# suggests 'gcloud alpha run instances' as a fallback — but the alpha
+# surface uses 'create' not 'deploy' and has no --sandbox-launcher, so
+# following that advice produces a broken Instance.
+#
+# This function probes the capability rather than parsing a version number
+# because the exact first version that ships 'instances' is not established.
+# Returns 0 if the capability is present, 1 with a diagnostic message if not.
+di_check_gcloud_instances() {
+  if gcloud beta run instances --help &>/dev/null; then
+    return 0
+  fi
+  cat >&2 <<'ERRMSG'
+Error: 'gcloud beta run instances' is not available in your Cloud SDK.
+
+This deploy requires 'gcloud beta run instances deploy --sandbox-launcher',
+which is not present in all SDK versions. Measured: absent at 575.0.0,
+present at 582.0.0.
+
+Update your SDK:
+
+  gcloud components update
+  # or, on Debian/Ubuntu:
+  sudo apt-get update && sudo apt-get --only-upgrade install google-cloud-cli
+
+DO NOT use 'gcloud alpha run instances' instead. gcloud may suggest it, but
+the alpha surface uses 'create' (not 'deploy') and does not support
+--sandbox-launcher. An Instance created via alpha will lack sandbox support
+and the server will crash on startup.
+ERRMSG
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Gate functions — testable with stub HTTP servers
 # ---------------------------------------------------------------------------
 
@@ -342,6 +381,15 @@ di_main() {
   [[ -z "$DI_PROJECT" ]] && missing+=("--project")
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo "Error: missing required flag(s): ${missing[*]}" >&2
+    return 1
+  fi
+
+  # ===================================================================
+  # Preflight: verify gcloud has 'beta run instances' before any side
+  # effects. Older SDKs lack this noun entirely and gcloud's own advice
+  # ("Try: gcloud alpha run instances") produces a broken Instance.
+  # ===================================================================
+  if ! di_check_gcloud_instances; then
     return 1
   fi
 
