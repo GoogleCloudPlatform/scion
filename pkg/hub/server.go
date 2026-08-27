@@ -3013,6 +3013,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			}
 		}
 
+		// Global fallback: try resolving a template named "default" when no
+		// name arrived from the payload, the project annotation, or the hub
+		// operational defaults. Twin of the rung on the agent-create path in
+		// handlers_agents_core.go — design §5.2 risk (d) applies.
+		templateFromImplicitDefault := false
+		if payload.Template == "" {
+			payload.Template = "default"
+			agent.Template = "default"
+			templateFromImplicitDefault = true
+		}
+
 		// Resolve template if specified
 		if payload.Template != "" {
 			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
@@ -3047,6 +3058,16 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			if templateFromHubDefault && tmpl == nil &&
 				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
 				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, "not found")
+				payload.Template = ""
+				agent.Template = ""
+			}
+			if templateFromImplicitDefault && tmpl == nil &&
+				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
+				// The implicit "default" fallback template doesn't exist —
+				// this is normal on hubs that haven't created one. Continue
+				// with no template. No warning: unlike a hub default (which
+				// is operator-configured and should resolve), the implicit
+				// fallback is speculative.
 				payload.Template = ""
 				agent.Template = ""
 			}
