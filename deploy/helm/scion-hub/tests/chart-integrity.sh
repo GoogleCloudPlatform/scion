@@ -61,7 +61,8 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # +5 in section E (the signing-key flip). The session-secret phase adds +3: E6
 # and E7 in the inverted section E, and one more in section C, because that
 # section asserts one file PER ENTRY in EXPECTED_FILES and secret-session.yaml
-# is a seventeenth entry. -> 38.
+# is a seventeenth entry. -> 38. E8 then adds the last one, refusing a pod
+# annotation derived from the session secret. -> 39.
 # Nothing FAILS -- every assertion the chart is accused by passes. The only red
 # is this number.
 #
@@ -72,7 +73,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=38
+EXPECTED_TOTAL=39
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -750,6 +751,78 @@ if [ -z "$_e7_bad" ]; then
   pass "all ${_e7_seen} ci fixtures pair SCION_REQUIRE_STABLE_SIGNING_KEY=true with a session-secret source"
 else
   fail "ci fixtures render the signing-key flag true with no secret source:${_e7_bad}"
+fi
+
+# --- E8. NO POD ANNOTATION IS DERIVED FROM THE SESSION SECRET. --------------
+# check-secret-placement.sh already refuses the secret's VALUE in an
+# annotation. This refuses a DIGEST of it, which that scanner cannot see and
+# which is the form the mistake would actually take.
+#
+# The mistake is attractive, which is why it needs a guard rather than a
+# comment. The session secret reaches the container through env, env is
+# resolved once at container start, so rotating it does nothing until the pods
+# restart - and the chart's own checksum/settings annotation is the established
+# local idiom for exactly that problem. Adding checksum/session would look like
+# consistency.
+#
+# It is not, because the two are not the same trade. Pod annotations are
+# readable by anyone with pod read access, which is a strictly wider audience
+# than the Secret's RBAC, and a digest over a single low-entropy credential is
+# recoverable offline. checksum/settings covers a whole rendered document and
+# is load-bearing in a way this would not be: settings.yaml is a subPath mount,
+# frozen for the container's lifetime, with no restart remedy an operator can
+# be told to run. The session secret has one, and values.yaml documents it.
+#
+# THE POSITIVE CONTROL IS A META-FAILURE, NOT AN ASSERTION, because a parser
+# that has stopped finding annotations would report this green forever in the
+# same words as a clean run. So the extractor must find checksum/env-config -
+# an annotation this chart renders unconditionally - before its silence about
+# 'session' is allowed to count as evidence.
+_e8_keys() { # stdin = render text; stdout = annotation keys, one per line
+  awk '
+    /^[[:space:]]*annotations:[[:space:]]*$/ {
+      match($0, /^[[:space:]]*/); ind = RLENGTH; in_ann = 1; next
+    }
+    in_ann {
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH <= ind || $0 ~ /^[[:space:]]*$/) { in_ann = 0; next }
+      if (match($0, /^[[:space:]]*[^[:space:]:]+:/))
+        { k = substr($0, RSTART, RLENGTH - 1); gsub(/^[[:space:]]+/, "", k); print k }
+    }
+  '
+}
+_e8_bad=""
+_e8_seen=0
+_e8_rendered=0
+_e8_control=0
+for _f in "${_e7_files[@]}"; do
+  [ -e "$_f" ] || continue
+  _e8_seen=$((_e8_seen+1))
+  _r="$("$HELM" template t "$CHART" -f "$_f" 2>&1)" || continue
+  _e8_rendered=$((_e8_rendered+1))
+  _k="$(printf '%s\n' "$_r" | _e8_keys)"
+  printf '%s\n' "$_k" | grep -qx 'checksum/env-config' && _e8_control=$((_e8_control+1))
+  _hit="$(printf '%s\n' "$_k" | grep -i 'session' | tr '\n' ' ')"
+  [ -n "$_hit" ] && _e8_bad="${_e8_bad} [$(basename "$_f"): ${_hit}]"
+done
+if [ "$_e8_seen" -ne "$_e7_ondisk" ]; then
+  echo "META-FAILURE: E8 evaluated ${_e8_seen} fixtures but ${_e7_ondisk} exist on disk." >&2
+  exit 2
+fi
+if [ "$_e8_rendered" -eq 0 ]; then
+  echo "META-FAILURE: E8 found no renderable fixtures among ${_e8_seen} on disk." >&2
+  exit 2
+fi
+if [ "$_e8_control" -ne "$_e8_rendered" ]; then
+  echo "META-FAILURE: E8's annotation extractor found checksum/env-config in ${_e8_control}" >&2
+  echo "  of ${_e8_rendered} renderable fixtures. Every renderable fixture renders it, so the" >&2
+  echo "  extractor is broken and its silence about 'session' is not evidence about the chart." >&2
+  exit 2
+fi
+if [ -z "$_e8_bad" ]; then
+  pass "no pod annotation in ${_e8_seen} ci fixtures is derived from the session secret"
+else
+  fail "a pod annotation names or digests the session secret:${_e8_bad} -- see values.yaml on why checksum/session is deliberately absent"
 fi
 
 # ---------------------------------------------------------------------------
