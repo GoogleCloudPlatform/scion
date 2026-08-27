@@ -174,6 +174,17 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Ownership check: verify the DM key IDs match the actual sender (agent)
+	// and recipient (user). The early format check above rejects malformed keys;
+	// this catches well-formed keys with wrong participant IDs.
+	if req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") {
+		dmAgentID, dmUserID := parseDMKeyIDs(req.ThreadID)
+		if dmAgentID != agent.ID || dmUserID != recipientID {
+			BadRequest(w, "DM thread_id does not match the sender and recipient")
+			return
+		}
+	}
+
 	// Reply affinity (Phase 6, AC22): when the agent sends an untagged reply
 	// (no explicit channel), check webchat_conversation_context for the
 	// (recipient, project, agent) triple. If a row exists, route to the
@@ -579,6 +590,25 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Ownership check: verify the DM key IDs match the actual participants.
+	// The agent in the DM key must match the target agent; the user must match
+	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
+	// be spoofed).
+	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
+		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
+		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
+		var authenticatedUserID string
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			authenticatedUserID = user.ID()
+		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			authenticatedUserID = agentIdent.ID()
+		}
+		if dmAgentID != agent.ID || dmUserID != authenticatedUserID {
+			BadRequest(w, "DM thread_id does not match the sender and recipient")
+			return
+		}
 	}
 
 	// Wake handling: if requested, resume a suspended agent before message delivery.

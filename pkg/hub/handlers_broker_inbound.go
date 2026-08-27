@@ -139,6 +139,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		// Cache the resolved user ID so downstream DM-ownership and
+		// persistence blocks can reuse it without redundant DB lookups.
+		req.Message.SenderID = senderUser.ID
+
 		userIdent := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
 		decision := s.authzService.CheckAccess(r.Context(), userIdent, agentResource(agent), ActionAttach)
 		if !decision.Allowed {
@@ -149,6 +153,20 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 					"sender":     req.Message.Sender,
 					"agent_slug": agentSlug,
 				})
+			return
+		}
+	}
+
+	// Ownership check: verify the DM key IDs match the actual participants.
+	// The agent in the DM key must match the resolved agent; the user must
+	// match the sender.
+	if req.Message.ThreadID != "" && strings.HasPrefix(req.Message.ThreadID, "dm:") {
+		dmAgentID, dmUserID := parseDMKeyIDs(req.Message.ThreadID)
+		// SenderID was cached by the upstream permission check for "user:"
+		// senders, so no additional DB lookup is needed here.
+		senderID := req.Message.SenderID
+		if dmAgentID != agent.ID || dmUserID != senderID {
+			BadRequest(w, "DM thread_id does not match the sender and recipient")
 			return
 		}
 	}
@@ -217,18 +235,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"type", req.Message.Type,
 	)
 
-	// Resolve the sender's user ID before persisting the message. The
-	// upstream permission check already did a user lookup for "user:" senders,
-	// but req.Message.SenderID may still be empty if the originating plugin
-	// didn't populate it.  Resolving early guarantees that both the persisted
-	// storeMsg and the webChatStore calls below use a valid ID.
+	// The sender user ID was resolved and cached in req.Message.SenderID
+	// during the upstream permission check for "user:" senders.
 	senderUserID := req.Message.SenderID
-	if senderUserID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
-		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
-			senderUserID = u.ID
-		}
-	}
 
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
 	// so that messages from external channels (Discord, Telegram) appear in

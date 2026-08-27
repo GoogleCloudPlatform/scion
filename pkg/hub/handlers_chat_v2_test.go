@@ -45,7 +45,7 @@ func TestIsDMParticipant(t *testing.T) {
 		want   bool
 	}{
 		{"dm:agent:a1:user:u1", "u1", true},
-		{"dm:agent:a1:user:u1", "a1", true},
+		{"dm:agent:a1:user:u1", "a1", false}, // agent slot — user principal must not match
 		{"dm:agent:a1:user:u1", "u2", false},
 		{"dm:user:u1:user:u2", "u1", true},
 		{"dm:user:u1:user:u2", "u2", true},
@@ -1585,6 +1585,32 @@ func TestParseAgentDMKey(t *testing.T) {
 	for _, tt := range tests {
 		if got := parseAgentDMKey(tt.key); got != tt.want {
 			t.Errorf("parseAgentDMKey(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseDMKeyIDs tests
+// ---------------------------------------------------------------------------
+
+func TestParseDMKeyIDs(t *testing.T) {
+	tests := []struct {
+		key       string
+		wantAgent string
+		wantUser  string
+	}{
+		{"dm:agent:aaaa-bbbb:user:cccc-dddd", "aaaa-bbbb", "cccc-dddd"},
+		{"dm:user:aaaa:user:bbbb", "", ""},   // not an agent-DM
+		{"dm:agent:1234:agent:5678", "", ""}, // second slot is not user
+		{"dm:agent:abc", "", ""},             // truncated
+		{"not-a-dm", "", ""},                 // garbage
+		{"", "", ""},                         // empty
+	}
+	for _, tt := range tests {
+		gotAgent, gotUser := parseDMKeyIDs(tt.key)
+		if gotAgent != tt.wantAgent || gotUser != tt.wantUser {
+			t.Errorf("parseDMKeyIDs(%q) = (%q, %q), want (%q, %q)",
+				tt.key, gotAgent, gotUser, tt.wantAgent, tt.wantUser)
 		}
 	}
 }

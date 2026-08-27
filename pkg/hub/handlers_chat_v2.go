@@ -2927,8 +2927,10 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-// isDMParticipant checks whether the given userID is one of the two
-// participants encoded in a DM conversation key by parsing tokens exactly.
+// isDMParticipant checks whether the given userID occupies a "user" slot in
+// a DM conversation key.  It matches only slots whose kind label is "user",
+// so an agent principal cannot inadvertently satisfy a user-slot check and
+// vice-versa.
 func isDMParticipant(key, userID string) bool {
 	// DM key formats:
 	//   dm:agent:<agentUUID>:user:<userUUID>
@@ -2937,7 +2939,8 @@ func isDMParticipant(key, userID string) bool {
 	if len(parts) < 5 {
 		return false
 	}
-	return parts[2] == userID || parts[4] == userID
+	return (parts[1] == "user" && parts[2] == userID) ||
+		(parts[3] == "user" && parts[4] == userID)
 }
 
 // dmUserParticipants returns the user IDs named in a DM key, skipping the agent
@@ -2989,6 +2992,21 @@ func parseAgentDMKey(key string) string {
 		return parts[2]
 	}
 	return ""
+}
+
+// parseDMKeyIDs extracts the agent UUID and user UUID from a DM key of the form
+// dm:agent:<agentUUID>:user:<userUUID>. Returns ("", "") if the key does not
+// match this format. The caller should validate format with validDMKey first.
+func parseDMKeyIDs(key string) (agentID, userID string) {
+	parts := strings.Split(key, ":")
+	if len(parts) != 5 {
+		return "", ""
+	}
+	// Accept dm:agent:<id>:user:<id> only — the canonical agent-DM format.
+	if parts[0] == "dm" && parts[1] == "agent" && parts[3] == "user" {
+		return parts[2], parts[4]
+	}
+	return "", ""
 }
 
 // resolveProjectFromDMKey attempts to derive a project ID from a DM key.
