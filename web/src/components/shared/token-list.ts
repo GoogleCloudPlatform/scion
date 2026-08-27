@@ -44,19 +44,28 @@ interface AccessToken {
 }
 
 const AVAILABLE_SCOPES = [
-  { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
-  { value: 'project:update', label: 'project:update', description: 'Update projects' },
-  { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
-  { value: 'agent:list', label: 'agent:list', description: 'List agents in the project' },
+  { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
   { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
   { value: 'agent:delete', label: 'agent:delete', description: 'Delete agents' },
-  { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
-  { value: 'agent:port_access', label: 'agent:port_access', description: 'Access forwarded ports' },
+  { value: 'agent:list', label: 'agent:list', description: 'List agents in the project' },
   {
     value: 'agent:manage',
     label: 'agent:manage',
     description: 'All agent actions (convenience alias)',
   },
+  { value: 'agent:port_access', label: 'agent:port_access', description: 'Access forwarded ports' },
+  { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
+  { value: 'hub:config:read', label: 'hub:config:read', description: 'Read server configuration' },
+  { value: 'hub:config:update', label: 'hub:config:update', description: 'Update server configuration' },
+  { value: 'hub:health:read', label: 'hub:health:read', description: 'Read health summary' },
+  { value: 'hub:integrations:read', label: 'hub:integrations:read', description: 'Read integrations' },
+  { value: 'hub:integrations:update', label: 'hub:integrations:update', description: 'Update integrations' },
+  { value: 'hub:settings:read', label: 'hub:settings:read', description: 'Read hub settings' },
+  { value: 'hub:settings:update', label: 'hub:settings:update', description: 'Update hub settings' },
+  { value: 'project:clone', label: 'project:clone', description: 'Clone projects' },
+  { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
+  { value: 'project:update', label: 'project:update', description: 'Update projects' },
+  { value: 'user:invite', label: 'user:invite', description: 'Invite users' },
 ] as const;
 
 @customElement('scion-token-list')

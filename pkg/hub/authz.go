@@ -51,7 +51,12 @@ const (
 	// it — currently attaching a GCP service account to an agent. Declared here
 	// so policies can be written against it; the assignment call sites still
 	// check ActionRead and are converted separately.
-	ActionAssign Action = "assign"
+	ActionAssign  Action = "assign"
+	ActionInvite  Action = "invite"
+	ActionSuspend Action = "suspend"
+	ActionPromote Action = "promote"
+	ActionClone   Action = "clone"
+	ActionExecute Action = "execute"
 )
 
 // Resource represents the target of an authorization check.
@@ -116,7 +121,8 @@ type AuthzRequest struct {
 	Credential CredentialContext
 	Resource   Resource
 	Action     Action
-	Explain    bool // When true, collect step-by-step trace in Decision
+	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
+	Explain    bool   // When true, collect step-by-step trace in Decision
 }
 
 // AuthzRequestFromContext builds a request from authentication middleware
@@ -201,7 +207,9 @@ func (a *AuthzService) SetDecisionAuditEmitter(emitter DecisionAuditEmitter) {
 }
 
 // CheckAccess evaluates whether the given identity is allowed to perform
-// the specified action on the resource.
+// the specified action on the resource. Legacy callers that do not know a
+// canonical permission ID pass an empty string; the role-binding evaluation
+// step is skipped when no permission is supplied.
 func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resource Resource, action Action) Decision {
 	return a.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
@@ -256,7 +264,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		if credential.Kind == CredentialKindUAT {
 			user = NewScopedUserIdentity(user, credential.ProjectID, credential.Scopes)
 		}
-		decision = a.checkAccessForUser(ctx, user, request.Resource, request.Action)
+		decision = a.checkAccessForUser(ctx, user, request.Resource, request.Action, request.Permission)
 	case PrincipalKindAgent, PrincipalKindFederatedAgent:
 		agent, ok := principal.Identity.(AgentIdentity)
 		if !ok {
@@ -467,7 +475,7 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 }
 
 // checkAccessForUser evaluates access for a user principal.
-func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action) Decision {
+func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action, permissionID ...string) Decision {
 	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
 	if scopedIdentity, ok := user.(*ScopedUserIdentity); ok {
 		if denied := a.enforceUATConstraints(scopedIdentity, resource, action); denied != nil {
@@ -564,7 +572,35 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 		}
 	}
 
-	// 3. Build principal refs: direct user + effective groups
+	// 3. Role binding permission check (Phase 2 D4 second-path).
+	// When a canonical permission ID is supplied, check whether the user
+	// holds that permission through any system-scoped role binding. This is
+	// the path that enables scoped admin: a non-super-admin user with the
+	// hub-admin role binding can access hub operations they have permissions
+	// for, without holding the super-admin bypass.
+	permID := ""
+	if len(permissionID) > 0 {
+		permID = permissionID[0]
+	}
+	if permID != "" {
+		effectivePerms, err := a.getEffectivePermissions(ctx, "user", user.ID(), store.RoleScopeSystem, "")
+		if err != nil {
+			a.logger.Warn("failed to get effective permissions for user", "userID", user.ID(), "error", err.Error())
+		} else {
+			for _, p := range effectivePerms {
+				if p == permID {
+					return Decision{
+						Allowed:       true,
+						Reason:        "role binding grant",
+						MatchedGrant:  permID,
+						PrincipalKind: PrincipalKindUser,
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Build principal refs: direct user + effective groups
 	principals := []store.PrincipalRef{
 		{Type: "user", ID: user.ID()},
 	}
@@ -577,7 +613,7 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
 
-	// 4. Fetch and evaluate policies
+	// 5. Fetch and evaluate policies
 	policies, err := a.store.GetPoliciesForPrincipals(ctx, principals)
 	if err != nil {
 		a.logger.Warn("failed to get policies for principals", "error", err)
