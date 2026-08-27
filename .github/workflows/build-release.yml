@@ -155,9 +155,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set registry
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - name: Build and push omni image chain
         env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
           TAG: ${{ github.ref_name }}
         run: |
           # Build the thick base layers first, then the omni chain.
@@ -177,7 +179,6 @@ jobs:
 
       - name: Tag images as latest
         env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
           TAG: ${{ github.ref_name }}
         run: |
           for image in scion-omni thick-prep scion-base; do

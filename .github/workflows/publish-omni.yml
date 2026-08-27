@@ -51,9 +51,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set registry
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - name: Build all images locally (no push)
         env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
           # Build with the merge-commit tag (backward compat).
           TAG: dev-${{ github.sha }}
         run: |
@@ -79,7 +81,6 @@ jobs:
 
       - name: Push only scion-omni
         env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
           MERGE_TAG: dev-${{ github.sha }}
           HEAD_TAG: dev-${{ github.event.pull_request.head.sha }}
         run: |
@@ -103,7 +104,6 @@ jobs:
       - name: Test anonymous pull (logged-out)
         if: always()
         env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
           TAG: dev-${{ github.event.pull_request.head.sha }}
         run: |
           # Remove the local image so the pull is real
