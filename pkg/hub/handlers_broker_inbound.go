@@ -94,6 +94,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate DM key format when the thread_id looks like a DM key.
+	if req.Message.ThreadID != "" && strings.HasPrefix(req.Message.ThreadID, "dm:") && !validDMKey(req.Message.ThreadID) {
+		BadRequest(w, "invalid DM key format")
+		return
+	}
+
 	// Look up the agent
 	agent, err := s.store.GetAgentBySlug(r.Context(), projectID, agentSlug)
 	if err != nil {
@@ -222,12 +228,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
 			senderUserID = u.ID
 		}
-	}
-
-	// Validate DM key format when the thread_id looks like a DM key.
-	if req.Message.ThreadID != "" && strings.HasPrefix(req.Message.ThreadID, "dm:") && !validDMKey(req.Message.ThreadID) {
-		BadRequest(w, "invalid DM key format")
-		return
 	}
 
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
