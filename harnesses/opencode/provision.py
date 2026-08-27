@@ -286,7 +286,48 @@ def provision(ctx: sh.ProvisionContext) -> None:
         resolved_model = os.environ.get("SCION_MODEL", "").strip()
     _write_model_config(resolved_model)
 
+    _prefetch_models_catalog(ctx)
+
     ctx.info(f"method={resolved.method}" + (f" model={resolved_model}" if resolved_model else ""))
+
+
+# ---------------------------------------------------------------------------
+# Models catalog pre-fetch
+# ---------------------------------------------------------------------------
+
+
+def _prefetch_models_catalog(ctx: sh.ProvisionContext) -> None:
+    """Pre-fetch latest models.dev catalog so opencode has fresh model data.
+
+    opencode bakes a models.dev snapshot at build time; when new models are
+    released after the image is built, its validation rejects them.  Writing a
+    fresh catalog to the cache location before opencode starts avoids this.
+
+    This is best-effort — a fetch failure is logged but never fails provision.
+    """
+    import urllib.error
+    import urllib.request
+
+    cache_dir = os.path.join(ctx.home, ".cache", "opencode")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, "models.json")
+
+    try:
+        req = urllib.request.Request(
+            "https://models.opencode.ai/api.json",
+            headers={"User-Agent": "scion-opencode-provision/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read()
+        # Sanity-check: a real catalog is several KB of JSON.
+        if len(data) > 100:
+            with open(cache_path, "wb") as f:
+                f.write(data)
+            ctx.info(f"pre-fetched models catalog ({len(data)} bytes)")
+        else:
+            ctx.info("models catalog response too small, skipping")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        ctx.info(f"models catalog pre-fetch failed (non-fatal): {e}")
 
 
 if __name__ == "__main__":
