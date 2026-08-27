@@ -165,15 +165,14 @@ di_build_instance_url() {
 }
 
 # di_build_iap_patch_url constructs the REST v2 PATCH URL for enabling IAP.
-# Arguments: region project name
+# The API base is a PARAMETER, not an environment read: di_main resolves and
+# validates it once (see di_resolve_api_base / di_validate_override_url) and
+# passes it here. That is deliberate — an earlier version read _DI_API_BASE
+# directly and relied on the preflight having validated it, which is a
+# validation held at a distance that no test could pin.
+# Arguments: api_base region project name
 di_build_iap_patch_url() {
-  local region="$1" project="$2" name="$3"
-  # _DI_API_BASE is the same TEST-ONLY seam the preflight GET uses, and the
-  # preflight validates its host (see di_validate_override_url) before any
-  # mutation runs. It is honoured here so a test can pin the property that
-  # broke in the field: that this PATCH carries the very token the preflight
-  # validated, rather than a freshly minted second one.
-  local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
+  local api_base="$1" region="$2" project="$3" name="$4"
   echo "${api_base}/v2/projects/${project}/locations/${region}/instances/${name}?updateMask=iapEnabled,invokerIamDisabled"
 }
 
@@ -222,15 +221,39 @@ ERRMSG
   return 1
 }
 
+# di_resolve_api_base returns the Cloud Run v2 API base URL.
+# _DI_API_BASE is a TEST-ONLY seam; the real value is the REGIONAL endpoint,
+# and the region matters — the global run.googleapis.com host does not serve
+# these v2 instance paths.
+# Arguments: region
+di_resolve_api_base() {
+  local region="$1"
+  echo "${_DI_API_BASE:-https://${region}-run.googleapis.com}"
+}
+
+# di_resolve_tokeninfo_url returns the OAuth2 tokeninfo endpoint.
+# _DI_TOKENINFO_URL is a TEST-ONLY seam.
+di_resolve_tokeninfo_url() {
+  echo "${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
+}
+
 # di_validate_override_url rejects a test-only URL override that would send an
 # access token somewhere other than Google or the local machine.
 #
-# Both _DI_TOKENINFO_URL and _DI_API_BASE are TEST-ONLY seams, and both now
-# carry the ADC token: tokeninfo takes it in a query string, and the API base
-# takes it in a Bearer header on a GET *and* on the step 3b PATCH — a mutating
-# call. One rule covers both: the host must be one of Google's own or loopback
-# (a stub that cannot move the token off the machine). Two seams under one rule
-# beats two seams under two rules.
+# Both _DI_TOKENINFO_URL and _DI_API_BASE are TEST-ONLY seams, and both carry
+# the ADC token: tokeninfo takes it in a query string, and the API base takes
+# it in a Bearer header on a GET *and* on the step 3b PATCH — a mutating call.
+# One rule covers both: the host must be one of Google's own or loopback (a
+# stub that cannot move the token off the machine).
+#
+# EXTRACTING THE HOST IS THE WHOLE JOB, and getting it nearly right is worse
+# than not checking at all, because a bypassable check gets documented as a
+# guarantee. A previous version stripped only the path, so
+# 'https://evil.example?.googleapis.com' was ALLOWED — and curl connects to
+# the host before the '?', so the Bearer token was delivered to the attacker.
+# Everything after the first /, ?, # or \ must go, and userinfo must go too
+# (curl resolves the host after the LAST '@'). This function has a
+# table-driven test; extend it before touching anything here.
 #
 # Arguments: var_name url
 # Returns 0 if the host is permitted, 1 with a diagnostic otherwise.
@@ -239,7 +262,9 @@ di_validate_override_url() {
   local url="$2"
 
   local host="${url#*://}"
-  host="${host%%/*}"
+  host="${host%%[/?#\\]*}" # path, query, fragment, backslash
+  host="${host##*@}"       # userinfo — curl uses the LAST '@'
+  host="${host,,}"         # hostnames are case-insensitive
   # Strip a :port suffix. Matching on the whole host first keeps a bare IPv6
   # literal like [::1] (colons, no port) from being mangled.
   if [[ "$host" =~ ^(.*):[0-9]+$ ]]; then
@@ -267,29 +292,19 @@ di_validate_override_url() {
 # The validated token is stored in the caller's _di_adc_token variable
 # (bash dynamic scope) for reuse in step 3b, avoiding a second mint.
 #
-# Arguments: gcloud_account region project
+# The two endpoints are PARAMETERS, already resolved and validated by di_main.
+# This function reads no environment variables: its behaviour is fully
+# determined by its arguments. Both URLs are echoed as they are used, so a
+# redirected endpoint is never invisible in the output.
+#
+# Arguments: gcloud_account region project api_base tokeninfo_url
 # Returns 0 on success, 1 on failure.
 di_preflight_rest_credential() {
   local gcloud_account="$1"
   local region="$2"
   local project="$3"
-
-  # --- Resolve and validate the TEST-ONLY endpoint seams ---
-  # _DI_TOKENINFO_URL and _DI_API_BASE exist so the tests can point these calls
-  # at a stub. Both are validated HERE, at the top of the preflight, before a
-  # token is minted and before any resource is touched — so a bad override
-  # means no token exists to leak and no Instance exists to strand. _DI_API_BASE
-  # is validated here on behalf of step 3b too, which reads it via
-  # di_build_iap_patch_url and runs strictly after this function.
-  # Both URLs are echoed below, so a redirect is never invisible in the output.
-  local tokeninfo_url="${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
-  if ! di_validate_override_url "_DI_TOKENINFO_URL" "$tokeninfo_url"; then
-    return 1
-  fi
-  local api_base="${_DI_API_BASE:-https://${region}-run.googleapis.com}"
-  if ! di_validate_override_url "_DI_API_BASE" "$api_base"; then
-    return 1
-  fi
+  local api_base="$4"
+  local tokeninfo_url="$5"
 
   echo "    Minting ADC token..."
 
@@ -377,13 +392,16 @@ di_preflight_rest_credential() {
     return 1
   }
 
-  # Unreachable by construction today: every curl exit path that yields no
-  # status also exits non-zero, and the || block above catches that first.
-  # Kept as a belt-and-braces guard because the alternative — an empty
-  # http_code falling into the numeric [[ -ge 300 ]] test below — is a silent
-  # pass, and this check must never fail open. Deliberately untested: a test
-  # would have to stub curl into a state curl does not produce.
-  if [[ -z "$http_code" ]]; then
+  # Unreachable by construction today: %{http_code} always emits something
+  # (measured: '000' with exit 7 when there is no HTTP response, never the
+  # empty string), and every such path exits non-zero, which the || block above
+  # catches first. Kept as a belt-and-braces guard because the alternative is a
+  # SILENT PASS — [[ -ge 300 ]] evaluates a non-numeric string as 0 — and this
+  # check must never fail open. Matched numerically rather than for emptiness
+  # so the guard is no narrower than the hole it covers. Deliberately untested:
+  # a test would have to stub curl into a state curl does not produce, which
+  # pins the stub, not the script.
+  if [[ ! "$http_code" =~ ^[0-9]+$ ]]; then
     echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
     rm -f "$resp_file"
     return 1
@@ -397,13 +415,19 @@ di_preflight_rest_credential() {
     echo "" >&2
     echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
     if [[ "$http_code" == "403" ]]; then
-      # A 403 means the token parsed fine and the identity simply lacks the
-      # role. Re-authenticating as the same principal will not help, so name
-      # the permission and the project first.
-      echo "HTTP 403 means the credential is valid but its identity is not authorized." >&2
-      echo "Fix: grant the ADC identity 'run.instances.list' on project '$project'" >&2
-      echo "     (for example roles/run.viewer), or switch to an account that already" >&2
-      echo "     has it: run 'gcloud auth application-default login' and retry." >&2
+      # A 403 means the token parsed fine, so re-authenticating as the same
+      # principal will not help. But it has TWO common causes and they need
+      # different remedies: the Cloud Run Admin API being switched off in a
+      # fresh project (Google returns SERVICE_DISABLED as a 403, and this is
+      # the likeliest case for a first single-node deploy), or the identity
+      # genuinely lacking the role. Name both and point at the response body
+      # printed above rather than asserting a cause — a message that asserts
+      # the wrong one sends the operator to the IAM console for an hour.
+      echo "HTTP 403 usually means one of two things — check the response body above:" >&2
+      echo "  - the API is not enabled:  gcloud services enable run.googleapis.com --project '$project'" >&2
+      echo "  - the identity lacks the role: grant 'run.instances.list' on project '$project'" >&2
+      echo "    (for example roles/run.viewer), or switch accounts with" >&2
+      echo "    'gcloud auth application-default login' and retry." >&2
     else
       echo "Fix: run 'gcloud auth application-default login' and retry." >&2
     fi
@@ -591,6 +615,35 @@ di_main() {
   fi
 
   # ===================================================================
+  # Resolve the TEST-ONLY endpoint seams — ONCE, HERE, before anything else.
+  #
+  # _DI_API_BASE and _DI_TOKENINFO_URL are read in exactly one place each
+  # (di_resolve_api_base / di_resolve_tokeninfo_url, called only from here),
+  # validated immediately, and then passed as parameters to every function
+  # that needs them. Nothing downstream reads the environment.
+  #
+  # This shape is deliberate. An earlier version had step 3b read _DI_API_BASE
+  # for itself and relied on the preflight having validated it first — true at
+  # the time, but a `--skip-preflight` flag or a second caller would have
+  # orphaned the validation silently, with no test failing. That is the same
+  # shape as the bug this whole script change exists to kill: step 3b assuming
+  # something established elsewhere. Read once, validate once, pass explicitly.
+  #
+  # Validating here, above di_check_gcloud_instances, also means a bad override
+  # aborts before ANY side effect at all — no gcloud call, no token, nothing.
+  # ===================================================================
+  local api_base
+  api_base="$(di_resolve_api_base "$DI_REGION")"
+  if ! di_validate_override_url "_DI_API_BASE" "$api_base"; then
+    return 1
+  fi
+  local tokeninfo_url
+  tokeninfo_url="$(di_resolve_tokeninfo_url)"
+  if ! di_validate_override_url "_DI_TOKENINFO_URL" "$tokeninfo_url"; then
+    return 1
+  fi
+
+  # ===================================================================
   # Preflight: verify gcloud has 'beta run instances' before any side
   # effects. Older SDKs lack this noun entirely and gcloud's own advice
   # ("Try: gcloud alpha run instances") produces a broken Instance.
@@ -675,7 +728,8 @@ di_main() {
   echo "==> Preflight: Validating REST credential (ADC)..."
 
   local _di_adc_token=""
-  if ! di_preflight_rest_credential "$operator_email" "$DI_REGION" "$DI_PROJECT"; then
+  if ! di_preflight_rest_credential "$operator_email" "$DI_REGION" "$DI_PROJECT" \
+    "$api_base" "$tokeninfo_url"; then
     return 1
   fi
 
@@ -740,7 +794,7 @@ di_main() {
   fi
 
   local patch_url
-  patch_url="$(di_build_iap_patch_url "$DI_REGION" "$DI_PROJECT" "$DI_NAME")"
+  patch_url="$(di_build_iap_patch_url "$api_base" "$DI_REGION" "$DI_PROJECT" "$DI_NAME")"
   echo "    PATCH $patch_url"
 
   local patch_resp_file

