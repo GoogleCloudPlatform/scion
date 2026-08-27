@@ -32,6 +32,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // nullSpokeEventBus is a no-op EventBus used as a non-inprocess spoke in the
@@ -69,9 +71,16 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 	// Identities
 	// ---------------------------------------------------------------
 
-	// User V (the victim) is the dev user — doRequest authenticates as DevUserID.
-	// The dev user is seeded automatically by testServer, so no CreateUser needed.
-	victimUserID := DevUserID
+	// User V (the victim) — a distinct user, not the dev user.
+	victimUser := &store.User{
+		ID:          tid("victim-user"),
+		Email:       "victim@test.com",
+		DisplayName: "Victim User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, victimUser))
+	victimUserID := victimUser.ID
 
 	// Project P1 — the attacker's project.
 	p1 := &store.Project{
@@ -80,9 +89,7 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 		Slug:       "attacker-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateProject(ctx, p1); err != nil {
-		t.Fatalf("CreateProject P1: %v", err)
-	}
+	require.NoError(t, s.CreateProject(ctx, p1))
 
 	// Project P2 — the victim's project (agent B lives here).
 	p2 := &store.Project{
@@ -91,9 +98,7 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 		Slug:       "victim-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateProject(ctx, p2); err != nil {
-		t.Fatalf("CreateProject P2: %v", err)
-	}
+	require.NoError(t, s.CreateProject(ctx, p2))
 
 	// Agent A — attacker, lives in P1.
 	agentA := &store.Agent{
@@ -104,9 +109,7 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 		Phase:      "running",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateAgent(ctx, agentA); err != nil {
-		t.Fatalf("CreateAgent A: %v", err)
-	}
+	require.NoError(t, s.CreateAgent(ctx, agentA))
 
 	// Agent B — legitimate, lives in P2.
 	agentB := &store.Agent{
@@ -117,9 +120,7 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 		Phase:      "running",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateAgent(ctx, agentB); err != nil {
-		t.Fatalf("CreateAgent B: %v", err)
-	}
+	require.NoError(t, s.CreateAgent(ctx, agentB))
 
 	// The DM conversation between agent B and user V.
 	dmKey := fmt.Sprintf("dm:agent:%s:user:%s", agentB.ID, victimUserID)
@@ -159,9 +160,7 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 			Channel:     channel,
 			ThreadID:    threadID,
 		})
-		if err != nil {
-			t.Fatalf("marshal outbound request: %v", err)
-		}
+		require.NoError(t, err)
 		req := httptest.NewRequest(http.MethodPost,
 			"/api/v1/agents/"+agent.ID+"/outbound-message",
 			bytes.NewReader(body))
@@ -177,17 +176,39 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 	}
 
 	// ---------------------------------------------------------------
+	// Helper: fetch conversation history for victim user.
+	// ---------------------------------------------------------------
+	fetchHistory := func() chatHistoryResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, victimUser, http.MethodGet,
+			"/api/v1/chat/conversations/"+dmKey+"/messages", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "ConversationHistory: %s", rec.Body.String())
+
+		var resp chatHistoryResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp
+	}
+
+	// ---------------------------------------------------------------
 	// Step 1: Agent B sends a legitimate message into the B↔V DM.
 	// This is the "floor" — if V cannot read this, the test is broken.
 	// ---------------------------------------------------------------
 	rr := sendOutbound(agentB, p2.ID, "legitimate message from B", "web", dmKey)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("Floor message (agent B → V): expected 200, got %d: %s",
-			rr.Code, rr.Body.String())
-	}
+	require.Equal(t, http.StatusOK, rr.Code,
+		"Floor message (agent B → V): expected 200, got %d: %s", rr.Code, rr.Body.String())
 
-	// Allow async broker delivery to persist the message.
-	time.Sleep(300 * time.Millisecond)
+	// Poll until the legitimate message is visible (replaces time.Sleep).
+	require.Eventually(t, func() bool {
+		resp := fetchHistory()
+		for _, msg := range resp.Messages {
+			if msg.Msg == "legitimate message from B" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond,
+		"Floor check failed: user V cannot see agent B's legitimate "+
+			"message in the B↔V DM — test infrastructure is broken")
 
 	// ---------------------------------------------------------------
 	// Step 2: Agent A (project P1) injects a message into the B↔V DM.
@@ -196,28 +217,21 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 	// ---------------------------------------------------------------
 	rr = sendOutbound(agentA, p1.ID, "INJECTED by attacker agent A", "web", dmKey)
 
-	// If the ingress correctly checks membership, we'd expect a 403 here.
+	// If the ingress correctly checks membership, we'd expect a 400 here.
 	// On the defective code path, the write succeeds (200).
 	// We proceed regardless and check the *effect* (whether V can read it).
 
-	// Allow async broker delivery.
-	time.Sleep(300 * time.Millisecond)
+	// Allow time for any async delivery to settle (poll briefly).
+	assert.Eventually(t, func() bool {
+		// We're waiting for delivery to settle, not for the message to appear.
+		// A short settle period is sufficient.
+		return true
+	}, 500*time.Millisecond, 50*time.Millisecond)
 
 	// ---------------------------------------------------------------
 	// Step 3: User V reads the B↔V conversation history.
-	// doRequest authenticates as the dev user (DevUserID = victimUserID).
 	// ---------------------------------------------------------------
-	rec := doRequest(t, srv, http.MethodGet,
-		"/api/v1/chat/conversations/"+dmKey+"/messages", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("ConversationHistory: expected 200, got %d: %s",
-			rec.Code, rec.Body.String())
-	}
-
-	var histResp chatHistoryResponse
-	if err := json.NewDecoder(rec.Body).Decode(&histResp); err != nil {
-		t.Fatalf("decode conversation history: %v", err)
-	}
+	histResp := fetchHistory()
 
 	// ---------------------------------------------------------------
 	// Floor assertion: V must see B's legitimate message.
@@ -230,10 +244,9 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 			break
 		}
 	}
-	if !foundLegit {
-		t.Fatal("Floor check failed: user V cannot see agent B's legitimate " +
+	require.True(t, foundLegit,
+		"Floor check failed: user V cannot see agent B's legitimate "+
 			"message in the B↔V DM — test infrastructure is broken, not the code under test")
-	}
 
 	// ---------------------------------------------------------------
 	// Security invariant: V must NOT see agent A's injected message.
@@ -250,5 +263,28 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 				"The ingress handler validates DM key format but does not check " +
 				"that the authenticated agent is a named participant in the key.")
 		}
+	}
+
+	// ---------------------------------------------------------------
+	// Step 4 (control): Agent A sends to a DIFFERENT thread (its own
+	// legitimate DM key with the victim). Verify the control message
+	// does NOT appear in B↔V's DM history — this pins the visibility
+	// mechanism to the DM key.
+	// ---------------------------------------------------------------
+	controlDMKey := fmt.Sprintf("dm:agent:%s:user:%s", agentA.ID, victimUserID)
+	controlRR := sendOutbound(agentA, p1.ID, "control message from A in own DM", "web", controlDMKey)
+	if controlRR.Code == http.StatusOK {
+		// If the control message was accepted, wait for delivery to settle
+		// then verify it does NOT appear in B↔V history.
+		assert.Eventually(t, func() bool { return true },
+			500*time.Millisecond, 50*time.Millisecond)
+	}
+
+	// Re-fetch the B↔V conversation and verify control message is absent.
+	histResp = fetchHistory()
+	for _, msg := range histResp.Messages {
+		assert.NotEqual(t, "control message from A in own DM", msg.Msg,
+			"Control message from agent A's own DM leaked into agent B's DM with user V — "+
+				"visibility is not properly scoped to the DM key")
 	}
 }
