@@ -121,9 +121,18 @@ var scheduleHistoryCmd = &cobra.Command{
 
 // resolveScheduleID resolves a potentially truncated schedule/event ID to its full UUID.
 // If the input is already a full UUID (36 chars), it is returned as-is with an empty resourceType.
-// Otherwise, it lists all schedules and events and finds a unique prefix match.
+// Otherwise, it lists schedules and/or events and finds a unique prefix match.
+// The targetType parameter controls which resources are searched:
+//   - "" (empty) — search both events and schedules
+//   - "event" — search only scheduled events
+//   - "schedule" — search only recurring schedules
+//
 // Returns (fullID, resourceType, error) where resourceType is "schedule" or "event".
-func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefix string) (string, string, error) {
+func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefix, targetType string) (string, string, error) {
+	if prefix == "" {
+		return "", "", fmt.Errorf("schedule/event ID is required")
+	}
+
 	if len(prefix) == 36 {
 		return prefix, "", nil
 	}
@@ -134,25 +143,29 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 	}
 	var matches []match
 
-	// List all one-shot events
-	evtResp, err := hubCtx.Client.ScheduledEvents(projectID).List(ctx, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to list scheduled events for prefix resolution: %w", err)
-	}
-	for _, evt := range evtResp.Events {
-		if strings.HasPrefix(evt.ID, prefix) {
-			matches = append(matches, match{id: evt.ID, resourceType: "event"})
+	// List one-shot events when targeting events or both
+	if targetType == "" || targetType == "event" {
+		evtResp, err := hubCtx.Client.ScheduledEvents(projectID).List(ctx, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to list scheduled events for prefix resolution: %w", err)
+		}
+		for _, evt := range evtResp.Events {
+			if strings.HasPrefix(evt.ID, prefix) {
+				matches = append(matches, match{id: evt.ID, resourceType: "event"})
+			}
 		}
 	}
 
-	// List all recurring schedules
-	schedResp, err := hubCtx.Client.Schedules(projectID).List(ctx, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to list schedules for prefix resolution: %w", err)
-	}
-	for _, sched := range schedResp.Schedules {
-		if strings.HasPrefix(sched.ID, prefix) {
-			matches = append(matches, match{id: sched.ID, resourceType: "schedule"})
+	// List recurring schedules when targeting schedules or both
+	if targetType == "" || targetType == "schedule" {
+		schedResp, err := hubCtx.Client.Schedules(projectID).List(ctx, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to list schedules for prefix resolution: %w", err)
+		}
+		for _, sched := range schedResp.Schedules {
+			if strings.HasPrefix(sched.ID, prefix) {
+				matches = append(matches, match{id: sched.ID, resourceType: "schedule"})
+			}
 		}
 	}
 
@@ -312,8 +325,8 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Resolve potentially truncated ID to full UUID
-	fullID, resourceType, err := resolveScheduleID(ctx, hubCtx, projectID, resourceID)
+	// Resolve potentially truncated ID to full UUID (get handles both types)
+	fullID, resourceType, err := resolveScheduleID(ctx, hubCtx, projectID, resourceID, "")
 	if err != nil {
 		return err
 	}
@@ -476,8 +489,8 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Resolve potentially truncated ID to full UUID
-	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, eventID)
+	// Resolve potentially truncated ID to full UUID (cancel only targets events)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, eventID, "event")
 	if err != nil {
 		return err
 	}
@@ -655,8 +668,8 @@ func runSchedulePause(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Resolve potentially truncated ID to full UUID
-	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID)
+	// Resolve potentially truncated ID to full UUID (pause only targets schedules)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if err != nil {
 		return err
 	}
@@ -695,8 +708,8 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Resolve potentially truncated ID to full UUID
-	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID)
+	// Resolve potentially truncated ID to full UUID (resume only targets schedules)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if err != nil {
 		return err
 	}
@@ -741,8 +754,8 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Resolve potentially truncated ID to full UUID
-	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID)
+	// Resolve potentially truncated ID to full UUID (delete only targets schedules)
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if err != nil {
 		return err
 	}
@@ -786,8 +799,8 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 
 	scheduleID := args[0]
 
-	// Resolve potentially truncated ID to full UUID
-	fullID, _, resolveErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID)
+	// Resolve potentially truncated ID to full UUID (history only targets schedules)
+	fullID, _, resolveErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if resolveErr != nil {
 		return resolveErr
 	}
