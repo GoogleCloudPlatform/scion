@@ -39,7 +39,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -488,7 +487,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
-	if req.GatherEnv && !req.NoAuth {
+	if req.GatherEnv {
 		// Build a preliminary merged env for env-gather evaluation
 		env := make(map[string]string)
 		for k, v := range req.ResolvedEnv {
@@ -2175,11 +2174,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			authType = req.Config.HarnessAuth
 		}
 
-		// Determine if GCP credentials are available via identity config.
-		// Both "assign" (broker-managed SA) and "passthrough" (ambient GCE
-		// metadata) provide credentials, so either satisfies GCP auth needs.
+		// Determine if a GCP service account is assigned via identity config.
 		gcpSAAssigned := req.Config != nil && req.Config.GCPIdentity != nil &&
-			(req.Config.GCPIdentity.MetadataMode == store.GCPMetadataModeAssign || req.Config.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough)
+			req.Config.GCPIdentity.MetadataMode == "assign"
 
 		// When auth type is unset (auto-detect), check if resolved file secrets
 		// or a GCP service account can satisfy an alternative auth method before

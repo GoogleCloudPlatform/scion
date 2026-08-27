@@ -55,6 +55,7 @@ func entPolicyToStore(p *ent.AccessPolicy) *store.Policy {
 		Updated:      p.Updated,
 		CreatedBy:    p.CreatedBy,
 		Origin:       p.Origin,
+		PolicyKind:   string(p.PolicyKind),
 	}
 	if p.Conditions != nil {
 		sp.Conditions = entConditionsToStore(p.Conditions)
@@ -147,6 +148,13 @@ func (s *PolicyStore) CreatePolicy(ctx context.Context, p *store.Policy) error {
 		create.SetOrigin(p.Origin)
 	}
 
+	// Set PolicyKind: default to "explicit" if not specified
+	policyKind := p.PolicyKind
+	if policyKind == "" {
+		policyKind = store.PolicyKindExplicit
+	}
+	create.SetPolicyKind(accesspolicy.PolicyKind(policyKind))
+
 	created, err := create.Save(ctx)
 	if err != nil {
 		return mapError(err)
@@ -220,6 +228,12 @@ func (s *PolicyStore) UpdatePolicy(ctx context.Context, p *store.Policy) error {
 	}
 	if p.Origin != "" {
 		update.SetOrigin(p.Origin)
+	}
+
+	// Only update PolicyKind if explicitly provided (non-empty).
+	// This prevents silently resetting 'default' policies to 'explicit'.
+	if p.PolicyKind != "" {
+		update.SetPolicyKind(accesspolicy.PolicyKind(p.PolicyKind))
 	}
 
 	updated, err := update.Save(ctx)
@@ -462,7 +476,13 @@ func (s *PolicyStore) GetPoliciesForPrincipals(ctx context.Context, principals [
 		return nil, nil
 	}
 
-	// Query policies that have bindings matching any of the principals
+	// Query policies that have bindings matching any of the principals.
+	// Order by deterministic total order:
+	// 1. scope_type ASC (hub < project < resource)
+	// 2. priority ASC (higher number wins because last-match-wins)
+	// 3. policy_kind ASC (default < explicit, so explicit wins)
+	// 4. created ASC (later created wins)
+	// 5. id ASC (stable tiebreaker)
 	policies, err := s.client.AccessPolicy.Query().
 		Where(accesspolicy.HasBindingsWith(
 			policybinding.Or(bindingPreds...),
@@ -470,6 +490,9 @@ func (s *PolicyStore) GetPoliciesForPrincipals(ctx context.Context, principals [
 		Order(
 			accesspolicy.ByScopeType(),
 			accesspolicy.ByPriority(),
+			accesspolicy.ByPolicyKind(),
+			accesspolicy.ByCreated(),
+			accesspolicy.ByID(),
 		).
 		All(ctx)
 	if err != nil {

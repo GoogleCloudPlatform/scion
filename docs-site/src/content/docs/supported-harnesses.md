@@ -233,11 +233,10 @@ from the `XAI_API_KEY` environment variable.
 Alternatively, a file-based auth method (`auth-file`) is supported using `~/.grok/auth.json`,
 produced by `grok login --device-auth`. Capture the credential with `capture_auth.py` after login.
 
-A **Vertex AI** auth method (`vertex-ai`) routes inference through Google Cloud's Vertex AI
-Model Garden. Set `GOOGLE_CLOUD_PROJECT` and optionally `GOOGLE_CLOUD_REGION` (defaults to the
-global endpoint). The provisioner writes `[auth_provider]` and `[model]` entries to
-`~/.grok/config.toml` using `gcloud auth print-access-token` for on-demand token refresh.
-Application Default Credentials (ADC) are placed automatically when staged.
+A third option is **Vertex AI** (auth type `vertex-ai`): provide `GOOGLE_CLOUD_PROJECT` and a
+region (`GOOGLE_CLOUD_REGION` / `CLOUD_ML_REGION` / `GOOGLE_CLOUD_LOCATION`), plus Application
+Default Credentials (ADC). Scion exposes the project and region as environment variables inside
+the container.
 
 If no credentials are found, the agent drops to a shell — run `grok login --device-auth`
 interactively, then capture the credential with the container's `capture_auth.py`
@@ -247,19 +246,19 @@ interactively, then capture the credential with the container's `capture_auth.py
 |---|---|---|
 | API Key | `XAI_API_KEY` | Set env var with xAI API key |
 | Auth File | `~/.grok/auth.json` | `grok login --device-auth` + capture |
-| Vertex AI | `SCION_METADATA_PROJECT_ID` or `GOOGLE_CLOUD_PROJECT` | Detected from GCP identity or env var |
+| Vertex AI | `GOOGLE_CLOUD_PROJECT` + region | Set GCP project and region env vars + ADC |
 
 ### Configuration
 - **Config directory**: `~/.grok/` (settings in `config.toml`).
-- **Instructions**: `agent_instructions` are projected into `~/.grok/AGENTS.md`.
-- **System Prompt**: Supported natively via the `--system-prompt-override` flag during launch.
-- **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
-- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4`, `extra-large` → `grok-4` (resolved and injected via `GROK_DEFAULT_MODEL`).
-- **Hooks**: 11 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect.
+- **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Grok has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
+- **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections. Project-scoped MCP servers are not supported (demoted to global).
+- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4`, `extra-large` → `grok-4`.
+- **Hooks**: Grok events are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect.
 - **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
 
 ### Known Limitations
 - **No max_model_calls** — Grok hooks do not expose model-call start/end events. `max_turns` and `max_duration` are supported.
+- **System Prompt**: approximated via `AGENTS.md` (no native override).
 - **No project-scoped MCP**.
 - **OAuth**: not supported — Grok uses xAI auth only.
 
@@ -280,7 +279,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Hooks** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ | ✅ |
-| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ |
+| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ◐ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ |

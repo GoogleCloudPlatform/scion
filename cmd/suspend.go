@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -166,7 +165,9 @@ func suspendAllAgents() error {
 		if agentName == "" {
 			continue
 		}
-		if a.Phase == string(state.PhaseRunning) {
+		status := strings.ToLower(a.ContainerStatus)
+		if strings.HasPrefix(status, "up") ||
+			strings.HasPrefix(status, "running") {
 			running = append(running, runningAgent{Name: agentName})
 		}
 	}
@@ -297,7 +298,9 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var running []hubclient.Agent
 	for _, a := range resp.Agents {
-		if a.Phase == string(state.PhaseRunning) {
+		status := strings.ToLower(a.ContainerStatus)
+		if strings.HasPrefix(status, "up") ||
+			strings.HasPrefix(status, "running") {
 			running = append(running, a)
 		}
 	}

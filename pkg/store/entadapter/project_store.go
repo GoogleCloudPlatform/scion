@@ -434,9 +434,13 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 		}
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
@@ -448,11 +452,11 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	}
 
 	if opts.Cursor != "" {
-		pred, err := s.projectCursorPredicate(ctx, opts.Cursor)
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(pred)
+		query.Where(projectBeforeCursor(cursorCreated, cursorID))
 	}
 
 	rows, err := query.
@@ -472,15 +476,20 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 		items = append(items, *sp)
 	}
 
-	result := &store.ListResult[store.Project]{
-		Items:      items,
-		TotalCount: totalCount,
-	}
+	result := &store.ListResult[store.Project]{TotalCount: totalCount}
 	if len(items) > limit {
-		result.NextCursor = items[limit-1].ID
 		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
 	}
 	return result, nil
+}
+
+// projectBeforeCursor returns a predicate for keyset pagination after the given cursor.
+func projectBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Project {
+	return keysetBeforeCursor(project.FieldCreated, project.FieldID, cursorCreated, cursorID)
 }
 
 // projectCursorPredicate builds the keyset predicate for paginating after the

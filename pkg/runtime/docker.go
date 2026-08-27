@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -206,7 +205,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 			if agentName == "" {
 				agentName = d.Names
 			}
-			info := api.AgentInfo{
+			agents = append(agents, api.AgentInfo{
 				ContainerID:     d.ID,
 				Name:            agentName,
 				ContainerStatus: d.Status,
@@ -221,15 +220,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
 				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
-			}
-			if code, ok := ExitCodeFromContainerStatus(d.Status); ok {
-				c := code
-				info.ExitCode = &c
-				if code != 0 {
-					info.ExitReason = string(state.ExitReasonCrashed)
-				}
-			}
-			agents = append(agents, info)
+			})
 		}
 	}
 
@@ -262,7 +253,8 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Check if running
-	if agent.Phase != string(state.PhaseRunning) {
+	status := strings.ToLower(agent.ContainerStatus)
+	if !strings.HasPrefix(status, "up") && status != "running" {
 		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 

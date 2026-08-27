@@ -43,6 +43,7 @@ type AgentIdentity interface {
 	HasScope(scope AgentTokenScope) bool
 	Ancestry() []string   // Ordered ancestor chain: [root_user, ..., parent_agent]
 	OriginUserID() string // Returns Ancestry[0] if present, empty string otherwise
+	TokenID() string      // JWT ID (jti) of the current token
 }
 
 // AuthenticatedUser implements UserIdentity.
@@ -87,16 +88,24 @@ func (u *AuthenticatedUser) ClientType() string { return u.clientType }
 // It is produced when authenticating with a User Access Token (UAT).
 type ScopedUserIdentity struct {
 	UserIdentity
-	projectID string
-	scopes    []string
+	projectID    string
+	scopes       []string
+	credentialID string
 }
 
 // NewScopedUserIdentity creates a ScopedUserIdentity.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
+}
+
+// NewScopedUserIdentityWithCredentialID creates a UAT-backed identity with
+// its persisted credential ID available for authorization audit context.
+func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
 		projectID:    projectID,
 		scopes:       scopes,
+		credentialID: credentialID,
 	}
 }
 
@@ -105,6 +114,62 @@ func (s *ScopedUserIdentity) ScopedProjectID() string { return s.projectID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
+
+// CredentialID returns the persisted ID of the UAT that authenticated this identity.
+func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
+
+// IsScopedUserIdentity reports whether an identity is backed by a scoped UAT.
+// Scoped credentials must not use role-only administrative bypasses.
+func IsScopedUserIdentity(identity Identity) bool {
+	_, ok := identity.(*ScopedUserIdentity)
+	return ok
+}
+
+// IsUnscopedLocalPlatformAdmin reports whether a local, non-bearer-scoped user
+// may use platform-admin bypasses. Federated identities are never local
+// platform administrators, regardless of an issuer-provided role claim.
+//
+// Phase 1F: This function uses User.Role == "admin" as a performance fast-path.
+// The startup reconciliation (ReconcileSuperAdminBindings) ensures
+// bidirectional consistency: User.Role == "admin" is always backed by a
+// system-scoped super-admin role binding, and a user removed from AdminEmails
+// has both User.Role demoted and the super-admin binding deleted.
+//
+// D11-fix2: Super-admin binding removal now also happens at login time
+// (provisionUser → deleteSuperAdminBinding) when demotion actually occurs,
+// closing the window where IsSystemAdmin could return true despite Role
+// being demoted. For contexts that need an explicit role-binding check, use
+// AuthzService.IsSystemAdmin instead.
+func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
+	if user == nil || user.Role() != "admin" || IsScopedUserIdentity(user) {
+		return false
+	}
+	_, federated := user.(FederatedIdentity)
+	return !federated
+}
+
+// AncestryIsHubAttested returns true when the identity's ancestry chain
+// was signed by this hub and can be trusted for delegation decisions.
+// Federated agent ancestry is a remote claim about local principal IDs
+// and must not be used for delegation matching or ceiling evaluation.
+//
+// This is the single predicate for ancestry trust. There will be more
+// consumers of ancestry after F1.7, and each one must answer this
+// question the same way — not via scattered Type() comparisons.
+//
+// The parameter is typed as Identity (not interface{}) so that callers
+// cannot accidentally pass an unrelated type. Unknown identity types
+// return false (fail closed — unknown is not attested).
+func AncestryIsHubAttested(identity Identity) bool {
+	if identity == nil {
+		return false
+	}
+	// All FederatedIdentity types (FederatedAgentIdentity,
+	// FederatedUserIdentity, FederatedServiceIdentity) are NOT
+	// hub-attested. Test the interface, not a single concrete type.
+	_, isFederated := identity.(FederatedIdentity)
+	return !isFederated
+}
 
 // HasScope returns true if this identity has the given scope.
 func (s *ScopedUserIdentity) HasScope(scope string) bool {
@@ -137,6 +202,8 @@ func (a *agentIdentityWrapper) Scopes() []AgentTokenScope { return a.AgentTokenC
 func (a *agentIdentityWrapper) Ancestry() []string { return a.AgentTokenClaims.Ancestry }
 
 // OriginUserID returns the originating user ID (first element of ancestry).
+func (a *agentIdentityWrapper) TokenID() string { return a.AgentTokenClaims.ID }
+
 func (a *agentIdentityWrapper) OriginUserID() string {
 	if len(a.AgentTokenClaims.Ancestry) > 0 {
 		return a.AgentTokenClaims.Ancestry[0]
@@ -146,6 +213,9 @@ func (a *agentIdentityWrapper) OriginUserID() string {
 
 // identityContextKey is the key for storing identity in the request context.
 type identityContextKey struct{}
+
+// credentialContextKey is the key for request credential metadata.
+type credentialContextKey struct{}
 
 // GetIdentityFromContext returns the authenticated identity (user or agent).
 func GetIdentityFromContext(ctx context.Context) Identity {
@@ -190,6 +260,19 @@ func GetAgentIdentityFromContext(ctx context.Context) AgentIdentity {
 // contextWithIdentity returns a new context with the identity set.
 func contextWithIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey{}, identity)
+}
+
+// GetCredentialContextFromContext returns the credential metadata recorded by
+// authentication middleware. It intentionally returns a zero value when a
+// legacy test or internal caller set only an identity.
+func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
+	credential, _ := ctx.Value(credentialContextKey{}).(CredentialContext)
+	return credential
+}
+
+// contextWithCredentialContext records credential caveats for request-based authorization.
+func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
+	return context.WithValue(ctx, credentialContextKey{}, credential)
 }
 
 // AuthType constants for request logging.

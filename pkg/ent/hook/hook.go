@@ -33,6 +33,18 @@ func (f AgentFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentMutation", m)
 }
 
+// The AgentCredentialFunc type is an adapter to allow the use of ordinary
+// function as AgentCredential mutator.
+type AgentCredentialFunc func(context.Context, *ent.AgentCredentialMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentCredentialFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentCredentialMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentCredentialMutation", m)
+}
+
 // The AgentSessionMetricsFunc type is an adapter to allow the use of ordinary
 // function as AgentSessionMetrics mutator.
 type AgentSessionMetricsFunc func(context.Context, *ent.AgentSessionMetricsMutation) (ent.Value, error)
@@ -115,6 +127,30 @@ func (f ChatLinkCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatLinkCodeMutation", m)
+}
+
+// The DecisionAuditFunc type is an adapter to allow the use of ordinary
+// function as DecisionAudit mutator.
+type DecisionAuditFunc func(context.Context, *ent.DecisionAuditMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DecisionAuditFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DecisionAuditMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionAuditMutation", m)
+}
+
+// The DelegationEdgeFunc type is an adapter to allow the use of ordinary
+// function as DelegationEdge mutator.
+type DelegationEdgeFunc func(context.Context, *ent.DelegationEdgeMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DelegationEdgeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DelegationEdgeMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DelegationEdgeMutation", m)
 }
 
 // The EnvVarFunc type is an adapter to allow the use of ordinary
@@ -309,6 +345,18 @@ func (f MessageFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, err
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessageMutation", m)
 }
 
+// The MutationAuditFunc type is an adapter to allow the use of ordinary
+// function as MutationAudit mutator.
+type MutationAuditFunc func(context.Context, *ent.MutationAuditMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f MutationAuditFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.MutationAuditMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MutationAuditMutation", m)
+}
+
 // The NonceCacheFunc type is an adapter to allow the use of ordinary
 // function as NonceCache mutator.
 type NonceCacheFunc func(context.Context, *ent.NonceCacheMutation) (ent.Value, error)
@@ -403,6 +451,30 @@ func (f ProjectSyncStateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectSyncStateMutation", m)
+}
+
+// The RoleBindingFunc type is an adapter to allow the use of ordinary
+// function as RoleBinding mutator.
+type RoleBindingFunc func(context.Context, *ent.RoleBindingMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RoleBindingFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RoleBindingMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RoleBindingMutation", m)
+}
+
+// The RoleDefinitionFunc type is an adapter to allow the use of ordinary
+// function as RoleDefinition mutator.
+type RoleDefinitionFunc func(context.Context, *ent.RoleDefinitionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RoleDefinitionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RoleDefinitionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RoleDefinitionMutation", m)
 }
 
 // The RuntimeBrokerFunc type is an adapter to allow the use of ordinary

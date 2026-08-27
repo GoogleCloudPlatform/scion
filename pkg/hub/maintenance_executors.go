@@ -36,8 +36,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"gopkg.in/yaml.v3"
 )
 
 // MaintenanceExecutor defines the interface for a runnable maintenance operation.
@@ -551,7 +553,10 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 	}
 
-	imageName := deriveImageBaseName(hc)
+	imageName := hc.Slug
+	if imageName == "" {
+		imageName = hc.Name
+	}
 	outputImage := imageName + ":" + tag
 	_, _ = fmt.Fprintf(logger, "Building %s from harness-config %q...\n", outputImage, hc.Name)
 	log.Debug("Starting container build",
@@ -588,9 +593,9 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		outputImage = pushImage
 	}
 
-	// Update the harness config's image in the DB so agents
+	// Update the harness config's image in storage and the DB so agents
 	// pick up the newly-built image instead of the stale upstream reference.
-	if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
+	if err := syncBuiltImage(ctx, e.storage, e.store, logger, hc, tmpDir, outputImage); err != nil {
 		log.Error("Failed to sync built image back to store", "error", err)
 		_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 	}
@@ -763,7 +768,11 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 		}
 	}()
 
-	imageName := deriveImageBaseName(hc)
+	// Build the output image reference.
+	imageName := hc.Slug
+	if imageName == "" {
+		imageName = hc.Name
+	}
 	baseImage := registry + "/scion-base:" + tag
 	outputImage := registry + "/" + imageName + ":" + tag
 
@@ -864,7 +873,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 			_, _ = fmt.Fprintf(logger, "\nCloud Build completed successfully: %s\n", outputImage)
 			log.Info("Cloud Build complete", "build_id", buildID, "image", outputImage)
 
-			if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
+			if err := syncBuiltImage(ctx, e.storage, e.store, logger, hc, tmpDir, outputImage); err != nil {
 				log.Error("Failed to sync built image back to store", "error", err)
 				_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 			}
@@ -892,34 +901,64 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 }
 
-// deriveImageBaseName returns the base image name (without tag) for a
-// harness config, preferring the config.yaml image field and falling
-// back to the slug or name.
-func deriveImageBaseName(hc *store.HarnessConfig) string {
-	if hc.Config != nil && hc.Config.Image != "" {
-		name := hc.Config.Image
-		// Only strip a tag — the colon must appear after the last slash
-		// to distinguish "registry:port/image" from "image:tag".
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			slashIdx := strings.LastIndex(name, "/")
-			if idx > slashIdx {
-				name = name[:idx]
+// syncBuiltImage updates the harness config's config.yaml in storage and the
+// DB record to reference the newly-built image. Shared by both local and Cloud
+// Build executors.
+func syncBuiltImage(ctx context.Context, stor storage.Storage, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config.yaml: %w", err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(configData, &doc); err != nil {
+		return fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("config.yaml root is not a YAML mapping")
+	}
+	{
+		mapping := doc.Content[0]
+		found := false
+		for i := 0; i < len(mapping.Content)-1; i += 2 {
+			if mapping.Content[i].Value == "image" {
+				mapping.Content[i+1].Value = outputImage
+				found = true
+				break
 			}
 		}
-		return name
+		if !found {
+			mapping.Content = append(mapping.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
+			)
+		}
 	}
-	if hc.Slug != "" {
-		return hc.Slug
-	}
-	return hc.Name
-}
 
-// syncBuiltImage updates the harness config's DB record to reference the
-// newly-built image without modifying config.yaml in storage. The image field
-// in config.yaml is a stable reference; two-phase resolution at agent start
-// prefers local images. This matches the CLI build path's behavior
-// (see cmd/build.go syncBuildToHub).
-func syncBuiltImage(ctx context.Context, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, outputImage string) error {
+	updatedData, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
+	}
+
+	if stor != nil && hc.StoragePath != "" {
+		objectPath := hc.StoragePath + "/config.yaml"
+		if _, err := stor.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
+			return fmt.Errorf("failed to upload updated config.yaml to storage: %w", err)
+		}
+		_, _ = fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
+	}
+
+	configHash := transfer.HashBytes(updatedData)
+	for i, f := range hc.Files {
+		if f.Path == "config.yaml" {
+			hc.Files[i].Size = int64(len(updatedData))
+			hc.Files[i].Hash = configHash
+			break
+		}
+	}
+	hc.ContentHash = computeContentHash(hc.Files)
+
 	if hc.Config == nil {
 		hc.Config = &store.HarnessConfigData{}
 	}

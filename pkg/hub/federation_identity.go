@@ -71,6 +71,10 @@ func (f *FederatedAgentIdentity) Ancestry() []string { return f.ancestry }
 // remote hub.
 func (f *FederatedAgentIdentity) OriginUserID() string { return f.rootUser }
 
+// TokenID returns an empty string for federated agents (they use OIDC tokens,
+// not locally-issued JWTs).
+func (f *FederatedAgentIdentity) TokenID() string { return "" }
+
 // IssuerURL returns the OIDC issuer URL of the trusted external issuer.
 func (f *FederatedAgentIdentity) IssuerURL() string { return f.issuerURL }
 

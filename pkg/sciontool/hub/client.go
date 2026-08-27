@@ -381,12 +381,11 @@ func (c *Client) ReportState(ctx context.Context, phase state.Phase, activity st
 
 // SetSecretRequest is the request body for agent-initiated secret creation.
 type SetSecretRequest struct {
-	Value        string `json:"value"`
-	Type         string `json:"type,omitempty"`
-	Target       string `json:"target,omitempty"`
-	Force        bool   `json:"force,omitempty"`
-	Scope        string `json:"scope,omitempty"`
-	AllowProgeny bool   `json:"allowProgeny,omitempty"`
+	Value  string `json:"value"`
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target,omitempty"`
+	Force  bool   `json:"force,omitempty"`
+	Scope  string `json:"scope,omitempty"`
 }
 
 // SetSecretResponse is the response from the agent secret creation endpoint.
@@ -510,7 +509,7 @@ func (c *Client) absoluteURL(path string) string {
 // SetSecret stores a secret via the Hub API.
 // The value should already be base64-encoded. Scope selects project (default)
 // or user; an empty scope is treated as "project".
-func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, scope string, force, allowProgeny bool) (*SetSecretResponse, error) {
+func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, scope string, force bool) (*SetSecretResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
@@ -519,12 +518,11 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 		strings.TrimSuffix(c.hubURL, "/"), c.agentID, key)
 
 	reqBody := SetSecretRequest{
-		Value:        value,
-		Type:         secretType,
-		Target:       target,
-		Force:        force,
-		Scope:        scope,
-		AllowProgeny: allowProgeny,
+		Value:  value,
+		Type:   secretType,
+		Target: target,
+		Force:  force,
+		Scope:  scope,
 	}
 
 	body, err := json.Marshal(reqBody)

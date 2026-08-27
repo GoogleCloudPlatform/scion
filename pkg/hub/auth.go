@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // AuthConfig holds authentication configuration.
@@ -72,6 +73,9 @@ type AuthConfig struct {
 	// The middleware loads from this pointer on each request to see
 	// hot-reloaded authenticators.
 	FederationAuth *atomic.Pointer[FederationAuthenticator]
+	// CredentialStore handles agent credential validation (Phase 1H).
+	// When non-nil, agent tokens are validated against persistent credential state.
+	CredentialStore store.AgentCredentialStore
 	// Debug enables verbose logging
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
@@ -149,8 +153,40 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
+						// Step 1a: Validate against persistent credential state (Phase 1H)
+						if cfg.CredentialStore != nil && claims.ID != "" {
+							jtiHash := hashJTI(claims.ID)
+							cred, credErr := cfg.CredentialStore.GetAgentCredentialByJTIHash(ctx, jtiHash)
+							if credErr == nil {
+								// Credential found — check revocation status
+								if cred.RevokedAt != nil {
+									writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+										"token has been revoked", nil)
+									return
+								}
+								// Store credential ID in context for downstream use
+								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
+								// Update last_seen_at (fire-and-forget)
+								go func() {
+									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
+										context.Background(), cred.ID, time.Now())
+								}()
+							} else if errors.Is(credErr, store.ErrNotFound) {
+								// Compatibility window: accept pre-table tokens with a warning
+								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
+									"agent_id", claims.Subject, "jti_hash", jtiHash[:8])
+								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
+							} else {
+								// Store error — log and accept (fail open for availability)
+								log.Warn("Credential store lookup failed, accepting token",
+									"agent_id", claims.Subject, "error", credErr)
+							}
+						}
+
 						ctx = context.WithValue(ctx, agentContextKey{}, claims)
-						ctx = contextWithIdentity(ctx, &agentIdentityWrapper{claims})
+						identity := &agentIdentityWrapper{claims}
+						ctx = contextWithIdentity(ctx, identity)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 						ctx = contextWithAuthType(ctx, AuthTypeAgent)
 						if cfg.Debug {
 							log.Debug("Agent authenticated", "subject", claims.Subject)
@@ -189,6 +225,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					return
 				}
 				ctx = contextWithIdentity(ctx, identity)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 				ctx = contextWithAuthType(ctx, AuthTypeFederation)
 				if cfg.Debug {
 					log.Debug("Federated identity authenticated",
@@ -263,6 +300,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						}
 						ctx = context.WithValue(ctx, userContextKey{}, identity)
 						ctx = contextWithIdentity(ctx, identity)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 						ctx = contextWithAuthType(ctx, AuthTypeProxy)
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated", "provider", cfg.ProxyAuthenticator.Name(), "email", proxyUser.Email)
@@ -278,6 +316,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					if user := extractProxyUser(r); user != nil {
 						ctx = context.WithValue(ctx, userContextKey{}, user)
 						ctx = contextWithIdentity(ctx, user)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
 						ctx = contextWithAuthType(ctx, AuthTypeProxy)
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated (legacy)", "email", user.Email())
@@ -307,6 +346,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
 				ctx = contextWithAuthType(ctx, AuthTypeDevToken)
 				if cfg.Debug {
 					log.Debug("Dev user authenticated")
@@ -326,6 +366,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
 				ctx = contextWithAuthType(ctx, AuthTypeUAT)
 				if cfg.Debug {
 					log.Debug("UAT authenticated", "email", scopedUser.Email(), "project_id", scopedUser.ScopedProjectID())
@@ -337,6 +378,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
+						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
 						ctx = contextWithAuthType(ctx, AuthTypeDevToken)
 						if cfg.Debug {
 							log.Debug("Dev user authenticated (fallback)")
@@ -363,6 +405,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				)
 				ctx = context.WithValue(ctx, userContextKey{}, user)
 				ctx = contextWithIdentity(ctx, user)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
 				ctx = contextWithAuthType(ctx, AuthTypeJWT)
 				if cfg.Debug {
 					log.Debug("User authenticated", "email", user.Email())
@@ -461,6 +504,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/.well-known/jwks.json": // OIDC JSON Web Key Set (public keys)
 		return true
+	case "/api/v1/settings/public": // Public settings (no auth required)
+		return true
 	}
 	return false
 }
@@ -530,6 +575,26 @@ func extractProxyUser(r *http.Request) UserIdentity {
 	}
 
 	return NewAuthenticatedUser(userID, email, name, role, string(ClientTypeWeb))
+}
+
+// agentCredentialIDContextKey stores the credential ID for a validated agent token.
+type agentCredentialIDContextKey struct{}
+
+// legacyTokenContextKey marks that the agent token is a legacy (pre-table) token.
+type legacyTokenContextKey struct{}
+
+// GetAgentCredentialIDFromContext returns the credential ID if the agent token
+// was found in the credential store, or "" if it's a legacy token.
+func GetAgentCredentialIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(agentCredentialIDContextKey{}).(string)
+	return id
+}
+
+// IsLegacyTokenFromContext returns true if the agent token was not found in the
+// credential store (compatibility window for pre-table tokens).
+func IsLegacyTokenFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(legacyTokenContextKey{}).(bool)
+	return v
 }
 
 // RequireAuth is middleware that ensures a request is authenticated.

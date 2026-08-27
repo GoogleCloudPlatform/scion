@@ -58,8 +58,6 @@ type Agent struct {
 	OwnerID           string            `json:"ownerId,omitempty"`
 	Visibility        string            `json:"visibility,omitempty"`
 	StateVersion      int64             `json:"stateVersion,omitempty"`
-	ExitCode          *int              `json:"exitCode,omitempty"`
-	ExitReason        string            `json:"exitReason,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
@@ -205,7 +203,6 @@ type ProjectSettings struct {
 	ActiveProfile          string                 `json:"activeProfile,omitempty"`
 	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
-	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
 	DefaultModel           string                 `json:"defaultModel,omitempty"`
 	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
 	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`

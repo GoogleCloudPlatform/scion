@@ -131,24 +131,6 @@ Base flags should put the tool in full-permission, non-interactive-approval
 mode (`--yolo`, `--dangerously-skip-permissions`, `approval_policy = never`,
 etc.) — the agent runs unattended inside a sandboxed container.
 
-> **⚠ Always configure the CLI for interactive/REPL mode.**
-> The Scion runtime manages the terminal session via a PTY, delivers task
-> prompts as input, and expects the tool to stay running for the agent's
-> entire lifetime. `command.base` must launch the CLI in its interactive
-> (REPL) mode — **not** single-prompt or batch mode. Single-prompt flags
-> (e.g. `-p`, `--single`, `--batch`) cause the tool to exit after one task,
-> breaking session management, resume, and follow-up prompts.
->
-> ```yaml
-> # WRONG — single-prompt mode exits after one task
-> command:
->   base: ["grok", "-p", "--yolo"]
->
-> # RIGHT — interactive mode stays running
-> command:
->   base: ["grok", "--yolo"]
-> ```
-
 ### Prompts, instructions, skills
 
 | Field | Meaning |
@@ -206,38 +188,8 @@ block below — see the precedence note there.
 ### Environment
 
 - `env`: static env vars set in the container.
-- `env_template`: values with placeholder expansion (see table below).
-
-#### Template variables
-
-`env_template` values are expanded by `expandEnvTemplate`
-(`pkg/harness/container_script_harness.go`) before they are injected into the
-container environment. The following placeholders are supported — these are the
-**only** three; any other `{{ .… }}` token is left as-is:
-
-| Placeholder | Expands to |
-|---|---|
-| `{{ .AgentName }}` | The agent's name (e.g. `my-agent`). |
-| `{{ .AgentHome }}` | The **host-side** path to the agent's home directory. This is the path on the machine running scion, *not* the container's `$HOME`. |
-| `{{ .UnixUsername }}` | The unix username of the agent user inside the container (e.g. `scion`). |
-
-> **⚠ Warning — `{{ .AgentHome }}` is a host path.**
-> Because `{{ .AgentHome }}` resolves to the host-side agent home directory,
-> it should generally **not** be used to construct paths that the containerized
-> tool will consume at runtime — the host path does not exist inside the
-> container. Tools should rely on their own default `$HOME`-relative paths
-> instead. Misuse of `{{ .AgentHome }}` was the root cause of
-> [#1225](https://github.com/GoogleCloudPlatform/scion/pull/1225).
-
-```yaml
-# WRONG — AgentHome is the host path, not container $HOME
-env_template:
-  TOOL_HOME: "{{ .AgentHome }}/.tool"
-
-# RIGHT — use placeholders for custom tool variables
-env_template:
-  MY_TOOL_AGENT: "{{ .AgentName }}"
-```
+- `env_template`: values with placeholder expansion — `{{ .AgentName }}`,
+  `{{ .AgentHome }}`, `{{ .UnixUsername }}` (only these three).
 
 Precedence: container env (`env`, `env_template`, template/CLI env) beats the
 `env.json` overlay your provisioner writes — the overlay only adds keys that

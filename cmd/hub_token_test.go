@@ -15,9 +15,35 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+func TestHubTokenCreateHelpUsesRegistryScopes(t *testing.T) {
+	help := hubTokenCreateCmd.Long
+	if !strings.Contains(help, permissions.UATScopeHelp()) {
+		t.Fatal("hub token create help must include registry-derived UAT scope help")
+	}
+	for _, required := range []string{store.UATScopeProjectUpdate, store.UATScopeAgentPortAccess} {
+		if !strings.Contains(help, required) {
+			t.Fatalf("hub token create help missing valid scope %q", required)
+		}
+	}
+	for _, stale := range []string{
+		store.UATScopeAgentStart,
+		store.UATScopeAgentStop,
+		store.UATScopeAgentMessage,
+		store.UATScopeAgentDispatch,
+	} {
+		if strings.Contains(help, stale) {
+			t.Fatalf("hub token create help exposes stale scope %q", stale)
+		}
+	}
+}
 
 func TestParseExpiry_Days(t *testing.T) {
 	before := time.Now().UTC()

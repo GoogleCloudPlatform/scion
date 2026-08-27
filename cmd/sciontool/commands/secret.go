@@ -21,11 +21,10 @@ import (
 )
 
 var (
-	secretType         string
-	secretTarget       string
-	secretForce        bool
-	secretScope        string
-	secretAllowProgeny bool
+	secretType   string
+	secretTarget string
+	secretForce  bool
+	secretScope  string
 )
 
 var secretCmd = &cobra.Command{
@@ -139,7 +138,7 @@ Examples:
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretScope, secretForce, secretAllowProgeny)
+		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretScope, secretForce)
 		if err != nil {
 			log.Error("%v", err)
 			os.Exit(1)
@@ -250,5 +249,4 @@ func init() {
 	secretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
 	secretSetCmd.Flags().BoolVar(&secretForce, "force", false, "Overwrite existing secret")
 	secretSetCmd.Flags().StringVar(&secretScope, "scope", "", "Secret scope: project (default) or user")
-	secretSetCmd.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "Allow progeny agents to inherit this secret (user scope only)")
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -27,30 +28,20 @@ type Capabilities struct {
 }
 
 // ResourceActions maps resource types to the actions applicable to individual resources.
-var ResourceActions = map[string][]Action{
-	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
-	"project":             {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
-	"skill":               {ActionRead, ActionUpdate, ActionDelete},
-	"template":            {ActionRead, ActionUpdate, ActionDelete},
-	"harness_config":      {ActionRead, ActionUpdate, ActionDelete},
-	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
-	"user":                {ActionRead, ActionUpdate},
-	"policy":              {ActionRead, ActionUpdate, ActionDelete},
-	"broker":              {ActionRead, ActionUpdate, ActionDelete, ActionDispatch},
-	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify, ActionAssign},
-}
+var ResourceActions = actionMapFromRegistry(permissions.ResourceActions())
 
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
-var ScopeActions = map[string][]Action{
-	"agent":               {ActionCreate, ActionList, ActionStopAll},
-	"project":             {ActionCreate, ActionList},
-	"skill":               {ActionCreate, ActionList},
-	"template":            {ActionCreate, ActionList},
-	"harness_config":      {ActionCreate, ActionList},
-	"group":               {ActionCreate, ActionList},
-	"policy":              {ActionCreate, ActionList},
-	"broker":              {ActionCreate, ActionList},
-	"gcp_service_account": {ActionCreate, ActionList, ActionMint},
+var ScopeActions = actionMapFromRegistry(permissions.ScopeActions())
+
+func actionMapFromRegistry(in map[string][]string) map[string][]Action {
+	out := make(map[string][]Action, len(in))
+	for resource, actions := range in {
+		out[resource] = make([]Action, len(actions))
+		for i, action := range actions {
+			out[resource][i] = Action(action)
+		}
+	}
+	return out
 }
 
 // agentResource constructs a Resource from a store.Agent for capability computation.
@@ -201,8 +192,11 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	}
 
 	// Admin short-circuit: return all actions
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		return allActions(actions)
+	}
+	if IsScopedUserIdentity(identity) {
+		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
 	// Project owner/admin short-circuit: full access on project and project-scoped
@@ -237,7 +231,7 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 	}
 
 	// Admin short-circuit
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		return allActions(actions)
 	}
 
@@ -245,6 +239,9 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		Type:       resourceType,
 		ParentType: scopeType,
 		ParentID:   scopeID,
+	}
+	if IsScopedUserIdentity(identity) {
+		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
 	// Project owner/admin short-circuit at scope level (e.g. agent:create
@@ -281,11 +278,18 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	}
 
 	// Admin short-circuit: return all actions for all resources
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		allCap := allActions(actions)
 		caps := make([]*Capabilities, len(resources))
 		for i := range caps {
 			caps[i] = allCap
+		}
+		return caps
+	}
+	if IsScopedUserIdentity(identity) {
+		caps := make([]*Capabilities, len(resources))
+		for i, resource := range resources {
+			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 		}
 		return caps
 	}
@@ -343,6 +347,22 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		caps[i] = &Capabilities{Actions: allowed}
 	}
 	return caps
+}
+
+// computeCapabilitiesWithContext evaluates every action through the canonical
+// request path so credential caveats (notably UAT project and scope limits)
+// cannot be bypassed by capability projections.
+func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, identity Identity, resource Resource, actions []Action) *Capabilities {
+	if GetIdentityFromContext(ctx) != identity {
+		ctx = contextWithIdentity(ctx, identity)
+	}
+	allowed := make([]string, 0, len(actions))
+	for _, action := range actions {
+		if a.DecideFromContext(ctx, resource, action).Allowed {
+			allowed = append(allowed, string(action))
+		}
+	}
+	return &Capabilities{Actions: allowed}
 }
 
 // precomputeForIdentity fetches group memberships and policies once for an identity.
