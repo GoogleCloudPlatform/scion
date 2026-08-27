@@ -308,19 +308,27 @@ or the [HA tier](/scion/hosted/ha/overview/).
 :::danger[Overloading the Instance destroys all work]
 If too many agents are started on one Instance, the container is terminated. The
 Hub restarts into a clean state — **every agent, every project, and every workspace
-is lost**. There is no warning before the crash, and the request that creates the
-agent past the limit returns success. The operator's last signal before losing
-everything is a success message.
+is lost**.
 
 The service recovers on its own within about 30 seconds. It comes back healthy,
 responsive, and completely empty — a new Hub with no trace of what was running.
 Nothing is visibly broken. An operator who checks after a crash sees a working
 system and no error, which is more dangerous than an outage that announces itself.
 
-There are no per-agent resource limits on this tier and no memory or CPU instrument
-visible to the operator. The agent count ceiling is not yet published (see
-[Section 4](#4-sizing)). **Push work to a git remote often.** Anything not pushed
-is unrecoverable.
+**Under real load there is a warning signal.** When agents are actively working,
+agent create times climb from under two seconds to tens of seconds as the Instance
+approaches its limit. **Agent creates taking ten or more seconds mean the Instance
+is near its ceiling — stop adding agents.** The final create before a crash
+typically returns a 503 rather than success.
+
+With idle agents there is no such warning. Creates return success at normal speed
+right up to the point of failure, and the operator's last signal before losing
+everything is a success message.
+
+There are no per-agent resource limits on this tier and no direct memory or CPU
+instrument visible to the operator; create latency under load is the practical
+proxy. The agent count ceiling is not yet published (see [Section 4](#4-sizing)).
+**Push work to a git remote often.** Anything not pushed is unrecoverable.
 :::
 
 :::note[Shallow clones]
