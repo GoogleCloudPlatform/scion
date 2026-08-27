@@ -270,8 +270,10 @@ di_assert_perimeter() {
   fi
 
   # Got 302 — verify it points to accounts.google.com
+  # || location="" prevents set -e from killing the script when grep finds
+  # no Location header. The downstream check still fails closed.
   local location
-  location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
+  location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')" || location=""
   rm -f "$headers_file"
 
   if [[ "$location" != *"accounts.google.com"* ]]; then
@@ -302,8 +304,10 @@ di_wait_for_iap() {
       "$instance_url" 2>/dev/null)" || probe_code="000"
 
     if [[ "$probe_code" == "302" ]]; then
+      # || location="" prevents set -e from killing the deploy when grep
+      # finds no Location header during a transient polling iteration.
       local location
-      location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
+      location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')" || location=""
       if [[ "$location" == *"accounts.google.com"* ]]; then
         rm -f "$headers_file"
         return 0
@@ -398,7 +402,10 @@ di_main() {
   # ===================================================================
   echo "==> Step 1: Resolving deployer identity..."
   local operator_email
-  operator_email="$(gcloud config get account 2>/dev/null | tr -d '[:space:]')"
+  operator_email="$(gcloud config get account 2>/dev/null | tr -d '[:space:]')" || {
+    echo "Error: 'gcloud config get account' failed — is gcloud configured and authenticated?" >&2
+    return 1
+  }
   if [[ -z "$operator_email" ]]; then
     echo "Error: gcloud returned empty account — is gcloud configured?" >&2
     return 1
@@ -422,7 +429,10 @@ di_main() {
   # ===================================================================
   echo "==> Step 2: Resolving project number..."
   local project_number
-  project_number="$(gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]')"
+  project_number="$(gcloud projects describe "$DI_PROJECT" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]')" || {
+    echo "Error: 'gcloud projects describe $DI_PROJECT' failed — check that the project exists and you have access" >&2
+    return 1
+  }
   if [[ -z "$project_number" ]]; then
     echo "Error: gcloud returned empty project number for '$DI_PROJECT'" >&2
     return 1
@@ -498,7 +508,10 @@ di_main() {
 
   # Get access token — NEVER print it to stdout.
   local access_token
-  access_token="$(gcloud auth print-access-token 2>/dev/null | tr -d '[:space:]')"
+  access_token="$(gcloud auth print-access-token 2>/dev/null | tr -d '[:space:]')" || {
+    echo "Error: 'gcloud auth print-access-token' failed — is gcloud authenticated?" >&2
+    return 1
+  }
   if [[ -z "$access_token" ]]; then
     echo "Error: gcloud returned empty access token" >&2
     return 1
@@ -518,7 +531,10 @@ di_main() {
     -H "Authorization: Bearer ${access_token}" \
     -H "Content-Type: application/json" \
     -d "$(di_iap_patch_body)" \
-    "$patch_url")"
+    "$patch_url")" || {
+    echo "Error: failed to connect to $patch_url — check network connectivity and project configuration" >&2
+    return 1
+  }
 
   if [[ "$http_code" -ge 300 ]]; then
     echo "Error: REST PATCH returned $http_code:" >&2

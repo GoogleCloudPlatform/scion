@@ -47,9 +47,11 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 	t.Helper()
 	scriptPath := deployScriptPath(t)
 
-	// Build a bash command that sources the script (no side effects thanks
-	// to the main guard) and then calls the function.
-	bashCmd := fmt.Sprintf("source %q && %s", scriptPath, funcName)
+	// Build a bash command that matches production: di_main runs
+	// "set -euo pipefail", so every function it calls inherits those
+	// options. Without this, tests are structurally blind to failures
+	// caused by set -e killing the script before its own error handling.
+	bashCmd := fmt.Sprintf("set -euo pipefail; source %q && %s", scriptPath, funcName)
 	for _, a := range args {
 		bashCmd += fmt.Sprintf(" %q", a)
 	}
