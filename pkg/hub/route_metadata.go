@@ -598,26 +598,32 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/allow-list": {
 		Pattern: "/api/v1/admin/allow-list", RouteID: "admin.allowList",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/admin/allow-list/": {
 		Pattern: "/api/v1/admin/allow-list/", RouteID: "admin.allowList.byEmail",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/admin/users/invite/bulk": {
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
 		Classification: RouteHubAdmin,
+		Permission:     "user.invite", Resource: "user", Action: "invite",
 	},
 	"/api/v1/admin/users/invite": {
 		Pattern: "/api/v1/admin/users/invite", RouteID: "admin.users.invite",
 		Classification: RouteHubAdmin,
+		Permission:     "user.invite", Resource: "user", Action: "invite",
 	},
 	"/api/v1/admin/invites": {
 		Pattern: "/api/v1/admin/invites", RouteID: "admin.invites",
 		Classification: RouteHubAdmin,
+		Permission:     "user.invite", Resource: "user", Action: "invite",
 	},
 	"/api/v1/admin/invites/": {
 		Pattern: "/api/v1/admin/invites/", RouteID: "admin.invites.byId",
 		Classification: RouteHubAdmin,
+		Permission:     "user.invite", Resource: "user", Action: "invite",
 	},
 	"/api/v1/admin/server-config/schema": {
 		Pattern: "/api/v1/admin/server-config/schema", RouteID: "admin.serverConfig.schema",
@@ -658,6 +664,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/validate-resources": {
 		Pattern: "/api/v1/admin/validate-resources", RouteID: "admin.validateResources",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.validate.execute", Resource: "hub", Action: "execute",
 	},
 	"/api/v1/admin/integrations": {
 		Pattern: "/api/v1/admin/integrations", RouteID: "admin.integrations",

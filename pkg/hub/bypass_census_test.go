@@ -84,14 +84,9 @@ func TestBypassCensus(t *testing.T) {
 
 		// ─── Handler-level bypasses (will be removed in PR-A2 through PR-A6) ──
 
-		// User management (PR-A3)
-		{file: "admin_allow_list.go", lineSubstr: `user.Role() != "admin"`, description: "get allow list (PR-A3)"},
-		{file: "admin_allow_list.go", lineSubstr: `user.Role() != "admin"`, description: "set allow list (PR-A3)"},
-		{file: "admin_invites.go", lineSubstr: `user.Role() != "admin"`, description: "list invites (PR-A3)"},
-		{file: "admin_invites.go", lineSubstr: `user.Role() != "admin"`, description: "delete invite (PR-A3)"},
-		{file: "admin_user_invite.go", lineSubstr: `user.Role() != "admin"`, description: "invite user (PR-A3)"},
-		{file: "admin_user_invite.go", lineSubstr: `user.Role() != "admin"`, description: "bulk invite (PR-A3)"},
-		{file: "admin_validate.go", lineSubstr: `user.Role() != "admin"`, description: "validate resources (PR-A3)"},
+		// Settings and config (PR-A2) — converted to permission-based checks
+
+		// User management (PR-A3) — converted to permission-based checks
 
 		// Operations (PR-A4)
 		{file: "admin_maintenance.go", lineSubstr: `user.Role() != "admin"`, description: "list maintenance (PR-A4)"},

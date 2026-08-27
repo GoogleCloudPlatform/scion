@@ -47,10 +47,6 @@ type InviteListResponse struct {
 // handleAdminInvites handles GET/POST /api/v1/admin/invites.
 func (s *Server) handleAdminInvites(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -65,10 +61,6 @@ func (s *Server) handleAdminInvites(w http.ResponseWriter, r *http.Request) {
 // handleAdminInviteByID handles GET/DELETE /api/v1/admin/invites/{id} and POST .../revoke.
 func (s *Server) handleAdminInviteByID(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
 
 	// Parse path: /api/v1/admin/invites/{id} or /api/v1/admin/invites/{id}/revoke or stats
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/invites/")
