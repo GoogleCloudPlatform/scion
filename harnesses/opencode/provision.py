@@ -305,7 +305,6 @@ def _prefetch_models_catalog(ctx: sh.ProvisionContext) -> None:
 
     This is best-effort — a fetch failure is logged but never fails provision.
     """
-    import urllib.error
     import urllib.request
 
     cache_dir = os.path.join(ctx.home, ".cache", "opencode")
