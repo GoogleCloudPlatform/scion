@@ -67,12 +67,45 @@ the subcommand — tracked by
 git clone https://github.com/GoogleCloudPlatform/scion.git
 cd scion
 go build -tags no_embed_web -o ./scion ./cmd/scion/
+mkdir -p "$(go env GOPATH)/bin" && mv ./scion "$(go env GOPATH)/bin/scion"
 ```
 
-The build writes the binary to `./scion` inside the clone. The rest of this guide
-assumes you stay in that directory — the wrapper scripts in
-[Section 1](#1-deploy) and [Section 6](#6-teardown) are repository-relative paths.
-Invoke the binary you just built as `./scion`, or put it on your `PATH`.
+The last line moves the binary into your Go bin directory (`~/go/bin` unless you
+have overridden `GOPATH`) — the conventional location for Go-built commands, and
+one that needs no `sudo`. Every `scion` command in this guide is then invoked
+bare, exactly as it will be once a release ships `deploy-instance`.
+
+Verify before continuing — this is the `scion` row of the [CLI tools](#cli-tools)
+table:
+
+```bash
+scion deploy-instance --help
+```
+
+If it prints the help text, you are done with this section. Two failures are
+possible, and both are fixed the same way:
+
+- `scion: command not found` — your Go bin directory is not on your `PATH`.
+- `unknown command "deploy-instance"` — an older `scion` **earlier** on your
+  `PATH` (a Homebrew or release install) is shadowing the binary you just built.
+
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+Prepending, not appending, is what makes the freshly built binary win over an
+older install. Re-run the verify command.
+
+:::caution[Scope this `PATH` change to your deploy shell]
+This build uses `-tags no_embed_web`, so it has **no web UI assets** — `scion
+server start` from it would serve a blank UI. If you already have a full `scion`
+install, export the `PATH` line in the shell you deploy from rather than in your
+shell profile, so the web-less build does not shadow it everywhere.
+:::
+
+**Stay in the clone directory for the rest of this guide** — the optional wrapper
+scripts in [Section 1](#1-deploy) and [Section 6](#6-teardown) are
+repository-relative paths.
 
 :::caution[gcloud version]
 `gcloud beta run instances deploy` requires a recent gcloud SDK. If `beta run
