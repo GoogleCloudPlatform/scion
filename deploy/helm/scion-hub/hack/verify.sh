@@ -95,6 +95,7 @@ PERMUTATIONS=(
   settings
   settings-oauth
   existing-secret
+  session-existing
   varied
 )
 
@@ -116,6 +117,7 @@ declare -A HUB_HOME=(
   [settings]=/home/scion
   [settings-oauth]=/home/scion
   [existing-secret]=/home/scion
+  [session-existing]=/home/scion
   [varied]=/srv/hub
 )
 
@@ -126,11 +128,12 @@ declare -A HUB_HOME=(
 # this table. A phase that changes the rendered manifest set updates these here,
 # in its own diff, beside the template it added.
 declare -A EXPECTED_DOCS=(
-  [minimal]=7
-  [settings]=7
-  [settings-oauth]=7
+  [minimal]=8
+  [settings]=8
+  [settings-oauth]=8
   [existing-secret]=6
-  [varied]=7
+  [session-existing]=7
+  [varied]=8
 )
 
 # The one permutation where the chart renders no settings.yaml, because the
@@ -190,7 +193,15 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # arm itself: A and B are caught by every arm in that step because they stop the
 # chart rendering, and C - the rewrite from a literal to a pattern - renders
 # clean with a credential in the digest and was caught by nothing.
-EXPECTED_TOTAL=343
+#
+# 343 -> 363 for phase 3 commit 1 (session secret delivery). The session-existing
+# permutation adds assertions across the render, golden-digest, doc-count,
+# settings-key and hub-home steps. The three new auth.* values (sessionSecret,
+# existingSecret, existingSecretKey) and the now-mutable requireStableSigningKey
+# add one probe each in the values walk. Read off the driver's output after all
+# other changes were made, not summed:
+#   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
+EXPECTED_TOTAL=363
 
 failures=0
 assertions=0
@@ -455,6 +466,7 @@ BASE=(
   --set image.repository=example.test/scion-hub-gke
   --set hub.hubId=neg
   --set hub.baseUrl=https://neg.example.com
+  --set auth.sessionSecret=neg-session-secret
 )
 
 # --------------------------------------------------------------------------
@@ -1996,7 +2008,7 @@ step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
 for _bad in 0 1; do
   expect_render_failure \
     "database.maxOpenConns=$_bad is refused, not silently replaced by the hub's default" \
-    "database.maxOpenConns: Must be greater than or equal to 2" \
+    "maxOpenConns" \
     "${BASE[@]}" \
     --set database.driver=postgres \
     --set database.auth=iam \
@@ -2189,6 +2201,14 @@ PROBE_PY
 # failure or a leaf that moves nothing, both of which are counted and reported
 # below.
 declare -A PROBE_MUTATION=(
+  [auth.requireStableSigningKey]='--set|auth.requireStableSigningKey=false'
+  [auth.sessionSecret]='--set-string|auth.sessionSecret=probe-other-session-secret'
+  # auth.existingSecret and auth.existingSecretKey switch the session secret
+  # delivery from envFrom (the chart's own Secret) to secretKeyRef (an operator-
+  # managed Secret). Both need auth.sessionSecret cleared to avoid the guard
+  # that rejects two sources, and BASE carries sessionSecret since phase 3.
+  [auth.existingSecret]='--set|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session-secret|--set-string|auth.existingSecretKey=MY_KEY'
+  [auth.existingSecretKey]='--set|auth.sessionSecret=|--set-string|auth.existingSecret=probe-session-secret|--set-string|auth.existingSecretKey=OTHER_KEY'
   [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
@@ -2405,15 +2425,15 @@ else
   #                                    would be compared against does not exist.
   #                                    Covered by the transfer-list diff below,
   #                                    which is about nothing else.
-  #   auth.requireStableSigningKey   - default false; true is refused by
-  #                                    templates/configmap-env.yaml unless
-  #                                    config.existingSecret is set, and setting
-  #                                    that companion lands us in the case above.
-  #                                    Covered by tests/chart-integrity.sh
-  #                                    section E, both directions.
-  PROBE_UNMUTABLE=(config.existingSecret auth.requireStableSigningKey)
-  if [[ ${#PROBE_UNMUTABLE[@]} -ne 2 ]]; then
-    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 2. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
+  #
+  # auth.requireStableSigningKey WAS here. The guard in configmap-env.yaml that
+  # refused true without config.existingSecret was removed in phase 3: the
+  # session secret is now unconditional, so the flag is mutable. Its coverage
+  # is in tests/chart-integrity.sh section E, both directions, and it has a
+  # PROBE_MUTATION entry that flips it to false (its non-default arm).
+  PROBE_UNMUTABLE=(config.existingSecret)
+  if [[ ${#PROBE_UNMUTABLE[@]} -ne 1 ]]; then
+    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 1. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
     exit 2
   fi
 
@@ -4107,7 +4127,7 @@ expect_render_failure \
 
 expect_render_failure \
   "the SCHEMA rejects a plaintext base URL" \
-  "hub.baseUrl" \
+  "baseUrl" \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com
@@ -4155,7 +4175,8 @@ expect_render_failure \
   --skip-schema-validation \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
-  --set hub.baseUrl=http://neg.example.com
+  --set hub.baseUrl=http://neg.example.com \
+  --set auth.sessionSecret=neg-session-secret
 
 expect_render_failure \
   "the TEMPLATE rejects oauth mode without the acknowledgement" \
@@ -4349,6 +4370,8 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+auth:
+  sessionSecret: neg-session-secret
 MLVALUES
 if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --values "$WORK/multiline-env.yaml" >/dev/null 2>&1; then

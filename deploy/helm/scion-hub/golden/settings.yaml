@@ -13,6 +13,23 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: scion
 ---
+# Source: scion-hub/templates/secret-session.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scion-scion-hub-session
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+type: Opaque
+stringData:
+  SCION_SERVER_SESSION_SECRET: "ci-settings-session-secret-not-real"
+---
 # Source: scion-hub/templates/secret-settings.yaml
 apiVersion: v1
 kind: Secret
@@ -119,28 +136,28 @@ data:
   # fall back to a per-process signing key, which across replicas would sign
   # tokens each of the others reject.
   #
-  # THE REFUSAL BELOW EXISTS BECAUSE THE HUB'S REFUSAL IS NOT SCOPED TO ITS OWN
-  # HARM. Setting this true in this release does not make the hub careful; it
-  # makes the hub refuse to boot, every time, on a first install, with nothing
-  # the operator can do about it from this chart. The hub resolves a stable key
-  # from a pre-configured key, then SharedSigningSecret, then a secret backend,
-  # then the store (pkg/hub/server.go:1445). SharedSigningSecret is
-  # resolveSessionSecret() (cmd/server_foreground.go:1556), which reads only
-  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
-  # (cmd/server_foreground.go:1452-1462); the chart renders none of them, and
-  # hub.extraEnv - the one operator-controlled env channel - refuses all three
-  # by name as credential material (_helpers.tpl:1306). The store is empty on a
-  # first boot. So there is no key, pkg/hub/server.go:1634 errors,
-  # pkg/hub/server.go:1008 makes it fatal, and cmd/server_foreground.go:259
-  # calls log.Fatalf.
+  # DEFAULTS TO true SINCE THE SESSION-SECRET PHASE, AND A REFUSAL WAS REMOVED
+  # HERE TO ALLOW IT. Until that phase this file carried a `fail` rejecting
+  # true unless config.existingSecret was set, because nothing the chart
+  # rendered could satisfy the flag: the hub resolves a stable key from a
+  # pre-configured key, then SharedSigningSecret, then a secret backend, then
+  # the store (pkg/hub/server.go:1445); SharedSigningSecret comes only from
+  # resolveSessionSecret (cmd/server_foreground.go:1452-1463), which reads
+  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET; the
+  # chart rendered none of the three, and a first boot has an empty store. With
+  # true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes
+  # it fatal, and cmd/server_foreground.go:259 turns it into log.Fatalf. Measured
+  # end-to-end through hub.New by gd-p1-dev, not inferred from the citations.
   #
-  # config.existingSecret is the one shape where true is satisfiable, and it is
-  # not hypothetical: the operator writes their own settings.yaml, so they can
-  # set server.secrets.backend and pre-provision the key there. The chart does
-  # not render that file and has no business second-guessing it.
-  #
-  # This turns a CrashLoopBackOff at 03:00 into a values error at install time.
-  SCION_REQUIRE_STABLE_SIGNING_KEY: "false"
+  # WHAT MAKES true SAFE NOW IS NOT THIS DEFAULT - IT IS THAT THE SECRET IS
+  # UNCONDITIONAL. scion-hub.assertSessionSecret fails the render when neither
+  # auth.sessionSecret nor auth.existingSecret is set, so there is no values
+  # combination that reaches this line with the flag true and no source for the
+  # variable. The refusal was not relaxed; its precondition was removed. If a
+  # later phase ever makes the session secret optional again, this default must
+  # go back to false in the same change - tests/chart-integrity.sh section E
+  # asserts exactly that pairing, in both directions.
+  SCION_REQUIRE_STABLE_SIGNING_KEY: "true"
 ---
 # Source: scion-hub/templates/rbac-role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -256,7 +273,7 @@ spec:
         app.kubernetes.io/part-of: scion
       annotations:
         scion.io/hub-id: "ci-settings"
-        checksum/env-config: 89a57c8a161eca4df95ce9fb7d6296f0b0c94dc463dc2e4b75d1baf4c24d624b
+        checksum/env-config: 35ce0e61c3b792d5ab1812cb3bf646e4c87442a4b7b50ce9cf53db01f312459a
         checksum/settings: ee863da21f691b4a71e9c259e72d7bef0b86bb42e075e18a7d9a0531bc0f3c44
     spec:
       serviceAccountName: scion-scion-hub
@@ -323,6 +340,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: scion-scion-hub-env
+            - secretRef:
+                name: scion-scion-hub-session
           env:
             - name: POD_NAMESPACE
               valueFrom:

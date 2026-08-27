@@ -531,6 +531,18 @@
           "enum": ["proxy", "oauth"],
           "description": "Selects which configuration subtree is rendered and nothing else. Every key the HA preflight requires renders identically in both modes."
         },
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of a Secret you manage holding the session secret. The chart renders no Secret in this shape. Mutually exclusive with auth.sessionSecret."
+        },
+        "existingSecretKey": {
+          "type": "string",
+          "description": "Key inside auth.existingSecret holding the secret. Defaults to SCION_SERVER_SESSION_SECRET."
+        },
+        "sessionSecret": {
+          "type": "string",
+          "description": "Inline session secret: the chart renders secret-session.yaml holding this value. Mutually exclusive with auth.existingSecret."
+        },
         "acknowledgeOAuthUnlanded": {
           "type": "boolean",
           "description": "The oauth mode's client credentials are not rendered by the chart yet. An oauth install starts and passes its probes; every human login fails. Set true to render it anyway."

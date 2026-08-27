@@ -671,6 +671,45 @@ auth:
   # five, which is what the paired ci fixtures actually diff.
   mode: proxy
 
+  # THE SESSION SECRET. One of the next two is REQUIRED - the render fails if
+  # neither is set, and it fails if both are.
+  #
+  # This one value backs BOTH the session cookie encryption key AND the hub's
+  # shared JWT signing keys (resolveSessionSecret,
+  # cmd/server_foreground.go:1452-1463), so every replica must see the same
+  # bytes or they reject each other's tokens.
+  #
+  # WHY THE CHART REFUSES RATHER THAN DEFAULTING OR GENERATING. The hub does not
+  # fail without one: it logs a single warning and derives a per-process key, so
+  # the deployment comes up green and users get logged out whenever the load
+  # balancer moves them - a symptom that reads as a flaky session store, not as
+  # a configuration error. And a generated secret is worse than none: it rotates
+  # on every helm upgrade, invalidating every live session and the shared
+  # signing key at once, and it cannot be rendered reproducibly because lookup
+  # returns empty under helm template, so the golden output would not match the
+  # installed output.
+  #
+  # PREFERRED. The name of a Secret you create and manage yourself. The chart
+  # renders no Secret in this shape, and the value never enters this file, your
+  # values overrides, or Helm's release storage - which is the whole reason to
+  # prefer it. Only the named key is bound into the hub's environment, so other
+  # keys in your Secret are not exposed to the hub.
+  existingSecret: ""
+
+  # The key inside auth.existingSecret holding the secret. Defaults to
+  # SCION_SERVER_SESSION_SECRET, which is what the hub reads; set it only if
+  # your Secret already uses a different key name. Meaningless without
+  # auth.existingSecret, and the chart refuses that combination rather than
+  # ignoring it.
+  existingSecretKey: ""
+
+  # The inline alternative: the chart renders secret-session.yaml holding this
+  # value. Convenient, and appropriate when your values file is itself managed
+  # as a secret - but note that this Secret is only as private as the values
+  # file and the Helm release that carry it. Generate with, for example,
+  # `openssl rand -base64 48`.
+  sessionSecret: ""
+
   # The oauth mode's supporting configuration - the client credentials - is not
   # rendered by the chart yet; it lands with the session and client secrets.
   #
@@ -690,33 +729,40 @@ auth:
   # signs tokens the others reject - and it is silent, so it presents as
   # intermittent logouts rather than as a configuration error.
   #
-  # DEFAULTED false, AND IT WILL BECOME true IN THE SESSION-SECRET PHASE. Not a
-  # judgement that the protection is unwanted - it is that in THIS release
-  # nothing can satisfy it. The hub resolves a stable key from, in order: a
-  # pre-configured key, SharedSigningSecret, a secret backend, then the store
-  # (pkg/hub/server.go:1445). SharedSigningSecret is resolveSessionSecret()
-  # (cmd/server_foreground.go:1556), which reads only --session-secret,
-  # SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
-  # (cmd/server_foreground.go:1452-1462) - it has no settings-file source at
-  # all, and this chart renders none of the three. On a first boot the store is
-  # empty too. So with true there is no key to find, and pkg/hub/server.go:1634
-  # returns an error that pkg/hub/server.go:1008 makes fatal and
-  # cmd/server_foreground.go:259 turns into log.Fatalf.
+  # DEFAULTED true SINCE THE SESSION-SECRET PHASE. It was false before, and the
+  # history matters because the reason was never "the protection is unwanted":
+  # it was that nothing in the release could satisfy it. The hub resolves a
+  # stable key from, in order, a pre-configured key, SharedSigningSecret, a
+  # secret backend, then the store (pkg/hub/server.go:1445). SharedSigningSecret
+  # is resolveSessionSecret() (cmd/server_foreground.go:1452-1463), which reads
+  # only --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET -
+  # it has no settings-file source at all - and the chart rendered none of the
+  # three. On a first boot the store is empty too. So true meant no key to find:
+  # pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes it fatal, and
+  # cmd/server_foreground.go:259 turns it into log.Fatalf.
   #
-  # MEASURED through the real hub.New, not read: ServerConfig{RequireStableSigningKey:
-  # true} refuses; adding only SharedSigningSecret makes the same call succeed.
-  # The missing session secret is the entire difference. Four of the five ci
-  # permutations rendered "true" and none rendered a secret, so four of five
-  # could not start - including minimal, which the rest of this chart's prose
-  # points at as the safe one.
+  # MEASURED through the real hub.New, not read, at both ends. Before:
+  # ServerConfig{RequireStableSigningKey: true} refuses with "refusing to
+  # generate a new signing key ... provide a SharedSigningSecret or
+  # pre-provision the key"; adding only SharedSigningSecret makes the same call
+  # succeed, so the missing session secret was the entire difference.
   #
-  # The harm the true setting prevents - replicas signing tokens each other
-  # reject - needs a replica set this release cannot start one member of. It
-  # arrives with the secret, so the two should arrive together. A guard that
-  # nothing can satisfy is worse than no guard, because it teaches operators to
-  # turn guards off.
+  # WHAT CHANGED IS NOT THIS LINE - IT IS THAT auth.sessionSecret /
+  # auth.existingSecret ARE NOW REQUIRED. The render fails when neither is set,
+  # so SCION_SERVER_SESSION_SECRET is delivered on every path that renders at
+  # all, and true is satisfiable everywhere rather than nowhere. A guard nothing
+  # can satisfy is worse than no guard, because it teaches operators to turn
+  # guards off; the fix was to make the guard satisfiable, not to keep it off.
   #
-  # tests/chart-integrity.sh asserts the flip: the day the default render gains
-  # a session-secret source, the LANDING limb fails and stays failing until this
-  # line reads true.
-  requireStableSigningKey: false
+  # SET IT false ONLY IF YOU SUPPLY A SIGNING KEY BY A ROUTE THE CHART CANNOT
+  # SEE - a secret backend configured through config.extra, or a key already in
+  # the hub's store from a previous release. Turning it off to make a failing
+  # install start is the wrong move: the failure means the hub found no durable
+  # key, and with the flag off it does not stop, it invents one per process. The
+  # symptom is users being logged out whenever the load balancer moves them.
+  #
+  # tests/chart-integrity.sh section E asserts the pairing in both directions:
+  # true with no session-secret source in the default render fails, and false
+  # while a source is present fails too. Neither the default nor the secret can
+  # be changed without the other.
+  requireStableSigningKey: true

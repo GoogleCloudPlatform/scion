@@ -35,6 +35,15 @@ limitations under the License.
 {{- include "scion-hub.assertExtraEnv" . }}
 {{- include "scion-hub.assertHAUnlanded" . }}
 {{- /*
+Also called from secret-session.yaml, which is where the secret is rendered.
+Repeated here for the reason directly below: this file always renders, and the
+case the assertion exists for - NEITHER source set - is the case in which
+secret-session.yaml produces no object. It still executes its include today, so
+this is redundancy rather than a fix; it is here so that wrapping that file in a
+conditional later cannot silently retire the check. fail is idempotent.
+*/}}
+{{- include "scion-hub.assertSessionSecret" . }}
+{{- /*
 Called here for the same reason assertConfigSource is: the Deployment is the one
 template that always renders, so this is where a guard becomes unconditional.
 */}}
@@ -243,7 +252,45 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "scion-hub.envConfigMapName" . }}
+            {{- /*
+            The session secret, when the chart renders it. envFrom is safe HERE
+            and only here: the chart controls this Secret and it holds exactly
+            one key, whose name is the env var name the hub reads.
+
+            THE EXISTING-SECRET CASE DELIBERATELY DOES NOT USE envFrom, and the
+            asymmetry is load-bearing rather than untidy. envFrom projects EVERY
+            key it finds, so pointing it at a Secret the operator owns would let
+            any key in that Secret become an environment variable in the hub -
+            including SCION_SERVER_BASE_URL, HOME, KUBECONFIG or
+            SCION_REQUIRE_STABLE_SIGNING_KEY. Those four are exactly what
+            scion-hub.assertExtraEnv refuses hub.extraEnv from shadowing, and a
+            later envFrom source overrides an earlier one, so the operator's
+            Secret would win over the ConfigMap. That is a route around the
+            https:// validation on the base URL, whose whole purpose is keeping
+            the session cookie's Secure attribute (design.md 5.4) - a bypass
+            that presents as nothing at all.
+
+            auth.existingSecretKey is itself the evidence this was intended:
+            a per-key selector has no meaning under envFrom, which cannot select
+            a key. So the existing-secret path binds one key by name, below.
+            */}}
+            {{- if not .Values.auth.existingSecret }}
+            - secretRef:
+                name: {{ include "scion-hub.sessionSecretName" . }}
+            {{- end }}
           env:
+            {{- /*
+            The session secret from a Secret the operator manages. Bound by KEY
+            so that nothing else in their Secret reaches the hub's environment -
+            see the envFrom comment above for why that matters.
+            */}}
+            {{- if .Values.auth.existingSecret }}
+            - name: SCION_SERVER_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "scion-hub.sessionSecretName" . }}
+                  key: {{ include "scion-hub.sessionSecretKey" . }}
+            {{- end }}
             {{- /*
             The namespace the hub is running in, which it reads to decide where
             to create agent pods when no namespace is configured. There is no

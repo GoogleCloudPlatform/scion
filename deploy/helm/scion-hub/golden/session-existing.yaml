@@ -12,25 +12,6 @@ metadata:
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: scion
-  annotations:
-    iam.gke.io/gcp-service-account: "ci-varied-hub@example-project.iam.gserviceaccount.com"
----
-# Source: scion-hub/templates/secret-session.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: scion-scion-hub-session
-  namespace: scion-system
-  labels:
-    helm.sh/chart: scion-hub-0.1.0
-    app.kubernetes.io/name: scion-hub
-    app.kubernetes.io/instance: scion
-    app.kubernetes.io/version: "0.1.0"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: scion
-type: Opaque
-stringData:
-  SCION_SERVER_SESSION_SECRET: "ci-varied-session-secret-not-real"
 ---
 # Source: scion-hub/templates/secret-settings.yaml
 apiVersion: v1
@@ -70,8 +51,8 @@ stringData:
     runtimes:
       kubernetes:
         gke: true
-        list_all_namespaces: true
-        namespace: ci-varied-agents
+        list_all_namespaces: false
+        namespace: scion-system
         type: kubernetes
     schema_version: "1"
     server:
@@ -82,14 +63,14 @@ stringData:
         host: 127.0.0.1
         port: 9800
       database:
-        conn_max_idle_time: 3m
-        conn_max_lifetime: 21m
+        conn_max_idle_time: 5m
+        conn_max_lifetime: 30m
         driver: sqlite
-        max_idle_conns: 7
-        max_open_conns: 41
+        max_idle_conns: 5
+        max_open_conns: 25
       hub:
-        hub_id: ci-varied
-        hub_name: CI Varied Hub
+        hub_id: ci-session-existing
+        hub_name: Scion Hub
       mode: hosted
       storage:
         provider: local
@@ -111,7 +92,7 @@ data:
   # The only lever on where the hub looks for settings.yaml. There is no
   # SCION_HOME and no config-path override: the directory is os.UserHomeDir()
   # plus .scion, full stop.
-  HOME: "/srv/hub"
+  HOME: "/home/scion"
 
   # Emptied deliberately. The Cloud Run image bakes KUBECONFIG=/home/scion/
   # .kube/config, and an explicit kubeconfig takes precedence over in-cluster
@@ -125,7 +106,7 @@ data:
   # http://localhost:<port>: agents cannot reach that, and the session cookie's
   # Secure attribute is derived from the https:// prefix, so the fallback also
   # quietly serves cookies without Secure.
-  SCION_SERVER_BASE_URL: "https://ci-varied.example.com"
+  SCION_SERVER_BASE_URL: "https://ci-session-existing.example.com"
 
   # Compared against the literal string "true", so it is emitted as a string and
   # any other value means false. When true the hub refuses to start rather than
@@ -153,17 +134,14 @@ data:
   # later phase ever makes the session secret optional again, this default must
   # go back to false in the same change - tests/chart-integrity.sh section E
   # asserts exactly that pairing, in both directions.
-  SCION_REQUIRE_STABLE_SIGNING_KEY: "false"
-
-  # Truthy values are true, 1 and yes.
-  SCION_SERVER_ADMIN_MODE: "false"
-  SCION_SERVER_MAINTENANCE_MESSAGE: "Scheduled maintenance window: Sunday 02:00 UTC."
+  SCION_REQUIRE_STABLE_SIGNING_KEY: "true"
 ---
-# Source: scion-hub/templates/rbac-clusterrole.yaml
+# Source: scion-hub/templates/rbac-role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: scion-scion-hub-scion-system-agents
+  name: scion-scion-hub-agents
+  namespace: scion-system
   labels:
     helm.sh/chart: scion-hub-0.1.0
     app.kubernetes.io/name: scion-hub
@@ -194,11 +172,12 @@ rules:
     resources: ["events"]
     verbs: ["get", "list", "watch"]
 ---
-# Source: scion-hub/templates/rbac-clusterrolebinding.yaml
+# Source: scion-hub/templates/rbac-rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: scion-scion-hub-scion-system-agents
+  name: scion-scion-hub-agents
+  namespace: scion-system
   labels:
     helm.sh/chart: scion-hub-0.1.0
     app.kubernetes.io/name: scion-hub
@@ -208,8 +187,8 @@ metadata:
     app.kubernetes.io/part-of: scion
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: scion-scion-hub-scion-system-agents
+  kind: Role
+  name: scion-scion-hub-agents
 subjects:
   - kind: ServiceAccount
     name: scion-scion-hub
@@ -269,11 +248,10 @@ spec:
         app.kubernetes.io/version: "0.1.0"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: scion
-        team: platform
       annotations:
-        scion.io/hub-id: "ci-varied"
-        checksum/env-config: 2de4f066a863fb877dec8904f0784d7fe6ccc69e2662ac70ac59370829ef2df2
-        checksum/settings: 12009b2578aa834709bdb43a37297eb428020d5e2307b2282c0f9df215229d83
+        scion.io/hub-id: "ci-session-existing"
+        checksum/env-config: a5129982fbf978f91fe3200ec6505e24f1b5abf41f72fd600603bd65cfd7c509
+        checksum/settings: 66815184561e4652de60a8df9b6dd691d4d5d244fa83edf5ae6f52b45e26d67f
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:
@@ -284,7 +262,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: hub
-          image: "us-docker.pkg.dev/scion-ci/scion/scion-hub@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          image: "us-docker.pkg.dev/example-project/example-repo/scion-hub-gke:ci"
           imagePullPolicy: IfNotPresent
           args:
             - server
@@ -295,27 +273,27 @@ spec:
             - --enable-runtime-broker
             - --enable-web
             - --web-port
-            - "9090"
+            - "8080"
             - --host
             - 0.0.0.0
             - --auto-provide
             - --global
-            - --log-level=debug
           envFrom:
             - configMapRef:
                 name: scion-scion-hub-env
-            - secretRef:
-                name: scion-scion-hub-session
           env:
+            - name: SCION_SERVER_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: my-own-session-secret
+                  key: session-secret
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: HUB_FEATURE_FLAGS
-              value: alpha-scheduling
           ports:
             - name: http
-              containerPort: 9090
+              containerPort: 8080
               protocol: TCP
           startupProbe:
             httpGet:
@@ -331,12 +309,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
-          livenessProbe:
-            tcpSocket:
-              port: http
-            periodSeconds: 20
-            failureThreshold: 6
-            timeoutSeconds: 3
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -353,9 +325,9 @@ spec:
               memory: 1Gi
           volumeMounts:
             - name: scion-home
-              mountPath: "/srv/hub/.scion"
+              mountPath: "/home/scion/.scion"
             - name: settings
-              mountPath: "/srv/hub/.scion/settings.yaml"
+              mountPath: "/home/scion/.scion/settings.yaml"
               subPath: settings.yaml
               readOnly: true
       volumes:

@@ -81,7 +81,8 @@ storage:
 
 auth:
   mode: oauth
-  # The client credentials and session secret oauth needs are not rendered by
+  sessionSecret: ci-settings-session-secret-not-real
+  # The client credentials oauth needs are not rendered by
   # this chart yet, so this install would not start. The schema requires the
   # acknowledgement rather than letting the mode be selected by accident.
   acknowledgeOAuthUnlanded: true

@@ -3140,3 +3140,82 @@ pattern as strict as it was for everything the helper did not write.
 {{- $_ := set $obj "stringData" (dict "settings.yaml" $projection) }}
 {{- toYaml $obj | sha256sum }}
 {{- end }}
+
+{{/*
+================================================================================
+PHASE 3 - SESSION SECRET, OAUTH CREDENTIALS, CREDENTIAL PLACEMENT CHECKER.
+================================================================================
+*/}}
+
+{{/*
+The name of the Secret carrying the session secret.
+
+Two sources, never both, and the caller must have run assertSessionSecret first
+so that "neither" is already refused by the time this renders.
+*/}}
+{{- define "scion-hub.sessionSecretName" -}}
+{{- if .Values.auth.existingSecret }}
+{{- .Values.auth.existingSecret }}
+{{- else }}
+{{- printf "%s-session" (include "scion-hub.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
+The key inside that Secret which holds the session secret.
+
+For the chart-rendered Secret this is fixed: the hub reads the value through a
+literal os.Getenv("SCION_SERVER_SESSION_SECRET") (resolveSessionSecret,
+cmd/server_foreground.go:1452-1463), and the chart-rendered Secret is consumed
+with envFrom, which turns each KEY INTO AN ENV VAR NAME. So the key name is the
+env var name and it is not a free choice.
+
+For an operator's existing Secret the key IS a free choice - theirs, not ours -
+which is what auth.existingSecretKey is for, and why that path cannot use
+envFrom. See assertSessionSecret.
+*/}}
+{{- define "scion-hub.sessionSecretKey" -}}
+{{- if .Values.auth.existingSecret }}
+{{- default "SCION_SERVER_SESSION_SECRET" .Values.auth.existingSecretKey }}
+{{- else }}
+{{- print "SCION_SERVER_SESSION_SECRET" }}
+{{- end }}
+{{- end }}
+
+{{/*
+The session secret must have exactly one source, and "none" is refused here
+rather than at runtime.
+
+WHY THIS IS A TEMPLATE-TIME FAILURE AND NOT A DEFAULT. The hub does not fail
+without a session secret. resolveSessionSecret returns "" and, in hosted mode,
+emits a single slog.Warn (cmd/server_foreground.go:1460-1462) - then the hub
+starts, binds, and passes every probe. What it has actually done is derive a
+per-process signing key, so each replica signs tokens the others reject and each
+replica has its own cookie encryption key. The symptom is users being logged out
+when the load balancer moves them, which reads as a flaky session store rather
+than as a configuration error, and it gets worse with replica count. There is no
+value this chart could default to that would be correct, so it asks.
+
+AND THE CHART DOES NOT GENERATE ONE. randAlphaNum would regenerate on every helm
+upgrade unless guarded with lookup, and lookup returns empty under helm template
+and --dry-run - so the golden output and the installed output would diverge, and
+a chart whose rendered form differs from its installed form cannot be reviewed.
+Worse, a silent rotation invalidates every live session AND the shared JWT
+signing key at once, which is the exact harm SCION_REQUIRE_STABLE_SIGNING_KEY
+exists to prevent. Failing loudly is the only honest option. See design.md 6.
+
+BOTH sources set is also refused. It is not a precedence question: one of the
+two would be silently inert, and an inert secret value is indistinguishable from
+a working one until sessions start breaking.
+*/}}
+{{- define "scion-hub.assertSessionSecret" -}}
+{{- if and .Values.auth.sessionSecret .Values.auth.existingSecret }}
+{{- fail "auth.sessionSecret and auth.existingSecret are both set. The chart cannot use both: one would be silently ignored, and a session secret that is silently ignored presents as intermittent logouts rather than as an error. Set exactly one - auth.existingSecret to reference a Secret you manage, or auth.sessionSecret to have the chart render one." }}
+{{- end }}
+{{- if not (or .Values.auth.sessionSecret .Values.auth.existingSecret) }}
+{{- fail "auth.sessionSecret is not set and neither is auth.existingSecret, so this release has no session secret. The chart will not generate one: a generated secret rotates on every helm upgrade, which silently invalidates every session and the shared JWT signing key, and it cannot be rendered reproducibly because lookup returns empty under helm template. Nor will the hub refuse to start without one - it logs a single warning (cmd/server_foreground.go:1460) and then derives a per-process signing key, so each replica signs tokens the others reject and users are logged out whenever the load balancer moves them. Set auth.existingSecret to the name of a Secret you manage (preferred - the value never enters your values file or Helm's release storage), or set auth.sessionSecret to have the chart render one." }}
+{{- end }}
+{{- if and .Values.auth.existingSecretKey (not .Values.auth.existingSecret) }}
+{{- fail "auth.existingSecretKey is set but auth.existingSecret is not. The key names an entry inside a Secret the chart is not being given, so it selects nothing. Set auth.existingSecret too, or remove the key." }}
+{{- end }}
+{{- end }}
