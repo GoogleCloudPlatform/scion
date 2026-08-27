@@ -409,6 +409,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateProject(ctx, project); err != nil {
+		if s.quotaService != nil && project.CreatedBy != "" {
+			s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -1387,6 +1390,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := s.store.CreateProject(ctx, project); err != nil {
+			if s.quotaService != nil && project.CreatedBy != "" {
+				s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}

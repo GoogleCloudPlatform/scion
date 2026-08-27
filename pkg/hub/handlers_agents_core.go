@@ -1157,6 +1157,9 @@ func (s *Server) createAgentInProject(
 	}
 
 	if err := s.store.CreateAgent(ctx, agent); err != nil {
+		if s.quotaService != nil {
+			s.quotaService.Release(ctx, "max_agents_per_project", agent.ID)
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

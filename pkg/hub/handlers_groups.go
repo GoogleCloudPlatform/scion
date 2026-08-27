@@ -723,6 +723,10 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	}
 
 	if err := s.store.AddGroupMember(ctx, member); err != nil {
+		if s.quotaService != nil {
+			membershipID := fmt.Sprintf("%s:%s:%s", groupID, member.MemberType, member.MemberID)
+			s.quotaService.Release(ctx, "max_members_per_group", membershipID)
+		}
 		if err == store.ErrAlreadyExists {
 			Conflict(w, "Member already exists in this group")
 			return

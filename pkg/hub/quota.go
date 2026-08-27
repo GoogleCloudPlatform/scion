@@ -50,10 +50,7 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 	// 4. Acquire advisory lock scoped to (quota class, scope hash).
 	locker, ok := qs.store.(store.AdvisoryLocker)
 	if !ok {
-		// Store doesn't support advisory locks — skip enforcement.
-		qs.logger.Warn("store does not implement AdvisoryLocker; skipping quota enforcement",
-			"limit", limitName)
-		return nil
+		return fmt.Errorf("quota enforcement unavailable: store does not support advisory locks")
 	}
 
 	objID := store.StableProjectHash(scopeID)
