@@ -118,7 +118,7 @@ func TestScriptAssertPerimeter_WrongRedirect(t *testing.T) {
 	assert.Contains(t, stderr, "not to accounts.google.com")
 }
 
-func TestScriptAssertPerimeter_MissingLocationHeader(t *testing.T) {
+func TestScriptAssertPerimeter_MissingIAPHeader(t *testing.T) {
 	// 302 to accounts.google.com but missing the IAP header — still passes
 	// because the redirect alone proves IAP is enforcing; the header is
 	// a bonus check.
