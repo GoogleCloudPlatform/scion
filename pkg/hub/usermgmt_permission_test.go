@@ -149,7 +149,10 @@ func TestUserMgmtPermissionConversion(t *testing.T) {
 
 	for _, tc := range guardTests {
 		t.Run(tc.name, func(t *testing.T) {
-			meta := routeMetadataTable[tc.pattern]
+			meta, ok := routeMetadataTable[tc.pattern]
+			if !ok {
+				t.Fatalf("route %q not found in routeMetadataTable", tc.pattern)
+			}
 			handler := srv.routeGuard(meta, okHandler)
 
 			req := httptest.NewRequest(http.MethodGet, tc.pattern, nil)

@@ -868,7 +868,7 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			// the handler where resource IDs, ownership, and visibility are known.
 			next(w, r)
 		case RouteHubAdmin:
-			if meta.Permission != "" {
+			if meta.Permission != "" && s.authzService != nil {
 				// Validate route metadata completeness
 				if meta.Resource == "" || meta.Action == "" {
 					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
