@@ -232,7 +232,7 @@ di_assert_perimeter() {
 
   # Got 302 — verify it points to accounts.google.com
   local location
-  location="$(grep -i '^location:' "$headers_file" | head -1 | tr -d '\r')"
+  location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
   rm -f "$headers_file"
 
   if [[ "$location" != *"accounts.google.com"* ]]; then
@@ -264,7 +264,7 @@ di_wait_for_iap() {
 
     if [[ "$probe_code" == "302" ]]; then
       local location
-      location="$(grep -i '^location:' "$headers_file" | head -1 | tr -d '\r')"
+      location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
       if [[ "$location" == *"accounts.google.com"* ]]; then
         rm -f "$headers_file"
         return 0
