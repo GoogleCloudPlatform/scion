@@ -88,6 +88,10 @@ func (s *Server) handleAdminLifecycleHooks(w http.ResponseWriter, r *http.Reques
 	case http.MethodPost:
 		// Inline authorization for write — route guard only checks read.
 		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+			return
+		}
 		user, ok := identity.(UserIdentity)
 		if !ok {
 			Forbidden(w)
@@ -127,6 +131,10 @@ func (s *Server) handleAdminLifecycleHookByID(w http.ResponseWriter, r *http.Req
 	case http.MethodPut, http.MethodDelete:
 		// Inline authorization for write — route guard only checks read.
 		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+			return
+		}
 		user, ok := identity.(UserIdentity)
 		if !ok {
 			Forbidden(w)
