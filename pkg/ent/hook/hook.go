@@ -129,6 +129,30 @@ func (f ChatLinkCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatLinkCodeMutation", m)
 }
 
+// The ConversationFunc type is an adapter to allow the use of ordinary
+// function as Conversation mutator.
+type ConversationFunc func(context.Context, *ent.ConversationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ConversationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ConversationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ConversationMutation", m)
+}
+
+// The ConversationParticipantFunc type is an adapter to allow the use of ordinary
+// function as ConversationParticipant mutator.
+type ConversationParticipantFunc func(context.Context, *ent.ConversationParticipantMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ConversationParticipantFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ConversationParticipantMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ConversationParticipantMutation", m)
+}
+
 // The DecisionAuditFunc type is an adapter to allow the use of ordinary
 // function as DecisionAudit mutator.
 type DecisionAuditFunc func(context.Context, *ent.DecisionAuditMutation) (ent.Value, error)
@@ -367,6 +391,18 @@ func (f MessageFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, err
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessageMutation", m)
+}
+
+// The MessageAddresseeFunc type is an adapter to allow the use of ordinary
+// function as MessageAddressee mutator.
+type MessageAddresseeFunc func(context.Context, *ent.MessageAddresseeMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f MessageAddresseeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.MessageAddresseeMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessageAddresseeMutation", m)
 }
 
 // The MutationAuditFunc type is an adapter to allow the use of ordinary

@@ -79,6 +79,11 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		}
 	}
 
+	var conversationID string
+	if e.ConversationID != nil {
+		conversationID = e.ConversationID.String()
+	}
+
 	return &store.Message{
 		ID:                    e.ID.String(),
 		ProjectID:             e.ProjectID.String(),
@@ -95,6 +100,7 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		GroupID:               e.GroupID,
 		Channel:               e.Channel,
 		ThreadID:              e.ThreadID,
+		ConversationID:        conversationID,
 		Visibility:            vis,
 		CreatedAt:             e.Created,
 		DispatchState:         e.DispatchState,
@@ -137,6 +143,13 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	}
 	if msg.ThreadID != "" {
 		create.SetThreadID(msg.ThreadID)
+	}
+	if msg.ConversationID != "" {
+		cid, err := parseUUID(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		create.SetConversationID(cid)
 	}
 	if msg.Visibility != "" {
 		create.SetVisibility(msg.Visibility)
@@ -323,6 +336,13 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.ThreadID != "" {
 		query.Where(message.ThreadIDEQ(filter.ThreadID))
 	}
+	if filter.ConversationID != "" {
+		cid, err := parseUUID(filter.ConversationID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid conversation_id filter: %w", err)
+		}
+		query.Where(message.ConversationIDEQ(cid))
+	}
 	// Visibility filter with NULL backfill awareness (review R1 fix):
 	// Old rows have NULL visibility. The read-time backfill in entMessageToStore
 	// normalises after fetch, but a simple IN predicate drops NULL rows before
@@ -459,4 +479,28 @@ func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Tim
 		return 0, err
 	}
 	return n, nil
+}
+
+// SetMessageConversationID updates the conversation_id on an existing message.
+// Used by Phase 4 backfill to link legacy messages to Conversation records.
+func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, conversationID string) error {
+	mid, err := parseUUID(messageID)
+	if err != nil {
+		return err
+	}
+	cid, err := parseUUID(conversationID)
+	if err != nil {
+		return err
+	}
+	n, err := s.client.Message.Update().
+		Where(message.IDEQ(mid)).
+		SetConversationID(cid).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }

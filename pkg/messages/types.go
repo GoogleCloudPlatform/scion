@@ -48,6 +48,11 @@ const MaxChannelLength = 64
 // channelRegexp validates that a channel name contains only alphanumeric characters and hyphens.
 var channelRegexp = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
 
+// IsValidChannel returns true if the channel name matches the channel regex.
+func IsValidChannel(ch string) bool {
+	return channelRegexp.MatchString(ch)
+}
+
 // Message type constants (closed enum).
 const (
 	TypeInstruction    = "instruction"
@@ -137,8 +142,9 @@ type StructuredMessage struct {
 	Status       string            `json:"status,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
-	Channel      string            `json:"channel,omitempty"`
-	ThreadID     string            `json:"thread_id,omitempty"`
+	Channel        string            `json:"channel,omitempty"`
+	ThreadID       string            `json:"thread_id,omitempty"`
+	ConversationID string            `json:"conversation_id,omitempty"`
 
 	// Visibility controls which consumers see this message.
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.

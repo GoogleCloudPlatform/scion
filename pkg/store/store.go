@@ -160,6 +160,9 @@ type Store interface {
 	// AgentSessionMetrics operations (Hub Metrics Reporting)
 	AgentSessionMetricsStore
 
+	// Conversation operations (Multi-Party Messaging)
+	ConversationStore
+
 	// Role operations (Permissions Foundation Phase 1E)
 	RoleStore
 
@@ -1323,6 +1326,11 @@ type MessageStore interface {
 	// PurgeOldMessages removes read messages older than readCutoff and
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
+
+	// SetMessageConversationID updates the conversation_id on an existing
+	// message. Used by the Phase 4 backfill to link legacy messages to
+	// Conversation records. Returns ErrNotFound if the message doesn't exist.
+	SetMessageConversationID(ctx context.Context, messageID, conversationID string) error
 }
 
 // =============================================================================
@@ -1589,6 +1597,67 @@ type AgentSessionMetricsStore interface {
 	// CountDistinctAgentsByProject returns the number of distinct agents with
 	// session metrics in a project.
 	CountDistinctAgentsByProject(ctx context.Context, projectID string) (int, error)
+}
+
+// =============================================================================
+// Conversations (Multi-Party Messaging)
+// =============================================================================
+
+// ConversationStore manages conversation, participant, and addressee persistence.
+type ConversationStore interface {
+	// CreateConversation creates a new conversation.
+	// Returns ErrAlreadyExists if a conversation with the same ID exists.
+	CreateConversation(ctx context.Context, conv *Conversation) error
+
+	// GetConversation retrieves a conversation by ID.
+	// Returns ErrNotFound if the conversation doesn't exist.
+	GetConversation(ctx context.Context, id string) (*Conversation, error)
+
+	// UpdateConversation updates an existing conversation.
+	// Returns ErrNotFound if the conversation doesn't exist.
+	UpdateConversation(ctx context.Context, conv *Conversation) error
+
+	// DeleteConversation soft-deletes a conversation by setting DeletedAt.
+	// Returns ErrNotFound if the conversation doesn't exist.
+	DeleteConversation(ctx context.Context, id string) error
+
+	// ListConversations returns conversations matching the filter.
+	ListConversations(ctx context.Context, filter ConversationFilter, opts ListOptions) (*ListResult[Conversation], error)
+
+	// GetConversationByExternalRef looks up a conversation by (surface, external_ref).
+	// Returns ErrNotFound if no matching active (non-deleted) conversation exists.
+	// This is the read-only counterpart of UpsertConversationByExternalRef.
+	GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*Conversation, error)
+
+	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
+	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).
+	// CRITICAL: this must be safe under concurrent calls — the UNIQUE partial index is the guard.
+	UpsertConversationByExternalRef(ctx context.Context, conv *Conversation) (*Conversation, error)
+
+	// AddParticipant adds a principal to a conversation.
+	// Returns ErrAlreadyExists if the participant already exists.
+	AddParticipant(ctx context.Context, p *ConversationParticipant) error
+
+	// RemoveParticipant soft-removes a participant by setting LeftAt.
+	// Returns ErrNotFound if the participant doesn't exist.
+	RemoveParticipant(ctx context.Context, conversationID, principalKind, principalID string) error
+
+	// ListParticipants returns active participants of a conversation (where left_at IS NULL).
+	ListParticipants(ctx context.Context, conversationID string) ([]ConversationParticipant, error)
+
+	// GetConversationsForPrincipal returns conversations a principal participates in (active, left_at IS NULL).
+	GetConversationsForPrincipal(ctx context.Context, principalKind, principalID string) ([]Conversation, error)
+
+	// AddAddressee adds an addressee record to a message.
+	// Returns ErrAlreadyExists if the addressee already exists.
+	AddAddressee(ctx context.Context, a *MessageAddressee) error
+
+	// ListAddressees returns all addressees for a message.
+	ListAddressees(ctx context.Context, messageID string) ([]MessageAddressee, error)
+
+	// UpdateDeliveryState updates the delivery state of an addressee.
+	// Returns ErrNotFound if the addressee doesn't exist.
+	UpdateDeliveryState(ctx context.Context, id string, state string, failureReason *string) error
 }
 
 // =============================================================================

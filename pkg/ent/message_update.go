@@ -315,6 +315,26 @@ func (_u *MessageUpdate) ClearThreadID() *MessageUpdate {
 	return _u
 }
 
+// SetConversationID sets the "conversation_id" field.
+func (_u *MessageUpdate) SetConversationID(v uuid.UUID) *MessageUpdate {
+	_u.mutation.SetConversationID(v)
+	return _u
+}
+
+// SetNillableConversationID sets the "conversation_id" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableConversationID(v *uuid.UUID) *MessageUpdate {
+	if v != nil {
+		_u.SetConversationID(*v)
+	}
+	return _u
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (_u *MessageUpdate) ClearConversationID() *MessageUpdate {
+	_u.mutation.ClearConversationID()
+	return _u
+}
+
 // SetVisibility sets the "visibility" field.
 func (_u *MessageUpdate) SetVisibility(v string) *MessageUpdate {
 	_u.mutation.SetVisibility(v)
@@ -488,6 +508,12 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ThreadIDCleared() {
 		_spec.ClearField(message.FieldThreadID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ConversationID(); ok {
+		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
+	}
+	if _u.mutation.ConversationIDCleared() {
+		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(message.FieldVisibility, field.TypeString, value)
@@ -801,6 +827,26 @@ func (_u *MessageUpdateOne) ClearThreadID() *MessageUpdateOne {
 	return _u
 }
 
+// SetConversationID sets the "conversation_id" field.
+func (_u *MessageUpdateOne) SetConversationID(v uuid.UUID) *MessageUpdateOne {
+	_u.mutation.SetConversationID(v)
+	return _u
+}
+
+// SetNillableConversationID sets the "conversation_id" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableConversationID(v *uuid.UUID) *MessageUpdateOne {
+	if v != nil {
+		_u.SetConversationID(*v)
+	}
+	return _u
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (_u *MessageUpdateOne) ClearConversationID() *MessageUpdateOne {
+	_u.mutation.ClearConversationID()
+	return _u
+}
+
 // SetVisibility sets the "visibility" field.
 func (_u *MessageUpdateOne) SetVisibility(v string) *MessageUpdateOne {
 	_u.mutation.SetVisibility(v)
@@ -1004,6 +1050,12 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.ThreadIDCleared() {
 		_spec.ClearField(message.FieldThreadID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ConversationID(); ok {
+		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
+	}
+	if _u.mutation.ConversationIDCleared() {
+		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(message.FieldVisibility, field.TypeString, value)
