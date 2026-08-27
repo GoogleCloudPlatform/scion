@@ -87,7 +87,7 @@ return an error instead of blocking.`,
 
 		requiresProject := true
 		switch cmdName {
-		case "help", "version", "completion", "doctor", "whoami", "global-flags", "deploy-instance":
+		case "help", "version", "completion", "doctor", "whoami", "global-flags":
 			requiresProject = false
 		case "init":
 			// Both top-level init and project init don't require existing project

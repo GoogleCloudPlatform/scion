@@ -47,69 +47,13 @@ gcloud services enable \
 
 | Tool | Verify |
 |------|--------|
-| `gcloud` (recent version, with `beta` component) | `gcloud beta run instances deploy --help` |
-| `scion` CLI that includes `deploy-instance` (see below) | `scion deploy-instance --help` |
-| `git` and `go` — only needed to build `scion` from source (see below) | `git --version`, `go version` |
-
-The `deploy-instance` subcommand is not yet in any published `scion` release. Until
-one ships it, build the CLI from a clone of the repository at `main`:
-
-:::caution[Temporary workaround — check before you build]
-Building from source is a stopgap, accurate as of 2026-08-27. It stops being
-necessary the moment a published `scion` release ships `deploy-instance`. Run
-`scion deploy-instance --help` against your installed binary first — if it
-succeeds, skip the build. This section should be deleted once a release includes
-the subcommand — tracked by
-[ptone/scion#1314](https://github.com/ptone/scion/issues/1314).
-:::
-
-```bash
-git clone https://github.com/GoogleCloudPlatform/scion.git
-cd scion
-go build -tags no_embed_web -o ./scion ./cmd/scion/
-mkdir -p "$(go env GOPATH)/bin" && mv ./scion "$(go env GOPATH)/bin/scion"
-```
-
-The last line moves the binary into your Go bin directory (`~/go/bin` unless you
-have overridden `GOPATH`) — the conventional location for Go-built commands, and
-one that needs no `sudo`. Every `scion` command in this guide is then invoked
-bare, exactly as it will be once a release ships `deploy-instance`.
-
-Verify before continuing — this is the `scion` row of the [CLI tools](#cli-tools)
-table:
-
-```bash
-scion deploy-instance --help
-```
-
-If it prints the help text, you are done with this section. Two failures are
-possible, and both are fixed the same way:
-
-- `scion: command not found` — your Go bin directory is not on your `PATH`.
-- `unknown command "deploy-instance"` — an older `scion` **earlier** on your
-  `PATH` (a Homebrew or release install) is shadowing the binary you just built.
-
-```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
-
-Prepending, not appending, is what makes the freshly built binary win over an
-older install. Re-run the verify command.
-
-:::caution[Scope this `PATH` change to your deploy shell]
-This build uses `-tags no_embed_web`, so it has **no web UI assets** — `scion
-server start` from it would serve a blank UI. If you already have a full `scion`
-install, export the `PATH` line in the shell you deploy from rather than in your
-shell profile, so the web-less build does not shadow it everywhere.
-:::
-
-**Stay in the clone directory for the rest of this guide** — the optional wrapper
-scripts in [Section 1](#1-deploy) and [Section 6](#6-teardown) are
-repository-relative paths.
+| `gcloud` 582.0.0 or later (verified; 575.0.0 does not have `beta run instances`) | `gcloud version` and `gcloud beta run instances deploy --help` |
+| `git` | `git --version` |
 
 :::caution[gcloud version]
-`gcloud beta run instances deploy` requires a recent gcloud SDK. If `beta run
-instances` returns "Invalid choice: 'instances'", update your SDK:
+`gcloud beta run instances deploy --sandbox-launcher` requires Cloud SDK 582.0.0
+or later. Version 575.0.0 does not have `beta run instances` at all. If the
+command returns "Invalid choice: 'instances'", update your SDK:
 `sudo apt-get update && sudo apt-get --only-upgrade install google-cloud-cli`.
 :::
 
@@ -132,33 +76,55 @@ automatically, but Hub admin is seeded from the deployer identity by default.
 ### Container image
 
 The deploy requires a pre-built **omni image** — a single image containing the Hub
-and all supported harnesses. There is no default public image; you must specify one
-explicitly.
+and all supported harnesses. There is no public image; you must build your own.
 
-For this guide, use the image built from commit `f99a818`:
+**Build your own image with Cloud Build:**
 
-```
-# Tag (readable, but tags can be moved):
-us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
-
-# Digest (immutable — this identifies the exact artifact):
-us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni@sha256:e3eab113675848be634513b1e35bb40a03c0ba109b4ce771eac4b8905beafaaa
-```
-
-A tag is a pointer that can be reassigned; only the `@sha256:` digest guarantees
-you are running the same build. Use the tag for readability and the digest when
-pinning a known-good version.
-
-To build your own image, see the [Image Build README](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md)
-and target `omni`:
+The repository includes a Cloud Build config that builds the full omni image chain.
+Before building, create an Artifact Registry repository to push to:
 
 ```bash
-image-build/scripts/build-images.sh --target omni --registry $YOUR_REGISTRY --push
+gcloud artifacts repositories create scion \
+  --repository-format=docker \
+  --location=us-central1 \
+  --project=$PROJECT_ID
+```
+
+Then submit the build:
+
+```bash
+git clone https://github.com/GoogleCloudPlatform/scion.git
+cd scion
+
+gcloud builds submit \
+  --project=$PROJECT_ID \
+  --config=image-build/cloudbuild-omni.yaml \
+  --substitutions="_TAG=$(git rev-parse --short HEAD),_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD),_REGISTRY=us-central1-docker.pkg.dev/$PROJECT_ID/scion" \
+  --ignore-file=image-build/gcloudignore-omni \
+  .
+```
+
+The build runs eight images in a chain (thick-prep → scion-base → claude → codex →
+opencode → antigravity → grok-build → omni). Each step builds in the Cloud Build
+worker and feeds the next. Only the final `scion-omni` image is pushed to your
+registry. Workers start fresh each run — there is no warm cache between builds.
+
+Monitor progress in the
+[Cloud Build console](https://console.cloud.google.com/cloud-build/builds) or with
+`gcloud builds list --project=$PROJECT_ID`.
+
+When it completes, your image is:
+
+```
+us-central1-docker.pkg.dev/$PROJECT_ID/scion/scion-omni:$(git rev-parse --short HEAD)
 ```
 
 The deploy derives the agent image registry from `--image` automatically; if
 derivation fails, the error names `--image-registry` as the explicit override.
 When this value is wrong, agent creation fails — not the deploy itself.
+
+**Stay in the clone directory for the rest of this guide** — the deploy script and
+teardown script are repository-relative paths.
 
 ---
 
@@ -167,21 +133,11 @@ When this value is wrong, agent creation fails — not the deploy itself.
 A single command creates the Instance, enables IAP, and verifies the perimeter:
 
 ```bash
-scion deploy-instance \
-  --name my-scion-hub \
-  --project $PROJECT_ID \
-  --region us-east4 \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
-```
-
-Or use the wrapper script:
-
-```bash
 ./scripts/single-node/deploy.sh \
   --name my-scion-hub \
   --project $PROJECT_ID \
   --region us-east4 \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 ```
 
 **What the command does, step by step:**
@@ -227,8 +183,8 @@ https://my-scion-hub-PROJECT_NUMBER.us-east4.run.app
 
 1. **IAP challenge** — Google sign-in. Use the email that was bound as the IAP user
    during deploy (your gcloud account, or the `--admin-email` value).
-2. **Hub login** — After IAP, the Hub presents its own login. The deployer is
-   automatically seeded as the first admin.
+2. **Hub access** — After sign-in you land directly in the Hub. There is no
+   second login. The deployer is automatically seeded as the first admin.
 
 :::tip[Granting access to other users]
 IAP access is region-scoped, not per-instance. To add another user:
@@ -259,28 +215,10 @@ From the Hub web UI, click **New Project**. Provide a name and a git remote URL
 Create an agent via the web UI or the API. The web UI is the simplest path — click
 a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 
-For the API, specify `template`, `harnessConfig`, and `projectId` explicitly.
-The access token authenticates through IAP because the caller has
-`roles/iap.httpsResourceAccessor` (granted by the deploy command). Both the
-`Authorization` and `Proxy-Authorization` headers work.
-
-```bash
-# Replace PROJECT_UUID with the project ID from the create-project response
-curl -s -X POST "$HUB_URL/api/v1/agents" \
-  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-agent",
-    "projectId": "PROJECT_UUID",
-    "template": "default",
-    "harnessConfig": "claude"
-  }'
-```
-
-:::note[Identity tokens as an alternative]
-For stricter or scripted environments, you can use an OIDC identity token instead
-of an access token. The audience **must** be the IAP OAuth client ID (not the
-resource path):
+:::note[IAP authentication for API and scripted access]
+If you access the Hub API programmatically (scripts, CI, or `curl`), authenticate
+through IAP with an access token or an OIDC identity token. For identity tokens,
+the audience **must** be the IAP OAuth client ID (not the resource path):
 
 ```bash
 # Discover the auto-generated IAP OAuth client ID
@@ -298,8 +236,8 @@ Using the resource path (`/projects/NUMBER/locations/REGION/services/NAME`) as t
 audience will fail with "Invalid JWT audience".
 :::
 
-:::caution[Always specify harnessConfig]
-An agent create that omits `harnessConfig` will fail with a 502 and an error
+:::caution[Always specify harnessConfig when creating agents via the API]
+An API agent create that omits `harnessConfig` will fail with a 502 and an error
 naming a harness the operator never chose:
 
 ```
@@ -308,7 +246,8 @@ failed to find harness-config "antigravity": harness-config "antigravity" not fo
 
 This is the product-wide default harness resolving to a name that is not registered
 on the running hub. The error gives no indication that specifying `harnessConfig`
-is the fix. Always pass `template` and `harnessConfig` explicitly.
+is the fix. Always pass `template` and `harnessConfig` explicitly. The web UI
+enforces harness selection and is not affected.
 :::
 
 ### Attach to the agent's terminal
@@ -355,11 +294,11 @@ memory budget. A single compute-heavy agent can starve its neighbours.
 To change the Instance size:
 
 ```bash
-scion deploy-instance \
+./scripts/single-node/deploy.sh \
   --name my-scion-hub \
   --project $PROJECT_ID \
   --cpu 8 --memory 32Gi \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 ```
 
 ---

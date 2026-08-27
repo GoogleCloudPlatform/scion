@@ -11,7 +11,7 @@ Helper scripts for deploying and tearing down a Scion Hub on a single
 
 | Script | Purpose |
 |--------|---------|
-| `deploy.sh` | Deploy a Cloud Run Instance with IAP. Wraps `scion deploy-instance`. |
+| `deploy.sh` | Deploy a Cloud Run Instance with IAP. Implements the full deploy flow (identity, project number, gcloud deploy, IAP enable, IAP reconcile gate, policy bind, perimeter assertion). |
 | `teardown.sh` | Delete the Instance. Prints the IAP cleanup commands but does **not** run them — see [Teardown does not remove IAP access](#teardown-does-not-remove-iap-access). |
 
 ## Quick Start
@@ -21,7 +21,7 @@ Helper scripts for deploying and tearing down a Scion Hub on a single
 ./scripts/single-node/deploy.sh \
   --name my-instance \
   --project my-gcp-project \
-  --image us-docker.pkg.dev/ptone-misc/scion-alt/scion-omni:f99a818
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 
 # Tear down
 ./scripts/single-node/teardown.sh \
