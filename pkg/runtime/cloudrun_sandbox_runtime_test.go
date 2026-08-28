@@ -2029,6 +2029,12 @@ func TestCloudRunSandboxRuntime_GetLogs_FallbackServesDeadAgent(t *testing.T) {
 	if !strings.Contains(logs, "sciontool init") {
 		t.Errorf("GetLogs() missing init output.\ngot: %q", logs)
 	}
+
+	// Source label must be present so the operator knows this is
+	// startup output, not live terminal content.
+	if !strings.Contains(logs, "[source: entrypoint log (startup)") {
+		t.Errorf("GetLogs() fallback output missing source label.\ngot: %q", logs)
+	}
 }
 
 // TestCloudRunSandboxRuntime_GetLogs_NoLogFileReportsPath tests requirement 3:
@@ -2099,5 +2105,64 @@ func TestCloudRunSandboxRuntime_GetLogs_NotInStateStore(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("GetLogs() error = %q, want to contain 'not found'", err.Error())
+	}
+}
+
+// TestCloudRunSandboxRuntime_GetLogs_EmptyTmuxFallsThrough tests that a
+// live sandbox whose tmux pane has no output falls through to the
+// entrypoint log rather than returning an empty tab.
+//
+// This matters because a live agent that has not yet printed anything
+// would otherwise render as "no logs" — indistinguishable from a broken
+// agent. The entrypoint log (labelled as startup output) is strictly
+// better than nothing.
+func TestCloudRunSandboxRuntime_GetLogs_EmptyTmuxFallsThrough(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Mock binary that succeeds but prints nothing (empty tmux pane).
+	mockBin := filepath.Join(tmpDir, "sandbox")
+	// "exec" subcommand exits 0 with no stdout — simulates an empty pane.
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create agent home with an entrypoint log.
+	agentHome := filepath.Join(tmpDir, "agents", "silent-agent", "home")
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	logContent := "sciontool init: provisioning agent...\nagent ready, handing off to tmux\n"
+	if err := os.WriteFile(filepath.Join(agentHome, entrypointLogFile), []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          mockBin,
+		state:        newSandboxStateStore(stateFile),
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "silent-agent",
+		AgentID:     "silent-agent",
+		AgentHome:   agentHome,
+	})
+
+	logs, err := rt.GetLogs(context.Background(), "silent-agent")
+	if err != nil {
+		t.Fatalf("GetLogs() returned error: %v", err)
+	}
+
+	// Must serve the entrypoint log, not an empty string.
+	if !strings.Contains(logs, "sciontool init") {
+		t.Errorf("GetLogs() with empty tmux did not fall through to entrypoint log.\ngot: %q", logs)
+	}
+
+	// Source label must be present — the operator must know this is
+	// startup output, not the live terminal being empty.
+	if !strings.Contains(logs, "[source: entrypoint log (startup)") {
+		t.Errorf("GetLogs() fallback output missing source label.\ngot: %q", logs)
 	}
 }

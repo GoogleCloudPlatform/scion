@@ -1124,20 +1124,35 @@ func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string
 	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
 	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
-	if err == nil {
+	if err == nil && strings.TrimSpace(logs) != "" {
 		return logs, nil
 	}
 
-	// tmux failed — the sandbox is likely dead. Fall back to reading
-	// the entrypoint log from the host filesystem via the state entry.
+	// Fall back to reading the entrypoint log from the host filesystem
+	// via the state entry. This triggers in two cases:
+	//
+	//   1. tmux exec failed — the sandbox is likely dead.
+	//   2. tmux succeeded but returned empty output — the pane has
+	//      printed nothing (or only whitespace). Showing the entrypoint
+	//      log is strictly better than an empty tab, and the source
+	//      label (below) tells the operator what they are looking at.
 	//
 	// WHY FALLBACK, NOT FLAG CHECK: on this tier, liveness flags have
 	// been wrong before (#17: hub reported agents "running" when the
-	// entrypoint had hung). Try-and-fallback is strictly more robust:
-	// if tmux works, you get tmux output; if it fails for any reason
-	// (dead sandbox, exec failure, corrupted state), you get the
-	// entrypoint log. There is no case where the fallback harms a live
-	// sandbox — tmux success returns immediately above.
+	// entrypoint had hung). A flag-check strategy would consult the
+	// flag, and if it said "running" while the sandbox was dead, it
+	// would SKIP the fallback and return the exec error — leaving the
+	// tab empty in precisely the case the feature exists for. Try-and-
+	// fallback is strictly more robust: it does not consult the flag.
+
+	if err != nil {
+		// Preserve the tmux failure for diagnostics. The operator gets
+		// the fallback content (better than empty), but the exec error
+		// is recorded so it can be found during debugging.
+		runtimeLog.Warn("tmux capture-pane failed, falling back to entrypoint log",
+			"agent_id", id, "error", err)
+	}
+
 	return r.readEntrypointLogFromState(id)
 }
 
@@ -1169,7 +1184,11 @@ func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id string) (string, 
 		return fmt.Sprintf("[entrypoint log at %s is empty]", logPath), nil
 	}
 
-	return string(data), nil
+	// Label the source so the operator knows this is startup output,
+	// not live terminal content. This is mandatory: without it, the
+	// output is indistinguishable from a live pane.
+	header := "[source: entrypoint log (startup) — sandbox was not reachable via tmux]\n"
+	return header + string(data), nil
 }
 
 func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
