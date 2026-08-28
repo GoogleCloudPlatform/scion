@@ -523,6 +523,9 @@ func isUniqueConstraintError(err error) bool {
 //
 // For non-direct conversations the function is a no-op (returns nil).
 func checkDMParticipantKey(conv *ent.Conversation, principalKind, principalID string) error {
+	if conv == nil {
+		return fmt.Errorf("%w: conversation is nil", store.ErrInvalidInput)
+	}
 	if err := messages.CheckDMParticipantKey(string(conv.Kind), conv.ExternalRef, principalKind, principalID); err != nil {
 		return fmt.Errorf("%w: %w", store.ErrInvalidInput, err)
 	}

@@ -437,6 +437,9 @@ func (s *DMMigrationService) mergeConversation(
 	if err != nil {
 		return fmt.Errorf("loading target conversation %s for participant guard: %w", newConvID, err)
 	}
+	if targetConv == nil {
+		return fmt.Errorf("target conversation %s not found (nil without error)", newConvID)
+	}
 
 	// Copy missing participants to the target conversation.
 	for _, p := range oldParticipants {
