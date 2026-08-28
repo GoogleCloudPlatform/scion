@@ -16,7 +16,6 @@ package messages
 
 import (
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -45,11 +44,9 @@ var validDMKinds = map[string]bool{
 func DMConversationKey(kindA, idA, kindB, idB string) (string, error) {
 	// No normalisation — reject non-canonical input.
 	if !validDMKinds[kindA] {
-		slog.Warn("DMConversationKey: rejected non-canonical kind", "received", kindA)
 		return "", fmt.Errorf("dm key: unknown kind %q (must be user or agent)", kindA)
 	}
 	if !validDMKinds[kindB] {
-		slog.Warn("DMConversationKey: rejected non-canonical kind", "received", kindB)
 		return "", fmt.Errorf("dm key: unknown kind %q (must be user or agent)", kindB)
 	}
 
@@ -58,8 +55,7 @@ func DMConversationKey(kindA, idA, kindB, idB string) (string, error) {
 		return "", fmt.Errorf("dm key: invalid UUID for %s: %w", kindA, err)
 	}
 	if uA.String() != idA {
-		slog.Warn("DMConversationKey: rejected non-canonical UUID", "kind", kindA, "shape", describeNonCanonicalUUID(idA))
-		return "", fmt.Errorf("dm key: non-canonical UUID %q for %s (expected %s)", idA, kindA, uA.String())
+		return "", fmt.Errorf("dm key: non-canonical UUID for %s (shape: %s)", kindA, describeNonCanonicalUUID(idA))
 	}
 
 	uB, err := uuid.Parse(idB)
@@ -67,8 +63,7 @@ func DMConversationKey(kindA, idA, kindB, idB string) (string, error) {
 		return "", fmt.Errorf("dm key: invalid UUID for %s: %w", kindB, err)
 	}
 	if uB.String() != idB {
-		slog.Warn("DMConversationKey: rejected non-canonical UUID", "kind", kindB, "shape", describeNonCanonicalUUID(idB))
-		return "", fmt.Errorf("dm key: non-canonical UUID %q for %s (expected %s)", idB, kindB, uB.String())
+		return "", fmt.Errorf("dm key: non-canonical UUID for %s (shape: %s)", kindB, describeNonCanonicalUUID(idB))
 	}
 
 	tokenA := kindA + ":" + idA
