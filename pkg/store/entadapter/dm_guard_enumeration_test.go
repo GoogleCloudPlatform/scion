@@ -21,19 +21,18 @@
 //   - EnsureParticipant calls checkDMParticipantKey
 //   - checkDMParticipantKey delegates to messages.CheckDMParticipantKey
 //
-// This makes mutation m4 (sever the delegation entirely — replace the
-// guard body with "return nil") impossible to land while the behavioural
-// tests are dark in CI.
+// It catches the two most likely accidental breaks:
+//   - m4: total removal — guard body replaced with "return nil"
+//   - m5: result discard — call present but assigned to _ instead of checked
 //
-// What this test is NOT: a correctness test. It would not catch subtle
-// bugs in the guard logic (wrong field order, inverted condition, etc.).
-// It does not prove the guard is correct — only that the call sites
-// exist.
-//
-// The real behavioural coverage lives in conversation_store_test.go
-// behind //go:build !no_sqlite. This file exists because CI runs with
-// -tags no_sqlite, so the entadapter package contributes zero
-// behavioural tests to the pipeline.
+// Remaining limitation: an "if err := checkDMParticipantKey(...); err != nil { }"
+// with an empty body would still slip past, as would many other deliberate
+// evasion patterns. The tightening targets the accidental case (refactor
+// at 5pm on a Friday), not the adversarial case (attacker editing the
+// store layer). The only real fix is getting the behavioural tests
+// (conversation_store_test.go, behind //go:build !no_sqlite) into CI.
+// That fix is tracked and is not this team's work. This file should be
+// deleted the day the behavioural tests run in CI.
 
 package entadapter
 
@@ -112,6 +111,41 @@ func bodyCallsSelector(body *ast.BlockStmt, pkg, sel string) bool {
 	return found
 }
 
+// bodyDiscardsCallResult reports whether any call to the named function has
+// its result assigned to the blank identifier (_).
+func bodyDiscardsCallResult(body *ast.BlockStmt, fnName string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		// Check if RHS contains a call to fnName.
+		for _, rhs := range assign.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			ident, ok := call.Fun.(*ast.Ident)
+			if !ok || ident.Name != fnName {
+				continue
+			}
+			// RHS calls fnName — check if any LHS is the blank identifier.
+			for _, lhs := range assign.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
 // TestDMGuardCallSites_Enumeration is an AST enumeration test that verifies
 // the D-1 immutability guard wiring in conversation_store.go. See the file-
 // level comment for scope and limitations.
@@ -158,6 +192,21 @@ func TestDMGuardCallSites_Enumeration(t *testing.T) {
 			t.Fatalf("checkDMParticipantKey does not call messages.CheckDMParticipantKey — "+
 				"the delegation to the shared predicate in pkg/messages has been severed. "+
 				"See conversation_store_test.go for the behavioural tests.")
+		}
+	})
+
+	// 4. Guard result must be consumed, not discarded (catches mutation m5).
+	t.Run("guard_result_consumed_not_discarded", func(t *testing.T) {
+		for _, fn := range []string{"AddParticipant", "EnsureParticipant"} {
+			body := funcBody(file, fn)
+			if body == nil {
+				t.Fatalf("function %s not found in %s", fn, conversationStoreSource)
+			}
+			if bodyDiscardsCallResult(body, "checkDMParticipantKey") {
+				t.Fatalf("%s calls checkDMParticipantKey but discards its result (assigns to _). "+
+					"The guard is present but dead — its error is never checked. "+
+					"See conversation_store_test.go for the behavioural tests.", fn)
+			}
 		}
 	})
 }
