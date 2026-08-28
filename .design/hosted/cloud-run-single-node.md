@@ -238,7 +238,7 @@ server cannot start. That command is not on every Cloud SDK: it is **absent at
 Versions 576–581 are unmeasured, so **this design states no version floor**. Writing
 one down would publish a number nobody has checked.
 
-Two consequences for tooling:
+Three consequences for tooling:
 
 - **Probe for the noun; do not compare version strings.** The deploy script must
   refuse early with a message that names the missing command. A hardcoded floor would
@@ -249,6 +249,26 @@ Two consequences for tooling:
   and has no `--sandbox-launcher`, so following it produces an Instance whose scion
   server crashes on startup. The diagnostic has to say so, because the platform's
   suggestion is actively misleading.
+- **Where the deploy leaves `gcloud` and speaks REST directly, it inherits a narrower
+  credential contract — and must not assume otherwise.** IAP configuration has no
+  `gcloud` flag, so it is applied by a hand-authenticated REST PATCH. That PATCH
+  rejected credential types the `gcloud` step immediately before it had accepted,
+  returning `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`. The operator experience is the
+  pathological one: the deploy authenticates, does real work, and *then* fails on
+  credentials — so the error arrives after the point where the operator has concluded
+  their auth is fine.
+
+  **The general form is the same argument this section makes about `K_SERVICE`: a signal
+  that answers a nearby question is not the same as one that answers yours.** "`gcloud`
+  authenticated successfully" answers *can gcloud use this credential*, not *can the REST
+  endpoint use this credential*. Any hand-rolled call must validate the credential
+  against the surface that will consume it, as early as the deploy can do so — the
+  preflight, not the point of use.
+
+**This section describes runtime autodetection only, and that is not the whole of what
+an agent runs on.** The profile layer above it makes its own selection and does not learn
+what autodetect decided — see §4.7, which is the same argument as this section's, one
+layer up, and which cost a §1 blocker to find.
 
 ### 4.4 The runtime is named `cloudrun-sandbox`
 
@@ -319,6 +339,125 @@ for a sandboxed one.
 address, discovered at startup, with a guard that refuses to bind `0.0.0.0`. This is
 what makes ADC work inside a sandbox.
 
+### 4.6 The deploy runs on the operator's machine, and that machine is not ours
+
+Every other decision in this document concerns software we build and run. This one
+concerns software we build and *someone else* runs, on hardware we have never seen.
+§1.3 begins *"an operator with a GCP project runs one deploy command"* — so
+`scripts/single-node/deploy.sh` executes on a laptop, and the tier is only as portable
+as that script.
+
+**This section exists because its absence caused a §1 blocker.** The deploy script used
+`${var,,}`, a bash 4.0 parameter expansion, at two sites. macOS ships **bash 3.2.57** —
+the last GPLv2 release — and has since 2007. The script died on line 286 the first time
+it was run on a Mac. Five review rounds, 42 Go tests, 62 shellcheck files and a live
+end-to-end deploy all passed beforehand, because **every one of them ran on Linux with
+GNU userland and bash 5.** Nothing was wrong with the review; the review had no way to
+see it. **Nobody wrote the requirement down, so nobody asked, so nothing tested it.**
+
+**The decision: the supported operator environment is stock macOS and mainstream Linux,
+with no prerequisite installation step.** "Install a newer bash first" is a second
+command, and §1.3 says *one*. This is load-bearing in the strict sense — it constrains
+every line of the deploy script permanently, and it is expensive to reverse once
+operators rely on it.
+
+What that commits us to, measured on an arm64 Darwin 25.6.0 machine on 2026-08-28:
+
+| Constraint | Measured | Consequence for the deploy script |
+|---|---|---|
+| `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc`. **`declare -A` is worse than absent — see below.** `printf -v` *is* available |
+| `=~` quoted right-hand side | Trap confirmed present | From 3.2 on, quoting the pattern makes it match **literally**. The RHS must stay unquoted, and this is a security-relevant line — it feeds a host-shape assertion |
+| BSD `sed` | Rejects the GNU-style `--help` extractor | Assume BSD `sed`; no GNU-only addressing |
+| BSD `grep` 2.6.0-FreeBSD | — | No `-P` |
+| `awk` 20200816 (BWK) | — | Not `gawk`; no `gensub` |
+| `mktemp` with no template | Works | Not the portability hazard it was assumed to be |
+
+**Row one is now measured, one construct per subprocess, on a native `macos-15` runner**
+(`scripts/dev/bash32-feature-probe.sh`). It did not begin that way. The list was written
+from bash release history and printed under a column headed "Measured", and it was wrong:
+`printf -v` arrived in bash **3.1**, so 3.2.57 has it. **A prohibition is the one kind of
+claim that is never falsified by use** — nobody trips over a rule saying they cannot do
+something, so a wrong entry silently narrows what everyone writes, forever.
+
+**`declare -A` is the entry that matters, and "unsupported" understates it.** On 3.2.57
+`declare -A m` **exits 0** while printing `declare: -A: invalid option` to stderr. The
+variable is created — as an *indexed* array. A later `m[key]=value` then evaluates `key`
+as an arithmetic expression, which yields **0**, so every key writes to `m[0]` and the
+last write wins. There is no error at the point of use. **A probe keyed on exit status
+alone reports `declare -A` as supported**, which is exactly what the first version of this
+probe did; the third commit exists to catch the exit-0-but-rejected class.
+
+Two properties of the measurement are load-bearing and easy to lose. **Probe each
+construct in its own subprocess:** `${v,,}` and `${v^^}` are *parse* errors, and a parse
+error aborts the whole script before its first line, so a single-script probe measures one
+failure and reports it as nine confirmations. **And include a control that must succeed**,
+or a broken harness reports universal unsupport and looks like a thorough result.
+
+**The general rule, which outlives the specific list: a portability fix is a semantics
+change until proven otherwise.** The obvious repair for `${host,,}` is a `tr` command
+substitution — and command substitution strips trailing newlines, which silently flipped
+three verdicts of the host-shape assertion from REJECT to ALLOW. A portability edit to a
+security-relevant line must be proven byte-identical on adversarial inputs, not merely
+observed to stop erroring.
+
+**The gate is a CI job on a native macOS runner**, not a hand-built old bash on Linux.
+GitHub's macOS runners ship bash 3.2.57 natively, so the interpreter needs no artifact
+to fetch, verify or compile — and the runner also supplies the BSD userland and arm64
+hardware, which a compiled bash on Linux would not. The runner image is pinned to a
+specific version rather than `macos-latest`, because a moving alias silently retires the
+gate the day the fleet upgrades past bash 3.2.
+
+### 4.7 The profile layer never learns what the runtime layer decided
+
+**§4.3 is correct and was not enough.** Autodetect picks `cloudrun-sandbox` on an
+Instance and nowhere else, exactly as that section describes. But autodetect is not the
+only layer that decides what an agent runs on, and the layer above it — *profiles* —
+was never described here. A fresh deploy pre-selected `remote (kubernetes)`, which this
+tier cannot serve, so §10 step 5 was unreachable on an otherwise correct deploy.
+
+**The mechanism is a substitution that is never written back.** `GetRuntime` resolves
+the configured runtime `docker`, observes it cannot work on an Instance, and returns
+`cloudrun-sandbox` instead. That substitution happens at the runtime layer and stays
+there. The `local` profile still *declares* `docker`. Nothing tells the profile layer
+what the runtime layer chose.
+
+`buildInfoProfiles` then filters the profile list against the broker's actual runtime,
+and drops any profile that is local-only when the broker is not. So it drops `local`
+**because the declaration and the substitution disagree** — and keeps `remote`, whose
+`kubernetes` survives only because it is *not local-only*. **The filter discards the one
+profile this broker can serve and keeps the one it cannot.** One profile then remains, so
+the UI auto-selects it, and the operator is given the broken option by default and never
+sees a choice.
+
+**This is the same error §4.3 already warns about, one layer up.** That section's
+argument is that `K_SERVICE` answers a nearby question rather than yours.
+`isLocalOnlyRuntime` is a negative predicate standing in for a positive one: the question
+that matters is *can this broker serve this profile*, and the code asks *is this profile
+local-only*. Those coincide on a workstation and diverge on every hosted tier. **A
+predicate that is right by coincidence is right until the environment changes, which is
+precisely what a new tier is.**
+
+**Decided: the tier seeds its own settings**, following the multi-node tier's existing
+`hub-settings-template.yaml` precedent, so a `default` profile exists that declares
+`cloudrun-sandbox` explicitly. Delivery is via `InitMachine`, not the deploy script —
+`deploy.sh` runs on the operator's machine (§4.6) and is the wrong place for a decision
+about the server's own configuration.
+
+**One mechanism here is load-bearing and was measured, not assumed:** koanf loads the
+embedded defaults *first* and the seeded template *after*, so the scalar `active_profile`
+is **overwritten** while the `profiles` map **merges**. The fix depends entirely on that
+asymmetry. It is pinned by a test that runs the real `InitMachine` against the real
+settings loader and asserts the effective post-merge state; pins written against the
+seeded *file* pass whether the fix is present or not.
+
+**Deferred, and named here so it is not lost: the predicate itself is still wrong.**
+Correcting it would remove the unservable option from the menu rather than merely
+demoting it — an operator can still select `remote (kubernetes)` today and get a dead
+agent. It is deferred because `buildInfoProfiles` is shared with the multi-node Cloud Run
+tier and with workstation brokers, where offering a remote profile is a legitimate
+feature. **That makes it a product decision about other tiers, not a defect fix within
+this one**, and this design does not get to make it unilaterally.
+
 ## 5. Durability — Tier 0, pure ephemeral
 
 Workspaces and the SQLite control plane live on the Instance's ephemeral filesystem.
@@ -358,6 +497,28 @@ rather than merely warn.
 invoker check is off and IAP is the sole perimeter. A six-way header × token ×
 audience matrix confirmed that IAP rejects all unauthenticated and mis-audienced
 requests, and that the hub is unreachable without a valid IAP assertion.
+
+**That verification covers the steady state. It says nothing about the deploy itself,
+and the deploy is not atomic.** The Instance is created first and IAP is configured
+afterwards, by a separate REST PATCH. Two windows follow from that ordering, and the
+paragraph above closes neither:
+
+- **Between create and PATCH**, the Instance exists. If it is routable in that interval
+  with the invoker check already off, the perimeter is absent while it is reachable.
+- **If the PATCH fails**, the deploy exits non-zero having already created an Instance.
+  A failed deploy that leaves a running artifact behind is worse than one that leaves
+  nothing, because the operator's mental model is "it failed, so nothing happened."
+
+**Requirement: a deploy that does not finish must not leave a reachable Instance without
+IAP.** Either the Instance is not routable until the PATCH lands, or a failed PATCH tears
+the Instance down. **This is stated as a requirement and is NOT yet measured** — the
+window's existence and duration are unknown, and "the create probably isn't serving yet"
+is an assumption, not a finding. §10 criterion 12 exists to settle it.
+
+The order of those two clauses matters. **"Fail closed" here means fail to a state with
+no Instance, not fail to an Instance with no perimeter.** §6.1's footgun is that the open
+configuration is the supported one; a partial deploy is the cheapest way to reach it by
+accident.
 
 ### 6.2 The hub work was already done
 
@@ -553,3 +714,28 @@ Additionally, for review:
 11. The omni image is produced by the chained build, and no harness version is pinned
     in two places (§4.1). **Verified — run.** The chained build produces the omni
     image and the result is verified by digest.
+12. **A deploy interrupted or failed between Instance creation and IAP configuration
+    leaves no Instance reachable without IAP** (§6.1). Verify by inducing the failure,
+    not by reading the ordering. The check is whether an Instance exists *and answers*
+    after a failed run — an Instance that exists but was never routable satisfies this;
+    one that answers without an IAP challenge does not, for any length of time.
+13. **The deploy script runs to completion on stock macOS with bash 3.2 and BSD
+    userland** (§4.6), with no prerequisite installation step. Enforced by CI on a
+    pinned native macOS runner. **Read the interpreter version the job prints before
+    trusting a green** — a gate that runs the suite under the wrong shell passes for
+    the wrong reason, and this one is checking for the absence of a runtime error, which
+    is the failure mode most easily faked by not executing the line at all.
+
+14. **A fresh deploy pre-selects a runtime profile the tier can actually serve** (§4.7),
+    and the operator reaches a running agent without choosing one. Verify on a deploy
+    that has never had its settings touched — the defect this replaces was invisible to
+    every existing test because the tests asserted the seeded file rather than the
+    effective settings after the merge.
+
+**On 12, 13 and 14 the same caution applies, and it is the lesson of this tier so far:
+all three are negative criteria.** "No unprotected Instance", "no bash-4 construct" and
+"no unservable profile" are each satisfied by a check that never ran. None should be
+recorded as met until it has been observed *failing* against a deliberately broken
+input — for 14 specifically, against a reverted fix, because a profile test that passes
+with the fix removed is the exact defect that was found and removed twice during its
+review.
