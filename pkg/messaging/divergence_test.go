@@ -19,6 +19,9 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/google/uuid"
 )
 
 func TestLegacyDirectMessageExternalRef_Deterministic(t *testing.T) {
@@ -173,13 +176,23 @@ func TestComputeDivergenceMatch_NoOldRouting(t *testing.T) {
 }
 
 func TestComputeDivergenceMatch_DMAgreement(t *testing.T) {
-	oldRouting := OldRoutingFromMessage("sender", "recip", "")
-	actualExternalRef := directMessageExternalRef("sender", "recip")
+	// Use realistic UUIDs and kind-safe DMConversationKey, matching what
+	// production actually stores. The old model routes by raw sorted IDs;
+	// the new model stores kind-prefixed canonical keys.
+	agentID := uuid.New().String()
+	userID := uuid.New().String()
+
+	oldRouting := OldRoutingFromMessage(agentID, userID, "")
+	actualExternalRef, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
 	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-abc")
 	if !match {
-		t.Error("expected match=true for DM agreement")
+		t.Errorf("expected match=true for DM agreement, got reason=%q (old=%s new=%s)",
+			reason, oldRouting, actualExternalRef)
 	}
-	if reason != "dm-routing-agreement" {
+	if match && reason != "dm-routing-agreement" {
 		t.Errorf("expected reason 'dm-routing-agreement', got %q", reason)
 	}
 }
@@ -209,9 +222,14 @@ func TestComputeDivergenceMatch_RoutingTypeMismatch(t *testing.T) {
 	}
 
 	// Old says thread, new says DM
+	senderID := uuid.New().String()
+	recipID := uuid.New().String()
 	oldRouting = OldRoutingFromMessage("", "", "thread-ABC")
-	actualExternalRef = directMessageExternalRef("sender", "recip")
-	match, reason = ComputeDivergenceMatch(oldRouting, actualExternalRef, "conv-xyz")
+	dmRef, err := messages.DMConversationKey("agent", senderID, "user", recipID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	match, reason = ComputeDivergenceMatch(oldRouting, dmRef, "conv-xyz")
 	if match {
 		t.Error("expected match=false when routing types differ (thread vs DM)")
 	}
@@ -241,8 +259,16 @@ func TestComputeDivergenceMatch_GenuineDisagreement(t *testing.T) {
 	// Construct a case where old-model and new-model genuinely disagree:
 	// message has sender=A, recipient=B (old routing = sender-recipient:A:B)
 	// but the conversation it was stamped with belongs to a different pair (dm:X:Y)
-	oldRouting := OldRoutingFromMessage("agent-A", "user-B", "")
-	actualExternalRef := directMessageExternalRef("agent-X", "user-Y") // DIFFERENT pair
+	agentA := uuid.New().String()
+	userB := uuid.New().String()
+	agentX := uuid.New().String()
+	userY := uuid.New().String()
+
+	oldRouting := OldRoutingFromMessage(agentA, userB, "")
+	actualExternalRef, err := messages.DMConversationKey("agent", agentX, "user", userY) // DIFFERENT pair
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
 
 	match, reason := ComputeDivergenceMatch(oldRouting, actualExternalRef, "some-conv-id")
 	if match {
