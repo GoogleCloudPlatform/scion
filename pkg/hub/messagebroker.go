@@ -709,8 +709,10 @@ func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID stri
 	p.log.Debug("Broadcasting to project agents", "project_id", projectID, "count", len(result.Items))
 
 	for _, agent := range result.Items {
-		// Skip the sender if it's an agent in this project
-		if msg.Sender == "agent:"+agent.Slug {
+		// B5/R1: skip the sender by ID, not by the display-label Sender field.
+		// Sender is a display label that may be in UUID form after the B5
+		// auth-derivation override; SenderID is the canonical identity.
+		if msg.SenderID != "" && msg.SenderID == agent.ID {
 			continue
 		}
 		agentMsg := *msg // copy to set per-agent recipient
@@ -733,7 +735,8 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 	p.log.Debug("Global broadcast to all agents", "count", len(result.Items))
 
 	for _, agent := range result.Items {
-		if msg.Sender == "agent:"+agent.Slug {
+		// B5/R1: skip the sender by ID, not by the display-label Sender field.
+		if msg.SenderID != "" && msg.SenderID == agent.ID {
 			continue
 		}
 		agentMsg := *msg
