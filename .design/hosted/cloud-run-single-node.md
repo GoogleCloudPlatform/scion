@@ -365,23 +365,33 @@ What that commits us to, measured on an arm64 Darwin 25.6.0 machine on 2026-08-2
 
 | Constraint | Measured | Consequence for the deploy script |
 |---|---|---|
-| `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `declare -A`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc` (derived — see below) |
+| `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc`. **`declare -A` is worse than absent — see below.** `printf -v` *is* available |
 | `=~` quoted right-hand side | Trap confirmed present | From 3.2 on, quoting the pattern makes it match **literally**. The RHS must stay unquoted, and this is a security-relevant line — it feeds a host-shape assertion |
 | BSD `sed` | Rejects the GNU-style `--help` extractor | Assume BSD `sed`; no GNU-only addressing |
 | BSD `grep` 2.6.0-FreeBSD | — | No `-P` |
 | `awk` 20200816 (BWK) | — | Not `gawk`; no `gensub` |
 | `mktemp` with no template | Works | Not the portability hazard it was assumed to be |
 
-**Two kinds of claim are in that table and the difference matters.** The interpreter
-versions, the `=~` trap, the `sed` rejection and the `mktemp` result were *executed* on
-the hardware. The list of missing bash builtins in row one was *derived* from bash
-release history and was never run — and it was wrong in one entry: `printf -v` was added
-in bash **3.1**, so 3.2.57 has it. A list of things a shell cannot do is the easiest kind
-of claim to write from memory and the hardest kind to notice is unverified, because every
-entry is a prohibition nobody will trip over. It is being replaced by a matrix measured on
-the macOS runner, one subprocess per construct — several of these are *parse* errors
-rather than runtime errors, so probing them in one script measures a single parse failure
-and reports it as nine confirmations.
+**Row one is now measured, one construct per subprocess, on a native `macos-15` runner**
+(`scripts/dev/bash32-feature-probe.sh`). It did not begin that way. The list was written
+from bash release history and printed under a column headed "Measured", and it was wrong:
+`printf -v` arrived in bash **3.1**, so 3.2.57 has it. **A prohibition is the one kind of
+claim that is never falsified by use** — nobody trips over a rule saying they cannot do
+something, so a wrong entry silently narrows what everyone writes, forever.
+
+**`declare -A` is the entry that matters, and "unsupported" understates it.** On 3.2.57
+`declare -A m` **exits 0** while printing `declare: -A: invalid option` to stderr. The
+variable is created — as an *indexed* array. A later `m[key]=value` then evaluates `key`
+as an arithmetic expression, which yields **0**, so every key writes to `m[0]` and the
+last write wins. There is no error at the point of use. **A probe keyed on exit status
+alone reports `declare -A` as supported**, which is exactly what the first version of this
+probe did; the third commit exists to catch the exit-0-but-rejected class.
+
+Two properties of the measurement are load-bearing and easy to lose. **Probe each
+construct in its own subprocess:** `${v,,}` and `${v^^}` are *parse* errors, and a parse
+error aborts the whole script before its first line, so a single-script probe measures one
+failure and reports it as nine confirmations. **And include a control that must succeed**,
+or a broken harness reports universal unsupport and looks like a thorough result.
 
 **The general rule, which outlives the specific list: a portability fix is a semantics
 change until proven otherwise.** The obvious repair for `${host,,}` is a `tr` command
