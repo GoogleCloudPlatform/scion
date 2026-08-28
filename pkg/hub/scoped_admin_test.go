@@ -564,7 +564,7 @@ func TestScopedAdmin_CombinedHubAndProjectRoles(t *testing.T) {
 	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
 	ctx := context.Background()
 
-	// Create a project and add hub-admin as project-admin there
+	// Create a project owned by hub-admin
 	project := &store.Project{
 		ID:        tid("project-combined"),
 		Name:      "Combined Test Project",
