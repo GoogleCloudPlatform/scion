@@ -1242,6 +1242,22 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// User callers must have attach access in the target project.
+	if userIdent != nil {
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				NotFound(w, "Project")
+			} else {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionAttach) {
+			return // authorize writes 403
+		}
+	}
+
 	var req BroadcastMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
