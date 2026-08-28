@@ -1,0 +1,129 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# deploy.sh on macOS.
+#
+# WHY THIS EXISTS. deploy.sh is the single-node tier's entry point and the
+# tier's §1 promise is "an operator runs one deploy command". macOS ships
+# bash 3.2.57 -- the last GPLv2 release, frozen since 2007 -- so a bash-4-only
+# construct there kills that command on the most common operator platform.
+#
+# It happened. `${scheme,,}` reached main and died on a maintainer's Mac with
+# `bad substitution` AFTER five review rounds, 42 Go tests, 62 shellcheck files
+# and a live end-to-end deploy. Every one of those ran on Linux bash 5, so not
+# one of them could see it. shellcheck cannot cover this class either: it has
+# no bash-version targeting.
+#
+# The gate therefore has to EXERCISE rather than READ, which is what this does
+# -- it runs the existing Go suite with SCION_TEST_BASH pointed at the system
+# bash of a real Mac.
+#
+# WHY A SEPARATE FILE FROM ci.yml. `paths:` is a workflow-level key; GitHub has
+# no job-level paths filter, and the alternative -- a third-party filter action
+# -- would add unpinned supply-chain surface, which is the opposite of what
+# this file is trying to be. A separate file also keeps ci.yml untouched, so
+# this change cannot collide with anyone else editing it.
+#
+# The filter is NOT about money: this repo is public, and GitHub-hosted runners
+# including macOS are free on public repos. It is about concurrency and queue
+# latency -- macOS runners are a scarcer pool than Linux, so a job that runs on
+# every PR would make everyone else's queue longer to protect files most PRs do
+# not touch.
+#
+# KNOWN TRAP, recorded deliberately: if this job is ever made a REQUIRED status
+# check, the paths filter will hang every PR that does not touch these paths,
+# because a filtered-out job reports nothing rather than reporting success.
+# Make it required only alongside a merge-queue or an always-run stub job.
+
+name: macOS bash 3.2
+
+# The two path lists are duplicated on purpose. GitHub Actions does not expand
+# YAML anchors, so `&paths` / `*paths` would not fail loudly -- it would parse
+# and then not filter the way it reads. Keep these two lists in sync by hand.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/single-node/**'
+      - 'scripts/dev/**'
+      - 'cmd/deploy_script_test.go'
+      - '.github/workflows/macos-bash32.yml'
+  pull_request:
+    paths:
+      - 'scripts/single-node/**'
+      - 'scripts/dev/**'
+      - 'cmd/deploy_script_test.go'
+      - '.github/workflows/macos-bash32.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  macos-bash32:
+    name: deploy.sh under macOS /bin/bash
+    # NOT macos-latest. That label is a moving alias by design, and this job's
+    # entire value is that the interpreter is bash 3.2. Pin the image; let the
+    # canary below catch the day the pin no longer means what we think.
+    runs-on: macos-15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # CANARY -- the reason this job is self-verifying rather than decorative.
+      #
+      # A negative assertion is not a pin until it has been observed positive.
+      # This job asserts a NEGATIVE: "no bash-4 construct fails here". The most
+      # likely way that goes wrong is not a bad test, it is the interpreter
+      # quietly not being bash 3.2 -- someone moves this to macos-latest, or
+      # Apple finally ships a newer /bin/bash -- after which the job runs bash 5
+      # under a 3.2 name and stays green forever while protecting nothing.
+      #
+      # So before trusting it, prove it REJECTS a bash-4 construct.
+      - name: Canary -- prove /bin/bash really is bash 3.2
+        run: |
+          set -uo pipefail
+          if /bin/bash -c 'x=ABC; echo "${x,,}"' >/dev/null 2>&1; then
+            echo "::error::canary failed -- /bin/bash accepted \${x,,}, so it is NOT bash 3.2."
+            echo "::error::This job would have reported success while testing nothing."
+            /bin/bash --version | head -1
+            exit 1
+          fi
+          /bin/bash --version | head -1
+          echo "canary ok -- interpreter rejects \${x,,} as bash 3.2 must"
+
+      # The recorded 3.2 answer in this fixture came from one maintainer's
+      # laptop. This is the first time it meets a SECOND real 3.2, on different
+      # hardware, which is the only way that record stops being one data point.
+      - name: Regex semantics match the recorded bash 3.2 behaviour
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: ./scripts/dev/bash32-regex-probe.sh --check
+
+      - name: Differential harness self-test under bash 3.2
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: ./scripts/dev/shell-differential.sh --self-test
+
+      - name: Run the deploy.sh suite under macOS /bin/bash
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: go test ./cmd/ -run TestScript -count=1 -v

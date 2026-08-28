@@ -211,9 +211,14 @@ observe() {
   rm -f "$errfile"
 }
 
-base_out="$(mktemp)"
-cand_out="$(mktemp)"
-trap 'rm -f "$base_out" "$cand_out"' EXIT
+# Named files in a temp DIR rather than two bare mktemp files, so the diff
+# header reads ".../baseline" and ".../candidate" without `diff --label`.
+# --label is GNU diffutils; macOS ships BSD diff. Depending on a GNU-only flag
+# in the tool whose job is proving macOS portability would be its own punchline.
+outdir="$(mktemp -d)"
+base_out="$outdir/baseline"
+cand_out="$outdir/candidate"
+trap 'rm -rf "$outdir"' EXIT
 
 observe "$baseline"  > "$base_out"
 observe "$candidate" > "$cand_out"
@@ -229,5 +234,9 @@ echo "DIVERGENT: the candidate does not preserve behaviour." >&2
 echo "  baseline:  $baseline" >&2
 echo "  candidate: $candidate" >&2
 echo >&2
-diff -u --label baseline "$base_out" --label candidate "$cand_out" >&2
+# `|| true` so the exit status below is OURS. diff exits 1 for "differs" and 2
+# for "trouble", and under `set -e` either would abort here and become the
+# script's status -- silently turning a clean DIVERGENT verdict into a 2 that
+# callers read as a crash.
+diff -u "$base_out" "$cand_out" >&2 || true
 exit 1

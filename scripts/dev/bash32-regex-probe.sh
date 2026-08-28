@@ -79,6 +79,15 @@ if [ "$actual" = "$EXPECTED_BASH32" ]; then
 fi
 
 echo "DIVERGENT from bash 3.2.57:" >&2
-diff -u --label bash-3.2.57 <(printf '%s\n' "$EXPECTED_BASH32") \
-        --label this-shell  <(printf '%s\n' "$actual") >&2
+
+# Named files, not `diff --label`: --label is GNU diffutils and macOS ships BSD
+# diff. A probe for macOS portability must not itself depend on a GNU-only
+# flag. `|| true` keeps the exit status ours -- diff returns 1 for "differs"
+# and 2 for "trouble", and under `set -e` either would become this script's
+# status and read as a crash rather than a verdict.
+d="$(mktemp -d)"
+trap 'rm -rf "$d"' EXIT
+printf '%s\n' "$EXPECTED_BASH32" > "$d/bash-3.2.57"
+printf '%s\n' "$actual"          > "$d/this-shell"
+diff -u "$d/bash-3.2.57" "$d/this-shell" >&2 || true
 exit 1
