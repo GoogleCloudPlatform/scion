@@ -158,6 +158,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/tokens/", RouteID: "auth.tokens.byId",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/auth/scopes": {
+		Pattern: "/api/v1/auth/scopes", RouteID: "auth.scopes",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/metrics/session/": {
 		Pattern: "/api/v1/metrics/session/", RouteID: "metrics.session",
 		Classification: RouteAuthenticated,

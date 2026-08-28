@@ -41,6 +41,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/me":                           "authenticated:user",
 	"/api/v1/auth/tokens":                       "authenticated:user-token",
 	"/api/v1/auth/tokens/":                      "authenticated:user-token",
+	"/api/v1/auth/scopes":                       "authenticated:user-token",
 	"/api/v1/auth/providers":                    "public:auth",
 	"/api/v1/auth/invite/redeem":                "public:invite",
 	"/api/v1/auth/cli/authorize":                "public:cli-oauth",
