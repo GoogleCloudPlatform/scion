@@ -163,8 +163,8 @@ func TestDMGuardCallSites_Enumeration(t *testing.T) {
 			t.Fatalf("function AddParticipant not found in %s", conversationStoreSource)
 		}
 		if !bodyCallsIdent(body, "checkDMParticipantKey") {
-			t.Fatalf("AddParticipant does not call checkDMParticipantKey — "+
-				"the D-1 immutability guard has been severed. "+
+			t.Fatalf("AddParticipant does not call checkDMParticipantKey — " +
+				"the D-1 immutability guard has been severed. " +
 				"See conversation_store_test.go for the behavioural tests.")
 		}
 	})
@@ -176,8 +176,8 @@ func TestDMGuardCallSites_Enumeration(t *testing.T) {
 			t.Fatalf("function EnsureParticipant not found in %s", conversationStoreSource)
 		}
 		if !bodyCallsIdent(body, "checkDMParticipantKey") {
-			t.Fatalf("EnsureParticipant does not call checkDMParticipantKey — "+
-				"the D-1 immutability guard has been severed. "+
+			t.Fatalf("EnsureParticipant does not call checkDMParticipantKey — " +
+				"the D-1 immutability guard has been severed. " +
 				"See conversation_store_test.go for the behavioural tests.")
 		}
 	})
@@ -189,8 +189,8 @@ func TestDMGuardCallSites_Enumeration(t *testing.T) {
 			t.Fatalf("function checkDMParticipantKey not found in %s", conversationStoreSource)
 		}
 		if !bodyCallsSelector(body, "messages", "CheckDMParticipantKey") {
-			t.Fatalf("checkDMParticipantKey does not call messages.CheckDMParticipantKey — "+
-				"the delegation to the shared predicate in pkg/messages has been severed. "+
+			t.Fatalf("checkDMParticipantKey does not call messages.CheckDMParticipantKey — " +
+				"the delegation to the shared predicate in pkg/messages has been severed. " +
 				"See conversation_store_test.go for the behavioural tests.")
 		}
 	})
