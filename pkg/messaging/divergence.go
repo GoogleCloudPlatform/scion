@@ -139,10 +139,29 @@ func ComputeDivergenceMatch(oldRouting, actualExternalRef, convID string) (match
 		return false, "unknown/no-old-routing"
 	}
 
-	// DM comparison: old="sender-recipient:{sorted pair}", new="dm:{sorted pair}"
+	// DM comparison: old="sender-recipient:{sortedID}:{sortedID}",
+	// new="dm:{kind}:{id}:{kind}:{id}" (kind-prefixed canonical key from
+	// DMConversationKey). Extract the raw IDs from the kind-prefixed key
+	// and sort them to compare against the old model's raw sorted pair.
+	//
+	// Case (c) ruling: a DM that carries a thread_id enters the thread
+	// branch above via OldRoutingFromMessage, producing "thread:{threadID}".
+	// The new model routes it by DM key, so it hits the routing-type-mismatch
+	// fallback. This is the correct signal — the old model really did route
+	// those by thread while the new model routes by DM key.
+	//
+	// Case (d) note: non-canonical raw IDs (e.g. uppercase UUIDs) in the old
+	// routing will not match canonical IDs in the new key. Treated as latent;
+	// not observed in production.
 	if strings.HasPrefix(oldRouting, "sender-recipient:") && strings.HasPrefix(actualExternalRef, "dm:") {
 		oldPair := strings.TrimPrefix(oldRouting, "sender-recipient:")
+		// New format: "dm:kindA:idA:kindB:idB" → extract raw IDs, sort, join.
 		newPair := strings.TrimPrefix(actualExternalRef, "dm:")
+		if parts := strings.Split(actualExternalRef, ":"); len(parts) == 5 && parts[0] == "dm" {
+			pair := []string{parts[2], parts[4]}
+			sort.Strings(pair)
+			newPair = strings.Join(pair, ":")
+		}
 		if oldPair == newPair {
 			return true, "dm-routing-agreement"
 		}
