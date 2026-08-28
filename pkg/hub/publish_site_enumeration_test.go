@@ -25,11 +25,12 @@ import (
 )
 
 // TestPublishUserMessageEnumeration uses go/ast to find every
-// PublishUserMessage call site in non-test .go files under pkg/hub. Each site
-// must appear in either the "guarded" set (the call only executes when
-// CreateMessage has already succeeded) or the "exempt" set (broker proxy
-// routing where persistence is handled by the deliverToUser callback). Any
-// unaccounted site causes a hard failure — this is the durable guard for
+// PublishUserMessage call site (arity 2 — the event publish signature) in
+// non-test .go files under pkg/hub. Each site must appear in the "guarded"
+// set (the call only executes when CreateMessage has already succeeded).
+// Broker proxy calls (arity 4) are excluded from the population entirely —
+// persistence is handled by the deliverToUser callback, not by the caller.
+// Any unaccounted site causes a hard failure — this is the durable guard for
 // contract B11/B13: publishing an unpersisted message is not legal.
 func TestPublishUserMessageEnumeration(t *testing.T) {
 	// -------------------------------------------------------------------
@@ -60,9 +61,9 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 		// error check.
 		"handlers_broker_inbound.go:handleBrokerInbound": "Publish in else branch of CreateMessage error check",
 
-		// handleAgentOutboundMessage direct path: CreateMessage error
-		// triggers early return before publish.
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:direct": "CreateMessage error triggers early return before publish",
+		// handleAgentOutboundMessage: CreateMessage error triggers early
+		// return before publish.
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": "CreateMessage error triggers early return before publish",
 
 		// handleAgentMessage: publish inside if persistedMsgID != empty
 		// block.
@@ -80,30 +81,9 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 		"handlers_agent_messaging.go:processMentions": "Publish inside if persisted block",
 	}
 
-	// -------------------------------------------------------------------
-	// Exempt sites: broker proxy routing — persistence and guard handled
-	// by the deliverToUser callback in messagebroker.go.
-	// -------------------------------------------------------------------
-	exempt := map[string]string{
-		// dispatchToBroker: broker proxy routing method; persistence and
-		// guard handled by deliverToUser callback in messagebroker.go.
-		"notifications.go:dispatchToBroker": "Broker proxy routing; persistence and guard handled by deliverToUser callback",
-
-		// PublishToGroup: broker proxy fan-out routing; delegates to
-		// deliverToUser for persistence.
-		"messagebroker.go:PublishToGroup": "Broker proxy fan-out routing; delegates to deliverToUser for persistence",
-
-		// handleAgentOutboundMessage broker path: broker proxy routing;
-		// persistence handled by deliverToUser callback.
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:broker": "Broker proxy routing; persistence handled by deliverToUser callback",
-	}
-
-	// Build combined set for lookup.
-	accounted := make(map[string]bool, len(guarded)+len(exempt))
+	// Build accounted set from guarded entries.
+	accounted := make(map[string]bool, len(guarded))
 	for k := range guarded {
-		accounted[k] = true
-	}
-	for k := range exempt {
 		accounted[k] = true
 	}
 
@@ -225,14 +205,13 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 	}
 
 	if len(unaccounted) > 0 {
-		t.Errorf("Found %d PublishUserMessage call site(s) not in guarded or exempt list:\n", len(unaccounted))
+		t.Errorf("Found %d PublishUserMessage call site(s) not in guarded list:\n", len(unaccounted))
 		for _, u := range unaccounted {
 			t.Errorf("  - %s", u)
 		}
-		t.Error("\nEvery PublishUserMessage site must be in the guarded set " +
-			"(preceded by a successful CreateMessage) or the exempt set " +
-			"(documented reason for omission). " +
-			"Add the new site to the appropriate list in this test.")
+		t.Error("\nEvery PublishUserMessage site (event publish, arity 2) must be " +
+			"in the guarded set (preceded by a successful CreateMessage). " +
+			"Add the new site to the guarded list in this test.")
 	}
 
 	// Verify all expected entries were actually found.
@@ -243,18 +222,20 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 		}
 	}
 
-	t.Logf("Verified %d PublishUserMessage call sites: %d guarded, %d exempt",
-		len(sites), len(guarded), len(exempt))
+	t.Logf("Verified %d PublishUserMessage call sites (event publish, arity 2): %d guarded",
+		len(sites), len(guarded))
 }
 
-// isPublishUserMessageCall returns true if the call expression is a call to a
-// function or method named PublishUserMessage.
+// isPublishUserMessageCall returns true if the call expression is a call to
+// PublishUserMessage with exactly 2 arguments (the event publish signature).
+// The broker proxy's PublishUserMessage takes 4 arguments and is excluded —
+// persistence is handled by its deliverToUser callback, not by the caller.
 func isPublishUserMessageCall(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.SelectorExpr:
-		return fn.Sel.Name == "PublishUserMessage"
+		return fn.Sel.Name == "PublishUserMessage" && len(call.Args) == 2
 	case *ast.Ident:
-		return fn.Name == "PublishUserMessage"
+		return fn.Name == "PublishUserMessage" && len(call.Args) == 2
 	}
 	return false
 }
@@ -274,11 +255,6 @@ func publishDisambiguationSuffixes(file, fn string, idx, total int) []string {
 			return []string{"agent"}
 		}
 		return []string{"user"}
-	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && total == 2:
-		if idx == 0 {
-			return []string{"broker"}
-		}
-		return []string{"direct"}
 	}
 	return nil
 }
