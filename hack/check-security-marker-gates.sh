@@ -54,9 +54,32 @@
 # EXIT CODES
 #   0  all gates pass
 #   1  one or more REQUIRED or AUDIT gates failed
+#   2  could not analyse — a guarded file is missing or unreadable. This is NOT
+#      a statement about the codebase; it means the instrument could not run.
+#      Distinguished from exit 1 so CI can report "nothing was analysed" rather
+#      than "the symbol is gone." GNU make collapses both into exit 2, which is
+#      why CI invokes this script directly rather than via `make`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# ---------------------------------------------------------------------------
+# File-existence precheck. A missing or renamed file yields count 0 from the
+# greps below, which reports "symbol missing" — technically fail-closed, but
+# misleading: "ActionAttach missing from sendAgentRouted" when the truth is
+# "somebody moved the file." Exit 2 with a distinct message before any
+# counting so the failure report says what actually happened.
+# ---------------------------------------------------------------------------
+HAM="pkg/hub/handlers_agent_messaging.go"
+HCV="pkg/hub/handlers_chat_v2.go"
+
+for f in "$HAM" "$HCV"; do
+  if [[ ! -r "$f" ]]; then
+    echo "ABORT: guarded file not found or not readable: $f" >&2
+    echo "  Nothing was analysed. This is an environment/rename issue, not a guard failure." >&2
+    exit 2
+  fi
+done
 
 rc=0
 notices=""
@@ -213,9 +236,6 @@ assert_informational() {
 }
 
 # ===== Gate assertions =====
-
-HAM="pkg/hub/handlers_agent_messaging.go"
-HCV="pkg/hub/handlers_chat_v2.go"
 
 # --- authenticatedSender in handlers_agent_messaging.go ---
 
