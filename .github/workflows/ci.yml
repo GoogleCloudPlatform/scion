@@ -103,6 +103,23 @@ jobs:
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
 
+      - name: Check Security Marker Gates
+        run: |
+          # Invoked directly rather than via `make check-security-marker-gates`:
+          # GNU make reports its own failure code (always 2), which would collapse
+          # exit 1 (guard violation) and exit 2 (nothing was analysed) into one
+          # indistinguishable result. Those mean opposite things.
+          set +e
+          ./hack/check-security-marker-gates.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Security marker gates::Security marker gate violations found — a guarded symbol was removed or moved out of its enclosing function. See the step log above." ;;
+            *) echo "::error title=Security marker gates NOT checked::check-security-marker-gates could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a guard failure." ;;
+          esac
+          exit "$rc"
+
       - name: Run Tests
         run: make test-fast
 

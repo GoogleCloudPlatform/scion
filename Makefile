@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -93,6 +93,10 @@ check-authz-guards:
 check-conversation-upsert-guard:
 	@./hack/check-conversation-upsert-guard.sh
 
+## check-security-marker-gates: Verify security symbols (authenticatedSender, validateDefaultAgent, ActionAttach) remain in handler code
+check-security-marker-gates:
+	@./hack/check-security-marker-gates.sh
+
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
 	@if [ ! -x "$(GOLANGCI_LINT)" ]; then \
@@ -165,7 +169,7 @@ fmt-check:
 	@echo "Go formatting OK."
 
 ## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
-ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard test-fast build
+ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates test-fast build
 	@echo ""
 	@echo "CI passed."
 
