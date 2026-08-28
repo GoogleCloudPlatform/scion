@@ -255,11 +255,38 @@ di_resolve_tokeninfo_url() {
 # (curl resolves the host after the LAST '@'). This function has a
 # table-driven test; extend it before touching anything here.
 #
+# A HOST ALLOWLIST IS NOT A URL ALLOWLIST, and the difference is not cosmetic:
+# a *permitted* host carrying a path plus a trailing '&z=' retargets the step
+# 3b PATCH at another project's Instance, with the operator's live token and a
+# valid updateMask, leaving the operator's own Instance with IAP off. That is
+# why the '?'/'#' guard below is a check and not a comment. Any residual
+# exposure here is harmless because an actor who can set these variables can
+# already run arbitrary code — NOT because only loopback is permitted, which
+# is reasoning about hosts and does not cover the path.
+#
 # Arguments: var_name url
 # Returns 0 if the host is permitted, 1 with a diagnostic otherwise.
 di_validate_override_url() {
   local var_name="$1"
   local url="$2"
+
+  # An endpoint override is a base URL, never a query or a fragment. Rejecting
+  # them outright stops a PERMITTED host being used to retarget the step 3b
+  # PATCH at another project's Instance via the path. No legitimate value
+  # contains either character: not the two real defaults, not a loopback stub.
+  if [[ "$url" == *[?#]* ]]; then
+    echo "Error: $var_name must not contain '?' or '#'; it is an endpoint, not a query." >&2
+    return 1
+  fi
+
+  # Only http(s) carry an Authorization header, so only http(s) can leak the
+  # token — but "curl would not send the header" is the client rescuing the
+  # rule again, and the point of this function is that the rule stands alone.
+  local scheme="${url%%://*}"
+  if [[ "${scheme,,}" != "http" && "${scheme,,}" != "https" ]]; then
+    echo "Error: $var_name must be an http:// or https:// URL." >&2
+    return 1
+  fi
 
   local host="${url#*://}"
   host="${host%%[/?#\\]*}" # path, query, fragment, backslash
@@ -269,6 +296,19 @@ di_validate_override_url() {
   # literal like [::1] (colons, no port) from being mangled.
   if [[ "$host" =~ ^(.*):[0-9]+$ ]]; then
     host="${BASH_REMATCH[1]}"
+  fi
+
+  # Assert a POSITIVE host shape before consulting the allowlist. Without this
+  # the glob accepts strings that are not hosts at all — 'evil.example .goog…',
+  # 'evil.example%2f.goog…', a non-numeric port — because they happen to END in
+  # a permitted suffix. Nothing leaks today: curl refuses to parse every one of
+  # them (exit 3, code 000, no connection opened). That is the problem. The
+  # safety would be coming from curl's parser rather than from the check, and a
+  # rule that holds only because a downstream component rescues it is not a
+  # rule. curl's URL parsing has changed before.
+  if [[ ! "$host" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:]+\])$ ]]; then
+    echo "Error: $var_name does not name a host: '$host'." >&2
+    return 1
   fi
 
   case "$host" in

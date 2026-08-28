@@ -58,6 +58,19 @@ func scrubbedEnv() []string {
 	return out
 }
 
+// shellQuote renders s as a single POSIX shell word.
+//
+// Go's %q is GO quoting, not SHELL quoting, and the two disagree on exactly
+// the inputs this file cares about: %q turns a real tab into the two
+// characters `\t`, which bash inside double quotes then hands to the function
+// as a literal backslash-t. The validator table feeds control characters in on
+// purpose — with %q those rows would silently be testing a backslash and would
+// pass for the wrong reason, which is the same class of defect as the m4 false
+// pin. Single quotes pass every byte through unchanged.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // runBashFunc sources deploy.sh and calls the named function with args.
 // Returns stdout, stderr, and the exit code.
 func runBashFunc(t *testing.T, funcName string, args ...string) (string, string, int) {
@@ -70,7 +83,7 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 	// caused by set -e killing the script before its own error handling.
 	bashCmd := fmt.Sprintf("set -euo pipefail; source %q && %s", scriptPath, funcName)
 	for _, a := range args {
-		bashCmd += fmt.Sprintf(" %q", a)
+		bashCmd += " " + shellQuote(a)
 	}
 
 	cmd := exec.Command("bash", "-c", bashCmd)
@@ -105,7 +118,7 @@ func runBashFuncWithSetup(t *testing.T, setup, funcName string, args ...string) 
 
 	bashCmd := fmt.Sprintf("set -euo pipefail; source %q; %s; %s", scriptPath, setup, funcName)
 	for _, a := range args {
-		bashCmd += fmt.Sprintf(" %q", a)
+		bashCmd += " " + shellQuote(a)
 	}
 
 	cmd := exec.Command("bash", "-c", bashCmd)
@@ -395,6 +408,16 @@ func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
 // `https://evil.example?.googleapis.com` passed the check and curl then
 // delivered `Authorization: Bearer <ADC token>` to evil.example, because curl
 // connects to the host before the `?`.
+//
+// Three later classes are pinned here too, each of which the host allowlist
+// alone does NOT catch:
+//   - a PERMITTED host with a path and a trailing `&z=`, which retargets the
+//     step 3b PATCH at another project's Instance (review r3);
+//   - strings that end in a permitted suffix but are not hostnames at all
+//     (whitespace, `%2f`, a non-numeric port) — rejected today only by curl's
+//     parser, which is not where the rule is supposed to live;
+//   - non-http(s) schemes, safe today only because curl sends no
+//     Authorization header on them.
 func TestScriptValidateOverrideURL(t *testing.T) {
 	allowed := []struct{ name, url string }{
 		{"regional Cloud Run endpoint (the real default)", "https://us-east4-run.googleapis.com"},
@@ -404,6 +427,11 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 		{"localhost", "http://localhost:8080"},
 		{"IPv6 loopback with port and path", "http://[::1]:9000/x"},
 		{"uppercase host — hostnames are case-insensitive", "https://FOO.GOOGLEAPIS.COM"},
+		// The one input where this rule is deliberately MORE permissive than
+		// curl: curl refuses to parse a double-`@` authority at all, while the
+		// host after the last `@` really is permitted. Pinned so the intent is
+		// recorded rather than rediscovered (review r3, Nit 3).
+		{"double userinfo — host after the LAST @ is permitted", "https://a@b@oauth2.googleapis.com"},
 	}
 	for _, tc := range allowed {
 		t.Run("allow/"+tc.name, func(t *testing.T) {
@@ -432,6 +460,35 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 		// Fail-closed, documented in review r2 Nit 5.
 		{"trailing-dot FQDN (fail-closed, known)", "https://oauth2.googleapis.com."},
 		{"plain attacker host", "https://evil.example"},
+		// A host allowlist is not a URL allowlist. These two rows are caught
+		// ONLY by the '?'/'#' guard — the host really is permitted. The first
+		// is the measured payload from review r3: the trailing `&z=` swallows
+		// the path di_build_iap_patch_url appends, so the PATCH lands on
+		// another project's Instance with the operator's live token and a
+		// valid updateMask, and the operator's own Instance keeps IAP off.
+		{"permitted host retargeting the PATCH via a query",
+			"https://us-east4-run.googleapis.com/v2/projects/victim/locations/us-east4/instances/victim?updateMask=iapEnabled&z="},
+		{"permitted host with a fragment", "https://oauth2.googleapis.com/tokeninfo#x"},
+		// Not hostnames at all. Each ends in a permitted suffix and passes the
+		// allowlist; only the positive host-shape assertion rejects them. curl
+		// refuses all ten (exit 3, code 000) — that is the point: the rule must
+		// not depend on the client for its own postcondition.
+		{"space in the host", "https://evil.example .googleapis.com"},
+		{"tab in the host", "https://evil.example\t.googleapis.com"},
+		{"newline in the host", "https://evil.example\n.googleapis.com"},
+		{"carriage return in the host", "https://evil.example\r.googleapis.com"},
+		{"percent-encoded slash in the host", "https://evil.example%2f.googleapis.com"},
+		{"percent-encoded hash in the host", "https://evil.example%23.googleapis.com"},
+		{"percent-encoded question mark in the host", "https://evil.example%3f.googleapis.com"},
+		{"semicolon in the host", "https://evil.example;.googleapis.com"},
+		{"comma in the host", "https://evil.example,.googleapis.com"},
+		{"non-numeric port", "https://evil.example:8x.googleapis.com"},
+		// Scheme. Only http(s) can carry the Bearer header, but the rule says
+		// so itself rather than leaning on curl to decline.
+		{"non-http scheme on a permitted host", "dict://x.googleapis.com"},
+		{"file scheme", "file:///etc/passwd"},
+		{"no scheme", "evil.example"},
+		{"scheme-relative", "//evil.example"},
 	}
 	for _, tc := range rejected {
 		t.Run("reject/"+tc.name, func(t *testing.T) {
