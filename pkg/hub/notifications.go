@@ -650,6 +650,18 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID st
 		return
 	}
 
+	// F2: resolve agent slug for display. After the B5 auth-derivation
+	// override, SenderName may be a raw UUID (the agent ID). Resolve it
+	// to the human-readable slug for the notification text. This runs
+	// AFTER the muted and presence gates so the lookup only fires when a
+	// notification will actually be written. On failure, fall back to the
+	// current label — display resolution must never drop a notification.
+	if msg.SenderID != "" {
+		if agent, err := cn.store.GetAgent(ctx, msg.SenderID); err == nil && agent.Slug != "" {
+			senderName = agent.Slug
+		}
+	}
+
 	message := formatChatNotification(ChatNotificationDMReceived, senderName, "", msg.Preview)
 
 	notif := cn.buildChatNotification(recipientUserID, ChatNotificationDMReceived, message, msg.ProjectID)
@@ -661,7 +673,10 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID st
 	}
 
 	// A DM has no thread name; make sure a stale one cannot ride along.
+	// Also propagate the resolved slug (if any) so the SSE event payload
+	// carries the human-readable name, not the raw UUID.
 	dmMsg := msg
+	dmMsg.SenderName = senderName
 	dmMsg.ConversationName = ""
 	cn.events.PublishChatNotification(ctx, notif, dmMsg)
 	cn.log.Info("DM notification created",

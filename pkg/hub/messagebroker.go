@@ -708,6 +708,16 @@ func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID stri
 
 	p.log.Debug("Broadcasting to project agents", "project_id", projectID, "count", len(result.Items))
 
+	// R3b: warn when a broadcast carries an agent-prefixed Sender but no
+	// SenderID. Without SenderID the self-skip cannot fire and the sender
+	// will silently receive its own broadcast. Do not guess from the slug —
+	// that is the bug B5/R1 removed. Just make it loud so it is caught in
+	// logs rather than silently regressing.
+	if msg.Broadcasted && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
+		p.log.Warn("Broadcast has agent Sender but empty SenderID — self-skip not possible",
+			"sender", msg.Sender, "projectID", projectID)
+	}
+
 	for _, agent := range result.Items {
 		// B5/R1: skip the sender by ID, not by the display-label Sender field.
 		// Sender is a display label that may be in UUID form after the B5
@@ -733,6 +743,12 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 	}
 
 	p.log.Debug("Global broadcast to all agents", "count", len(result.Items))
+
+	// R3b: same warning as fanOutToProject — see comment there.
+	if msg.Broadcasted && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
+		p.log.Warn("Global broadcast has agent Sender but empty SenderID — self-skip not possible",
+			"sender", msg.Sender)
+	}
 
 	for _, agent := range result.Items {
 		// B5/R1: skip the sender by ID, not by the display-label Sender field.

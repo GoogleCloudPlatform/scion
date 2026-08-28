@@ -911,3 +911,92 @@ func TestBroadcast_B5F1c_SelfSkipUsesAuthNotSender(t *testing.T) {
 			len(senderMsgs.Items))
 	}
 }
+
+// B5/R2: fanOutGlobal self-skip must use SenderID, not Sender slug.
+// fanOutGlobal is currently unreachable from the HTTP surface (PublishBroadcast
+// only receives non-empty projectID), but fixing the class without testing
+// every member leaves a latent bug that returns when a global broadcast
+// endpoint is added.
+//
+// Direct sink test — no HTTP plumbing.
+func TestBroker_R2_FanOutGlobalSelfSkipBySenderID(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectA := &store.Project{
+		ID: api.NewUUID(), Name: "r2-pa", Slug: "r2-pa",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, projectA); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	sender := &store.Agent{
+		ID: api.NewUUID(), Name: "global-sender", Slug: "global-sender",
+		ProjectID: projectA.ID, Phase: "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	peer := &store.Agent{
+		ID: api.NewUUID(), Name: "global-peer", Slug: "global-peer",
+		ProjectID: projectA.ID, Phase: "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	if err := s.CreateAgent(ctx, sender); err != nil {
+		t.Fatalf("CreateAgent sender: %v", err)
+	}
+	if err := s.CreateAgent(ctx, peer); err != nil {
+		t.Fatalf("CreateAgent peer: %v", err)
+	}
+
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+
+	// Subscribe agents so deliverToAgent can find them.
+	proxy.subscribeAgent(projectA.ID, sender.Slug)
+	proxy.subscribeAgent(projectA.ID, peer.Slug)
+
+	// Call fanOutGlobal directly — SenderID is the sender agent's UUID,
+	// Sender is the UUID form (as it would be after the B5 override).
+	msg := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Type:        messages.TypeInstruction,
+		Sender:      "agent:" + sender.ID, // UUID form, not slug
+		SenderID:    sender.ID,
+		Msg:         "global broadcast",
+		Broadcasted: true,
+	}
+	proxy.fanOutGlobal(ctx, msg)
+
+	// Check stored messages.
+	countFor := func(agentID string) int {
+		res, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agentID}, store.ListOptions{})
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		return len(res.Items)
+	}
+
+	peerN := countFor(peer.ID)
+	selfN := countFor(sender.ID)
+	t.Logf("fanOutGlobal delivered: peer=%d self=%d", peerN, selfN)
+
+	if peerN == 0 {
+		t.Fatalf("INCONCLUSIVE: peer received nothing — fanOutGlobal did not deliver")
+	}
+	if selfN > 0 {
+		t.Errorf("SELF-DELIVERY in fanOutGlobal: sender received its own broadcast (%d rows). "+
+			"fanOutGlobal must skip by SenderID, not by the Sender display label.", selfN)
+	}
+}
