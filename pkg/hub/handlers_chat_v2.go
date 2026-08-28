@@ -693,11 +693,8 @@ func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef s
 	if err != nil || a == nil {
 		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
 	}
-	if a.ProjectID != projectID {
+	if a.ProjectID != projectID || !a.DeletedAt.IsZero() {
 		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
-	}
-	if !a.DeletedAt.IsZero() {
-		return fmt.Errorf("defaultAgent %q has been deleted", agentRef)
 	}
 	return nil
 }

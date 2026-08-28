@@ -3210,8 +3210,8 @@ func TestDEF31_MutationTest_LookupScoping(t *testing.T) {
 				"removed or bypassed — this is the DEF-31 defect. Agent " + f.deletedA.ID +
 				" is soft-deleted but was accepted")
 		}
-		if !strings.Contains(err.Error(), "deleted") {
-			t.Errorf("unexpected error message: %v (expected mention of 'deleted')", err)
+		if !strings.Contains(err.Error(), "not found in this project") {
+			t.Errorf("unexpected error message: %v (expected 'not found in this project')", err)
 		}
 	})
 
