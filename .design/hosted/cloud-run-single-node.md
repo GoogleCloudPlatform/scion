@@ -238,7 +238,7 @@ server cannot start. That command is not on every Cloud SDK: it is **absent at
 Versions 576–581 are unmeasured, so **this design states no version floor**. Writing
 one down would publish a number nobody has checked.
 
-Two consequences for tooling:
+Three consequences for tooling:
 
 - **Probe for the noun; do not compare version strings.** The deploy script must
   refuse early with a message that names the missing command. A hardcoded floor would
@@ -249,6 +249,21 @@ Two consequences for tooling:
   and has no `--sandbox-launcher`, so following it produces an Instance whose scion
   server crashes on startup. The diagnostic has to say so, because the platform's
   suggestion is actively misleading.
+- **Where the deploy leaves `gcloud` and speaks REST directly, it inherits a narrower
+  credential contract — and must not assume otherwise.** IAP configuration has no
+  `gcloud` flag, so it is applied by a hand-authenticated REST PATCH. That PATCH
+  rejected credential types the `gcloud` step immediately before it had accepted,
+  returning `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`. The operator experience is the
+  pathological one: the deploy authenticates, does real work, and *then* fails on
+  credentials — so the error arrives after the point where the operator has concluded
+  their auth is fine.
+
+  **The general form is the same argument this section makes about `K_SERVICE`: a signal
+  that answers a nearby question is not the same as one that answers yours.** "`gcloud`
+  authenticated successfully" answers *can gcloud use this credential*, not *can the REST
+  endpoint use this credential*. Any hand-rolled call must validate the credential
+  against the surface that will consume it, as early as the deploy can do so — the
+  preflight, not the point of use.
 
 ### 4.4 The runtime is named `cloudrun-sandbox`
 
@@ -319,6 +334,53 @@ for a sandboxed one.
 address, discovered at startup, with a guard that refuses to bind `0.0.0.0`. This is
 what makes ADC work inside a sandbox.
 
+### 4.6 The deploy runs on the operator's machine, and that machine is not ours
+
+Every other decision in this document concerns software we build and run. This one
+concerns software we build and *someone else* runs, on hardware we have never seen.
+§1.3 begins *"an operator with a GCP project runs one deploy command"* — so
+`scripts/single-node/deploy.sh` executes on a laptop, and the tier is only as portable
+as that script.
+
+**This section exists because its absence caused a §1 blocker.** The deploy script used
+`${var,,}`, a bash 4.0 parameter expansion, at two sites. macOS ships **bash 3.2.57** —
+the last GPLv2 release — and has since 2007. The script died on line 286 the first time
+it was run on a Mac. Five review rounds, 42 Go tests, 62 shellcheck files and a live
+end-to-end deploy all passed beforehand, because **every one of them ran on Linux with
+GNU userland and bash 5.** Nothing was wrong with the review; the review had no way to
+see it. **Nobody wrote the requirement down, so nobody asked, so nothing tested it.**
+
+**The decision: the supported operator environment is stock macOS and mainstream Linux,
+with no prerequisite installation step.** "Install a newer bash first" is a second
+command, and §1.3 says *one*. This is load-bearing in the strict sense — it constrains
+every line of the deploy script permanently, and it is expensive to reverse once
+operators rely on it.
+
+What that commits us to, measured on an arm64 Darwin 25.6.0 machine on 2026-08-28:
+
+| Constraint | Measured | Consequence for the deploy script |
+|---|---|---|
+| `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `declare -A`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc`, no `printf -v` |
+| `=~` quoted right-hand side | Trap confirmed present | From 3.2 on, quoting the pattern makes it match **literally**. The RHS must stay unquoted, and this is a security-relevant line — it feeds a host-shape assertion |
+| BSD `sed` | Rejects the GNU-style `--help` extractor | Assume BSD `sed`; no GNU-only addressing |
+| BSD `grep` 2.6.0-FreeBSD | — | No `-P` |
+| `awk` 20200816 (BWK) | — | Not `gawk`; no `gensub` |
+| `mktemp` with no template | Works | Not the portability hazard it was assumed to be |
+
+**The general rule, which outlives the specific list: a portability fix is a semantics
+change until proven otherwise.** The obvious repair for `${host,,}` is a `tr` command
+substitution — and command substitution strips trailing newlines, which silently flipped
+three verdicts of the host-shape assertion from REJECT to ALLOW. A portability edit to a
+security-relevant line must be proven byte-identical on adversarial inputs, not merely
+observed to stop erroring.
+
+**The gate is a CI job on a native macOS runner**, not a hand-built old bash on Linux.
+GitHub's macOS runners ship bash 3.2.57 natively, so the interpreter needs no artifact
+to fetch, verify or compile — and the runner also supplies the BSD userland and arm64
+hardware, which a compiled bash on Linux would not. The runner image is pinned to a
+specific version rather than `macos-latest`, because a moving alias silently retires the
+gate the day the fleet upgrades past bash 3.2.
+
 ## 5. Durability — Tier 0, pure ephemeral
 
 Workspaces and the SQLite control plane live on the Instance's ephemeral filesystem.
@@ -358,6 +420,28 @@ rather than merely warn.
 invoker check is off and IAP is the sole perimeter. A six-way header × token ×
 audience matrix confirmed that IAP rejects all unauthenticated and mis-audienced
 requests, and that the hub is unreachable without a valid IAP assertion.
+
+**That verification covers the steady state. It says nothing about the deploy itself,
+and the deploy is not atomic.** The Instance is created first and IAP is configured
+afterwards, by a separate REST PATCH. Two windows follow from that ordering, and the
+paragraph above closes neither:
+
+- **Between create and PATCH**, the Instance exists. If it is routable in that interval
+  with the invoker check already off, the perimeter is absent while it is reachable.
+- **If the PATCH fails**, the deploy exits non-zero having already created an Instance.
+  A failed deploy that leaves a running artifact behind is worse than one that leaves
+  nothing, because the operator's mental model is "it failed, so nothing happened."
+
+**Requirement: a deploy that does not finish must not leave a reachable Instance without
+IAP.** Either the Instance is not routable until the PATCH lands, or a failed PATCH tears
+the Instance down. **This is stated as a requirement and is NOT yet measured** — the
+window's existence and duration are unknown, and "the create probably isn't serving yet"
+is an assumption, not a finding. §10 criterion 12 exists to settle it.
+
+The order of those two clauses matters. **"Fail closed" here means fail to a state with
+no Instance, not fail to an Instance with no perimeter.** §6.1's footgun is that the open
+configuration is the supported one; a partial deploy is the cheapest way to reach it by
+accident.
 
 ### 6.2 The hub work was already done
 
@@ -551,5 +635,21 @@ Additionally, for review:
 10. Autodetect selects `cloudrun-sandbox` on an Instance and does not select it
     anywhere else (§4.3).
 11. The omni image is produced by the chained build, and no harness version is pinned
-    in two places (§4.1). **Verified — run.** The chained build produces the omni
+    in two places (§4.1).
+12. **A deploy interrupted or failed between Instance creation and IAP configuration
+    leaves no Instance reachable without IAP** (§6.1). Verify by inducing the failure,
+    not by reading the ordering. The check is whether an Instance exists *and answers*
+    after a failed run — an Instance that exists but was never routable satisfies this;
+    one that answers without an IAP challenge does not, for any length of time.
+13. **The deploy script runs to completion on stock macOS with bash 3.2 and BSD
+    userland** (§4.6), with no prerequisite installation step. Enforced by CI on a
+    pinned native macOS runner. **Read the interpreter version the job prints before
+    trusting a green** — a gate that runs the suite under the wrong shell passes for
+    the wrong reason, and this one is checking for the absence of a runtime error, which
+    is the failure mode most easily faked by not executing the line at all.
+
+**On 12 and 13, the same caution applies and it is the lesson of this tier so far:
+both are negative criteria.** "No unprotected Instance" and "no bash-4 construct" are
+satisfied by a check that never ran. Neither should be recorded as met until it has
+been observed *failing* against a deliberately broken input. **Verified — run.** The chained build produces the omni
     image and the result is verified by digest.
