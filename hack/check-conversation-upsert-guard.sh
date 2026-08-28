@@ -67,7 +67,10 @@ rc=0
 # --- Check 1: Go method calls that mint conversations ---
 # UpsertConversationByExternalRef, CreateConversation, and AddParticipant
 # must only be called from pkg/messaging/ and pkg/store/.
-grep -rn 'UpsertConversationByExternalRef\|\.CreateConversation(\|\.AddParticipant(' \
+# Pattern uses POSIX ERE (-E flag). Do not rewrite with BRE alternation (\|)
+# or word-boundary (\b) — those are GNU extensions that silently match nothing
+# on BSD/macOS grep, causing the guard to report false-clean.
+grep -rEn 'UpsertConversationByExternalRef|\.CreateConversation\(|\.AddParticipant\(' \
   --include='*.go' \
   --exclude='*_test.go' \
   . \
@@ -91,8 +94,11 @@ fi
 # .Conversation.Create() and .Conversation.CreateBulk() must only appear
 # inside pkg/store/ (where the ent adapter lives). pkg/ent/ is excluded
 # because it contains auto-generated code from the ent framework.
+# Pattern uses POSIX ERE (-E flag). Do not rewrite with BRE alternation (\|)
+# or word-boundary (\b) — those are GNU extensions that silently match nothing
+# on BSD/macOS grep, causing the guard to report false-clean.
 : >"$tmp"
-grep -rn '\.Conversation\.Create\b\|\.Conversation\.CreateBulk\b' \
+grep -rEn '\.Conversation\.Create(Bulk)?([^a-zA-Z]|$)' \
   --include='*.go' \
   --exclude='*_test.go' \
   . \
@@ -114,8 +120,11 @@ fi
 # INSERT OR REPLACE INTO, with optional quoting on the table name, and
 # case-insensitive to catch any casing variant.
 # Allowed only in pkg/store/.
+# Pattern uses POSIX ERE (-E flag). Do not rewrite with BRE alternation (\|)
+# or word-boundary (\b) — those are GNU extensions that silently match nothing
+# on BSD/macOS grep, causing the guard to report false-clean.
 : >"$tmp"
-grep -rni 'INSERT[[:space:]]\+\(OR[[:space:]]\+[A-Z]\+[[:space:]]\+\)\?INTO[[:space:]]\+[\"]\?conversations[\"]\?' \
+grep -rEni 'INSERT[[:space:]]+(OR[[:space:]]+[A-Z]+[[:space:]]+)?INTO[[:space:]]+"?conversations"?' \
   --include='*.go' \
   --exclude='*_test.go' \
   . \
