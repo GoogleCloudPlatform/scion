@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -88,6 +88,10 @@ compat-literals:
 # apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
 check-authz-guards:
 	@./hack/check-authz-guards.sh
+
+## check-conversation-upsert-guard: Verify UpsertConversationByExternalRef is only called from pkg/messaging and pkg/store
+check-conversation-upsert-guard:
+	@./hack/check-conversation-upsert-guard.sh
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
@@ -161,12 +165,12 @@ fmt-check:
 	@echo "Go formatting OK."
 
 ## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
-ci: fmt-check lint compat-literals check-authz-guards test-fast build
+ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint compat-literals check-authz-guards golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint compat-literals check-authz-guards check-conversation-upsert-guard golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
