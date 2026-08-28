@@ -19,11 +19,15 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,4 +267,124 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 		t.Fatalf("the agent's own message must not be starved by its transcript mirror: got %d: %s",
 			rr.Code, rr.Body.String())
 	}
+}
+
+// recordingBus is a fan-out spoke that keeps what the handler published, so a
+// test can assert the route the handler chose without wiring persistence.
+type recordingBus struct {
+	mu   sync.Mutex
+	sent []*messages.StructuredMessage
+}
+
+func (b *recordingBus) Publish(_ context.Context, _ string, msg *messages.StructuredMessage) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sent = append(b.sent, msg)
+	return nil
+}
+
+func (b *recordingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, nil
+}
+
+func (b *recordingBus) Close() error { return nil }
+
+func (b *recordingBus) last() *messages.StructuredMessage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.sent) == 0 {
+		return nil
+	}
+	return b.sent[len(b.sent)-1]
+}
+
+// TestOutboundMessage_ReplyAffinityRestoresRoute exercises the affinity block
+// end to end: with a webchat store and a registered channel present, an agent
+// reply that names no route is put back where the user last spoke.
+func TestOutboundMessage_ReplyAffinityRestoresRoute(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	// A fan-out bus with a "web" spoke, so the channel the affinity row names
+	// passes the registered-channel check below it.
+	rec := &recordingBus{}
+	bus := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "web", ChannelID: "web", Bus: rec, Observer: true},
+	}, slog.Default())
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(bus, s, srv.events, func() AgentDispatcher { return nil }, slog.Default()))
+
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "aff", Slug: "aff", Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	human := &store.User{ID: api.NewUUID(), Email: "human@example.com", DisplayName: "Human", Status: store.UserStatusActive}
+	if err := s.CreateUser(ctx, human); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	agent := &store.Agent{
+		ID: api.NewUUID(), Name: "a", Slug: "a", ProjectID: project.ID,
+		Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// The user last spoke in a web thread.
+	if err := wcs.RecordChannel(ctx, human.ID, project.ID, agent.ID, "web", "topic-42", time.Now()); err != nil {
+		t.Fatalf("RecordChannel: %v", err)
+	}
+
+	send := func(t *testing.T, threadID string) *messages.StructuredMessage {
+		t.Helper()
+		body, _ := json.Marshal(OutboundMessageRequest{
+			Recipient: "user:human@example.com",
+			Msg:       "reply",
+			ThreadID:  threadID,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims: jwt.Claims{Subject: agent.ID}, ProjectID: project.ID,
+		}}))
+		rr := httptest.NewRecorder()
+		srv.handleAgentOutboundMessage(rr, req, agent.ID)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		m := rec.last()
+		if m == nil {
+			t.Fatal("nothing was published to the spoke")
+		}
+		return m
+	}
+
+	t.Run("an untagged reply is routed back to the thread", func(t *testing.T) {
+		m := send(t, "")
+		if m.Channel != "web" {
+			t.Errorf("channel = %q, want web", m.Channel)
+		}
+		if m.ThreadID != "topic-42" {
+			t.Errorf("thread = %q, want topic-42; an untagged reply lands beside the conversation without it", m.ThreadID)
+		}
+	})
+
+	t.Run("a thread named by the caller is not overwritten", func(t *testing.T) {
+		m := send(t, "topic-99")
+		if m.ThreadID != "topic-99" {
+			t.Errorf("thread = %q, want topic-99", m.ThreadID)
+		}
+	})
 }

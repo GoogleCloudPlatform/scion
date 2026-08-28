@@ -120,14 +120,15 @@ func TestWebChatStore_RecordChannel_Insert(t *testing.T) {
 
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)
-	err := store.RecordChannel(ctx, "user1", "proj1", "agent1", "web", now)
+	err := store.RecordChannel(ctx, "user1", "proj1", "agent1", "web", "topic-1", now)
 	require.NoError(t, err)
 
-	var channel string
-	err = db.QueryRow(`SELECT last_channel FROM webchat_conversation_context
-		WHERE user_id = 'user1' AND project_id = 'proj1' AND agent_id = 'agent1'`).Scan(&channel)
+	var channel, threadID string
+	err = db.QueryRow(`SELECT last_channel, last_thread_id FROM webchat_conversation_context
+		WHERE user_id = 'user1' AND project_id = 'proj1' AND agent_id = 'agent1'`).Scan(&channel, &threadID)
 	require.NoError(t, err)
 	require.Equal(t, "web", channel)
+	require.Equal(t, "topic-1", threadID)
 }
 
 func TestWebChatStore_RecordChannel_Upsert(t *testing.T) {
@@ -138,10 +139,10 @@ func TestWebChatStore_RecordChannel_Upsert(t *testing.T) {
 	t1 := time.Now().Truncate(time.Second)
 	t2 := t1.Add(5 * time.Minute)
 
-	err := store.RecordChannel(ctx, "user1", "proj1", "agent1", "web", t1)
+	err := store.RecordChannel(ctx, "user1", "proj1", "agent1", "web", "topic-1", t1)
 	require.NoError(t, err)
 
-	err = store.RecordChannel(ctx, "user1", "proj1", "agent1", "discord", t2)
+	err = store.RecordChannel(ctx, "user1", "proj1", "agent1", "discord", "topic-2", t2)
 	require.NoError(t, err)
 
 	var channel string
@@ -151,10 +152,14 @@ func TestWebChatStore_RecordChannel_Upsert(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
-	err = db.QueryRow(`SELECT last_channel FROM webchat_conversation_context
-		WHERE user_id = 'user1' AND project_id = 'proj1' AND agent_id = 'agent1'`).Scan(&channel)
+	var threadID string
+	err = db.QueryRow(`SELECT last_channel, last_thread_id FROM webchat_conversation_context
+		WHERE user_id = 'user1' AND project_id = 'proj1' AND agent_id = 'agent1'`).Scan(&channel, &threadID)
 	require.NoError(t, err)
 	require.Equal(t, "discord", channel)
+	// The thread moves with the channel: a reply must not be put into the
+	// thread of a conversation the user has since left.
+	require.Equal(t, "topic-2", threadID)
 }
 
 // --- WebChannelBus tests ---
@@ -619,4 +624,54 @@ func TestTouchDMActivity_EmptyMessageID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "old-msg", lastMsgID, "empty messageID should not overwrite last_message_id")
 	require.True(t, activityAt.Valid, "last_activity_at should be set")
+}
+
+func TestWebChatStore_GetLastRoute(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	t.Run("no row yields an empty route, not an error", func(t *testing.T) {
+		ch, th, err := store.GetLastRoute(ctx, "nobody", "proj1", "agent1")
+		require.NoError(t, err)
+		require.Empty(t, ch)
+		require.Empty(t, th)
+	})
+
+	t.Run("returns the channel and the thread within it", func(t *testing.T) {
+		require.NoError(t, store.RecordChannel(ctx, "user1", "proj1", "agent1", "web", "topic-1", now))
+		ch, th, err := store.GetLastRoute(ctx, "user1", "proj1", "agent1")
+		require.NoError(t, err)
+		require.Equal(t, "web", ch)
+		require.Equal(t, "topic-1", th)
+	})
+
+	t.Run("a channel without threads yields a channel and no thread", func(t *testing.T) {
+		require.NoError(t, store.RecordChannel(ctx, "user2", "proj1", "agent1", "telegram", "", now))
+		ch, th, err := store.GetLastRoute(ctx, "user2", "proj1", "agent1")
+		require.NoError(t, err)
+		require.Equal(t, "telegram", ch)
+		require.Empty(t, th, "a threadless channel must not inherit a stale thread")
+	})
+}
+
+func TestAddConversationContextThreadID(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	sq, ok := store.(*sqliteWebChatStore)
+	require.True(t, ok, "expected the sqlite store")
+
+	// Init already ran it once; running it again must be a no-op rather than a
+	// duplicate-column error.
+	require.NoError(t, sq.addConversationContextThreadID())
+	require.NoError(t, sq.addConversationContextThreadID())
+
+	ctx := context.Background()
+	require.NoError(t, store.RecordChannel(ctx, "u", "p", "a", "web", "topic-9", time.Now()))
+	_, th, err := store.GetLastRoute(ctx, "u", "p", "a")
+	require.NoError(t, err)
+	require.Equal(t, "topic-9", th)
 }

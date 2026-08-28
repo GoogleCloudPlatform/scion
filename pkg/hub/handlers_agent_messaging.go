@@ -187,16 +187,22 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Reply affinity (Phase 6, AC22): when the agent sends an untagged reply
 	// (no explicit channel), check webchat_conversation_context for the
-	// (recipient, project, agent) triple. If a row exists, route to the
-	// channel the user last spoke from. If no row exists, leave channel
-	// empty so the message fans out to all spokes (today's default behavior).
+	// (recipient, project, agent) triple. If a row exists, route to where the
+	// user last spoke from. If no row exists, leave the route empty so the
+	// message fans out to all spokes (today's default behavior).
+
 	if req.Channel == "" && recipientID != "" && s.webChatStore != nil && s.GetMessageBrokerProxy() != nil {
-		if lastCh, err := s.webChatStore.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
+		lastCh, lastThread, err := s.webChatStore.GetLastRoute(ctx, recipientID, agent.ProjectID, agent.ID)
+		switch {
+		case err != nil:
 			s.messageLog.Error("Failed to look up reply affinity",
 				"recipient_id", recipientID, "agent_id", agent.ID, "error", err)
 			// Non-fatal: fall through to fan-out-to-all behavior.
-		} else if lastCh != "" {
+		case lastCh != "":
 			req.Channel = lastCh
+			if req.ThreadID == "" {
+				req.ThreadID = lastThread
+			}
 		}
 	}
 

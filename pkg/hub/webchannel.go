@@ -136,7 +136,7 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 	}
 
 	// Reply affinity — still needed for cross-channel reply routing.
-	if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", time.Now().UTC()); err != nil {
+	if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", msg.ThreadID, time.Now().UTC()); err != nil {
 		b.log.Error("Failed to record conversation context",
 			"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
 		return err
