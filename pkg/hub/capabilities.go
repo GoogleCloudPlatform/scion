@@ -191,10 +191,8 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 		return &Capabilities{Actions: []string{}}
 	}
 
-	// Admin short-circuit: return all actions
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		return allActions(actions)
-	}
+	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
+	// Hub-admins get correct capabilities from their role bindings.
 	if IsScopedUserIdentity(identity) {
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
@@ -230,10 +228,8 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		return &Capabilities{Actions: []string{}}
 	}
 
-	// Admin short-circuit
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		return allActions(actions)
-	}
+	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
+	// Hub-admins get correct capabilities from their role bindings.
 
 	resource := Resource{
 		Type:       resourceType,
@@ -277,15 +273,8 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
-	// Admin short-circuit: return all actions for all resources
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		allCap := allActions(actions)
-		caps := make([]*Capabilities, len(resources))
-		for i := range caps {
-			caps[i] = allCap
-		}
-		return caps
-	}
+	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
+	// Hub-admins get correct capabilities from their role bindings.
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
@@ -293,9 +282,6 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		}
 		return caps
 	}
-
-	// Pre-fetch principals and policies once for the identity
-	principals, policies := a.precomputeForIdentity(ctx, identity)
 
 	// Per-batch project ownership cache. Most batches list resources from a
 	// single project, so this collapses to one lookup per project.
@@ -336,7 +322,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 
 		var allowed []string
 		for _, action := range actions {
-			decision := a.checkAccessPrecomputed(identity, principals, policies, resource, action)
+			decision := a.CheckAccess(ctx, identity, resource, action)
 			if decision.Allowed {
 				allowed = append(allowed, string(action))
 			}

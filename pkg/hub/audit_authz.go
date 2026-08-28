@@ -242,10 +242,20 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 
 	// Determine the principal for the explain request.
 	explainIdentity := identity
+	// Explaining for a different principal reveals authorization internals and
+	// is restricted to users with hub.audit.read (super-admin only). The Decide
+	// check routes through checkAccessForUser, so the step-1 super-admin bypass
+	// grants this automatically without a seed policy.
 	isSuperAdmin := false
-
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		isSuperAdmin = true
+	if user, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: "hub", ID: "hub"},
+			Action:     Action("manage"),
+			Permission: "hub.audit.read",
+		})
+		isSuperAdmin = decision.Allowed
 	}
 
 	// Non-admin cannot explain for a different principal.

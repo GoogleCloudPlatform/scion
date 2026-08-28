@@ -90,11 +90,67 @@ func TestComputeCapabilities_AdminGetsAllActions(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
+	// Super-admin (role=admin) gets all actions via CheckAccess/Decide step-1 bypass
+	// even after the IsUnscopedLocalPlatformAdmin short-circuit was removed.
 	admin := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
 	resource := Resource{Type: "agent", ID: "some-agent"}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, admin, resource)
 	assert.Equal(t, expectedAgentResourceActions(), caps.Actions)
+}
+
+func TestComputeCapabilities_HubAdminGetsOnlyPolicyGrantedActions(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a non-admin user who has a policy granting only "read" and "update" on agents.
+	// This simulates a hub-admin who has role bindings but is not a super-admin.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("user-hubadmin-cap"), Email: "hubadmin-cap@test.com", DisplayName: "HubAdmin", Role: "member", Status: "active",
+	}))
+
+	policy := &store.Policy{
+		ID: tid("policy-hubadmin-cap"), Name: "Hub Admin Agent Read/Update", ScopeType: "hub",
+		ResourceType: "agent", Actions: []string{"read", "update"}, Effect: "allow",
+	}
+	require.NoError(t, s.CreatePolicy(ctx, policy))
+	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID: tid("policy-hubadmin-cap"), PrincipalType: "user", PrincipalID: tid("user-hubadmin-cap"),
+	}))
+
+	user := NewAuthenticatedUser(tid("user-hubadmin-cap"), "hubadmin-cap@test.com", "HubAdmin", "member", "api")
+	resource := Resource{Type: "agent", ID: tid("agent-1")}
+
+	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
+	// Hub-admin should get exactly the policy-granted actions, not all and not zero.
+	assert.Equal(t, []string{"read", "update"}, caps.Actions)
+}
+
+func TestComputeScopeCapabilities_AdminGetsAllScopeActions(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+
+	// Super-admin still gets all scope actions after short-circuit removal.
+	admin := NewAuthenticatedUser("admin-scope-regr", "admin-scope-regr@example.com", "Admin", "admin", "api")
+	caps := srv.authzService.ComputeScopeCapabilities(ctx, admin, "", "", "agent")
+	assert.Equal(t, []string{"create", "list", "stop_all"}, caps.Actions)
+}
+
+func TestComputeCapabilitiesBatch_AdminGetsAllAfterConversion(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+
+	// Super-admin still gets all actions per resource in batch after short-circuit removal.
+	admin := NewAuthenticatedUser("admin-batch-regr", "admin-batch-regr@example.com", "Admin", "admin", "api")
+	resources := []Resource{
+		{Type: "agent", ID: tid("agent-1")},
+		{Type: "agent", ID: tid("agent-2")},
+	}
+	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, admin, resources, "agent")
+	require.Len(t, caps, 2)
+	for _, cap := range caps {
+		assert.Equal(t, expectedAgentResourceActions(), cap.Actions)
+	}
 }
 
 func TestComputeCapabilities_OwnerGetsAllActions(t *testing.T) {

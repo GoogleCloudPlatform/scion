@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // =============================================================================
@@ -389,6 +391,64 @@ func TestExplainAPI_DeniedForOtherPrincipal(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for non-admin explaining other principal, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestExplainAPI_MemberWithoutAuditReadCannotExplainForOthers(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// A member user without hub.audit.read cannot explain for another principal,
+	// even with other hub-level policies. This verifies the Decide-based gate
+	// that replaced the IsUnscopedLocalPlatformAdmin check.
+	memberID := tid("explain-member-noaudit")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: memberID, Email: "member-noaudit@test.com", DisplayName: "Member", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, memberID)
+
+	body := map[string]interface{}{
+		"resource":    map[string]interface{}{"type": "agent", "id": tid("some-agent")},
+		"action":      "read",
+		"principalId": tid("another-user"),
+	}
+	bodyBytes, _ := json.Marshal(body)
+	req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", bodyBytes,
+		NewAuthenticatedUser(memberID, "member-noaudit@test.com", "Member", "member", "api"))
+	rec := httptest.NewRecorder()
+	srv.handleAuthzExplain(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "member without hub.audit.read must be denied explain-for-other")
+}
+
+func TestExplainAPI_SuperAdminCanExplainForOthersViaDecide(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Super-admin (role=admin) can still explain for another principal after
+	// the IsUnscopedLocalPlatformAdmin check was replaced with a Decide call.
+	// The step-1 admin bypass in checkAccessForUser grants hub.audit.read.
+	targetID := tid("explain-target-decide")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: "target-decide@test.com", DisplayName: "Target", Role: "member", Status: "active",
+	}))
+
+	project := &store.Project{
+		ID: tid("explain-decide-project"), Name: "Explain Decide Test", Slug: "explain-decide",
+		Visibility: "private", CreatedBy: DevUserID, OwnerID: DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	body := map[string]interface{}{
+		"resource":      map[string]interface{}{"type": "project", "id": project.ID, "projectId": project.ID},
+		"action":        "read",
+		"principalId":   targetID,
+		"principalKind": "user",
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/authz/explain", body)
+	assert.Equal(t, http.StatusOK, rec.Code, "super-admin must be able to explain for other principals: %s", rec.Body.String())
+
+	var resp explainResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Trace, "explain response must include a trace")
 }
 
 func TestExplainAPI_NoSecretLeakage(t *testing.T) {
