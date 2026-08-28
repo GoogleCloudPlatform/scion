@@ -175,6 +175,15 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 			}),
 			action: ActionCreate,
 		},
+		{
+			name:         "gcp_service_account:read scope + user has gcp_service_account.read binding",
+			permissionID: "gcp_service_account.read",
+			uatScope:     "gcp_service_account:read",
+			resource: gcpServiceAccountResource(&store.GCPServiceAccount{
+				ID: tid("sa-int-1"), Scope: store.ScopeProject, ScopeID: projectID,
+			}),
+			action: ActionRead,
+		},
 	}
 
 	for _, tc := range tests {
@@ -765,6 +774,40 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 		// NOTE: broker:read and broker:list are excluded here because brokers
 		// are hub-level resources (no project parent) and UATs always deny
 		// hub-level resources. See TestEnforceUATConstraints_BrokerHubLevel.
+
+		// gcp_service_account — project-scoped (has project parent)
+		{
+			name:  "gcp_service_account:read",
+			scope: "gcp_service_account:read",
+			resource: gcpServiceAccountResource(&store.GCPServiceAccount{
+				ID: "sa-1", Scope: store.ScopeProject, ScopeID: projectID,
+			}),
+			action: ActionRead,
+		},
+		{
+			name:  "gcp_service_account:list",
+			scope: "gcp_service_account:list",
+			resource: gcpServiceAccountResource(&store.GCPServiceAccount{
+				ID: "sa-2", Scope: store.ScopeProject, ScopeID: projectID,
+			}),
+			action: ActionList,
+		},
+		{
+			name:  "gcp_service_account:verify",
+			scope: "gcp_service_account:verify",
+			resource: gcpServiceAccountResource(&store.GCPServiceAccount{
+				ID: "sa-3", Scope: store.ScopeProject, ScopeID: projectID,
+			}),
+			action: ActionVerify,
+		},
+		{
+			name:  "gcp_service_account:assign",
+			scope: "gcp_service_account:assign",
+			resource: gcpServiceAccountResource(&store.GCPServiceAccount{
+				ID: "sa-4", Scope: store.ScopeProject, ScopeID: projectID,
+			}),
+			action: ActionAssign,
+		},
 		{
 			name:     "project:clone",
 			scope:    "project:clone",
@@ -817,6 +860,40 @@ func TestEnforceUATConstraints_UserHubLevel(t *testing.T) {
 	require.NotNil(t, result, "user resources are hub-level; UATs should deny them")
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.Reason, "token not scoped for hub-level resources")
+}
+
+// TestEnforceUATConstraints_GCPServiceAccountHubLevel verifies that hub-scoped
+// gcp_service_account resources (no project parent) are denied for UATs.
+// Project-scoped SAs are covered by TestEnforceUATConstraints_NewResourceTypes.
+func TestEnforceUATConstraints_GCPServiceAccountHubLevel(t *testing.T) {
+	authz := &AuthzService{}
+
+	// Hub-scoped SA has no ParentType/ParentID — gcpServiceAccountResource only
+	// sets those for ScopeProject.
+	hubSA := gcpServiceAccountResource(&store.GCPServiceAccount{
+		ID:    "sa-hub-1",
+		Scope: store.ScopeHub,
+	})
+
+	for _, action := range []struct {
+		name   string
+		action Action
+		scope  string
+	}{
+		{"read", ActionRead, "gcp_service_account:read"},
+		{"list", ActionList, "gcp_service_account:list"},
+		{"verify", ActionVerify, "gcp_service_account:verify"},
+		{"assign", ActionAssign, "gcp_service_account:assign"},
+	} {
+		t.Run(action.name, func(t *testing.T) {
+			scoped := NewScopedUserIdentity(nil, "some-project", []string{action.scope})
+			result := authz.enforceUATConstraints(scoped, hubSA, action.action)
+
+			require.NotNil(t, result, "hub-scoped gcp_service_account must be denied for UATs (action=%s)", action.name)
+			assert.False(t, result.Allowed)
+			assert.Contains(t, result.Reason, "token not scoped for hub-level resources")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
