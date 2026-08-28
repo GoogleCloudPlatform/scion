@@ -92,6 +92,36 @@ Five tests added per specification:
    deleted-at guards are removed, these assertions fail with diagnostic messages
    naming the defect — not a panic or compile error.
 
+## Send-path resolver tests (added in review round 2)
+
+The initial tests only exercised `validateDefaultAgent` (ingress helper). The
+reviewer correctly identified that the load-bearing resolver guard at the send
+path had zero test coverage. Three send-path tests were added:
+
+6. **TestDEF31_SendPath_ForeignProjectAgent_NotRouted** — writes a topic with a
+   foreign-project agent UUID directly via `wcs.CreateTopic` (bypassing ingress),
+   POSTs a message, asserts `type=chat` (no agent routing).
+
+7. **TestDEF31_SendPath_SoftDeletedAgent_NotRouted** — same pattern with a
+   soft-deleted same-project agent UUID.
+
+8. **TestDEF31_SendPath_ValidAgent_StillRoutes** — paired positive: a valid
+   same-project agent still routes (`type=instruction`). Without this, deleting
+   the entire routing branch passes all tests.
+
+**Mutation result:** Removed the resolver guard (lines 995-1001), ran send-path
+tests — both negative tests FAILED with assertions naming the wrong-project/
+deleted-agent routing. Positive test still passed. Restored guard — all 11 tests
+passed.
+
+## Whitespace fix (added in review round 2)
+
+Whitespace-only `defaultAgent` (`"   "`) behaved differently on the two
+endpoints: CreateThread trimmed inside the `!= ""` check (so `"   "` → `""`
+triggered a confusing validation error), while TopicPatch trimmed first (treating
+it as a clear). Fixed CreateThread to trim before the empty check, matching PATCH
+behavior.
+
 ## Pre-existing test failure
 
 `TestTemplateResource_UATConfinement/global_template_is_still_not_confined_(unchanged)`

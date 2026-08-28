@@ -3223,3 +3223,148 @@ func TestDEF31_MutationTest_LookupScoping(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// DEF-31 send-path resolver tests — end-to-end through handleConversationSend
+//
+// These tests write bad default_agent values directly via wcs.CreateTopic,
+// bypassing ingress validation, to simulate pre-existing rows in production.
+// They then POST a message through the HTTP handler and assert on the response
+// type: TypeInstruction means the resolver routed to an agent; TypeChat means
+// it fell through to the no-agent human-to-human path.
+//
+// These tests cover the load-bearing resolver guard at the send path —
+// the ONLY protection for pre-existing bad rows that ingress validation
+// cannot retroactively fix.
+// ---------------------------------------------------------------------------
+
+// TestDEF31_SendPath_ForeignProjectAgent_NotRouted simulates a pre-existing
+// topic row whose default_agent holds a UUID from another project. The
+// resolver must NOT route the message to that foreign agent.
+func TestDEF31_SendPath_ForeignProjectAgent_NotRouted(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Write a topic with the foreign-project agent UUID directly via the
+	// store, bypassing ingress validation — this simulates a pre-existing
+	// bad row.
+	topicID := tid("def31-send-foreign")
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    f.projA.ID,
+		Name:         "send-foreign",
+		DefaultAgent: f.agentB.ID, // agent from project B — foreign
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Send a message via the HTTP handler.
+	body := map[string]string{"content": "hello from bad row"}
+	rec := doRequest(t, f.srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// The resolver must NOT have routed to the foreign agent. If it did,
+	// the message type would be TypeInstruction. It should fall through to
+	// the human-to-human path and return TypeChat.
+	if resp.Type == messages.TypeInstruction {
+		t.Fatalf("RESOLVER GUARD FAILURE: message was routed to foreign-project agent %s "+
+			"(type=%s). The resolver's project-scoping guard is missing or broken — "+
+			"this is the DEF-31 defect at the send path", f.agentB.ID, resp.Type)
+	}
+	if resp.Type != messages.TypeChat {
+		t.Errorf("expected type %q (no-agent fallthrough), got %q", messages.TypeChat, resp.Type)
+	}
+}
+
+// TestDEF31_SendPath_SoftDeletedAgent_NotRouted simulates a pre-existing
+// topic row whose default_agent holds a same-project UUID that has since been
+// soft-deleted. The resolver must NOT route to it.
+func TestDEF31_SendPath_SoftDeletedAgent_NotRouted(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Write a topic with the soft-deleted agent UUID directly via the store.
+	topicID := tid("def31-send-deleted")
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    f.projA.ID,
+		Name:         "send-deleted",
+		DefaultAgent: f.deletedA.ID, // same project, but soft-deleted
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "hello from stale row"}
+	rec := doRequest(t, f.srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Type == messages.TypeInstruction {
+		t.Fatalf("RESOLVER GUARD FAILURE: message was routed to soft-deleted agent %s "+
+			"(type=%s). The resolver's deleted_at guard is missing or broken — "+
+			"this is the DEF-31 defect at the send path", f.deletedA.ID, resp.Type)
+	}
+	if resp.Type != messages.TypeChat {
+		t.Errorf("expected type %q (no-agent fallthrough), got %q", messages.TypeChat, resp.Type)
+	}
+}
+
+// TestDEF31_SendPath_ValidAgent_StillRoutes is the paired positive: a topic
+// with a valid, same-project default agent must still route messages through
+// it. Without this test, deleting the entire routing branch passes all tests.
+func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Write a topic with a valid same-project agent as default.
+	topicID := tid("def31-send-valid")
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    f.projA.ID,
+		Name:         "send-valid",
+		DefaultAgent: f.agentA.ID, // valid, same project, not deleted
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "hello from good row"}
+	rec := doRequest(t, f.srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// A valid default agent must cause agent routing — type should be
+	// TypeInstruction, not TypeChat.
+	if resp.Type != messages.TypeInstruction {
+		t.Fatalf("expected type %q (agent-routed via default), got %q — "+
+			"the default-agent routing branch may have been removed entirely",
+			messages.TypeInstruction, resp.Type)
+	}
+}

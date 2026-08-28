@@ -447,8 +447,10 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 
 	// Validate defaultAgent when provided: must be a reasonable length and
 	// must resolve to a non-deleted agent within this project.
+	// Trim first so whitespace-only input is treated as "no default agent"
+	// (matching the PATCH/clear behavior).
+	body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
 	if body.DefaultAgent != "" {
-		body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
 		if len([]rune(body.DefaultAgent)) > 200 {
 			ValidationError(w, "defaultAgent identifier is too long", nil)
 			return
