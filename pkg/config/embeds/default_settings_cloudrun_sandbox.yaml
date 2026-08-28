@@ -1,0 +1,54 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scion Agent Configuration (v1) — Cloud Run Sandbox (single-node) tier
+#
+# This tier runs on a Cloud Run Instance with the sandbox launcher.
+# Agents are created as sandboxes inside the Instance. Docker, Podman,
+# and Kubernetes are not available; a single "default" profile pointing
+# to the cloudrun-sandbox runtime is the only correct choice.
+#
+# This template mirrors the pattern set by scripts/cloudrun/hub-settings-template.yaml
+# for the multi-node Cloud Run tier: one profile, matching the tier's runtime.
+
+schema_version: "1"
+
+# Active profile determines which runtime to use
+active_profile: default
+
+# Default harness template for new agents
+# Env: SCION_DEFAULT_TEMPLATE
+default_template: default
+
+# Default harness-config for new agents
+# Env: SCION_DEFAULT_HARNESS_CONFIG
+default_harness_config: antigravity
+
+# Container image registry path (REQUIRED)
+# Env: SCION_IMAGE_REGISTRY
+image_registry: ""
+
+# CLI behavior settings
+cli:
+  autohelp: true
+
+# Runtime configurations — only cloudrun-sandbox is available on this tier.
+runtimes:
+  cloudrun-sandbox:
+    type: cloudrun-sandbox
+
+# Profiles — single "default" profile matching the tier's runtime.
+profiles:
+  default:
+    runtime: cloudrun-sandbox

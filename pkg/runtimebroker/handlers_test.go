@@ -3195,3 +3195,141 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 		t.Errorf("expected agent directory to be cleaned up after start failure, but it still exists: %s", agentDir)
 	}
 }
+
+// TestBuildInfoProfiles_CloudRunSandbox_Task92 is the broker-level pin test
+// for task #92. When the broker runs cloudrun-sandbox and the settings define
+// a "default" profile with runtime cloudrun-sandbox, buildInfoProfiles must
+// return that profile. Before the fix, the workstation defaults (local/docker,
+// remote/kubernetes) were seeded; buildInfoProfiles filtered out docker
+// (local-only) and returned only remote/kubernetes — which cannot work on
+// this tier. With the fix, the "default" profile survives alongside
+// "remote" (from embedded defaults merge), and autoSelectProfile does NOT
+// fire (length > 1), so "Use broker default" is shown — which resolves to
+// active_profile "default" → cloudrun-sandbox.
+//
+// The assertion is on the PROFILE LIST contents, not just the selected value.
+// The bug was a list of length one containing the WRONG entry.
+func TestBuildInfoProfiles_CloudRunSandbox_Task92(t *testing.T) {
+	tmpDir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Seed settings matching the fixed Cloud Run sandbox template:
+	// active_profile=default, profiles.default.runtime=cloudrun-sandbox
+	// LoadEffectiveSettings also merges the embedded defaults, which add
+	// profiles.local (docker) and profiles.remote (kubernetes). The filter
+	// in buildInfoProfiles then drops local (local-only) but keeps both
+	// default and remote.
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: default
+runtimes:
+  cloudrun-sandbox:
+    type: cloudrun-sandbox
+profiles:
+  default:
+    runtime: cloudrun-sandbox
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	profiles := srv.buildInfoProfiles("cloudrun-sandbox")
+
+	// Build a lookup map for assertions.
+	byName := make(map[string]BrokerProfile, len(profiles))
+	for _, p := range profiles {
+		byName[p.Name] = p
+	}
+
+	// CRITICAL ASSERTION: "default" profile with type "cloudrun-sandbox" MUST
+	// be present. This is the fix — before task #92, no cloudrun-sandbox
+	// profile existed.
+	defaultP, hasDefault := byName["default"]
+	if !hasDefault {
+		names := make([]string, len(profiles))
+		for i, p := range profiles {
+			names[i] = fmt.Sprintf("%s(%s)", p.Name, p.Type)
+		}
+		t.Fatalf("profile 'default' missing; profiles are: %v", names)
+	}
+	if defaultP.Type != "cloudrun-sandbox" {
+		t.Errorf("profile 'default' type = %q, want %q", defaultP.Type, "cloudrun-sandbox")
+	}
+	if !defaultP.Available {
+		t.Error("profile 'default' should be available")
+	}
+
+	// GUARD ASSERTION: "local" profile (docker) MUST be filtered out. If it
+	// is present, the filter is not working and local-only profiles leak to
+	// a non-local broker.
+	if _, hasLocal := byName["local"]; hasLocal {
+		t.Error("profile 'local' (docker) should be filtered out on a cloudrun-sandbox broker")
+	}
+
+	// The profile list must have length > 1 so that autoSelectProfile does
+	// NOT fire. "remote" (from embedded defaults merge) is expected alongside
+	// "default". With length > 1, the UI shows "Use broker default" which
+	// resolves to active_profile "default" → cloudrun-sandbox → works.
+	if len(profiles) < 2 {
+		t.Errorf("expected >= 2 profiles (so autoSelectProfile does not fire), got %d", len(profiles))
+	}
+}
+
+// TestBuildInfoProfiles_OldWorkstationDefaults_Task92_Regression is the RED
+// counterpart of the pin test. When the WORKSTATION defaults are seeded
+// (local/docker + remote/kubernetes) and the broker runtime is cloudrun-sandbox,
+// buildInfoProfiles returns only remote/kubernetes — which is the bug.
+//
+// This test documents the defective state so the pin test's GREEN is meaningful.
+// If someone re-introduces the old defaults for Cloud Run sandbox, this test
+// shows what would happen: the UI would see only "remote (kubernetes)".
+func TestBuildInfoProfiles_OldWorkstationDefaults_Task92_Regression(t *testing.T) {
+	tmpDir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Seed the OLD (broken) workstation defaults: local/docker + remote/kubernetes.
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	brokenSettingsYAML := `schema_version: "1"
+active_profile: local
+runtimes:
+  docker:
+    type: docker
+  kubernetes:
+    type: kubernetes
+profiles:
+  local:
+    runtime: docker
+  remote:
+    runtime: kubernetes
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(brokenSettingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	profiles := srv.buildInfoProfiles("cloudrun-sandbox")
+
+	// Document the bug: docker is filtered out (local-only), only kubernetes
+	// remains. This is the defect — the profile list contains only an entry
+	// that cannot work on this tier.
+	if len(profiles) != 1 {
+		t.Fatalf("expected 1 profile (regression confirms filter), got %d", len(profiles))
+	}
+	if profiles[0].Name != "remote" || profiles[0].Type != "kubernetes" {
+		t.Errorf("regression: expected remote/kubernetes, got %s/%s", profiles[0].Name, profiles[0].Type)
+	}
+	// This is the symptom: the ONLY available profile is kubernetes, which
+	// cannot work on Cloud Run sandbox. autoSelectProfile() in the UI would
+	// auto-select it because profiles.length === 1.
+}
