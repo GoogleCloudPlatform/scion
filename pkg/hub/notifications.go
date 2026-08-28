@@ -494,10 +494,17 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 	}
 
 	// Phase 5 dual-write: resolve-or-create DM conversation for inbox notification messages.
-	convResult := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
-		"agent", agent.ID, "user", sub.SubscriberID)
-	if convResult != nil {
-		storeMsg.ConversationID = convResult.ConversationID
+	// SubscriberID may be a slug or federated identity rather than a UUID;
+	// DMConversationKey requires valid UUIDs for both parties.
+	if _, parseErr := uuid.Parse(sub.SubscriberID); parseErr != nil {
+		nd.log.Warn("skipping DM conversation resolution for inbox message: subscriber ID not a UUID",
+			"subscriber_id", sub.SubscriberID, "notification_id", notif.ID)
+	} else {
+		convResult := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
+			"agent", agent.ID, "user", sub.SubscriberID)
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
 	}
 
 	if err := nd.store.CreateMessage(ctx, storeMsg); err != nil {
