@@ -75,9 +75,12 @@ gcloud auth application-default login
 :::caution[Two credential stores]
 These are usually the same identity. When they differ, gcloud commands run as one
 identity and the REST API call runs as another — which can cause a confusing
-permission failure on step 3b after step 3a succeeds. The deploy script detects
-this mismatch and warns, but the fix is to ensure both credentials are configured
-for the same account.
+permission failure on step 3b after step 3a succeeds. The deploy script compares
+the two identities and warns when they differ, **but only when the ADC token
+carries an `email` claim. Service-account ADC (metadata server, Cloud Shell, CI)
+does not, and the script says so and skips the comparison** — on those, verify by
+hand. Either way the fix is to ensure both credentials are configured for the
+same account.
 :::
 
 ### Deployer permissions
