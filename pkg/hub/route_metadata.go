@@ -722,6 +722,43 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Hub admin: Quota management (PR-B3)
+	// -------------------------------------------------------------------------
+	"/api/v1/admin/limits": {
+		Pattern: "/api/v1/admin/limits", RouteID: "admin.limits",
+		Classification: RouteHubAdmin,
+		Permission:     "quota.read", Resource: "quota", Action: "read",
+	},
+	"/api/v1/admin/limits/": {
+		Pattern: "/api/v1/admin/limits/", RouteID: "admin.limits.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "quota.update", Resource: "quota", Action: "update",
+	},
+	"/api/v1/admin/entitlements/": {
+		Pattern: "/api/v1/admin/entitlements/", RouteID: "admin.entitlements.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "quota.update", Resource: "quota", Action: "update",
+	},
+	"/api/v1/admin/usage": {
+		Pattern: "/api/v1/admin/usage", RouteID: "admin.usage",
+		Classification: RouteHubAdmin,
+		Permission:     "quota.read", Resource: "quota", Action: "read",
+	},
+	"/api/v1/admin/usage/": {
+		Pattern: "/api/v1/admin/usage/", RouteID: "admin.usage.byLimit",
+		Classification: RouteHubAdmin,
+		Permission:     "quota.read", Resource: "quota", Action: "read",
+	},
+
+	// -------------------------------------------------------------------------
+	// Authenticated: Usage self-service
+	// -------------------------------------------------------------------------
+	"/api/v1/usage/me": {
+		Pattern: "/api/v1/usage/me", RouteID: "usage.me",
+		Classification: RouteAuthenticated,
+	},
+
+	// -------------------------------------------------------------------------
 	// Hub admin: GitHub App
 	// -------------------------------------------------------------------------
 	"/api/v1/github-app": {

@@ -537,6 +537,11 @@ func hubAdminPermissionIDs() []string {
 		"hub.github_app.update":       true,
 		"hub.metrics.read":            true,
 		"hub.validate.execute":        true,
+		// Quota management
+		"quota.read":   true,
+		"quota.create": true,
+		"quota.update": true,
+		"quota.delete": true,
 		// Project oversight
 		"project.read":   true,
 		"project.list":   true,

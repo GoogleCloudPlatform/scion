@@ -32,6 +32,7 @@ const (
 	ResourceBroker            = "broker"
 	ResourceGCPServiceAccount = "gcp_service_account"
 	ResourceHub               = "hub"
+	ResourceQuota             = "quota"
 
 	ActionCreate       = "create"
 	ActionRead         = "read"
@@ -183,6 +184,12 @@ var Registry = []Permission{
 	{ID: "hub.github_app.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read GitHub app configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.github_app.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update GitHub app configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.metrics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read metrics dashboard", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+
+	// Quota management (Phase 2B — Limits/Quotas)
+	{ID: "quota.read", Resource: ResourceQuota, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read limit definitions, entitlements, and usage", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
+	{ID: "quota.create", Resource: ResourceQuota, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
+	{ID: "quota.update", Resource: ResourceQuota, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
+	{ID: "quota.delete", Resource: ResourceQuota, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
 	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},

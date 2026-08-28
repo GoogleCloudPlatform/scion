@@ -3838,6 +3838,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/metrics/", s.guarded("/api/v1/metrics/", s.handleMetricsDashboard))
 	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.guarded("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard)) // legacy backward-compat
 
+	// Quota management (PR-B3)
+	s.mux.HandleFunc("/api/v1/admin/limits", s.guarded("/api/v1/admin/limits", s.handleAdminLimits))
+	s.mux.HandleFunc("/api/v1/admin/limits/", s.guarded("/api/v1/admin/limits/", s.handleAdminLimitByID))
+	s.mux.HandleFunc("/api/v1/admin/entitlements/", s.guarded("/api/v1/admin/entitlements/", s.handleAdminEntitlementByID))
+	s.mux.HandleFunc("/api/v1/admin/usage", s.guarded("/api/v1/admin/usage", s.handleAdminUsage))
+	s.mux.HandleFunc("/api/v1/admin/usage/", s.guarded("/api/v1/admin/usage/", s.handleAdminUsageByLimit))
+	s.mux.HandleFunc("/api/v1/usage/me", s.guarded("/api/v1/usage/me", s.handleUsageMe))
+
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.guarded("/api/v1/notifications", s.handleNotifications))
 	s.mux.HandleFunc("/api/v1/notifications/", s.guarded("/api/v1/notifications/", s.handleNotificationRoutes))

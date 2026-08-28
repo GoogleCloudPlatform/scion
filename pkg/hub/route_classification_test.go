@@ -180,6 +180,12 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/system/fs/mkdir":                   "workstation:filesystem",
 	"/api/v1/system/fs/validate-path":           "workstation:filesystem",
 	"/api/v1/authz/explain":                     "authenticated:authz-explain",
+	"/api/v1/admin/limits":                      "hub-admin:quota",
+	"/api/v1/admin/limits/":                     "hub-admin:quota",
+	"/api/v1/admin/entitlements/":               "hub-admin:quota",
+	"/api/v1/admin/usage":                       "hub-admin:quota",
+	"/api/v1/admin/usage/":                      "hub-admin:quota",
+	"/api/v1/usage/me":                          "authenticated:quota-usage",
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {
