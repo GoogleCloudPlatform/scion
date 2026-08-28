@@ -550,9 +550,15 @@ func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
 		"--name", "test-name", "--project", "test-project",
 		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
 
-	assert.NotEqual(t, 0, exitCode,
+	// The exit code is the PREMISE, not a signal: a script that reached the
+	// network and failed there also exits non-zero. require, so the assertions
+	// that do discriminate are read against a run that actually failed.
+	require.NotEqual(t, 0, exitCode,
 		"must refuse to send an access token to a host outside googleapis.com")
-	assert.Contains(t, stderr, "evil.example",
+	// The host must be named BY THE REJECTION, not merely echoed somewhere in
+	// stderr — see the sibling test for why the bare host name carries no
+	// signal on its own.
+	assert.Contains(t, stderr, "refusing to send an access token to host 'evil.example'",
 		"the rejection must name the offending host")
 	assert.Contains(t, stderr, "_DI_TOKENINFO_URL",
 		"the rejection must name the variable at fault")
@@ -578,9 +584,20 @@ func TestScriptRejectsNonGoogleAPIBase(t *testing.T) {
 		"--name", "test-name", "--project", "test-project",
 		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
 
-	assert.NotEqual(t, 0, exitCode,
+	// PREMISE, not signal. With the check deleted this run still exits
+	// non-zero — di_main reaches the network and the connection to
+	// evil.example fails — so a bare NotEqual cannot tell the two apart. It is
+	// require rather than assert to say so in the code: it guards the
+	// assertions below, it does not add to their count.
+	require.NotEqual(t, 0, exitCode,
 		"must refuse to send an access token to a host outside googleapis.com")
-	assert.Contains(t, stderr, "evil.example",
+	// Assert the REJECTION MESSAGE, not the host name. `Contains(stderr,
+	// "evil.example")` passes with the check deleted, because curl's
+	// connection-failure message echoes the URL — review r3 measured it. Same
+	// class as the weak stub this file already fixed: red for the wrong
+	// reason is not signal, and an assertion that cannot fail inflates the
+	// count of assertions that can.
+	assert.Contains(t, stderr, "refusing to send an access token to host 'evil.example'",
 		"the rejection must name the offending host")
 	assert.Contains(t, stderr, "_DI_API_BASE",
 		"the rejection must name the variable at fault — with two seams under "+
@@ -598,27 +615,40 @@ func TestScriptRejectsNonGoogleAPIBase(t *testing.T) {
 // the call site rather than invisible in the environment — but a future
 // function could still add its own ${_DI_API_BASE:-...} read and silently
 // reacquire the at-a-distance problem that review r2 flagged. Nothing else
-// would fail. So the count is pinned directly: each variable is read in
-// exactly one resolver, and each resolver is called exactly once.
+// would fail. So the count is pinned directly.
+//
+// It is pinned by counting the BARE NAME in comment-stripped text, not by
+// matching a read syntax. Review r3 probed the syntax version and walked past
+// it five ways — indirection, `printenv`, `env | grep`, a computed name, and a
+// `[[ -v VAR ]]` guard were all invisible to it — while an innocent comment
+// containing `${_DI_API_BASE:-...}` turned it red for nothing, and a pin that
+// fails on unrelated edits is a pin that gets deleted. Counting the name
+// catches six of those seven and additionally goes red if the validation call
+// is deleted, because that call is one of the two expected mentions. Only a
+// deliberately string-concatenated name escapes, and a refactor guard does not
+// need to stop an adversary.
+//
+// Expect exactly two mentions per seam: the `${SEAM:-default}` read inside its
+// resolver, and the string literal naming it in the di_validate_override_url
+// call in di_main.
 func TestScriptSeamsAreReadInExactlyOnePlace(t *testing.T) {
 	script := readDeployScript(t)
+	code := regexp.MustCompile(`(?m)^\s*#.*$`).ReplaceAllString(script, "")
 
 	for _, seam := range []struct{ variable, resolver string }{
 		{"_DI_API_BASE", "di_resolve_api_base"},
 		{"_DI_TOKENINFO_URL", "di_resolve_tokeninfo_url"},
 	} {
 		t.Run(seam.variable, func(t *testing.T) {
-			reads := regexp.MustCompile(`\$\{`+seam.variable+`:?-`).FindAllString(script, -1)
-			assert.Len(t, reads, 1,
-				"%s must be read in exactly one place (%s). A second reader is how "+
-					"the validation gets orphaned: it would be resolved somewhere that "+
-					"di_main's check cannot see, and no existing test would fail.",
+			mentions := regexp.MustCompile(`\b`+seam.variable+`\b`).FindAllString(code, -1)
+			assert.Len(t, mentions, 2,
+				"%s must appear exactly twice in executable text: once as the read "+
+					"inside %s, once as the name passed to di_validate_override_url. "+
+					"A third is a second reader, and that is how the validation gets "+
+					"orphaned — resolved somewhere di_main's check cannot see, with no "+
+					"other test failing. A first-and-only one means the validation call "+
+					"itself is gone.",
 				seam.variable, seam.resolver)
-
-			calls := regexp.MustCompile(`(?m)^\s*\w+="\$\(`+seam.resolver+`\b`).FindAllString(script, -1)
-			assert.Len(t, calls, 1,
-				"%s must be called exactly once, in di_main, with the validation "+
-					"immediately after it", seam.resolver)
 		})
 	}
 }
