@@ -537,10 +537,15 @@ export class ScionPageAdminQuotas extends LitElement {
       if (entRes.ok) {
         const data = (await entRes.json()) as { items: EntitlementBinding[] };
         this.entitlements = data.items || [];
+      } else {
+        this.entitlementsError = await extractApiError(entRes, `HTTP ${entRes.status}`);
       }
 
       if (usageRes.ok) {
         this.usageDetail = (await usageRes.json()) as UsageByLimitResponse;
+      } else if (!this.entitlementsError) {
+        // Only set if we don't already have an error
+        this.entitlementsError = await extractApiError(usageRes, `HTTP ${usageRes.status}`);
       }
     } catch (err) {
       console.error('Failed to load entitlements:', err);
@@ -708,7 +713,7 @@ export class ScionPageAdminQuotas extends LitElement {
       }
 
       const res = await apiFetch(url, { method: 'DELETE' });
-      if (!res.ok && res.status !== 204) {
+      if (!res.ok) {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
