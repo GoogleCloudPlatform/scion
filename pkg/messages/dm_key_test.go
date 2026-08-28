@@ -69,19 +69,22 @@ func TestDMConversationKey_Ordering_SameKind(t *testing.T) {
 	assert.Equal(t, "dm:user:"+id1+":user:"+id2, key1)
 }
 
-func TestDMConversationKey_CaseNormalisation(t *testing.T) {
-	id := "AABBCCDD-0011-2233-4455-667788990011"
-	lower := strings.ToLower(id)
+// TestDMConversationKey_RejectsNonCanonicalKind verifies that non-lowercase
+// kind strings are rejected outright.
+//
+// Previous behaviour was normalisation (strings.ToLower). That was wrong: the
+// key IS the ACL. Normalising silently rewrites the ACL, creating a key the
+// caller did not ask for. Rejection ensures the deriver and checker agree.
+func TestDMConversationKey_RejectsNonCanonicalKind(t *testing.T) {
+	id := "aabbccdd-0011-2233-4455-667788990011"
 
-	key, err := DMConversationKey("USER", id, "AGENT", lower)
-	require.NoError(t, err)
+	_, err := DMConversationKey("USER", id, "agent", id)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown kind")
 
-	// Kind normalised to lowercase, UUID normalised to lowercase.
-	assert.Contains(t, key, "agent:")
-	assert.Contains(t, key, "user:")
-	assert.NotContains(t, key, "AABBCCDD")
-	assert.NotContains(t, key, "USER")
-	assert.NotContains(t, key, "AGENT")
+	_, err = DMConversationKey("user", id, "AGENT", id)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown kind")
 }
 
 func TestDMConversationKey_RejectBadUUID(t *testing.T) {
@@ -171,7 +174,6 @@ func TestDMConversationKey_MatchesProductionRegex(t *testing.T) {
 		{"user+agent", "user", uuid.NewString(), "agent", uuid.NewString()},
 		{"user+user", "user", uuid.NewString(), "user", uuid.NewString()},
 		{"agent+agent", "agent", uuid.NewString(), "agent", uuid.NewString()},
-		{"uppercase UUID", "user", "AABBCCDD-0011-2233-4455-667788990011", "agent", uuid.NewString()},
 	}
 
 	require.Greater(t, len(cases), 0, "conformance test must have at least one case (rule 14)")
@@ -184,6 +186,13 @@ func TestDMConversationKey_MatchesProductionRegex(t *testing.T) {
 				"DMConversationKey output must match production regex from handlers_chat_v2.go:391")
 		})
 	}
+
+	// Uppercase UUID must now be rejected (previously it was normalised).
+	t.Run("uppercase UUID rejected", func(t *testing.T) {
+		_, err := DMConversationKey("user", "AABBCCDD-0011-2233-4455-667788990011", "agent", uuid.NewString())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "non-canonical UUID")
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -239,14 +248,6 @@ func TestDMConversationKey_GoldenVectors(t *testing.T) {
 			idB:      "12345678-1234-5678-1234-567812345678",
 			expected: "dm:agent:12345678-1234-5678-1234-567812345678:agent:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
 		},
-		{
-			name:     "uppercase UUID requires lowercase normalisation",
-			kindA:    "user",
-			idA:      "AABBCCDD-0011-2233-4455-667788990011",
-			kindB:    "agent",
-			idB:      "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
-			expected: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:aabbccdd-0011-2233-4455-667788990011",
-		},
 	}
 
 	require.Greater(t, len(vectors), 0, "golden vectors must have at least one case (rule 14)")
@@ -267,6 +268,44 @@ func TestDMConversationKey_GoldenVectors(t *testing.T) {
 	key1, _ := DMConversationKey(vectors[0].kindA, vectors[0].idA, vectors[0].kindB, vectors[0].idB)
 	key2, _ := DMConversationKey(vectors[1].kindA, vectors[1].idA, vectors[1].kindB, vectors[1].idB)
 	assert.Equal(t, key1, key2, "reversed argument order must produce the same key")
+
+	// Rejection golden vectors: non-canonical inputs that used to be normalised.
+	rejections := []struct {
+		name  string
+		kindA string
+		idA   string
+		kindB string
+		idB   string
+	}{
+		{
+			name:  "uppercase kind",
+			kindA: "USER",
+			idA:   "550e8400-e29b-41d4-a716-446655440000",
+			kindB: "agent",
+			idB:   "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		},
+		{
+			name:  "uppercase UUID",
+			kindA: "user",
+			idA:   "AABBCCDD-0011-2233-4455-667788990011",
+			kindB: "agent",
+			idB:   "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+		},
+		{
+			name:  "mixed-case UUID",
+			kindA: "user",
+			idA:   "6ba7b810-9dad-11d1-80b4-00C04FD430C8",
+			kindB: "agent",
+			idB:   "550e8400-e29b-41d4-a716-446655440000",
+		},
+	}
+
+	for _, tc := range rejections {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			_, err := DMConversationKey(tc.kindA, tc.idA, tc.kindB, tc.idB)
+			require.Error(t, err, "non-canonical input must be rejected")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -304,4 +343,60 @@ func TestCheckDMParticipantKey_UnparseableRef(t *testing.T) {
 	err := CheckDMParticipantKey("direct", "garbage-key", "user", uuid.NewString())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unparseable external_ref")
+}
+
+// ---------------------------------------------------------------------------
+// Cross-writer agreement test
+// ---------------------------------------------------------------------------
+
+// TestDMConversationKey_CrossWriterAgreement verifies that DMConversationKey
+// produces byte-identical keys to the SQL concatenation pattern used by four
+// SQL writers in webchannel_store that construct DM keys by concatenation
+// ('dm:agent:' + agentID + ':user:' + userID) without calling
+// DMConversationKey. This test pins that the two construction methods agree.
+// If the sort order or format ever changes, this test will catch the
+// divergence.
+func TestDMConversationKey_CrossWriterAgreement(t *testing.T) {
+	agentID := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+
+	// agent+user pair: SQL writers use "dm:agent:" + agentID + ":user:" + userID
+	// because "agent:" < "user:" lexically.
+	goKey, err := DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+
+	sqlKey := "dm:agent:" + agentID + ":user:" + userID
+	assert.Equal(t, sqlKey, goKey,
+		"DMConversationKey must produce byte-identical output to SQL concatenation pattern")
+}
+
+// ---------------------------------------------------------------------------
+// Rejection golden vectors for non-canonical UUID forms
+// ---------------------------------------------------------------------------
+
+// TestDMConversationKey_RejectsNonCanonicalUUID exercises every non-canonical
+// UUID form that uuid.Parse accepts but that does not match canonical
+// lowercase-hyphenated output.
+func TestDMConversationKey_RejectsNonCanonicalUUID(t *testing.T) {
+	canonical := "550e8400-e29b-41d4-a716-446655440000"
+
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{"uppercase", "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"},
+		{"mixed case", "6ba7b810-9dad-11d1-80b4-00C04FD430C8"},
+		{"braced", "{6ba7b810-9dad-11d1-80b4-00c04fd430c8}"},
+		{"unhyphenated", "6ba7b8109dad11d180b400c04fd430c8"},
+		{"urn:uuid: form", "urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DMConversationKey("user", tc.id, "agent", canonical)
+			require.Error(t, err, "non-canonical UUID %q must be rejected", tc.id)
+			assert.Contains(t, err.Error(), "non-canonical UUID",
+				"error message must mention non-canonical UUID")
+		})
+	}
 }
