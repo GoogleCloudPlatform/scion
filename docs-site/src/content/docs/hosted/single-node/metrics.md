@@ -212,7 +212,7 @@ For every significant lifecycle event (session start/end, tool use, model call),
 
 ## Hub Infrastructure Metrics
 
-The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub:admin` role) and can be exported to standard monitoring tools.
+The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
 
 ### GCP Token Metrics
 

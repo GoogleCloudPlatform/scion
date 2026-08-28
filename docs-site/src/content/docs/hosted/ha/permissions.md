@@ -10,7 +10,7 @@ For a detailed technical specification of the policy language and agent identity
 ## Core Concepts
 
 ### Unified Authorization
-Scion uses a `UnifiedAuthMiddleware` to enforce declarative route guards across the Hub. Every request undergoes deterministic policy evaluation before reaching the handler, ensuring no resource can be accessed without explicit permission.
+Scion uses a `UnifiedAuthMiddleware` to enforce declarative route guards across the Hub. Every request undergoes deterministic policy evaluation via a Decide path before reaching the handler, ensuring no resource can be accessed without explicit permission. Engine internals, settings handlers, User Access Token (UAT) endpoints, user management, integrations, and operations have all been converted to explicit permission-based checks, deprecating the legacy `requireAdmin` fallback.
 
 ### Roles and Bindings
 Access is granted through explicit role assignments:
@@ -166,6 +166,14 @@ To make the service account lifecycle transparent and auditable for users and ad
 
 ---
 
+## Quotas and Limits
+
+The Scion Hub enforces resource consumption through a strict **Quota System** (Permissions Phase 2). This system operates at both the project and agent creation layers:
+- **Enforcement Mechanics**: Quotas are evaluated via advisory-lock-based enforcement with fail-closed semantics to ensure hard limits are respected and reservation leaks are prevented.
+- **Data Model**: The quota system uses `LimitDefinition`, `EntitlementBinding`, and `UsageReservation` schemas backed by a dedicated `QuotaStore`.
+- **System Limits**: Several seeded system limit definitions provide out-of-the-box safe bounds on resource usage.
+- **Quota API**: A suite of 13 quota API endpoints is available for inspecting and managing quotas. These endpoints feature strict route guard read/write permission splits and built-in protection against arbitrary system limit modification.
+
 ## Roles
 
 To simplify management, Scion separates roles into **User Roles** (for human operators) and **Agent Roles** (for running agents).
@@ -176,7 +184,7 @@ These built-in roles bundle common permissions for human users:
 
 | Role | Description |
 |------|-------------|
-| `hub:admin` | Full control over the entire Hub. |
+| `hub-admin` | Full control over the entire Hub (System Role). |
 | `hub:member` | Standard user; can create their own projects. |
 | `project:admin` | Full control over a specific project and its agents. |
 | `project:developer` | Can create and manage agents within a project. |
@@ -248,7 +256,7 @@ When an agent creates a child agent (for example, to delegate a sub-task), the s
 The Scion Web Dashboard includes a centralized **Admin Management Suite** (accessible to users with administrative privileges) that provides dedicated views for access control management:
 
 - **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. This allows administrators to view and modify the global `settings.yaml` through the Web UI with support for tabbed navigation, sensitive field masking, and hot-reloading of key settings like log levels, telemetry defaults, and admin emails.
-- **Users List**: View all authenticated users, search for specific accounts, track "Last Seen" timestamps, and manage their system-wide roles (e.g., granting `hub:admin` access).
+- **Users List**: View all authenticated users, search for specific accounts, track "Last Seen" timestamps, and manage their system-wide roles (e.g., granting `hub-admin` access).
 - **Groups Management**: Create organizational groups and manage their membership with a human-friendly member editor and user search autocomplete. Group creation is strictly authorized, and the `project:` prefix is a reserved slug. To prevent slug collisions, colliding group identifiers require a system marker combined with the `ProjectID`. Membership lookups rely on canonical identity resolution. This enables policy-based authorization where permissions can be granted to an entire team at once, while strictly enforcing group ownership and authorization rules.
 - **Admin Security**: When verifying administrative privileges across endpoints, the `requireAdmin` guard explicitly rejects scoped user identities (e.g. from limited personal access tokens) prior to evaluating the principal's embedded roles, ensuring that scoped identities cannot inadvertently bypass administrative gates.
 - **Broker Visibility**: Comprehensive broker detail pages provide a grouped view of all active agents by their respective projects, helping administrators understand resource distribution.

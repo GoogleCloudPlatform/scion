@@ -216,7 +216,13 @@ When using slug-based query paths or addressing agents via `agent:<name>` (e.g.,
   - **Granular Scopes**: Authorization gates require the agent token to hold the `project:read` scope for reading subscriptions and the `project:agent:notify` scope for writing (creating, updating, or deleting) subscriptions.
   - **Ownership Constraints**: Acknowledging notifications or modifying/deleting existing subscriptions strictly requires ownership validation, meaning an agent can only modify or acknowledge subscriptions that target or belong to itself.
 
-### 4. Sleep Anti-Pattern & Polling
+### 4. Message Security & Thread Validation
+
+Scion employs strict, ingress-level security controls for Direct Messages (DMs) to prevent spoofing and cross-project injection:
+- **Ownership Validation**: At all message ingress points, the system validates the authenticated identity from the request context against the provided DM key. An agent cannot write into another agent's DM conversation by supplying a well-formed but unauthorized DM key.
+- **Thread ID Formatting**: When an agent supplies a `thread_id` (used as the DM key), it is strictly validated against the canonical DM key format at ingress. Malformed or unauthorized thread IDs are rejected with a `400 Bad Request` before any dispatch or persistence occurs.
+
+### 5. Sleep Anti-Pattern & Polling
 
 :::danger[Avoid Sleep]
 **Never use the shell `sleep` command to wait for external processes.** Running a blocking `sleep` loop keeps your agent alive but inactive, triggering the Hub's stall detector and leading to an automatic suspend.
@@ -231,7 +237,7 @@ sciontool status blocked "Waiting for build job 103"
 ```
 The scheduled message delivers the wake-up poke; `status blocked` tells the platform that your silence is intentional, keeping you from being suspended.
 
-### 5. @mention Parsing & Multi-Recipient CC Fan-Out
+### 6. @mention Parsing & Multi-Recipient CC Fan-Out
 
 When a human or an agent sends a message, Scion automatically scans for recipient targeting to fan-out notifications. This enables multi-agent notification and collaboration through two distinct mechanisms:
 

@@ -159,6 +159,14 @@ A named collection of Hub users (and nested groups) used by the Hub permissions 
 ### User Access Token (UAT)
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes). Formerly known as a *Personal Access Token (PAT)*.
 
+
+**Quota System**:
+An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.
+_Avoid_: rate limits, usage caps
+
+**LimitDefinition**:
+A seeded system or custom limit configuration that defines a quota boundary within the Quota System.
+
 ## Messaging
 
 ### Native Web Chat

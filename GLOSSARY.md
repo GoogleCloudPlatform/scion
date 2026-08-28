@@ -239,6 +239,14 @@ A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user a
 _Avoid_: personal access token (PAT), API key, secret token
 _See also_: Hub
 
+
+**Quota System**:
+An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.
+_Avoid_: rate limits, usage caps
+
+**LimitDefinition**:
+A seeded system or custom limit configuration that defines a quota boundary within the Quota System.
+
 ## Messaging
 
 **Native Web Chat**:

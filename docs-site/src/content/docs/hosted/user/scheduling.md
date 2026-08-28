@@ -124,6 +124,8 @@ Use these commands to manage schedules and events in your project:
 | **Delete a recurring schedule** | `scion schedule delete <id-or-name>` |
 | **View execution history** | `scion schedule history <id-or-name>` |
 
+*Tip: All 6 schedule subcommands (`get`, `cancel`, `pause`, `resume`, `delete`, `history`) support client-side prefix matching. You can provide a truncated schedule ID (e.g. `scion schedule cancel a1b2`) instead of the full ID.*
+
 ---
 
 ## Gotchas & Best Practices
