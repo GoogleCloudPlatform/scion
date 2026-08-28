@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -30,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 )
@@ -210,24 +213,41 @@ func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBr
 
 // --- Auth tests ---
 
-func TestIntegrations_Unauthenticated(t *testing.T) {
-	srv := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
-	rr := httptest.NewRecorder()
-	srv.handleAdminIntegrations(rr, req)
+// Auth tests for integrations endpoints.
+//
+// Authorization for these routes moved from inline handler checks to the
+// route guard (PR-A5 permission conversion). The guard is tested in
+// TestIntegrationsHooksPermissionConversion. The tests below verify the
+// guard wiring by calling guarded() so the route metadata is applied.
 
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
+func TestIntegrations_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	handler := srv.guarded("/api/v1/admin/integrations", srv.handleAdminIntegrations)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
 	}
 }
 
 func TestIntegrations_NonAdmin(t *testing.T) {
-	srv := &Server{}
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("integ-member"), Email: "member@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/integrations", srv.handleAdminIntegrations)
+	member := NewAuthenticatedUser(tid("integ-member"), "member@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rr := httptest.NewRecorder()
-	srv.handleAdminIntegrations(rr, req)
+	handler(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", rr.Code)
@@ -235,23 +255,33 @@ func TestIntegrations_NonAdmin(t *testing.T) {
 }
 
 func TestIntegrationByName_Unauthenticated(t *testing.T) {
-	srv := &Server{}
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	handler := srv.guarded("/api/v1/admin/integrations/", srv.handleAdminIntegrationByName)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
+	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
-	srv.handleAdminIntegrationByName(rr, req)
+	handler(rr, req)
 
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
 	}
 }
 
 func TestIntegrationByName_NonAdmin(t *testing.T) {
-	srv := &Server{}
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("integ-member2"), Email: "member2@example.com", DisplayName: "Member2", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/integrations/", srv.handleAdminIntegrationByName)
+	member := NewAuthenticatedUser(tid("integ-member2"), "member2@example.com", "Member2", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rr := httptest.NewRecorder()
-	srv.handleAdminIntegrationByName(rr, req)
+	handler(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", rr.Code)
@@ -261,7 +291,7 @@ func TestIntegrationByName_NonAdmin(t *testing.T) {
 // --- List endpoint ---
 
 func TestListIntegrations_Empty(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -287,7 +317,7 @@ func TestListIntegrations_WithPlugins(t *testing.T) {
 	mgr.plugins["discord"] = map[string]string{"guild_id": "12345"}
 	mgr.selfManaged["discord"] = true
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -337,7 +367,7 @@ func TestListIntegrations_WithPlugins(t *testing.T) {
 }
 
 func TestListIntegrations_MethodNotAllowed(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -353,7 +383,7 @@ func TestListIntegrations_MethodNotAllowed(t *testing.T) {
 
 func TestGetIntegration_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -375,7 +405,7 @@ func TestGetIntegration_OK(t *testing.T) {
 		"bot_token":      "should-be-filtered",
 	}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -414,19 +444,25 @@ func TestGetIntegration_OK(t *testing.T) {
 }
 
 func TestGetIntegration_MethodNotAllowed(t *testing.T) {
-	mgr := newMockIntegrationManager()
-	mgr.plugins["telegram"] = map[string]string{}
-	srv := &Server{}
-	srv.pluginManager = mgr
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	adminU := &store.User{ID: tid("integ-admin-ma"), Email: "admin-ma@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
+	if err := s.CreateUser(ctx, adminU); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-admin-ma"), "admin-ma@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
+	// DELETE on a name with no action path (e.g. /integrations/telegram) is
+	// not a supported endpoint. The handler returns 404 "integration endpoint"
+	// via the default case after the empty-action GET-only check.
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", rr.Code)
+		t.Fatalf("expected 405, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -436,7 +472,7 @@ func TestIntegrationHealth_OK(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -466,7 +502,7 @@ func TestIntegrationHealth_OK(t *testing.T) {
 
 func TestIntegrationHealth_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -486,7 +522,7 @@ func TestRestartIntegration_OK(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -518,7 +554,7 @@ func TestRestartIntegration_WithSpokeWired(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.SetMessageBrokerProxy(proxy)
 
@@ -557,7 +593,7 @@ func TestRestartIntegration_WithoutSpokeWired(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.SetMessageBrokerProxy(proxy)
 
@@ -590,7 +626,7 @@ func TestRestartIntegration_WithoutSpokeWired(t *testing.T) {
 }
 
 func TestValidateIntegrationWiring_NoProxy(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	warnings := srv.validateIntegrationWiring("discord")
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning, got %d", len(warnings))
@@ -616,7 +652,7 @@ func TestEnsureBrokerSpoke_AddsWhenMissing(t *testing.T) {
 	}, slog.Default())
 
 	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.SetMessageBrokerProxy(proxy)
 
@@ -647,7 +683,7 @@ func TestEnsureBrokerSpoke_NoopWhenAlreadyPresent(t *testing.T) {
 	}, slog.Default())
 
 	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.SetMessageBrokerProxy(proxy)
 
@@ -663,7 +699,7 @@ func TestEnsureBrokerSpoke_NoProxyIsNoop(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	// No proxy set — should not panic.
 	srv.ensureBrokerSpoke(mgr, "discord")
@@ -671,7 +707,7 @@ func TestEnsureBrokerSpoke_NoProxyIsNoop(t *testing.T) {
 
 func TestRestartIntegration_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -688,7 +724,7 @@ func TestRestartIntegration_NotFound(t *testing.T) {
 func TestRestartIntegration_MethodNotAllowed(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -829,7 +865,7 @@ func TestUpdateConfig_NoConfigFile(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -854,7 +890,7 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 		"webhook_listen": ":9094",
 	}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -890,7 +926,7 @@ func TestUpdateConfig_InstalledButNotLoaded(t *testing.T) {
 
 	mgr := newMockIntegrationManager() // telegram NOT loaded in the manager
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -930,7 +966,7 @@ func TestUpdateConfig_InstalledButNotLoaded_ActivationFailureIsNonFatal(t *testi
 	mgr := newMockIntegrationManager()
 	mgr.loadOneErr = fmt.Errorf("bot_token is required")
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -950,7 +986,7 @@ func TestUpdateConfig_InvalidBody(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -968,7 +1004,7 @@ func TestUpdateConfig_UnknownSecretKey(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -989,7 +1025,7 @@ func TestUpdateConfig_NotFound(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	mgr := newMockIntegrationManager()
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1126,7 +1162,7 @@ func TestPluginNameFromKey(t *testing.T) {
 func TestIntegrationByName_UnknownAction(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1147,7 +1183,7 @@ func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	mgr.deploymentModes["telegram"] = plugin.DeploymentModeHA
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	// dbDriver is empty → requirePostgres returns 409
 
@@ -1164,7 +1200,7 @@ func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 
 func TestUpdateIntegration_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1182,7 +1218,7 @@ func TestUpdateIntegration_NoRepoPath(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1201,7 +1237,7 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	mgr.updateErr = fmt.Errorf("go build failed: exit status 1")
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.config.MaintenanceConfig.RepoPath = "/some/repo"
 	srv.pluginManager = mgr
 
@@ -1223,7 +1259,7 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 // --- Install endpoint ---
 
 func TestInstallIntegration_NilPluginManager(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
@@ -1240,7 +1276,7 @@ func TestInstallIntegration_AlreadyInstalled(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1257,7 +1293,7 @@ func TestInstallIntegration_AlreadyInstalled(t *testing.T) {
 func TestInstallIntegration_UnknownPlugin(t *testing.T) {
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1292,7 +1328,7 @@ func TestInstallIntegration_PreservesExistingConfigFile(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 
@@ -1318,7 +1354,7 @@ func TestInstallIntegration_PreservesExistingConfigFile(t *testing.T) {
 // --- Available integrations endpoint ---
 
 func TestListAvailableIntegrations_NoRepoPath(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
@@ -1350,7 +1386,7 @@ func TestListAvailableIntegrations_WithSource(t *testing.T) {
 	// telegram is NOT installed, discord is NOT installed either
 	// but only telegram has a source dir
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 	srv.pluginManager = mgr
 
@@ -1384,7 +1420,7 @@ func TestListAvailableIntegrations_IncludesSlack(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 	srv.pluginManager = mgr
 
@@ -1424,7 +1460,7 @@ func TestListAvailableIntegrations_ExcludesInstalled(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{} // already installed
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 	srv.pluginManager = mgr
 
@@ -1450,7 +1486,7 @@ func TestListAvailableIntegrations_ExcludesInstalled(t *testing.T) {
 // --- Mode 3 (HA) integration tests ---
 
 func TestRequirePostgres_SQLite(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	// dbDriver is empty — SQLite or unconfigured
 	rr := httptest.NewRecorder()
 	ok := srv.requirePostgres(rr)
@@ -1698,7 +1734,7 @@ func TestGetUpdateStatus_InvalidID(t *testing.T) {
 }
 
 func TestGetUpdateStatus_SQLiteReturns409(t *testing.T) {
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
 	srv.pluginManager = mgr
@@ -1757,7 +1793,7 @@ func TestUpdateConfig_NonHA_NeedsConfigFile(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	// selfManaged is false → non-HA path
 
-	srv := &Server{dbDriver: "postgres"}
+	srv := &Server{dbDriver: "postgres", authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1776,7 +1812,7 @@ func TestIsHAIntegration(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 
 	if !srv.isHAIntegration(mgr, "discord") {
 		t.Error("expected discord (HA mode) to be HA")
@@ -1876,7 +1912,7 @@ func TestListIntegrations_DeploymentMode(t *testing.T) {
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.selfManaged["discord"] = true
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1916,7 +1952,7 @@ func TestGetIntegration_DeploymentMode(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -1945,7 +1981,7 @@ func TestIsHAIntegration_Modes(t *testing.T) {
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	if srv.isHAIntegration(mgr, "telegram") {
@@ -2081,7 +2117,7 @@ func TestGetIntegration_ReadsFromConfigFile(t *testing.T) {
 		"hub_url":        "https://hub.example.com",
 	}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -2180,7 +2216,7 @@ func TestUpdateIntegration_SelfManagedRejected(t *testing.T) {
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -2206,7 +2242,7 @@ func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.config.HubEndpoint = "http://hub.example.com:8080"
 
@@ -2340,7 +2376,7 @@ func TestCreateBridgeConfigTemplate_PreservesExisting(t *testing.T) {
 	// stat-before-create guard in handleInstallSelfManaged (the function itself
 	// always writes). Here we verify the guard at the handler level.
 	mgr := newMockIntegrationManager()
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.config.HubEndpoint = "http://other-hub:8080"
 
@@ -2385,7 +2421,7 @@ func TestInstallIntegration_SelfManaged_RegisteredButNotLoaded(t *testing.T) {
 
 	mgr := newMockIntegrationManager() // a2a-bridge NOT in mgr.plugins
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -2412,7 +2448,7 @@ func TestInstallIntegration_SelfManaged_AlreadyInstalled(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -2435,7 +2471,7 @@ func TestListAvailableIntegrations_IncludesA2ABridge(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 	srv.pluginManager = mgr
 
@@ -2477,7 +2513,7 @@ func TestListAvailableIntegrations_IncludesDescription(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 	srv.pluginManager = mgr
 
@@ -2513,7 +2549,7 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_NoSource(t *testing.T) {
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.config.MaintenanceConfig.RepoPath = t.TempDir() // RepoPath set but no source dir
 
@@ -2533,7 +2569,7 @@ func TestUpdateIntegration_SelfManaged_NoRepoPath(t *testing.T) {
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	// No RepoPath set → should reject with guidance
 
@@ -2563,7 +2599,7 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T)
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{}
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	srv.pluginManager = mgr
 	srv.config.MaintenanceConfig.RepoPath = repoPath
 

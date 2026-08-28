@@ -664,10 +664,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/lifecycle-hooks": {
 		Pattern: "/api/v1/admin/lifecycle-hooks", RouteID: "admin.lifecycleHooks",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.lifecycle_hooks.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/lifecycle-hooks/": {
 		Pattern: "/api/v1/admin/lifecycle-hooks/", RouteID: "admin.lifecycleHooks.byId",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.lifecycle_hooks.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/validate-resources": {
 		Pattern: "/api/v1/admin/validate-resources", RouteID: "admin.validateResources",
@@ -677,14 +679,17 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/integrations": {
 		Pattern: "/api/v1/admin/integrations", RouteID: "admin.integrations",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.integrations.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/integrations/teams/manifest": {
 		Pattern: "/api/v1/admin/integrations/teams/manifest", RouteID: "admin.integrations.teamsManifest",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.teams_manifest.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/integrations/": {
 		Pattern: "/api/v1/admin/integrations/", RouteID: "admin.integrations.byName",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.integrations.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/diagnostics/logs/stream": {
 		Pattern: "/api/v1/admin/diagnostics/logs/stream", RouteID: "admin.diagnostics.logsStream",

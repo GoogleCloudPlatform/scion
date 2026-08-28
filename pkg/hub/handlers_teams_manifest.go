@@ -97,15 +97,10 @@ type teamsBotCommand struct {
 
 // handleTeamsManifestDownload generates and returns a Teams app manifest .zip.
 // GET /api/v1/admin/integrations/teams/manifest
+// Authorization: route guard checks hub.teams_manifest.read.
 func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
-		return
-	}
-
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
 		return
 	}
 

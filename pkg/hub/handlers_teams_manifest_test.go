@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"image/color"
 	"image/png"
@@ -25,28 +28,45 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // --- Teams Manifest handler tests ---
 
-func TestHandleTeamsManifestDownload_AuthGate_Unauthenticated(t *testing.T) {
-	srv := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/teams/manifest", nil)
-	rr := httptest.NewRecorder()
-	srv.handleTeamsManifestDownload(rr, req)
+// Auth tests below validate authorization via the route guard (PR-A5
+// permission conversion). Unauthenticated requests get 401; non-admin
+// members get 403 from the route guard's Decide check.
 
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for unauthenticated request, got %d", rr.Code)
+func TestHandleTeamsManifestDownload_AuthGate_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	handler := srv.guarded("/api/v1/admin/integrations/teams/manifest", srv.handleTeamsManifestDownload)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/teams/manifest", nil)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated request, got %d", rr.Code)
 	}
 }
 
 func TestHandleTeamsManifestDownload_AuthGate_NonAdmin(t *testing.T) {
-	srv := &Server{}
-	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	memberU := &store.User{ID: tid("tm-member"), Email: "member@example.com", DisplayName: "Member", Role: "member", Status: "active"}
+	if err := s.CreateUser(ctx, memberU); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	handler := srv.guarded("/api/v1/admin/integrations/teams/manifest", srv.handleTeamsManifestDownload)
+
+	member := NewAuthenticatedUser(tid("tm-member"), "member@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/teams/manifest", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rr := httptest.NewRecorder()
-	srv.handleTeamsManifestDownload(rr, req)
+	handler(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for non-admin, got %d", rr.Code)

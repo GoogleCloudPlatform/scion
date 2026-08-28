@@ -103,7 +103,22 @@ func (s *Server) authorizePassthroughIdentity(
 		return false
 	}
 
-	if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
+	// Permission-based admin check via Decide replaces the former
+	// inline role check. The super-admin bypass and scoped-admin access
+	// are preserved through the authorization pipeline.
+	isAdmin := false
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(userIdent),
+		Credential: credentialContextForIdentity(userIdent),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     Action("update"),
+		Permission: "hub.integrations.update",
+	})
+	if decision.Allowed {
+		isAdmin = true
+	}
+
+	if !isAdmin && broker.CreatedBy != userIdent.ID() {
 		logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch,
 			"not broker owner or admin")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,

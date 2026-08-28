@@ -199,13 +199,8 @@ var pluginBuildMu sync.Map
 // --- Route dispatchers ---
 
 // handleAdminIntegrations dispatches GET /api/v1/admin/integrations.
+// Authorization: route guard checks hub.integrations.read for GET.
 func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
 		s.handleListIntegrations(w, r)
@@ -216,11 +211,16 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 
 // handleAdminIntegrationByName dispatches requests under
 // /api/v1/admin/integrations/{name}[/config|/restart|/health].
+// Authorization: route guard checks hub.integrations.read for GET.
+// Write operations (PUT/POST/DELETE) require hub.integrations.update via inline Decide.
 func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
-		return
+	// Inline authorization for write operations — the route guard only
+	// checks the read permission. Writes need hub.integrations.update.
+	switch r.Method {
+	case http.MethodPut, http.MethodPost, http.MethodDelete:
+		if _, ok := s.requireWritePermission(w, r, "hub.integrations.update"); !ok {
+			return
+		}
 	}
 
 	// Parse: /api/v1/admin/integrations/{name}[/{action}[/{sub}]]
