@@ -282,8 +282,25 @@ di_validate_override_url() {
   # Only http(s) carry an Authorization header, so only http(s) can leak the
   # token — but "curl would not send the header" is the client rescuing the
   # rule again, and the point of this function is that the rule stands alone.
+  # LOWERCASING IS DONE WITH tr, NOT WITH ${v,,}. ${v,,} is bash 4.0+, and
+  # macOS ships bash 3.2.57, where it is a fatal "bad substitution" at runtime.
+  # This script is the tier's entry point, so a bash-4-ism here is not a style
+  # question: it kills the documented one-command deploy on a stock Mac.
+  #
+  # THE `; printf x` AND `%x` ARE LOAD-BEARING. DO NOT "SIMPLIFY" THEM AWAY.
+  # Command substitution strips ALL trailing newlines, and the lowercasing
+  # happens BEFORE the positive host-shape assertion below — so the plain form
+  #     host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  # deletes a trailing newline before the check that exists to reject it.
+  # Measured: that form flips three inputs from REJECT to ALLOW, including
+  # 'https://oauth2.googleapis.com\n', which becomes a permitted host. The
+  # sentinel byte makes the substitution preserve every trailing byte, so the
+  # verdicts are byte-identical to the ${v,,} original on all 45 inputs tested.
   local scheme="${url%%://*}"
-  if [[ "${scheme,,}" != "http" && "${scheme,,}" != "https" ]]; then
+  local scheme_lc
+  scheme_lc="$(printf '%s' "$scheme" | tr '[:upper:]' '[:lower:]'; printf x)"
+  scheme_lc="${scheme_lc%x}"
+  if [[ "$scheme_lc" != "http" && "$scheme_lc" != "https" ]]; then
     echo "Error: $var_name must be an http:// or https:// URL (got '$scheme')." >&2
     return 1
   fi
@@ -291,7 +308,9 @@ di_validate_override_url() {
   local host="${url#*://}"
   host="${host%%[/?#\\]*}" # path, query, fragment, backslash
   host="${host##*@}"       # userinfo — curl uses the LAST '@'
-  host="${host,,}"         # hostnames are case-insensitive
+  # hostnames are case-insensitive; sentinel per the note above
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]'; printf x)"
+  host="${host%x}"
   # Strip a :port suffix. Matching on the whole host first keeps a bare IPv6
   # literal like [::1] (colons, no port) from being mangled.
   if [[ "$host" =~ ^(.*):[0-9]+$ ]]; then

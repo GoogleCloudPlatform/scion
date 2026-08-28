@@ -71,6 +71,27 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// testBash names the interpreter every harness in this file runs the script
+// under. It exists because of a real escape: five review rounds, 42 tests, 62
+// shellcheck files and a live deploy all passed on Linux bash 5, and the script
+// still died on line 286 of a stock Mac, which ships bash 3.2.57. Nothing here
+// could see that, because the interpreter was hardcoded.
+//
+// Point SCION_TEST_BASH at another bash and the WHOLE existing suite runs under
+// it — that is a gate that executes rather than reads. shellcheck cannot do this
+// job: it has no bash-version targeting.
+//
+// Know the limit before trusting it: "bad substitution" is a RUNTIME error, so
+// running under an old bash only catches lines the suite actually EXECUTES.
+// See TestScriptLowercasingIsReachedByTheSuite, which pins that coverage
+// directly and does not need an old bash to do it.
+func testBash() string {
+	if b := os.Getenv("SCION_TEST_BASH"); b != "" {
+		return b
+	}
+	return "bash"
+}
+
 // runBashFunc sources deploy.sh and calls the named function with args.
 // Returns stdout, stderr, and the exit code.
 func runBashFunc(t *testing.T, funcName string, args ...string) (string, string, int) {
@@ -86,7 +107,7 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 		bashCmd += " " + shellQuote(a)
 	}
 
-	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd := exec.Command(testBash(), "-c", bashCmd)
 	cmd.Env = scrubbedEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -121,7 +142,7 @@ func runBashFuncWithSetup(t *testing.T, setup, funcName string, args ...string) 
 		bashCmd += " " + shellQuote(a)
 	}
 
-	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd := exec.Command(testBash(), "-c", bashCmd)
 	cmd.Env = scrubbedEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -510,6 +531,28 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 		{"file scheme", "file:///etc/passwd"},
 		{"no scheme", "evil.example"},
 		{"scheme-relative", "//evil.example"},
+		// TRAILING WHITESPACE. THESE ROWS EXIST TO STOP THE LOWERCASING BEING
+		// "SIMPLIFIED". deploy.sh lowercases with
+		//     v="$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]'; printf x)"
+		//     v="${v%x}"
+		// and the `; printf x` / `%x` look like noise someone can remove. They
+		// cannot: command substitution strips ALL trailing newlines, and the
+		// lowercasing runs BEFORE the host-shape assertion that rejects these.
+		//
+		// Measured, per site, against the pre-macOS-fix original:
+		//   plain form at the HOST site   — 3 of these flip REJECT -> ALLOW
+		//   plain form at the SCHEME site — 2 of these flip REJECT -> ALLOW
+		//   sentinel form at both         — byte-identical on all 48 inputs
+		// Without these rows the whole table stays GREEN on the plain form, so
+		// a portability edit would silently reopen the class R2 closed. Note
+		// \r rows are NOT redundant with \n: substitution strips only newlines,
+		// so the CR rows pin that the fix did not over-reach either.
+		{"trailing newline on a permitted host", "https://oauth2.googleapis.com\n"},
+		{"trailing newlines on a permitted host", "https://oauth2.googleapis.com\n\n\n"},
+		{"trailing newline on an uppercase permitted host", "https://OAUTH2.GOOGLEAPIS.COM\n"},
+		{"trailing newline inside the scheme", "https\n://oauth2.googleapis.com"},
+		{"trailing newline inside an uppercase scheme", "HTTPS\n://oauth2.googleapis.com"},
+		{"trailing carriage return on a permitted host", "https://oauth2.googleapis.com\r"},
 	}
 	for _, tc := range rejected {
 		t.Run("reject/"+tc.name, func(t *testing.T) {
@@ -520,6 +563,102 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 					"in a query string on tokeninfo, where the receiver logs it.", tc.url)
 			assert.Contains(t, stderr, "_DI_API_BASE",
 				"the rejection must name the variable at fault")
+		})
+	}
+}
+
+// TestScriptLowercasingIsReachedByTheSuite proves the suite EXECUTES both
+// lowercasing sites, which is the precondition for any old-bash CI job being
+// worth anything.
+//
+// Why this exists. deploy.sh used ${v,,} at two sites. That is bash 4.0+, and
+// macOS ships 3.2.57, so the documented one-command deploy died on line 286 of
+// a stock Mac — after five review rounds, 42 tests and a live deploy, all on
+// Linux bash 5. The fix is to run the suite under an old bash (SCION_TEST_BASH).
+// But "bad substitution" is a RUNTIME error, so that job only catches lines the
+// suite actually runs. A job that executes neither line would pass forever and
+// look like protection.
+//
+// The instrument. ${v@Z} is NOT a simulation of bash 3.2 — it is an invalid
+// parameter transformation that fails in the SAME CLASS at the SAME MOMENT as
+// ${v,,} on 3.2: bash -n parses it clean, and it dies at expansion time with
+// "bad substitution". That is exactly and only what the coverage question needs,
+// and it needs no old bash, which matters because bash 3.2 cannot be built in
+// every environment (this one has no route to the source).
+func TestScriptLowercasingIsReachedByTheSuite(t *testing.T) {
+	original, err := os.ReadFile(deployScriptPath(t))
+	require.NoError(t, err)
+
+	sites := []struct {
+		name    string
+		real    string
+		poisonY string
+	}{
+		{
+			name:    "scheme site",
+			real:    "  scheme_lc=\"$(printf '%s' \"$scheme\" | tr '[:upper:]' '[:lower:]'; printf x)\"",
+			poisonY: "  scheme_lc=\"${scheme@Z}\"",
+		},
+		{
+			name:    "host site",
+			real:    "  host=\"$(printf '%s' \"$host\" | tr '[:upper:]' '[:lower:]'; printf x)\"",
+			poisonY: "  host=\"${host@Z}\"",
+		},
+	}
+
+	// probe poisons one line, runs the validator against a plain permitted URL,
+	// and reports whether bash complained.
+	probe := func(t *testing.T, real, poison, url string) string {
+		t.Helper()
+		poisoned := strings.Replace(string(original), real, poison, 1)
+		require.NotEqual(t, string(original), poisoned,
+			"the poison did not apply — this test cannot observe anything and would "+
+				"pass vacuously. The target line was reformatted; update it to match "+
+				"deploy.sh. Target was:\n%s", real)
+
+		path := filepath.Join(t.TempDir(), "deploy.sh")
+		require.NoError(t, os.WriteFile(path, []byte(poisoned), 0o700))
+
+		bashCmd := fmt.Sprintf(
+			"set -euo pipefail; source %q && di_validate_override_url _DI_API_BASE %s",
+			path, shellQuote(url))
+		cmd := exec.Command(testBash(), "-c", bashCmd)
+		cmd.Env = scrubbedEnv()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		_ = cmd.Run()
+		return stderr.String()
+	}
+
+	// NEGATIVE CONTROL, AND IT IS NOT CEREMONY. Everything below assumes ${v@Z}
+	// is a RUNTIME error, so it fires only when its line executes. That is
+	// measured on bash 5 — but this test also runs under SCION_TEST_BASH, and on
+	// an interpreter where ${v@Z} were a PARSE error instead, every subtest below
+	// would pass without executing anything and the coverage gate would be a
+	// decoration. So: poison a line that a clean URL never reaches, and require
+	// silence. If this fires, the instrument is measuring presence, not
+	// execution, and the results below mean nothing.
+	t.Run("negative control — the instrument reports execution, not presence", func(t *testing.T) {
+		unreachable := `    echo "Error: $var_name must not contain '?' or '#'; it is an endpoint, not a query." >&2`
+		quiet := probe(t, unreachable, `    echo "${var_name@Z}" >&2`, "https://oauth2.googleapis.com")
+		require.NotContains(t, quiet, "bad substitution",
+			"poisoning an UNREACHED line produced an error, so this instrument fires on "+
+				"presence rather than execution and cannot prove coverage of anything")
+
+		// ...and the same poisoned line must fire when a URL does reach it.
+		loud := probe(t, unreachable, `    echo "${var_name@Z}" >&2`, "https://oauth2.googleapis.com/x?y")
+		require.Contains(t, loud, "bad substitution",
+			"the instrument failed to fire on a line that IS executed, so a silent "+
+				"result below would be meaningless")
+	})
+
+	for _, site := range sites {
+		t.Run(site.name, func(t *testing.T) {
+			// A plain, permitted value: it must reach BOTH sites.
+			stderr := probe(t, site.real, site.poisonY, "https://oauth2.googleapis.com")
+			assert.Contains(t, stderr, "bad substitution",
+				"the suite must EXECUTE this lowercasing line, or an old-bash CI job "+
+					"cannot detect a bash-4-ism here and would be green for no reason")
 		})
 	}
 }
@@ -1318,7 +1457,7 @@ func TestScriptEnableIAPPatchBodyViaStubServer(t *testing.T) {
 		-d '%s' \
 		"%s?updateMask=iapEnabled,invokerIamDisabled"`, patchBody, server.URL)
 
-	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd := exec.Command(testBash(), "-c", bashCmd)
 	out, err := cmd.Output()
 	require.NoError(t, err, "curl to stub server failed")
 	assert.Equal(t, "200", strings.TrimSpace(string(out)))
@@ -1334,6 +1473,51 @@ func TestScriptEnableIAPPatchBodyViaStubServer(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Preflight: gcloud capability check
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shell-differential self-test: banner invocation count
+// ---------------------------------------------------------------------------
+
+// TestShellDifferentialSelfTestBannerCount asserts that running
+// `shell-differential.sh --self-test` executes the self-test banner exactly
+// once. Without the SHELL_DIFFERENTIAL_SELFTEST export at the top of the
+// --self-test block, each of the four check() calls spawns a 4-argument child
+// that hits the guard at :146 and triggers a redundant nested self-test — five
+// total invocations instead of one.
+//
+// The visible stdout count is 1 either way, because check() redirects its
+// children's output to /dev/null and the guard captures the nested self-test
+// via command substitution. So this test measures TOTAL invocations via a
+// sideband file: a patched copy of the script appends a marker on every
+// banner execution, and the test counts markers.
+func TestShellDifferentialSelfTestBannerCount(t *testing.T) {
+	scriptPath := filepath.Join(repoRoot(t), "scripts", "dev", "shell-differential.sh")
+	scriptContent, err := os.ReadFile(scriptPath)
+	require.NoError(t, err)
+
+	traceFile := filepath.Join(t.TempDir(), "banner-trace")
+	patched := strings.Replace(
+		string(scriptContent),
+		`echo "self-test: ${SCION_TEST_BASH:-bash}"`,
+		fmt.Sprintf(`echo "self-test: ${SCION_TEST_BASH:-bash}"; echo x >> %q`, traceFile),
+		1,
+	)
+	patchedScript := filepath.Join(t.TempDir(), "shell-differential.sh")
+	require.NoError(t, os.WriteFile(patchedScript, []byte(patched), 0755))
+
+	cmd := exec.Command(patchedScript, "--self-test")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "self-test must pass; output: %s", output)
+
+	traceData, err := os.ReadFile(traceFile)
+	require.NoError(t, err, "trace file must exist — the banner was never reached")
+	count := strings.Count(string(traceData), "x")
+	assert.Equal(t, 1, count,
+		"self-test banner must execute exactly once; got %d — each extra "+
+			"invocation is a redundant self-test spawned because "+
+			"SHELL_DIFFERENTIAL_SELFTEST was not exported to check()'s children",
+		count)
+}
 
 func TestScriptCheckGcloudInstances_FailureMessage(t *testing.T) {
 	// On this container (gcloud 575.0.0), the preflight SHOULD fail.

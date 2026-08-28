@@ -1,0 +1,53 @@
+# Adversarial inputs for di_validate_override_url (scripts/single-node/deploy.sh).
+#
+# Format: name<TAB>value, value expanded with `printf %b`.
+# See scripts/dev/shell-differential.sh for what this corpus is for.
+#
+# THIS FILE IS NOT A COPY OF THE GO TABLE. cmd/deploy_script_test.go pins the
+# validator's RULES and is the authority on them. This corpus pins something the
+# table is structurally bad at: inputs whose significant bytes are at the END,
+# where a diff of ordinary test output shows nothing and an editor eats the
+# evidence. Every row below was added BEFORE an implementation was chosen, which
+# is the only reason the trailing-newline regression was caught at all.
+#
+# Ordinary values — a portability change must not alter these either.
+regional Cloud Run endpoint (real default)	https://us-east4-run.googleapis.com
+tokeninfo endpoint (real default)	https://oauth2.googleapis.com/tokeninfo
+loopback stub	http://127.0.0.1:45607
+localhost	http://localhost:8080
+ipv6 loopback	http://[::1]:8080
+uppercase host	https://FOO.GOOGLEAPIS.COM
+double userinfo	https://a@b@oauth2.googleapis.com
+denied host	https://evil.example
+no scheme	evil.example
+non-http scheme	dict://x.googleapis.com
+#
+# TRAILING WHITESPACE ON THE HOST. Command substitution strips trailing
+# newlines. Lowercasing runs BEFORE the host-shape assertion, so a plain
+# `$(… | tr …)` deletes the byte that the assertion exists to reject: measured,
+# these three flip REJECT -> ALLOW.
+trailing newline on a permitted host	https://oauth2.googleapis.com\n
+trailing newlines on a permitted host	https://oauth2.googleapis.com\n\n\n
+trailing newline on an uppercase permitted host	https://OAUTH2.GOOGLEAPIS.COM\n
+trailing newline on a denied host	https://evil.example\n
+#
+# TRAILING WHITESPACE INSIDE THE SCHEME. Same defect, other site: a scheme
+# comparison that silently accepts "https\n". Measured: these two flip
+# REJECT -> ALLOW under the plain form.
+trailing newline inside the scheme	https\n://oauth2.googleapis.com
+trailing newline inside an uppercase scheme	HTTPS\n://oauth2.googleapis.com
+#
+# CARRIAGE RETURN — A NEGATIVE CONTROL ON THE FIX, NOT A DUPLICATE OF THE ABOVE.
+# Substitution strips newlines only, so these must be UNAFFECTED by the fix.
+# They pin its blast radius: if a future rewrite starts eating \r too, it has
+# over-reached and these rows say so.
+trailing carriage return on a permitted host	https://oauth2.googleapis.com\r
+carriage return inside the scheme	https\r://oauth2.googleapis.com
+#
+# Interior control characters — not stripped by substitution, rejected by the
+# host-shape assertion. Present so a rewrite cannot quietly change WHICH rule
+# rejects them, which is a diagnostic change even when the verdict holds.
+space in the host	https://evil.example .googleapis.com
+tab in the host	https://evil.example\t.googleapis.com
+newline in the host	https://evil.example\n.googleapis.com
+carriage return in the host	https://evil.example\r.googleapis.com

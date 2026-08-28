@@ -1,0 +1,191 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# deploy.sh on macOS.
+#
+# WHY THIS EXISTS. deploy.sh is the single-node tier's entry point and the
+# tier's §1 promise is "an operator runs one deploy command". macOS ships
+# bash 3.2.57 -- the last GPLv2 release, frozen since 2007 -- so a bash-4-only
+# construct there kills that command on the most common operator platform.
+#
+# It happened. `${scheme,,}` reached main and died on a maintainer's Mac with
+# `bad substitution` AFTER five review rounds, 42 Go tests, 62 shellcheck files
+# and a live end-to-end deploy. Every one of those ran on Linux bash 5, so not
+# one of them could see it. shellcheck cannot cover this class either: it has
+# no bash-version targeting.
+#
+# The gate therefore has to EXERCISE rather than READ, which is what this does
+# -- it runs the existing Go suite with SCION_TEST_BASH pointed at the system
+# bash of a real Mac.
+#
+# WHY A SEPARATE FILE FROM ci.yml. `paths:` is a workflow-level key; GitHub has
+# no job-level paths filter, and the alternative -- a third-party filter action
+# -- would add unpinned supply-chain surface, which is the opposite of what
+# this file is trying to be. A separate file also keeps ci.yml untouched, so
+# this change cannot collide with anyone else editing it.
+#
+# The filter is NOT about money: this repo is public, and GitHub-hosted runners
+# including macOS are free on public repos. It is about concurrency and queue
+# latency -- macOS runners are a scarcer pool than Linux, so a job that runs on
+# every PR would make everyone else's queue longer to protect files most PRs do
+# not touch.
+#
+# KNOWN TRAP, recorded deliberately: if this job is ever made a REQUIRED status
+# check, the paths filter will hang every PR that does not touch these paths,
+# because a filtered-out job reports nothing rather than reporting success.
+# Make it required only alongside a merge-queue or an always-run stub job.
+#
+# ---------------------------------------------------------------------------
+# IF YOU NEED REAL BASH 3.2 WITHOUT A MAC, AND WHAT THAT DOES NOT BUY YOU
+#
+# This job deliberately does NOT build bash from source -- fetching a 2007
+# tarball over the network and compiling and EXECUTING it in a workflow where
+# every `uses:` is SHA-pinned would be the least trustworthy step in the file.
+# The recipe is recorded here anyway, because obtaining it cost a night and the
+# next person should not repeat it. Run it on your own machine, not in CI.
+#
+#   curl -LO https://mirrors.kernel.org/gnu/bash/bash-3.2.57.tar.gz
+#   sha256sum bash-3.2.57.tar.gz
+#   # 3fa9daf85ebf35068f090ce51283ddeeb3c75eb5bc70b1a4a7cb05868bfe06a4
+#   #
+#   # That digest was cross-checked against three independent mirrors -- nexcess,
+#   # OCF Berkeley and RWTH Aachen -- because ftp.gnu.org was unreachable from
+#   # the machine that needed it and one mirror agreeing with itself is not
+#   # provenance. Note it is recorded, not used: the moment this appears in an
+#   # automated fetch, re-read the paragraph above.
+#   tar xzf bash-3.2.57.tar.gz && cd bash-3.2.57
+#   rm -f y.tab.c y.tab.h   # REQUIRED, see below
+#   ./configure --without-bash-malloc
+#   make CFLAGS='-O2 -std=gnu89 -Wno-implicit-function-declaration'
+#
+#   Two traps, both measured:
+#   - The pregenerated y.tab.c shipped in the tarball is STALE relative to the
+#     patched parse.y, so building as-shipped fails with "too few arguments to
+#     function 'expand_prompt_string'". Deleting it forces a regeneration and
+#     you need bison/yacc installed. On a container with a stale package index,
+#     `apt-get install bison` reports "no installation candidate" -- that is a
+#     missing `apt-get update`, not a missing package.
+#   - 2007 C does not compile clean under a modern default std; the CFLAGS above
+#     are what it takes, and -std=gnu89 is doing the real work.
+#
+# WHAT A GREEN LOCAL RUN PROVES, EXACTLY: bash 3.2 SEMANTICS. Nothing else.
+# macOS is bash 3.2 PLUS BSD userland -- BSD sed, BSD diff, no GNU flags -- and
+# a Linux build isolates only the shell half. It can prove a shell-level failure
+# EXISTS (it did: the pre-fix deploy.sh dies with `${scheme,,}: bad substitution`
+# on all 22 corpus rows under a locally built 3.2). It CANNOT prove macOS
+# passes, and #90 -- `deploy.sh --help` dying on BSD sed with "bad flag in
+# substitute command: '}'" -- is the standing proof that the userland half
+# breaks independently. Do not quote a green Linux 3.2 run as macOS coverage.
+# That is what THIS job, on real Apple hardware, is for.
+# ---------------------------------------------------------------------------
+
+name: macOS bash 3.2
+
+# The two path lists are duplicated on purpose. GitHub Actions does not expand
+# YAML anchors, so `&paths` / `*paths` would not fail loudly -- it would parse
+# and then not filter the way it reads. Keep these two lists in sync by hand.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/single-node/**'
+      - 'scripts/dev/**'
+      - 'cmd/deploy_script_test.go'
+      - '.github/workflows/macos-bash32.yml'
+  pull_request:
+    paths:
+      - 'scripts/single-node/**'
+      - 'scripts/dev/**'
+      - 'cmd/deploy_script_test.go'
+      - '.github/workflows/macos-bash32.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  macos-bash32:
+    name: deploy.sh under macOS /bin/bash
+    # NOT macos-latest. That label is a moving alias by design, and this job's
+    # entire value is that the interpreter is bash 3.2. Pin the image; let the
+    # canary below catch the day the pin no longer means what we think.
+    runs-on: macos-15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # CANARY -- the reason this job is self-verifying rather than decorative.
+      #
+      # A negative assertion is not a pin until it has been observed positive.
+      # This job asserts a NEGATIVE: "no bash-4 construct fails here". The most
+      # likely way that goes wrong is not a bad test, it is the interpreter
+      # quietly not being bash 3.2 -- someone moves this to macos-latest, or
+      # Apple finally ships a newer /bin/bash -- after which the job runs bash 5
+      # under a 3.2 name and stays green forever while protecting nothing.
+      #
+      # So before trusting it, prove it REJECTS a bash-4 construct.
+      - name: Canary -- prove /bin/bash really is bash 3.2
+        run: |
+          set -uo pipefail
+          if /bin/bash -c 'x=ABC; echo "${x,,}"' >/dev/null 2>&1; then
+            echo "::error::canary failed -- /bin/bash accepted \${x,,}, so it is NOT bash 3.2."
+            echo "::error::This job would have reported success while testing nothing."
+            /bin/bash --version | head -1
+            exit 1
+          fi
+          /bin/bash --version | head -1
+          echo "canary ok -- interpreter rejects \${x,,} as bash 3.2 must"
+
+      # The recorded 3.2 answer in this fixture came from one maintainer's
+      # laptop. This is the first time it meets a SECOND real 3.2, on different
+      # hardware, which is the only way that record stops being one data point.
+      - name: Regex semantics match the recorded bash 3.2 behaviour
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: ./scripts/dev/bash32-regex-probe.sh --check
+
+      # Measure which bash 4+ constructs 3.2.57 actually has. Each construct
+      # runs in its own subprocess so a parse error (which aborts the whole
+      # script) cannot mask the results of later probes. The control probe
+      # must succeed; if it doesn't, every other row is meaningless.
+      - name: Bash 3.2.57 feature matrix
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: |
+          set -euo pipefail
+          output="$(./scripts/dev/bash32-feature-probe.sh)"
+          printf '%s\n' "$output"
+          # Assert the control probe succeeded — if it didn't, the harness
+          # is broken and every other row is meaningless.
+          if ! printf '%s\n' "$output" | grep -q '^control.*SUPPORTED'; then
+            echo "::error::Control probe failed — the harness itself is broken."
+            exit 1
+          fi
+
+      - name: Differential harness self-test under bash 3.2
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: ./scripts/dev/shell-differential.sh --self-test
+
+      - name: Run the deploy.sh suite under macOS /bin/bash
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: go test ./cmd/ -run TestScript -count=1 -v
