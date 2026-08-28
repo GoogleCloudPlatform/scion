@@ -903,7 +903,7 @@ func TestBroadcast_B5F1c_SelfSkipUsesAuthNotSender(t *testing.T) {
 	t.Logf("peer received: %d, sender received: %d", len(peerMsgs.Items), len(senderMsgs.Items))
 
 	if len(peerMsgs.Items) == 0 {
-		t.Errorf("peer-agent received no messages — forged Sender caused it to be "+
+		t.Errorf("peer-agent received no messages — forged Sender caused it to be " +
 			"skipped instead of the real sender. Self-skip must use auth identity.")
 	}
 	if len(senderMsgs.Items) > 0 {
