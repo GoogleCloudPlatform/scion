@@ -1071,7 +1071,7 @@ export class ScionPageAgentDetail extends LitElement {
         <scion-agent-message-viewer
           agentId=${this.agentId}
           agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'message')}
+          ?canSend=${can(agent._capabilities, 'attach')}
           ?cloudLogging=${agent.cloudLogging || false}
         ></scion-agent-message-viewer>
       `;
@@ -1101,14 +1101,14 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'message')}
+        ?canSend=${can(agent._capabilities, 'attach')}
         ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
       ></scion-chat-thread>
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'message')}
+        ?canSend=${can(agent._capabilities, 'attach')}
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
       ></scion-agent-message-viewer>
@@ -1156,7 +1156,7 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
-          ${can(agent._capabilities, 'message')
+          ${can(agent._capabilities, 'attach')
             ? html`
                 <sl-button
                   variant="default"

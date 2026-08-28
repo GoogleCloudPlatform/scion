@@ -966,7 +966,7 @@ export class ScionAgentTreeView extends LitElement {
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
         </a>
-        ${can(agent._capabilities, 'message')
+        ${can(agent._capabilities, 'attach')
           ? html`
               <sl-icon-button
                 class="message-btn"
