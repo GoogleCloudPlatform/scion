@@ -892,8 +892,25 @@ func TestWriteProjectSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 // profile (local-only on a non-local broker), leaving only kubernetes —
 // which cannot work on this tier.
 //
-// This test asserts the PROFILE LIST, not just the selected value. The bug
-// is a list of length one containing the wrong entry.
+// This test asserts the SEED FILE layer (pre-merge). Two kinds of assertions:
+//
+// LOAD-BEARING (determine behavior after koanf merge):
+//   - active_profile == "default" → koanf scalar overwrite makes this the
+//     effective active profile, which is what ResolveRuntime("") resolves.
+//   - profiles["default"].runtime == "cloudrun-sandbox" → this profile
+//     survives the merge and carries the correct runtime type.
+//
+// SEED-LAYER-ONLY (true of the seed file but NOT of effective settings):
+//   - len(profiles) == 1 → the seed defines one profile, but koanf merge
+//     adds local and remote from embedded defaults (effective has 3).
+//   - no "local" / no "remote" profiles → absent from seed, but present
+//     in effective settings after merge with embedded defaults.
+//   - no "kubernetes" runtime → absent from seed, but present in effective.
+//
+// These supplementary assertions document what the template CONTAINS, not
+// what the system USES. The end-to-end test
+// TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92 pins the
+// post-merge state that actually governs behavior.
 func TestInitMachine_CloudRunSandbox_SeedsCorrectProfile(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -970,6 +987,135 @@ func TestInitMachine_CloudRunSandbox_SeedsCorrectProfile(t *testing.T) {
 	if _, hasK8s := runtimes["kubernetes"]; hasK8s {
 		t.Error("runtime 'kubernetes' is present — it should not exist on the Cloud Run sandbox tier")
 	}
+}
+
+// TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92 is the R1 pin test
+// for task #92. It runs real InitMachine (Cloud Run sandbox environment) →
+// real LoadEffectiveSettings and asserts the POST-MERGE state that governs
+// runtime selection. This is the load-bearing invariant: koanf loads embedded
+// defaults first (lowest priority) then the seeded settings.yaml, so the
+// scalar active_profile is OVERWRITTEN to "default" while the profiles map
+// MERGES to three entries (local, remote, default). An empty profile
+// selection ("Use broker default") resolves through ResolveRuntime("") →
+// ActiveProfile → "default" → cloudrun-sandbox.
+//
+// Without this pin, a change to merge order, embedded defaults, or the
+// template's active_profile key could silently re-break §1. (R1/rev2)
+func TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Simulate Cloud Run Instance with sandbox launcher.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-r1")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Seed via real InitMachine — same as a fresh deploy.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Load EFFECTIVE settings — the same call buildInfoProfiles and
+	// resolveManagerForOpts make. This is post-koanf-merge: embedded defaults
+	// (local/docker + remote/kubernetes) merged with seeded settings.yaml
+	// (default/cloudrun-sandbox).
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	vs, _, err := LoadEffectiveSettings(globalDir)
+	if err != nil {
+		t.Fatalf("LoadEffectiveSettings failed: %v", err)
+	}
+
+	// LOAD-BEARING ASSERTION 1: ActiveProfile must be "default".
+	// The koanf scalar overwrite (seed "default" overwrites embedded "local")
+	// is the mechanism that makes the fix work. If this is "local", an empty
+	// profile selection resolves to docker, which is the bug.
+	if vs.ActiveProfile != "default" {
+		t.Errorf("effective ActiveProfile = %q, want %q — koanf scalar overwrite failed", vs.ActiveProfile, "default")
+	}
+
+	// LOAD-BEARING ASSERTION 2: ResolveRuntime("") must yield cloudrun-sandbox.
+	// This is the exact call path that fires when the UI sends an empty profile
+	// ("Use broker default"): ResolveRuntime("") → uses ActiveProfile →
+	// looks up profile "default" → runtime cloudrun-sandbox.
+	_, runtimeType, err := vs.ResolveRuntime("")
+	if err != nil {
+		t.Fatalf("ResolveRuntime(\"\") failed: %v — profile 'default' not found in effective settings", err)
+	}
+	if runtimeType != "cloudrun-sandbox" {
+		t.Errorf("ResolveRuntime(\"\") = %q, want %q", runtimeType, "cloudrun-sandbox")
+	}
+
+	// SUPPLEMENTARY: verify the merge produced the expected profile set.
+	// Three profiles after merge: local (from embedded), remote (from embedded),
+	// default (from seed). This is not load-bearing — the two assertions above
+	// are — but it documents the merge shape.
+	if len(vs.Profiles) < 3 {
+		names := make([]string, 0, len(vs.Profiles))
+		for k := range vs.Profiles {
+			names = append(names, k)
+		}
+		t.Logf("effective profiles: %v (expected ≥3 from merge)", names)
+	}
+}
+
+// TestInitMachine_CloudRunSandbox_RevertGuard_Task92 verifies that REVERTING
+// the Cloud Run sandbox fix (removing the template branch in init.go)
+// produces the buggy outcome: an empty profile selection resolves to a
+// runtime that cannot work on this tier (docker, from the workstation
+// defaults). This test runs through real InitMachine with the sandbox
+// detection DISABLED (simulating a reverted fix), then asserts the broken
+// state. It is the O4 fix guard: unlike the regression test in
+// handlers_test.go (which hardcodes YAML and tests the filter), this test
+// proves the fix is load-bearing by showing what happens WITHOUT it.
+func TestInitMachine_CloudRunSandbox_RevertGuard_Task92(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Run InitMachine WITHOUT Cloud Run sandbox detection. This simulates
+	// what happens if the fix is reverted: SkipRuntimeCheck=true falls
+	// through to the docker-default path.
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return false }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Load effective settings — what the broker sees.
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	vs, _, err := LoadEffectiveSettings(globalDir)
+	if err != nil {
+		t.Fatalf("LoadEffectiveSettings failed: %v", err)
+	}
+
+	// WITHOUT the fix, ActiveProfile is "local" and ResolveRuntime("") yields
+	// "docker" — which is correct for a workstation but WRONG for Cloud Run
+	// sandbox. This documents the broken state.
+	if vs.ActiveProfile != "local" {
+		t.Errorf("reverted: ActiveProfile = %q, want %q (workstation default)", vs.ActiveProfile, "local")
+	}
+	_, runtimeType, err := vs.ResolveRuntime("")
+	if err != nil {
+		t.Fatalf("reverted: ResolveRuntime(\"\") failed: %v", err)
+	}
+	if runtimeType != "docker" {
+		t.Errorf("reverted: ResolveRuntime(\"\") = %q, want %q (workstation default)", runtimeType, "docker")
+	}
+
+	// This is the bug: on Cloud Run sandbox with docker defaults, the only
+	// profile buildInfoProfiles would keep is remote/kubernetes (docker is
+	// filtered as local-only), and an empty selection resolves to docker
+	// (not cloudrun-sandbox). Either path produces a broken agent.
+	t.Log("CONFIRMED: without the fix, empty selection resolves to docker — the bug")
 }
 
 // TestInitMachine_CloudRunSandbox_WithoutSandboxBin_FallsBack verifies that

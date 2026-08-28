@@ -3333,3 +3333,144 @@ profiles:
 	// cannot work on Cloud Run sandbox. autoSelectProfile() in the UI would
 	// auto-select it because profiles.length === 1.
 }
+
+// TestBuildInfoProfiles_FallbackFires_Task92 verifies the architect's Shape B
+// claim by execution: when ALL profiles are dropped by buildInfoProfiles
+// (both local/docker and remote/kubernetes filtered out), the existing
+// len(profiles)==0 fallback fires and returns exactly one synthetic profile
+// {Name: "default", Type: defaultRuntimeType, Available: true}.
+//
+// With defaultRuntimeType="cloudrun-sandbox", this means the fallback produces
+// the correct profile for the single-node tier. autoSelectProfile in the UI
+// fires (length == 1), and the profile resolves to cloudrun-sandbox.
+//
+// This test also verifies the workstation case (docker broker) is unaffected
+// by the filter: when the broker IS local, the filter condition
+// !isLocalOnlyRuntime(defaultRuntimeType) is false, so NO profiles are
+// dropped — kubernetes remains available as a legitimate product feature.
+//
+// These three facts were measured by a verification instrument that was
+// deleted under a stop order (architect 03:08). This committed pin restores
+// them as reproducible evidence.
+func TestBuildInfoProfiles_FallbackFires_Task92(t *testing.T) {
+	tmpDir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Seed the ORIGINAL workstation defaults — the settings that exist
+	// on a fresh deploy without the task-92 fix.
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+runtimes:
+  docker:
+    type: docker
+  kubernetes:
+    type: kubernetes
+profiles:
+  local:
+    runtime: docker
+  remote:
+    runtime: kubernetes
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+
+	// === FACT 1: Current filter behavior on cloudrun-sandbox broker ===
+	// With workstation defaults, only remote/kubernetes survives the filter.
+	// local/docker is dropped because isLocalOnlyRuntime("docker")=true and
+	// the broker is non-local (!isLocalOnlyRuntime("cloudrun-sandbox")=true).
+	profiles := srv.buildInfoProfiles("cloudrun-sandbox")
+	if len(profiles) != 1 {
+		t.Fatalf("FACT 1: expected 1 profile (remote/kubernetes only), got %d", len(profiles))
+	}
+	if profiles[0].Name != "remote" || profiles[0].Type != "kubernetes" {
+		t.Errorf("FACT 1: expected remote/kubernetes, got %s/%s", profiles[0].Name, profiles[0].Type)
+	}
+	t.Log("FACT 1 CONFIRMED: on cloudrun-sandbox broker with workstation defaults, only remote/kubernetes survives the filter")
+
+	// === FACT 2: Filter predicate analysis ===
+	// isLocalOnlyRuntime("kubernetes") is false — this is WHY kubernetes
+	// survives the filter. The filter asks "is this local-only?" when it
+	// should ask "can this broker serve this runtime?".
+	if isLocalOnlyRuntime("kubernetes") {
+		t.Fatal("FACT 2: isLocalOnlyRuntime('kubernetes') should be false — this is load-bearing")
+	}
+	if !isLocalOnlyRuntime("docker") {
+		t.Fatal("FACT 2: isLocalOnlyRuntime('docker') should be true")
+	}
+	t.Log("FACT 2 CONFIRMED: kubernetes survives filter because isLocalOnlyRuntime('kubernetes')=false — predicate answers wrong question")
+
+	// === FACT 3: Workstation broker preserves all profiles ===
+	// On a docker broker, !isLocalOnlyRuntime("docker") = !true = false,
+	// so the filter condition is false for ALL profiles → nothing is dropped.
+	// This means kubernetes IS available on a workstation, which is correct
+	// (a workstation legitimately offers k8s as a product feature).
+	workstationProfiles := srv.buildInfoProfiles("docker")
+	byName := make(map[string]BrokerProfile, len(workstationProfiles))
+	for _, p := range workstationProfiles {
+		byName[p.Name] = p
+	}
+	if _, ok := byName["local"]; !ok {
+		t.Error("FACT 3: local profile should be present on docker broker")
+	}
+	if _, ok := byName["remote"]; !ok {
+		t.Error("FACT 3: remote profile should be present on docker broker — workstation legitimately offers k8s")
+	}
+	if len(workstationProfiles) < 2 {
+		t.Errorf("FACT 3: expected >= 2 profiles on docker broker, got %d", len(workstationProfiles))
+	}
+	t.Log("FACT 3 CONFIRMED: docker broker keeps all profiles (filter condition false for local broker)")
+
+	// === SUPPLEMENTARY: len(profiles)==0 fallback produces correct result ===
+	// The existing fallback at handlers.go:226-230 returns:
+	//   {Name: "default", Type: defaultRuntimeType, Available: true}
+	// To exercise this, seed settings with ONLY local-only profiles. On a
+	// cloudrun-sandbox broker, all local-only profiles are dropped → the
+	// filter loop produces an empty list → the fallback fires.
+	fallbackDir := t.TempDir()
+	fallbackScionDir := filepath.Join(fallbackDir, ".scion")
+	if err := os.MkdirAll(fallbackScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Override ALL profiles (including embedded defaults' "remote") to
+	// local-only runtimes. koanf merge overwrites nested map values, so
+	// profiles.remote.runtime = podman replaces the embedded kubernetes.
+	localOnlyYAML := `schema_version: "1"
+active_profile: local
+runtimes:
+  docker:
+    type: docker
+  podman:
+    type: podman
+profiles:
+  local:
+    runtime: docker
+  remote:
+    runtime: podman
+`
+	if err := os.WriteFile(filepath.Join(fallbackScionDir, "settings.yaml"), []byte(localOnlyYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Setenv("HOME", fallbackDir)
+	// Note: origHome defer from the top of this function will restore HOME.
+
+	fallbackProfiles := srv.buildInfoProfiles("cloudrun-sandbox")
+	if len(fallbackProfiles) != 1 {
+		t.Fatalf("FALLBACK: expected 1 profile from len==0 fallback, got %d", len(fallbackProfiles))
+	}
+	if fallbackProfiles[0].Name != "default" {
+		t.Errorf("FALLBACK: expected name 'default', got %q", fallbackProfiles[0].Name)
+	}
+	if fallbackProfiles[0].Type != "cloudrun-sandbox" {
+		t.Errorf("FALLBACK: expected type 'cloudrun-sandbox', got %q", fallbackProfiles[0].Type)
+	}
+	t.Log("FALLBACK CONFIRMED: len(profiles)==0 fallback returns {default, cloudrun-sandbox, true}")
+}

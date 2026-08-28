@@ -667,7 +667,8 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 
 // defaultSandboxBin is the path to the Cloud Run sandbox launcher binary.
 // Duplicated from pkg/runtime to avoid an import cycle (config is lower-level
-// than runtime). Must stay in sync with runtime.defaultSandboxBin.
+// than runtime). Must stay in sync with runtime.DefaultSandboxBin; an equality
+// test in init_test.go pins this (O5).
 const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
 
 // isCloudRunSandboxEnvironment returns true when the process is running on a
