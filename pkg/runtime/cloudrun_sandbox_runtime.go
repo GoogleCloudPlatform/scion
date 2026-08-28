@@ -79,9 +79,21 @@ const sandboxAgentHome = "/home/scion"
 const sandboxWorkspace = "/workspace"
 
 // entrypointLogFile is the filename (relative to agentHome) where the
-// entrypoint's stdout/stderr is captured on failure. When `exec sciontool
-// init` succeeds the shell is replaced and the file contains normal init
-// output; when it fails the file holds the error output that explains why.
+// entrypoint's stdout/stderr is captured.  This file is the ONLY record
+// of failures that occur before, around, or outside sciontool's own
+// logger — shell-level errors ("command not found"), exec failures, and
+// any diagnostic the process writes to stdout/stderr without going
+// through log.go.  Those failures produce a bare exit code in the UI
+// and nothing else; this file is where the explanation lives.
+//
+// The file is opened with >> (append) so that a restart preserves the
+// previous run's output.  A run-delimiter line is emitted at the start
+// of each run to make boundaries unambiguous.  See #110 for the history.
+//
+// Growth is unbounded across restarts, matching agent.log (which also
+// appends without rotation in the same directory).  If disk pressure
+// from diagnostic logs becomes a concern on this tier, rotation should
+// be added to BOTH files together.
 const entrypointLogFile = ".scion-entrypoint.log"
 
 // sandboxUID and sandboxGID control the UID/GID passed to the sandbox via
@@ -712,8 +724,11 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// No .rc file: `exec` replaces the shell on success (echo never runs),
 	// and `sandbox wait` already provides the exit code on the host side.
 	logPath := filepath.Join(sandboxAgentHome, entrypointLogFile)
-	wrappedCmd := fmt.Sprintf("{ exec sciontool init -- /bin/sh -c %s; } > %s 2>&1",
-		shellQuote(tmuxCmd), logPath)
+	// Append (>>), not truncate (>): a restart must preserve the previous
+	// run's diagnostic output.  The run delimiter makes boundaries
+	// unambiguous when multiple runs accumulate in the same file.  #110.
+	wrappedCmd := fmt.Sprintf("echo '--- entrypoint start '$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)' ---' >> %s; { exec sciontool init -- /bin/sh -c %s; } >> %s 2>&1",
+		logPath, shellQuote(tmuxCmd), logPath)
 	return []string{"/bin/sh", "-c", wrappedCmd}, nil
 }
 
