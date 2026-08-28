@@ -445,6 +445,20 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// Validate defaultAgent when provided: must be a reasonable length and
+	// must resolve to a non-deleted agent within this project.
+	if body.DefaultAgent != "" {
+		body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
+		if len([]rune(body.DefaultAgent)) > 200 {
+			ValidationError(w, "defaultAgent identifier is too long", nil)
+			return
+		}
+		if err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+	}
+
 	topicID := uuid.New().String()
 	now := time.Now().UTC()
 	topic := WebChatTopic{
@@ -576,7 +590,20 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 	}
 
 	if body.DefaultAgent != nil {
-		updates.DefaultAgent = body.DefaultAgent
+		// Validate defaultAgent: clearing (empty string) is always allowed;
+		// setting a value must resolve to a non-deleted agent in this project.
+		da := strings.TrimSpace(*body.DefaultAgent)
+		if da != "" {
+			if len([]rune(da)) > 200 {
+				ValidationError(w, "defaultAgent identifier is too long", nil)
+				return
+			}
+			if err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return
+			}
+		}
+		updates.DefaultAgent = &da
 	}
 
 	if updates.Name == nil && updates.DefaultAgent == nil {
@@ -649,6 +676,30 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// validateDefaultAgent checks that the given identifier (slug or UUID) resolves
+// to a non-deleted agent within the specified project. Returns nil on success
+// or a user-facing error describing the validation failure.
+func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef string) error {
+	// Try slug lookup first (project-scoped, excludes soft-deleted).
+	a, err := s.store.GetAgentBySlug(ctx, projectID, agentRef)
+	if err == nil && a != nil {
+		return nil // found by slug in this project, not deleted
+	}
+
+	// Fall back to UUID lookup.
+	a, err = s.store.GetAgent(ctx, agentRef)
+	if err != nil || a == nil {
+		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+	}
+	if a.ProjectID != projectID {
+		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+	}
+	if !a.DeletedAt.IsZero() {
+		return fmt.Errorf("defaultAgent %q has been deleted", agentRef)
+	}
+	return nil
 }
 
 // ClearTopicDefaultAgent drops the default-agent binding from every topic in
@@ -939,6 +990,16 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			if err != nil || defaultAgent == nil {
 				// Fall back to lookup by ID in case the value is a UUID.
 				defaultAgent, err = s.store.GetAgent(ctx, topic.DefaultAgent)
+				// Scope the fallback: reject agents from other projects or
+				// soft-deleted agents. GetAgent is a bare primary-key fetch
+				// with no project or deletion filter, so without this guard
+				// a UUID naming an agent in another project (or a deleted
+				// agent) would bind successfully — DEF-31.
+				if err == nil && defaultAgent != nil {
+					if defaultAgent.ProjectID != projectID || !defaultAgent.DeletedAt.IsZero() {
+						defaultAgent = nil
+					}
+				}
 			}
 			if err == nil && defaultAgent != nil {
 				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now, body.ReplyToID)
