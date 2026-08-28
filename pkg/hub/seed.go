@@ -542,6 +542,14 @@ func hubAdminPermissionIDs() []string {
 		"quota.create": true,
 		"quota.update": true,
 		"quota.delete": true,
+		// Role and binding management (PR-C1)
+		"role.read":           true,
+		"role.create":         true,
+		"role.update":         true,
+		"role.delete":         true,
+		"role_binding.read":   true,
+		"role_binding.create": true,
+		"role_binding.delete": true,
 		// Project oversight
 		"project.read":   true,
 		"project.list":   true,

@@ -187,6 +187,12 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/usage":                       "hub-admin:quota",
 	"/api/v1/admin/usage/":                      "hub-admin:quota",
 	"/api/v1/usage/me":                          "authenticated:quota-usage",
+	// Role management (PR-C1)
+	"/api/v1/admin/roles":          "hub-admin:role",
+	"/api/v1/admin/roles/":         "hub-admin:role",
+	"/api/v1/admin/role-bindings":  "hub-admin:role_binding",
+	"/api/v1/admin/role-bindings/": "hub-admin:role_binding",
+	"/api/v1/admin/permissions":    "hub-admin:role",
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {

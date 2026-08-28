@@ -755,6 +755,35 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Hub admin: Role management (PR-C1)
+	// -------------------------------------------------------------------------
+	"/api/v1/admin/roles": {
+		Pattern: "/api/v1/admin/roles", RouteID: "admin.roles",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
+	"/api/v1/admin/roles/": {
+		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
+	"/api/v1/admin/role-bindings": {
+		Pattern: "/api/v1/admin/role-bindings", RouteID: "admin.roleBindings",
+		Classification: RouteHubAdmin,
+		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+	},
+	"/api/v1/admin/role-bindings/": {
+		Pattern: "/api/v1/admin/role-bindings/", RouteID: "admin.roleBindings.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+	},
+	"/api/v1/admin/permissions": {
+		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
+
+	// -------------------------------------------------------------------------
 	// Authenticated: Usage self-service
 	// -------------------------------------------------------------------------
 	"/api/v1/usage/me": {

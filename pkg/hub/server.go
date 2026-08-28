@@ -3847,6 +3847,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/usage/", s.guarded("/api/v1/admin/usage/", s.handleAdminUsageByLimit))
 	s.mux.HandleFunc("/api/v1/usage/me", s.guarded("/api/v1/usage/me", s.handleUsageMe))
 
+	// Role management (PR-C1)
+	s.mux.HandleFunc("/api/v1/admin/roles", s.guarded("/api/v1/admin/roles", s.handleAdminRoles))
+	s.mux.HandleFunc("/api/v1/admin/roles/", s.guarded("/api/v1/admin/roles/", s.handleAdminRoleByID))
+	s.mux.HandleFunc("/api/v1/admin/role-bindings", s.guarded("/api/v1/admin/role-bindings", s.handleAdminRoleBindings))
+	s.mux.HandleFunc("/api/v1/admin/role-bindings/", s.guarded("/api/v1/admin/role-bindings/", s.handleAdminRoleBindingByID))
+	s.mux.HandleFunc("/api/v1/admin/permissions", s.guarded("/api/v1/admin/permissions", s.handleAdminPermissions))
+
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.guarded("/api/v1/notifications", s.handleNotifications))
 	s.mux.HandleFunc("/api/v1/notifications/", s.guarded("/api/v1/notifications/", s.handleNotificationRoutes))

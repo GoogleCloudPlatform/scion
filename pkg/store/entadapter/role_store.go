@@ -135,6 +135,104 @@ func (r *RoleStore) CreateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	return entRoleDefinitionToStore(created), nil
 }
 
+// UpdateRoleDefinition updates an existing role definition.
+// System roles (System == true) cannot be updated.
+func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefinition) (*store.RoleDefinition, error) {
+	uid, err := parseGetID(rd.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch existing to check system flag.
+	existing, err := r.client.RoleDefinition.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if existing.System {
+		return nil, fmt.Errorf("%w: system roles cannot be modified", store.ErrInvalidInput)
+	}
+
+	builder := r.client.RoleDefinition.UpdateOneID(uid).
+		SetName(rd.Name).
+		SetDescription(rd.Description).
+		SetPermissions(rd.Permissions)
+	// ScopeType is intentionally not updatable.
+
+	updated, err := builder.Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entRoleDefinitionToStore(updated), nil
+}
+
+// DeleteRoleDefinition deletes a role definition by ID.
+// System roles (System == true) cannot be deleted.
+// Returns an error if any bindings reference the role.
+func (r *RoleStore) DeleteRoleDefinition(ctx context.Context, id string) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+
+	// Fetch existing to check system flag.
+	existing, err := r.client.RoleDefinition.Get(ctx, uid)
+	if err != nil {
+		return mapError(err)
+	}
+	if existing.System {
+		return fmt.Errorf("%w: system roles cannot be deleted", store.ErrInvalidInput)
+	}
+
+	// Check for active bindings referencing this role.
+	count, err := r.client.RoleBinding.Query().
+		Where(rolebinding.RoleDefinitionIDEQ(uid)).
+		Count(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if count > 0 {
+		return fmt.Errorf("%w: role has %d active binding(s)", store.ErrInvalidInput, count)
+	}
+
+	if err := r.client.RoleDefinition.DeleteOneID(uid).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// ListAllRoleBindings returns all role bindings (admin view) with pagination.
+// A limit of 0 defaults to 100. The maximum allowed limit is 1000.
+func (r *RoleStore) ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*store.RoleBinding, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rbs, err := r.client.RoleBinding.Query().
+		Order(ent.Desc(rolebinding.FieldCreated)).
+		Limit(limit).
+		Offset(offset).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.RoleBinding, len(rbs))
+	for i, rb := range rbs {
+		result[i] = entRoleBindingToStore(rb)
+	}
+	return result, nil
+}
+
+// CountAllRoleBindings returns the total number of role bindings.
+func (r *RoleStore) CountAllRoleBindings(ctx context.Context) (int, error) {
+	return r.client.RoleBinding.Query().Count(ctx)
+}
+
 // GetRoleBinding retrieves a role binding by ID.
 func (r *RoleStore) GetRoleBinding(ctx context.Context, id string) (*store.RoleBinding, error) {
 	uid, err := parseGetID(id)

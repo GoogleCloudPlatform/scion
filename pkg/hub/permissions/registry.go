@@ -33,6 +33,8 @@ const (
 	ResourceGCPServiceAccount = "gcp_service_account"
 	ResourceHub               = "hub"
 	ResourceQuota             = "quota"
+	ResourceRole              = "role"
+	ResourceRoleBinding       = "role_binding"
 
 	ActionCreate       = "create"
 	ActionRead         = "read"
@@ -191,6 +193,15 @@ var Registry = []Permission{
 	{ID: "quota.create", Resource: ResourceQuota, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
 	{ID: "quota.update", Resource: ResourceQuota, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
 	{ID: "quota.delete", Resource: ResourceQuota, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
+
+	// Role management (Phase 2 PR-C1)
+	{ID: "role.read", Resource: ResourceRole, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.create", Resource: ResourceRole, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.update", Resource: ResourceRole, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.delete", Resource: ResourceRole, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.read", Resource: ResourceRoleBinding, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.create", Resource: ResourceRoleBinding, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
 	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
