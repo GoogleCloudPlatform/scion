@@ -264,3 +264,135 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 			rr.Code, rr.Body.String())
 	}
 }
+
+// B5 SECURITY: A client sending a structured_message with a spoofed SenderID
+// must not be able to create (or join) a DM conversation under the spoofed
+// identity. The DM key IS the access control list; if an attacker can choose
+// the sender ID in the key, they can read/write any user's DM.
+//
+// This test sends a message with SenderID set to a different user (the
+// "victim") while the authenticated identity is the attacker. Without the
+// fix, the dual-write path builds a DM key from the spoofed SenderID and
+// creates a conversation that the victim would join on their next message.
+// With the fix, the key is derived from the authenticated caller, so the
+// conversation belongs to the attacker (correct, expected behaviour).
+func TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "b5-security-project",
+		Slug:       "b5-security-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// The attacker: will authenticate as this user.
+	attacker := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "attacker@example.com",
+		DisplayName: "Attacker",
+	}
+	if err := s.CreateUser(ctx, attacker); err != nil {
+		t.Fatalf("CreateUser (attacker): %v", err)
+	}
+
+	// The victim: attacker will try to spoof this user's ID as SenderID.
+	victim := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "victim@example.com",
+		DisplayName: "Victim",
+	}
+	if err := s.CreateUser(ctx, victim); err != nil {
+		t.Fatalf("CreateUser (victim): %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "target-agent",
+		Slug:       "target-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Build the request with spoofed sender: SenderID and Sender claim to be
+	// the victim, but the authenticated identity is the attacker.
+	spoofedMsg := &messages.StructuredMessage{
+		Sender:    "user:" + victim.Email,
+		SenderID:  victim.ID,
+		Recipient: "agent:" + agent.Slug,
+		Msg:       "spoofed message",
+		Type:      messages.TypeInstruction,
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	body, _ := json.Marshal(MessageRequest{StructuredMessage: spoofedMsg})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	// Authenticate as the attacker.
+	req = req.WithContext(contextWithIdentity(req.Context(),
+		NewAuthenticatedUser(attacker.ID, attacker.Email, attacker.DisplayName, "user", "web")))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, agent.ID)
+
+	// The handler may return 503 (no dispatcher) — that's fine, the
+	// dual-write (conversation creation) happens before delivery.
+	t.Logf("handler response: %d %s", rr.Code, rr.Body.String())
+
+	// Build the expected keys.
+	correctKey, err := messages.DMConversationKey("user", attacker.ID, "agent", agent.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey (correct): %v", err)
+	}
+	spoofedKey, err := messages.DMConversationKey("user", victim.ID, "agent", agent.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey (spoofed): %v", err)
+	}
+	t.Logf("correct key (attacker): %s", correctKey)
+	t.Logf("spoofed key (victim):   %s", spoofedKey)
+
+	// The conversation must be keyed to the attacker (the authenticated user),
+	// NOT to the victim (the spoofed sender).
+	correctConv, err := s.GetConversationByExternalRef(ctx, "native", correctKey)
+	if err != nil {
+		t.Fatalf("expected conversation with correct key (attacker) to exist, got: %v", err)
+	}
+	t.Logf("conversation created: id=%s external_ref=%s", correctConv.ID, correctConv.ExternalRef)
+
+	// The spoofed key must NOT have produced a conversation.
+	spoofedConv, spoofedErr := s.GetConversationByExternalRef(ctx, "native", spoofedKey)
+	if spoofedErr == nil && spoofedConv != nil {
+		t.Errorf("SECURITY VIOLATION: conversation created under spoofed victim key %s (conv_id=%s). "+
+			"The DM key must be derived from the authenticated context, never the payload.",
+			spoofedKey, spoofedConv.ID)
+	}
+
+	// Also verify the stored message uses the attacker's sender identity, not
+	// the victim's. This ensures downstream consumers (broker, SSE) inherit
+	// the authenticated identity.
+	msgResult, err := s.ListMessages(ctx, store.MessageFilter{
+		ConversationID: correctConv.ID,
+	}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for _, m := range msgResult.Items {
+		if m.SenderID == victim.ID {
+			t.Errorf("stored message %s has SenderID=%s (victim); should be %s (attacker)",
+				m.ID, victim.ID, attacker.ID)
+		}
+		if strings.Contains(m.Sender, victim.Email) || strings.Contains(m.Sender, victim.DisplayName) {
+			t.Errorf("stored message %s has Sender=%q containing victim identity; should use attacker",
+				m.ID, m.Sender)
+		}
+	}
+}
