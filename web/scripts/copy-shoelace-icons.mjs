@@ -159,6 +159,7 @@ const USED_ICONS = [
   'slash-circle',
   'sliders',
   'sort-down',
+  'speedometer2',
   'star',
   'star-fill',
   'stop-circle',
