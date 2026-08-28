@@ -69,6 +69,9 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 		// messagebroker deliverToAgent: broker-delivered agent messages.
 		"messagebroker.go:deliverToAgent": "Phase 5 dual-write: broker-delivered agent message",
+
+		// createInboxMessage: agent → user inbox notification (e.g. WAITING_FOR_INPUT).
+		"notifications.go:createInboxMessage": "Phase 5 dual-write: agent→user inbox notification DM conversation",
 	}
 
 	// -------------------------------------------------------------------
@@ -78,12 +81,7 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// broadcastDirect: Broadcast messages are ephemeral fan-outs.
 		// Both broker paths also skip conversation resolution for broadcasts.
 		// No conversation ownership applies.
-		"handlers_agent_messaging.go:broadcastDirect": "Broadcast messages are ephemeral; no conversation ownership",
-
-		// createInboxMessage: System notification creating a synthetic inbox
-		// message (e.g. WAITING_FOR_INPUT). Not a real conversation participant
-		// message; it is a one-way notification.
-		"notifications.go:createInboxMessage": "System notification; synthetic inbox message, not a conversation participant message",
+		"handlers_agent_messaging.go:broadcastDirect": "Deferred pending group-conversation model; broadcast is one-to-many with no two-party key to derive",
 	}
 
 	// Build combined set for lookup.
