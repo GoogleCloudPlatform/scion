@@ -283,8 +283,8 @@ func TestNewCloudRunSandboxRuntime_WithConfig(t *testing.T) {
 
 func TestNewCloudRunSandboxRuntime_NilConfig(t *testing.T) {
 	rt := NewCloudRunSandboxRuntime(nil)
-	if rt.bin != defaultSandboxBin {
-		t.Errorf("bin = %q, want default %q", rt.bin, defaultSandboxBin)
+	if rt.bin != DefaultSandboxBin {
+		t.Errorf("bin = %q, want default %q", rt.bin, DefaultSandboxBin)
 	}
 }
 

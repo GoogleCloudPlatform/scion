@@ -36,7 +36,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
-const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
+// DefaultSandboxBin is the path to the Cloud Run sandbox launcher binary.
+// Exported so that pkg/config (which cannot import this package without
+// creating a cycle) can assert equality with its own copy at test time.
+const DefaultSandboxBin = "/usr/local/gcp/bin/sandbox"
 
 // defaultScionRoot is the parent directory for all writable sandbox paths.
 // Per-agent bind mounts under this directory satisfy the write-visibility
@@ -83,7 +86,7 @@ const entrypointLogFile = ".scion-entrypoint.log"
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
 func SandboxLauncherAvailable() bool {
-	_, err := os.Stat(defaultSandboxBin)
+	_, err := os.Stat(DefaultSandboxBin)
 	return err == nil
 }
 
@@ -660,7 +663,7 @@ type CloudRunSandboxRuntime struct {
 
 // NewCloudRunSandboxRuntime returns a new CloudRunSandboxRuntime.
 func NewCloudRunSandboxRuntime(cfg *config.V1CloudRunSandboxConfig) *CloudRunSandboxRuntime {
-	bin := defaultSandboxBin
+	bin := DefaultSandboxBin
 	if cfg != nil && cfg.SandboxBin != "" {
 		bin = cfg.SandboxBin
 	}

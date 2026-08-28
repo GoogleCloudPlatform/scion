@@ -574,26 +574,53 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 	// Create global settings file if it doesn't exist
 	settingsPath := GetSettingsPath(globalDir)
 	if settingsPath == "" {
-		var detectedRuntime string
-		if !opt.SkipRuntimeCheck {
+		var defaultSettings []byte
+
+		// Cloud Run Instance with sandbox launcher: use the tier-specific
+		// settings template that defines a single "default" profile pointing
+		// to cloudrun-sandbox. This mirrors the pattern set by
+		// scripts/cloudrun/hub-settings-template.yaml for the multi-node
+		// Cloud Run tier. Without this, the embedded workstation defaults
+		// define docker/kubernetes profiles; buildInfoProfiles filters out
+		// the docker profile (local-only) on a non-local broker, leaving
+		// only the kubernetes profile — which cannot work on this tier
+		// (task #92).
+		//
+		// isCloudRunSandboxEnvironment() is a FACT about the machine
+		// (CLOUD_RUN_INSTANCE set + sandbox binary present).
+		// SkipRuntimeCheck is a CALLER PREFERENCE. The fact must dominate:
+		// a caller who asks for runtime detection on a platform where
+		// detection cannot succeed must still get the correct template.
+		if isCloudRunSandboxEnvironment() {
 			var err error
-			detectedRuntime, err = DetectLocalRuntime()
+			defaultSettings, err = EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to read Cloud Run sandbox settings template: %w", err)
 			}
 		} else {
-			detectedRuntime = "docker"
-		}
+			var detectedRuntime string
+			if !opt.SkipRuntimeCheck {
+				var err error
+				detectedRuntime, err = DetectLocalRuntime()
+				if err != nil {
+					return err
+				}
+			} else {
+				detectedRuntime = "docker"
+			}
 
-		// Seed default YAML settings with the detected runtime
-		defaultSettings, err := getDefaultSettingsYAMLForRuntime(detectedRuntime)
-		if err != nil {
-			// Fall back to JSON defaults
-			defaultSettings, err = getDefaultSettingsDataForRuntime(detectedRuntime)
+			// Seed default YAML settings with the detected runtime
+			var err error
+			defaultSettings, err = getDefaultSettingsYAMLForRuntime(detectedRuntime)
 			if err != nil {
-				return fmt.Errorf("failed to read default settings: %w", err)
+				// Fall back to JSON defaults
+				defaultSettings, err = getDefaultSettingsDataForRuntime(detectedRuntime)
+				if err != nil {
+					return fmt.Errorf("failed to read default settings: %w", err)
+				}
 			}
 		}
+
 		newSettingsPath := filepath.Join(globalDir, "settings.yaml")
 		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
 			return fmt.Errorf("failed to seed global settings.yaml: %w", err)
@@ -642,6 +669,27 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 	}
 
 	return nil
+}
+
+// defaultSandboxBin is the path to the Cloud Run sandbox launcher binary.
+// Duplicated from pkg/runtime to avoid an import cycle (config is lower-level
+// than runtime). Must stay in sync with runtime.DefaultSandboxBin.
+// TestDefaultSandboxBin_MatchesLiteral pins this copy;
+// TestSandboxBinConstantSync_Task92 pins the runtime copy. (O5)
+const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
+
+// isCloudRunSandboxEnvironment returns true when the process is running on a
+// Cloud Run Instance with the sandbox launcher available. This combination
+// identifies the single-node hosted tier, which needs a cloudrun-sandbox
+// profile instead of the workstation defaults.
+func isCloudRunSandboxEnvironment() bool {
+	return os.Getenv("CLOUD_RUN_INSTANCE") != "" && sandboxBinExists(defaultSandboxBin)
+}
+
+// sandboxBinExists is a test seam for isCloudRunSandboxEnvironment.
+var sandboxBinExists = func(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // ensureBrokerID checks whether a broker ID already exists in the global settings

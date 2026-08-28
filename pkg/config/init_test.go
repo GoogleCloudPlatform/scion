@@ -883,3 +883,478 @@ func TestWriteProjectSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 		t.Errorf("expected hub.project_id=%q, got %v", projectID, hub["project_id"])
 	}
 }
+
+// TestInitMachine_CloudRunSandbox_SeedsCorrectProfile is the pin test for
+// task #92. On a Cloud Run Instance with sandbox launcher, InitMachine must
+// seed settings with a single "default" profile pointing to cloudrun-sandbox.
+// The bug: without this, the workstation defaults (local/docker +
+// remote/kubernetes) are seeded. buildInfoProfiles filters out the docker
+// profile (local-only on a non-local broker), leaving only kubernetes —
+// which cannot work on this tier.
+//
+// This test asserts the SEED FILE layer (pre-merge). Two kinds of assertions:
+//
+// LOAD-BEARING (determine behavior after koanf merge):
+//   - active_profile == "default" → koanf scalar overwrite makes this the
+//     effective active profile, which is what ResolveRuntime("") resolves.
+//   - profiles["default"].runtime == "cloudrun-sandbox" → this profile
+//     survives the merge and carries the correct runtime type.
+//
+// SEED-LAYER-ONLY (true of the seed file but NOT of effective settings):
+//   - len(profiles) == 1 → the seed defines one profile, but koanf merge
+//     adds local and remote from embedded defaults (effective has 3).
+//   - no "local" / no "remote" profiles → absent from seed, but present
+//     in effective settings after merge with embedded defaults.
+//   - no "kubernetes" runtime → absent from seed, but present in effective.
+//
+// These supplementary assertions document what the template CONTAINS, not
+// what the system USES. The end-to-end test
+// TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92 pins the
+// post-merge state that actually governs behavior.
+func TestInitMachine_CloudRunSandbox_SeedsCorrectProfile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Simulate Cloud Run Instance with sandbox launcher.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-001")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// SkipRuntimeCheck=true is what hosted mode passes.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Load the seeded settings and verify.
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	settingsPath := filepath.Join(globalDir, "settings.yaml")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read seeded settings.yaml: %v", err)
+	}
+
+	var settingsMap map[string]interface{}
+	if err := yaml.Unmarshal(data, &settingsMap); err != nil {
+		t.Fatalf("failed to parse settings.yaml: %v", err)
+	}
+
+	// Assert active_profile is "default" (not "local").
+	activeProfile, ok := settingsMap["active_profile"].(string)
+	if !ok || activeProfile != "default" {
+		t.Errorf("active_profile = %q, want %q", activeProfile, "default")
+	}
+
+	// Assert the PROFILE LIST: exactly one profile, "default", with runtime
+	// "cloudrun-sandbox". The old bug produced two profiles: "local" (docker)
+	// and "remote" (kubernetes).
+	profiles, ok := settingsMap["profiles"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("profiles section missing or wrong type: %v", settingsMap["profiles"])
+	}
+
+	if len(profiles) != 1 {
+		t.Errorf("expected exactly 1 profile, got %d: %v", len(profiles), profileNames(profiles))
+	}
+
+	defaultProfile, ok := profiles["default"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("profile 'default' missing; profiles are: %v", profileNames(profiles))
+	}
+	if rt := defaultProfile["runtime"]; rt != "cloudrun-sandbox" {
+		t.Errorf("profile 'default' runtime = %q, want %q", rt, "cloudrun-sandbox")
+	}
+
+	// Negative assertion: the profiles that caused the bug must NOT be present.
+	if _, hasLocal := profiles["local"]; hasLocal {
+		t.Error("profile 'local' is present — it should not exist on the Cloud Run sandbox tier")
+	}
+	if _, hasRemote := profiles["remote"]; hasRemote {
+		t.Error("profile 'remote' is present — it should not exist on the Cloud Run sandbox tier")
+	}
+
+	// Assert runtimes: exactly cloudrun-sandbox.
+	runtimes, ok := settingsMap["runtimes"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("runtimes section missing: %v", settingsMap["runtimes"])
+	}
+	if _, hasCRS := runtimes["cloudrun-sandbox"]; !hasCRS {
+		t.Errorf("runtime 'cloudrun-sandbox' missing; runtimes are: %v", runtimeNames(runtimes))
+	}
+	if _, hasK8s := runtimes["kubernetes"]; hasK8s {
+		t.Error("runtime 'kubernetes' is present — it should not exist on the Cloud Run sandbox tier")
+	}
+}
+
+// TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92 is the R1 pin test
+// for task #92. It runs real InitMachine (Cloud Run sandbox environment) →
+// real LoadEffectiveSettings and asserts the POST-MERGE state that governs
+// runtime selection. This is the load-bearing invariant: koanf loads embedded
+// defaults first (lowest priority) then the seeded settings.yaml, so the
+// scalar active_profile is OVERWRITTEN to "default" while the profiles map
+// MERGES to three entries (local, remote, default). An empty profile
+// selection ("Use broker default") resolves through ResolveRuntime("") →
+// ActiveProfile → "default" → cloudrun-sandbox.
+//
+// Without this pin, a change to merge order, embedded defaults, or the
+// template's active_profile key could silently re-break §1. (R1/rev2)
+func TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Simulate Cloud Run Instance with sandbox launcher.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-r1")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Seed via real InitMachine — same as a fresh deploy.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Load EFFECTIVE settings — the same call buildInfoProfiles and
+	// resolveManagerForOpts make. This is post-koanf-merge: embedded defaults
+	// (local/docker + remote/kubernetes) merged with seeded settings.yaml
+	// (default/cloudrun-sandbox).
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	vs, _, err := LoadEffectiveSettings(globalDir)
+	if err != nil {
+		t.Fatalf("LoadEffectiveSettings failed: %v", err)
+	}
+
+	// LOAD-BEARING ASSERTION 1: ActiveProfile must be "default".
+	// The koanf scalar overwrite (seed "default" overwrites embedded "local")
+	// is the mechanism that makes the fix work. If this is "local", an empty
+	// profile selection resolves to docker, which is the bug.
+	if vs.ActiveProfile != "default" {
+		t.Errorf("effective ActiveProfile = %q, want %q — koanf scalar overwrite failed", vs.ActiveProfile, "default")
+	}
+
+	// LOAD-BEARING ASSERTION 2: ResolveRuntime("") must yield cloudrun-sandbox.
+	// This is the exact call path that fires when the UI sends an empty profile
+	// ("Use broker default"): ResolveRuntime("") → uses ActiveProfile →
+	// looks up profile "default" → runtime cloudrun-sandbox.
+	_, runtimeType, err := vs.ResolveRuntime("")
+	if err != nil {
+		t.Fatalf("ResolveRuntime(\"\") failed: %v — profile 'default' not found in effective settings", err)
+	}
+	if runtimeType != "cloudrun-sandbox" {
+		t.Errorf("ResolveRuntime(\"\") = %q, want %q", runtimeType, "cloudrun-sandbox")
+	}
+
+	// SUPPLEMENTARY: verify the merge produced the expected profile set.
+	// Three profiles after merge: local (from embedded), remote (from embedded),
+	// default (from seed). This is not load-bearing — the two assertions above
+	// are — but it documents the merge shape.
+	if len(vs.Profiles) < 3 {
+		names := make([]string, 0, len(vs.Profiles))
+		for k := range vs.Profiles {
+			names = append(names, k)
+		}
+		t.Logf("effective profiles: %v (expected ≥3 from merge)", names)
+	}
+}
+
+// TestDefaultSandboxBin_MatchesLiteral pins config's unexported
+// defaultSandboxBin against the same literal that
+// TestSandboxBinConstantSync_Task92 (in the external config_test package)
+// pins runtime.DefaultSandboxBin against. Together these two tests catch
+// drift in either direction. (O5)
+func TestDefaultSandboxBin_MatchesLiteral(t *testing.T) {
+	if defaultSandboxBin != "/usr/local/gcp/bin/sandbox" {
+		t.Errorf("defaultSandboxBin = %q, want %q — update both config and runtime if this changes",
+			defaultSandboxBin, "/usr/local/gcp/bin/sandbox")
+	}
+}
+
+// TestInitMachine_CloudRunSandbox_WithoutSandboxBin_FallsBack verifies that
+// when CLOUD_RUN_INSTANCE is set but the sandbox binary is absent,
+// InitMachine falls back to the standard hosted-mode path (docker defaults).
+// This guards against accidentally applying the single-node template to
+// Cloud Run Instances that lack the sandbox launcher.
+func TestInitMachine_CloudRunSandbox_WithoutSandboxBin_FallsBack(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// CLOUD_RUN_INSTANCE is set, but sandbox binary is NOT available.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-002")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return false }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	settingsPath := filepath.Join(globalDir, "settings.yaml")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read seeded settings.yaml: %v", err)
+	}
+
+	var settingsMap map[string]interface{}
+	if err := yaml.Unmarshal(data, &settingsMap); err != nil {
+		t.Fatalf("failed to parse settings.yaml: %v", err)
+	}
+
+	// Without sandbox binary, should fall back to workstation defaults.
+	activeProfile := settingsMap["active_profile"].(string)
+	if activeProfile != "local" {
+		t.Errorf("active_profile = %q, want %q (standard fallback)", activeProfile, "local")
+	}
+
+	profiles := settingsMap["profiles"].(map[string]interface{})
+	if _, hasLocal := profiles["local"]; !hasLocal {
+		t.Error("profile 'local' should be present in standard fallback")
+	}
+}
+
+// TestInitMachine_NonCloudRun_SkipRuntimeCheck_UnchangedBehavior verifies
+// that the fix does not alter behavior for non-Cloud-Run hosted deployments
+// (e.g., a self-hosted instance on a VM).
+func TestInitMachine_NonCloudRun_SkipRuntimeCheck_UnchangedBehavior(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// No CLOUD_RUN_INSTANCE env var.
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return false }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read settings.yaml: %v", err)
+	}
+
+	var settingsMap map[string]interface{}
+	if err := yaml.Unmarshal(data, &settingsMap); err != nil {
+		t.Fatalf("failed to parse settings.yaml: %v", err)
+	}
+
+	// Standard hosted-mode defaults: active_profile=local, profiles include
+	// local (docker) and remote (kubernetes).
+	if ap := settingsMap["active_profile"].(string); ap != "local" {
+		t.Errorf("active_profile = %q, want 'local'", ap)
+	}
+	profiles := settingsMap["profiles"].(map[string]interface{})
+	if _, hasLocal := profiles["local"]; !hasLocal {
+		t.Error("profile 'local' missing from standard hosted defaults")
+	}
+}
+
+func profileNames(profiles map[string]interface{}) []string {
+	names := make([]string, 0, len(profiles))
+	for k := range profiles {
+		names = append(names, k)
+	}
+	return names
+}
+
+func runtimeNames(runtimes map[string]interface{}) []string {
+	names := make([]string, 0, len(runtimes))
+	for k := range runtimes {
+		names = append(names, k)
+	}
+	return names
+}
+
+// TestInitMachine_CloudRunSandbox_SkipRuntimeCheckFalse_SeedsCorrectTemplate
+// is the load-bearing assertion for the environment-predicate-dominance fix.
+//
+// Scenario: CLOUD_RUN_INSTANCE set, sandbox binary present, but the caller
+// passes SkipRuntimeCheck: false (e.g. the Hub /api/system/init handler).
+// Before the fix, this fell into the else branch, called DetectLocalRuntime(),
+// and failed — or, if runtime detection happened to succeed, seeded the
+// workstation template instead of the cloudrun-sandbox template.
+//
+// After the fix, isCloudRunSandboxEnvironment() dominates: the machine fact
+// settles the template choice regardless of the caller preference.
+func TestInitMachine_CloudRunSandbox_SkipRuntimeCheckFalse_SeedsCorrectTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Simulate Cloud Run Instance with sandbox launcher.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-dominance")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Mock runtime detection to succeed with "docker" — this ensures the
+	// mutation test (inverting the condition to `if false`) seeds the WRONG
+	// template (workstation defaults) rather than erroring out, so the
+	// content assertion is the one that goes red. On a real Cloud Run Instance
+	// detection would fail, but for this test the content assertion is more
+	// valuable than the error assertion.
+	mockRuntimeDetection(t, "docker")
+
+	// SkipRuntimeCheck: false — the caller did NOT ask to skip detection.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: false}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Read the seeded file and assert its CONTENT matches the cloudrun-sandbox
+	// template. Byte-for-byte comparison is not possible because ensureBrokerID()
+	// mutates the file after seeding (adds broker_id, strips comments via YAML
+	// round-trip). The semantic comparison below catches the actual bug: seeding
+	// the wrong template.
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	seededPath := filepath.Join(globalDir, "settings.yaml")
+	seeded, err := os.ReadFile(seededPath)
+	if err != nil {
+		t.Fatalf("failed to read seeded settings.yaml: %v", err)
+	}
+
+	// Parse the seeded file.
+	var seededMap map[string]interface{}
+	if err := yaml.Unmarshal(seeded, &seededMap); err != nil {
+		t.Fatalf("failed to parse seeded settings.yaml: %v", err)
+	}
+
+	// Parse the embedded cloudrun-sandbox template for comparison.
+	expectedBytes, err := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
+	if err != nil {
+		t.Fatalf("failed to read embedded template: %v", err)
+	}
+	var expectedMap map[string]interface{}
+	if err := yaml.Unmarshal(expectedBytes, &expectedMap); err != nil {
+		t.Fatalf("failed to parse embedded template: %v", err)
+	}
+
+	// Assert the template-defining fields match: active_profile, profiles, runtimes.
+	// These are the fields that distinguish the cloudrun-sandbox template from the
+	// workstation template. Differences in broker_id or other post-seed mutations
+	// are expected and not bugs.
+	if ap := seededMap["active_profile"]; ap != expectedMap["active_profile"] {
+		t.Errorf("active_profile = %q, want %q", ap, expectedMap["active_profile"])
+	}
+
+	seededProfiles, _ := seededMap["profiles"].(map[string]interface{})
+	expectedProfiles, _ := expectedMap["profiles"].(map[string]interface{})
+
+	if len(seededProfiles) != len(expectedProfiles) {
+		t.Errorf("profile count: got %d (%v), want %d (%v)",
+			len(seededProfiles), profileNames(seededProfiles),
+			len(expectedProfiles), profileNames(expectedProfiles))
+	}
+	for name, ep := range expectedProfiles {
+		sp, ok := seededProfiles[name]
+		if !ok {
+			t.Errorf("profile %q missing from seeded settings", name)
+			continue
+		}
+		epMap, _ := ep.(map[string]interface{})
+		spMap, _ := sp.(map[string]interface{})
+		if epMap["runtime"] != spMap["runtime"] {
+			t.Errorf("profile %q runtime: got %q, want %q", name, spMap["runtime"], epMap["runtime"])
+		}
+	}
+
+	seededRuntimes, _ := seededMap["runtimes"].(map[string]interface{})
+	expectedRuntimes, _ := expectedMap["runtimes"].(map[string]interface{})
+	if len(seededRuntimes) != len(expectedRuntimes) {
+		t.Errorf("runtime count: got %d (%v), want %d (%v)",
+			len(seededRuntimes), runtimeNames(seededRuntimes),
+			len(expectedRuntimes), runtimeNames(expectedRuntimes))
+	}
+	for name := range expectedRuntimes {
+		if _, ok := seededRuntimes[name]; !ok {
+			t.Errorf("runtime %q missing from seeded settings", name)
+		}
+	}
+
+	// Negative: workstation-only profiles and runtimes must NOT be present.
+	for _, bad := range []string{"local", "remote"} {
+		if _, ok := seededProfiles[bad]; ok {
+			t.Errorf("profile %q is present — Cloud Run sandbox must not have workstation profiles", bad)
+		}
+	}
+	for _, bad := range []string{"docker", "podman", "kubernetes"} {
+		if _, ok := seededRuntimes[bad]; ok {
+			t.Errorf("runtime %q is present — Cloud Run sandbox must not have workstation runtimes", bad)
+		}
+	}
+}
+
+// TestInitMachine_NonCloudRun_SkipRuntimeCheckFalse_SeedsWorkstationTemplate
+// is the negative assertion: on a non-Cloud-Run machine with SkipRuntimeCheck
+// false, the workstation defaults must be seeded and DetectLocalRuntime must
+// be consulted. This protects against accidentally seeding the cloudrun
+// template on a laptop.
+func TestInitMachine_NonCloudRun_SkipRuntimeCheckFalse_SeedsWorkstationTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Not a Cloud Run Instance.
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return false }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Make runtime detection succeed — DetectLocalRuntime must be consulted.
+	mockRuntimeDetection(t, "docker")
+
+	// SkipRuntimeCheck: false — standard workstation init.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: false}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	seeded, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read seeded settings.yaml: %v", err)
+	}
+
+	var settingsMap map[string]interface{}
+	if err := yaml.Unmarshal(seeded, &settingsMap); err != nil {
+		t.Fatalf("failed to parse settings.yaml: %v", err)
+	}
+
+	// Must be workstation defaults: active_profile=local, profiles include local.
+	if ap, _ := settingsMap["active_profile"].(string); ap != "local" {
+		t.Errorf("active_profile = %q, want %q", ap, "local")
+	}
+	profiles, _ := settingsMap["profiles"].(map[string]interface{})
+	if _, hasLocal := profiles["local"]; !hasLocal {
+		t.Error("profile 'local' missing from workstation defaults")
+	}
+
+	// Must NOT have the cloudrun-sandbox profile or runtime.
+	if _, hasCRS := profiles["default"]; hasCRS {
+		dp, _ := profiles["default"].(map[string]interface{})
+		if rt, _ := dp["runtime"].(string); rt == "cloudrun-sandbox" {
+			t.Error("cloudrun-sandbox profile 'default' is present — workstation must not get the Cloud Run template")
+		}
+	}
+
+	// Verify the seeded content is NOT the cloudrun-sandbox template.
+	cloudrunTemplate, _ := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
+	if string(seeded) == string(cloudrunTemplate) {
+		t.Error("seeded settings.yaml matches the cloudrun-sandbox template — workstation should get workstation defaults")
+	}
+}
