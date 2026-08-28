@@ -451,6 +451,7 @@ func (s *DMMigrationService) mergeConversation(
 	result *DMMigrationResult,
 ) error {
 	// Re-stamp all messages from old conversation to new.
+	var restampFailed bool
 	cursor := ""
 	for {
 		page, err := s.store.ListMessages(ctx, store.MessageFilter{
@@ -465,6 +466,7 @@ func (s *DMMigrationService) mergeConversation(
 
 		for _, msg := range page.Items {
 			if err := s.store.SetMessageConversationID(ctx, msg.ID, newConvID); err != nil {
+				restampFailed = true
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("re-stamp message %s: %v", msg.ID, err))
 			}
@@ -474,6 +476,13 @@ func (s *DMMigrationService) mergeConversation(
 			break
 		}
 		cursor = page.NextCursor
+	}
+
+	// B2 ATOMICITY: if any re-stamp failed, abort the merge. Under-migrating
+	// is recoverable; deleting the source row while messages still reference
+	// it is data loss.
+	if restampFailed {
+		return fmt.Errorf("aborting merge %s → %s: re-stamp failed, old row left intact", oldConvID, newConvID)
 	}
 
 	// Copy missing participants to the target conversation.

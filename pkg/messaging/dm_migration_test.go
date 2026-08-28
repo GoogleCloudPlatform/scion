@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -932,4 +933,59 @@ func TestMigration_MixedScenarios(t *testing.T) {
 	assert.Equal(t, 0, result.Unparseable)
 	assert.Equal(t, 0, result.Ambiguous)
 	assert.Len(t, result.Errors, 0)
+}
+
+// ---------------------------------------------------------------------------
+// B2: Atomicity — re-stamp failure must not delete the old row
+// ---------------------------------------------------------------------------
+
+// failingRestamp wraps the mock and makes message re-stamping always fail.
+type failingRestamp struct{ *mockMigrationStore }
+
+func (f *failingRestamp) SetMessageConversationID(_ context.Context, _, _ string) error {
+	return errors.New("simulated DB failure during re-stamp")
+}
+
+// TestB2_MergeAbortsOnRestampFailure verifies that mergeConversation does NOT
+// soft-delete the old conversation row when re-stamping messages fails.
+//
+// Mutation contract: removing the restampFailed abort check causes this test
+// to fail because the old row gets soft-deleted despite re-stamp failure.
+func TestB2_MergeAbortsOnRestampFailure(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	// Old empty-ref row with a message.
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native", ExternalRef: ""},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	// Target kind-encoded row.
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: mustDMKey("user", userID, "agent", agentID)},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	msgID := uuid.NewString()
+	ms.addMessage(&store.Message{ID: msgID, ConversationID: oldConvID, Msg: "important history"})
+
+	svc := NewDMMigrationService(&failingRestamp{ms})
+	result, _ := svc.Run(ctx, DMMigrationConfig{})
+
+	// (a) Old row must NOT be soft-deleted.
+	assert.Nil(t, ms.conversations[oldConvID].DeletedAt,
+		"old row must not be soft-deleted when re-stamp fails")
+
+	// (b) Message must still point at old conversation.
+	assert.Equal(t, oldConvID, ms.messages[msgID].ConversationID,
+		"message must still reference old conversation after re-stamp failure")
+
+	// (c) Errors must be reported.
+	assert.NotEmpty(t, result.Errors,
+		"result.Errors must be non-empty after re-stamp failure")
 }
