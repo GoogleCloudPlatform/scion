@@ -165,10 +165,15 @@ di_build_instance_url() {
 }
 
 # di_build_iap_patch_url constructs the REST v2 PATCH URL for enabling IAP.
-# Arguments: region project name
+# The API base is a PARAMETER, not an environment read: di_main resolves and
+# validates it once (see di_resolve_api_base / di_validate_override_url) and
+# passes it here. That is deliberate — an earlier version read _DI_API_BASE
+# directly and relied on the preflight having validated it, which is a
+# validation held at a distance that no test could pin.
+# Arguments: api_base region project name
 di_build_iap_patch_url() {
-  local region="$1" project="$2" name="$3"
-  echo "https://${region}-run.googleapis.com/v2/projects/${project}/locations/${region}/instances/${name}?updateMask=iapEnabled,invokerIamDisabled"
+  local api_base="$1" region="$2" project="$3" name="$4"
+  echo "${api_base}/v2/projects/${project}/locations/${region}/instances/${name}?updateMask=iapEnabled,invokerIamDisabled"
 }
 
 # di_iap_patch_body returns the JSON body for the IAP enable PATCH.
@@ -214,6 +219,267 @@ the alpha surface uses 'create' (not 'deploy') and does not support
 and the server will crash on startup.
 ERRMSG
   return 1
+}
+
+# di_resolve_api_base returns the Cloud Run v2 API base URL.
+# _DI_API_BASE is a TEST-ONLY seam; the real value is the REGIONAL endpoint,
+# and the region matters — the global run.googleapis.com host does not serve
+# these v2 instance paths.
+# Arguments: region
+di_resolve_api_base() {
+  local region="$1"
+  echo "${_DI_API_BASE:-https://${region}-run.googleapis.com}"
+}
+
+# di_resolve_tokeninfo_url returns the OAuth2 tokeninfo endpoint.
+# _DI_TOKENINFO_URL is a TEST-ONLY seam.
+di_resolve_tokeninfo_url() {
+  echo "${_DI_TOKENINFO_URL:-https://oauth2.googleapis.com/tokeninfo}"
+}
+
+# di_validate_override_url rejects a test-only URL override that would send an
+# access token somewhere other than Google or the local machine.
+#
+# Both _DI_TOKENINFO_URL and _DI_API_BASE are TEST-ONLY seams, and both carry
+# the ADC token: tokeninfo takes it in a query string, and the API base takes
+# it in a Bearer header on a GET *and* on the step 3b PATCH — a mutating call.
+# One rule covers both: the host must be one of Google's own or loopback (a
+# stub that cannot move the token off the machine).
+#
+# EXTRACTING THE HOST IS THE WHOLE JOB, and getting it nearly right is worse
+# than not checking at all, because a bypassable check gets documented as a
+# guarantee. A previous version stripped only the path, so
+# 'https://evil.example?.googleapis.com' was ALLOWED — and curl connects to
+# the host before the '?', so the Bearer token was delivered to the attacker.
+# Everything after the first /, ?, # or \ must go, and userinfo must go too
+# (curl resolves the host after the LAST '@'). This function has a
+# table-driven test; extend it before touching anything here.
+#
+# A HOST ALLOWLIST IS NOT A URL ALLOWLIST, and the difference is not cosmetic:
+# a *permitted* host carrying a path plus a trailing '&z=' retargets the step
+# 3b PATCH at another project's Instance, with the operator's live token and a
+# valid updateMask, leaving the operator's own Instance with IAP off. That is
+# why the '?'/'#' guard below is a check and not a comment. Any residual
+# exposure here is harmless because an actor who can set these variables can
+# already run arbitrary code — NOT because only loopback is permitted, which
+# is reasoning about hosts and does not cover the path.
+#
+# Arguments: var_name url
+# Returns 0 if the host is permitted, 1 with a diagnostic otherwise.
+di_validate_override_url() {
+  local var_name="$1"
+  local url="$2"
+
+  # An endpoint override is a base URL, never a query or a fragment. Rejecting
+  # them outright stops a PERMITTED host being used to retarget the step 3b
+  # PATCH at another project's Instance via the path. No legitimate value
+  # contains either character: not the two real defaults, not a loopback stub.
+  if [[ "$url" == *[?#]* ]]; then
+    echo "Error: $var_name must not contain '?' or '#'; it is an endpoint, not a query." >&2
+    return 1
+  fi
+
+  # Only http(s) carry an Authorization header, so only http(s) can leak the
+  # token — but "curl would not send the header" is the client rescuing the
+  # rule again, and the point of this function is that the rule stands alone.
+  local scheme="${url%%://*}"
+  if [[ "${scheme,,}" != "http" && "${scheme,,}" != "https" ]]; then
+    echo "Error: $var_name must be an http:// or https:// URL (got '$scheme')." >&2
+    return 1
+  fi
+
+  local host="${url#*://}"
+  host="${host%%[/?#\\]*}" # path, query, fragment, backslash
+  host="${host##*@}"       # userinfo — curl uses the LAST '@'
+  host="${host,,}"         # hostnames are case-insensitive
+  # Strip a :port suffix. Matching on the whole host first keeps a bare IPv6
+  # literal like [::1] (colons, no port) from being mangled.
+  if [[ "$host" =~ ^(.*):[0-9]+$ ]]; then
+    host="${BASH_REMATCH[1]}"
+  fi
+
+  # Assert a POSITIVE host shape before consulting the allowlist. Without this
+  # the glob accepts strings that are not hosts at all — 'evil.example .goog…',
+  # 'evil.example%2f.goog…', a non-numeric port — because they happen to END in
+  # a permitted suffix. Nothing leaks today: curl refuses to parse every one of
+  # them (exit 3, code 000, no connection opened). That is the problem. The
+  # safety would be coming from curl's parser rather than from the check, and a
+  # rule that holds only because a downstream component rescues it is not a
+  # rule. curl's URL parsing has changed before.
+  if [[ ! "$host" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:]+\])$ ]]; then
+    echo "Error: $var_name does not name a host: '$host'." >&2
+    return 1
+  fi
+
+  case "$host" in
+    *.googleapis.com | 127.0.0.1 | localhost | '[::1]') return 0 ;;
+  esac
+
+  echo "Error: refusing to send an access token to host '$host'." >&2
+  echo "$var_name is a test-only override; it must name a *.googleapis.com" >&2
+  echo "host or loopback. Unset it and retry." >&2
+  return 1
+}
+
+# di_preflight_rest_credential mints an Application Default Credential (ADC)
+# token, validates it against the Cloud Run v2 API with a cheap GET, and
+# compares the ADC identity with the active gcloud account.
+#
+# This runs BEFORE any resource is created or modified. If the token cannot
+# be minted or the API rejects it, the deploy aborts with zero mutations —
+# preventing a half-built deploy (Instance created, IAP not enabled).
+#
+# The validated token is stored in the caller's _di_adc_token variable
+# (bash dynamic scope) for reuse in step 3b, avoiding a second mint.
+#
+# The two endpoints are PARAMETERS, already resolved and validated by di_main.
+# This function reads no environment variables: its behaviour is fully
+# determined by its arguments. Both URLs are echoed as they are used, so a
+# redirected endpoint is never invisible in the output.
+#
+# Arguments: gcloud_account region project api_base tokeninfo_url
+# Returns 0 on success, 1 on failure.
+di_preflight_rest_credential() {
+  local gcloud_account="$1"
+  local region="$2"
+  local project="$3"
+  local api_base="$4"
+  local tokeninfo_url="$5"
+
+  echo "    Minting ADC token..."
+
+  # Capture stderr so we can print it on failure (never suppress with 2>/dev/null).
+  local adc_stderr_file
+  adc_stderr_file="$(mktemp)"
+
+  local tok
+  tok="$(gcloud auth application-default print-access-token 2>"$adc_stderr_file" | tr -d '[:space:]')" || {
+    echo "Error: 'gcloud auth application-default print-access-token' failed." >&2
+    echo "stderr from gcloud:" >&2
+    cat "$adc_stderr_file" >&2
+    rm -f "$adc_stderr_file"
+    echo "" >&2
+    echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    return 1
+  }
+
+  if [[ -z "$tok" ]]; then
+    echo "Error: ADC returned an empty access token." >&2
+    if [[ -s "$adc_stderr_file" ]]; then
+      echo "stderr from gcloud:" >&2
+      cat "$adc_stderr_file" >&2
+    fi
+    rm -f "$adc_stderr_file"
+    echo "" >&2
+    echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    return 1
+  fi
+  rm -f "$adc_stderr_file"
+
+  echo "    ADC token minted (${#tok} chars, prefix: ${tok:0:4}...)"
+
+  # --- Resolve ADC identity via tokeninfo ---
+  echo "    Resolving ADC identity via $tokeninfo_url"
+  local tokeninfo_resp
+  tokeninfo_resp="$(curl -s "${tokeninfo_url}?access_token=${tok}" 2>&1)" || true
+
+  # tokeninfo does not always carry "email": a service-account token scoped
+  # only to cloud-platform returns azp/aud/scope and no email. azp is a
+  # NUMERIC CLIENT ID, which can never equal an email address — comparing the
+  # two would warn on every single service-account run (metadata server, GCE,
+  # Cloud Shell, CI). So compare only when the email claim is present, and
+  # otherwise report the client ID and say the comparison was skipped.
+  local adc_email
+  adc_email="$(echo "$tokeninfo_resp" | grep '"email"' | sed 's/.*"email"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
+  local adc_azp
+  adc_azp="$(echo "$tokeninfo_resp" | grep '"azp"' | sed 's/.*"azp"[[:space:]]*:[[:space:]]*"//;s/".*//')" || true
+
+  if [[ -n "$adc_email" ]]; then
+    echo "    ADC identity: $adc_email"
+    # Warn on identity mismatch — not a hard failure (a deliberate mismatch
+    # is legitimate), but it must be visible.
+    if [[ "$adc_email" != "$gcloud_account" ]]; then
+      echo "" >&2
+      echo "    WARNING: ADC identity does not match the active gcloud account." >&2
+      echo "      gcloud account: $gcloud_account" >&2
+      echo "      ADC identity:   $adc_email" >&2
+      echo "    Step 3a (gcloud) will run as the gcloud account." >&2
+      echo "    Step 3b (REST PATCH) will run as the ADC identity." >&2
+      echo "    If this is unintentional, run: gcloud auth application-default login" >&2
+      echo ""
+    fi
+  elif [[ -n "$adc_azp" ]]; then
+    echo "    ADC identity: client ID $adc_azp (no email claim — comparison with the gcloud account skipped)"
+  else
+    echo "    ADC identity: (could not resolve — tokeninfo returned no email or azp)"
+  fi
+
+  # --- Validate with one cheap GET against the v2 surface ---
+  # A non-2xx here means the token will be rejected at step 3b.
+  # Abort NOW, before step 3a creates an Instance we cannot configure.
+  local list_url="${api_base}/v2/projects/${project}/locations/${region}/instances"
+  echo "    Validating ADC token against Cloud Run API..."
+  echo "    GET $list_url"
+
+  local resp_file
+  resp_file="$(mktemp)"
+  local http_code
+  http_code="$(curl -s -o "$resp_file" -w "%{http_code}" \
+    -H "Authorization: Bearer ${tok}" \
+    "$list_url")" || {
+    echo "Error: could not connect to $list_url — check network connectivity" >&2
+    rm -f "$resp_file"
+    return 1
+  }
+
+  # Unreachable by construction today: %{http_code} always emits something
+  # (measured: '000' with exit 7 when there is no HTTP response, never the
+  # empty string), and every such path exits non-zero, which the || block above
+  # catches first. Kept as a belt-and-braces guard because the alternative is a
+  # SILENT PASS — [[ -ge 300 ]] evaluates a non-numeric string as 0 — and this
+  # check must never fail open. Matched numerically rather than for emptiness
+  # so the guard is no narrower than the hole it covers. Deliberately untested:
+  # a test would have to stub curl into a state curl does not produce, which
+  # pins the stub, not the script.
+  if [[ ! "$http_code" =~ ^[0-9]+$ ]]; then
+    echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
+    rm -f "$resp_file"
+    return 1
+  fi
+
+  if [[ "$http_code" -ge 300 ]]; then
+    echo "Error: ADC credential check failed — GET $list_url returned HTTP $http_code:" >&2
+    head -c 500 "$resp_file" >&2
+    echo >&2
+    rm -f "$resp_file"
+    echo "" >&2
+    echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
+    if [[ "$http_code" == "403" ]]; then
+      # A 403 means the token parsed fine, so re-authenticating as the same
+      # principal will not help. But it has TWO common causes and they need
+      # different remedies: the Cloud Run Admin API being switched off in a
+      # fresh project (Google returns SERVICE_DISABLED as a 403, and this is
+      # the likeliest case for a first single-node deploy), or the identity
+      # genuinely lacking the role. Name both and point at the response body
+      # printed above rather than asserting a cause — a message that asserts
+      # the wrong one sends the operator to the IAM console for an hour.
+      echo "HTTP 403 usually means one of two things — check the response body above:" >&2
+      echo "  - the API is not enabled:  gcloud services enable run.googleapis.com --project '$project'" >&2
+      echo "  - the identity lacks the role: grant 'run.instances.list' on project '$project'" >&2
+      echo "    (for example roles/run.viewer), or switch accounts with" >&2
+      echo "    'gcloud auth application-default login' and retry." >&2
+    else
+      echo "Fix: run 'gcloud auth application-default login' and retry." >&2
+    fi
+    return 1
+  fi
+  rm -f "$resp_file"
+  echo "    ADC credential validated successfully."
+
+  # Store token for step 3b (bash dynamic scope — the caller declares
+  # _di_adc_token as a local, and this assignment writes to it).
+  # NEVER print the full token to stdout.
+  _di_adc_token="$tok"
 }
 
 # ---------------------------------------------------------------------------
@@ -389,6 +655,35 @@ di_main() {
   fi
 
   # ===================================================================
+  # Resolve the TEST-ONLY endpoint seams — ONCE, HERE, before anything else.
+  #
+  # _DI_API_BASE and _DI_TOKENINFO_URL are read in exactly one place each
+  # (di_resolve_api_base / di_resolve_tokeninfo_url, called only from here),
+  # validated immediately, and then passed as parameters to every function
+  # that needs them. Nothing downstream reads the environment.
+  #
+  # This shape is deliberate. An earlier version had step 3b read _DI_API_BASE
+  # for itself and relied on the preflight having validated it first — true at
+  # the time, but a `--skip-preflight` flag or a second caller would have
+  # orphaned the validation silently, with no test failing. That is the same
+  # shape as the bug this whole script change exists to kill: step 3b assuming
+  # something established elsewhere. Read once, validate once, pass explicitly.
+  #
+  # Validating here, above di_check_gcloud_instances, also means a bad override
+  # aborts before ANY side effect at all — no gcloud call, no token, nothing.
+  # ===================================================================
+  local api_base
+  api_base="$(di_resolve_api_base "$DI_REGION")"
+  if ! di_validate_override_url "_DI_API_BASE" "$api_base"; then
+    return 1
+  fi
+  local tokeninfo_url
+  tokeninfo_url="$(di_resolve_tokeninfo_url)"
+  if ! di_validate_override_url "_DI_TOKENINFO_URL" "$tokeninfo_url"; then
+    return 1
+  fi
+
+  # ===================================================================
   # Preflight: verify gcloud has 'beta run instances' before any side
   # effects. Older SDKs lack this noun entirely and gcloud's own advice
   # ("Try: gcloud alpha run instances") produces a broken Instance.
@@ -465,6 +760,20 @@ di_main() {
   echo "    Image registry: $image_registry"
 
   # ===================================================================
+  # Preflight: Validate REST credential (ADC) before any mutations
+  # The REST PATCH in step 3b requires an Application Default Credential.
+  # If the token cannot be minted or the API rejects it, abort NOW —
+  # before step 3a creates an Instance that 3b cannot configure.
+  # ===================================================================
+  echo "==> Preflight: Validating REST credential (ADC)..."
+
+  local _di_adc_token=""
+  if ! di_preflight_rest_credential "$operator_email" "$DI_REGION" "$DI_PROJECT" \
+    "$api_base" "$tokeninfo_url"; then
+    return 1
+  fi
+
+  # ===================================================================
   # Step 3a: Create/update the Instance via gcloud (v1 surface)
   # gcloud speaks v1, which is the ONLY surface that has sandboxLauncher.
   # REST v2 neither sets nor returns sandboxLauncher.
@@ -496,8 +805,18 @@ di_main() {
 
   # ===================================================================
   # Step 3b: Enable IAP via REST v2 PATCH
-  # iapEnabled and invokerIamDisabled are v2-only fields. gcloud has no
-  # --iap flag, so we flip both booleans with a single REST PATCH.
+  # iapEnabled and invokerIamDisabled are v2-only fields, so we flip both
+  # booleans with a single REST PATCH.
+  #
+  # DO NOT replace this with a gcloud flag. A --iap flag DOES exist in
+  # gcloud 582, but it is registered on the SERVICES surface only
+  # ('gcloud run deploy', 'gcloud run services update') and NOT on the
+  # 'run instances' noun this script uses. Confusingly,
+  # 'gcloud beta run instances deploy --help' describes --public as
+  # "Equivalent to setting --no-invoker-iam-check and --no-iap", naming a
+  # flag that surface does not expose. Grepping the help text will suggest
+  # the PATCH is removable; it is not. The PATCH is the only way to enable
+  # IAP on an Instance, and without it the tier's whole auth model is off.
   #
   # This PATCH is safe because it uses updateMask to touch ONLY the IAP
   # booleans, leaving all v1-only fields (like sandboxLauncher) untouched.
@@ -506,19 +825,16 @@ di_main() {
   # ===================================================================
   echo "==> Step 3b: Enabling IAP (REST v2 PATCH)..."
 
-  # Get access token — NEVER print it to stdout.
+  # Reuse the ADC token validated in preflight — never mint twice.
   local access_token
-  access_token="$(gcloud auth print-access-token 2>/dev/null | tr -d '[:space:]')" || {
-    echo "Error: 'gcloud auth print-access-token' failed — is gcloud authenticated?" >&2
-    return 1
-  }
+  access_token="$_di_adc_token"
   if [[ -z "$access_token" ]]; then
-    echo "Error: gcloud returned empty access token" >&2
+    echo "Error: ADC token from preflight is empty — this should not happen" >&2
     return 1
   fi
 
   local patch_url
-  patch_url="$(di_build_iap_patch_url "$DI_REGION" "$DI_PROJECT" "$DI_NAME")"
+  patch_url="$(di_build_iap_patch_url "$api_base" "$DI_REGION" "$DI_PROJECT" "$DI_NAME")"
   echo "    PATCH $patch_url"
 
   local patch_resp_file

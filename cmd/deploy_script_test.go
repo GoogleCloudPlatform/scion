@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -41,6 +42,35 @@ func deployScriptPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "scripts", "single-node", "deploy.sh")
 }
 
+// scrubbedEnv returns the caller's environment with deploy.sh's test-only
+// seams removed. Without this, a developer with _DI_API_BASE exported in their
+// shell would silently redirect the script under test, and any assertion about
+// a DEFAULT endpoint would be defeatable by an ambient variable. Tests that
+// want a seam set do it explicitly, as a shell assignment in the setup prelude.
+func scrubbedEnv() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "_DI_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// shellQuote renders s as a single POSIX shell word.
+//
+// Go's %q is GO quoting, not SHELL quoting, and the two disagree on exactly
+// the inputs this file cares about: %q turns a real tab into the two
+// characters `\t`, which bash inside double quotes then hands to the function
+// as a literal backslash-t. The validator table feeds control characters in on
+// purpose — with %q those rows would silently be testing a backslash and would
+// pass for the wrong reason, which is the same class of defect as the m4 false
+// pin. Single quotes pass every byte through unchanged.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // runBashFunc sources deploy.sh and calls the named function with args.
 // Returns stdout, stderr, and the exit code.
 func runBashFunc(t *testing.T, funcName string, args ...string) (string, string, int) {
@@ -53,10 +83,11 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 	// caused by set -e killing the script before its own error handling.
 	bashCmd := fmt.Sprintf("set -euo pipefail; source %q && %s", scriptPath, funcName)
 	for _, a := range args {
-		bashCmd += fmt.Sprintf(" %q", a)
+		bashCmd += " " + shellQuote(a)
 	}
 
 	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd.Env = scrubbedEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -72,6 +103,637 @@ func runBashFunc(t *testing.T, funcName string, args ...string) (string, string,
 	}
 
 	return stdout.String(), stderr.String(), exitCode
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: invoke bash functions with custom setup (e.g. mock gcloud)
+// ---------------------------------------------------------------------------
+
+// runBashFuncWithSetup is like runBashFunc but injects setup commands
+// between sourcing deploy.sh and calling the function. This allows
+// mocking gcloud or setting environment variables for testing.
+func runBashFuncWithSetup(t *testing.T, setup, funcName string, args ...string) (string, string, int) {
+	t.Helper()
+	scriptPath := deployScriptPath(t)
+
+	bashCmd := fmt.Sprintf("set -euo pipefail; source %q; %s; %s", scriptPath, setup, funcName)
+	for _, a := range args {
+		bashCmd += " " + shellQuote(a)
+	}
+
+	cmd := exec.Command("bash", "-c", bashCmd)
+	cmd.Env = scrubbedEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("failed to run bash function %s: %v", funcName, err)
+		}
+	}
+
+	return stdout.String(), stderr.String(), exitCode
+}
+
+// ---------------------------------------------------------------------------
+// Preflight: ADC credential check tests
+//
+// Two rules hold for every test in this section, and both were learned the
+// hard way in review r1:
+//
+//  1. HERMETIC. Every test points BOTH _DI_TOKENINFO_URL and _DI_API_BASE at a
+//     local stub. An earlier version of TestScriptPreflightFailsWithoutADC set
+//     neither, so it minted a real 1024-character access token, sent it to the
+//     real oauth2.googleapis.com/tokeninfo in a query string, called the real
+//     Cloud Run API — and then passed anyway, because the generic remedy string
+//     happened to appear in stderr. A unit test must never put a live
+//     cloud-platform credential on the network.
+//
+//  2. THE gcloud STUB ANSWERS ONLY THE ADC FORM, AND RECORDS ITS ARGV. Mocks
+//     of the shape `gcloud() { echo "ya29.fake"; }` answer any invocation, so
+//     they cannot tell `gcloud auth application-default print-access-token`
+//     (correct) from `gcloud auth print-access-token` (the bug being fixed).
+//     All four original tests passed against the buggy source. Recording argv
+//     and asserting on it is what pins the token source.
+// ---------------------------------------------------------------------------
+
+// gcloudArgvLog returns a path in the test's temp dir for the gcloud stub to
+// record its argv to, one invocation per line.
+func gcloudArgvLog(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "gcloud-argv.log")
+}
+
+// readGcloudArgvLog reads the argv recorded by a gcloud stub. It fails the
+// test if the stub was never invoked at all.
+func readGcloudArgvLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "the gcloud stub recorded nothing — gcloud was never called")
+	return string(data)
+}
+
+// adcGcloudStub builds a bash gcloud() mock that records every invocation to
+// argvLog and answers ONLY `gcloud auth application-default print-access-token`.
+// Any other invocation is an error, which is what makes tests using this stub
+// fail if deploy.sh reverts to the non-ADC credential store.
+func adcGcloudStub(argvLog string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  if [[ "$*" == "auth application-default print-access-token" ]]; then
+    printf '%%s\n' "ya29.fake-test-token"
+    return 0
+  fi
+  echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+  return 1
+}`, argvLog)
+}
+
+// brokenADCGcloudStub is adcGcloudStub with the ADC store unavailable: it
+// records argv, then fails whatever it is asked for. It simulates a machine
+// where `gcloud auth application-default login` has never been run.
+func brokenADCGcloudStub(argvLog string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  if [[ "$*" == "auth application-default print-access-token" ]]; then
+    echo "ERROR: Application Default Credentials are not available." >&2
+    return 1
+  fi
+  echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+  return 1
+}`, argvLog)
+}
+
+// newPreflightStub serves both endpoints the preflight talks to: tokeninfo
+// (identified by the access_token query parameter) and the Cloud Run v2
+// instances API. The returned counter records how many requests arrived, so a
+// test can assert that nothing was sent at all.
+func newPreflightStub(t *testing.T, tokeninfoJSON string, apiStatus int, apiBody string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Query().Get("access_token") != "" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, tokeninfoJSON)
+			return
+		}
+		w.WriteHeader(apiStatus)
+		_, _ = io.WriteString(w, apiBody)
+	}))
+	t.Cleanup(server.Close)
+	return server, &hits
+}
+
+// stubTokeninfoURL gives the stub's tokeninfo endpoint a path of its own. Both
+// seams point at the same server, so without a distinct path an assertion
+// about the tokeninfo URL would also be satisfied by the API URL — which
+// shares the host and port. Mutation-testing caught exactly that: deleting the
+// tokeninfo echo left the assertion passing on the "GET <api url>" line.
+func stubTokeninfoURL(serverURL string) string {
+	return serverURL + "/tokeninfo"
+}
+
+// preflightSetup composes the bash prelude for a di_main-level test: the
+// gcloud stub, plus both test-only URL seams set so di_main resolves them.
+// Only di_main reads these variables; every function below it takes the
+// endpoints as parameters. These two assignments are therefore the only place
+// the environment seam itself is exercised, which is deliberate.
+//
+// shellQuote, not %q, for the same reason as the argv channel — and here the
+// stakes are higher. %q into a bash DOUBLE-QUOTED context does not merely lose
+// a tab: `$(...)` and backticks are EXECUTED while the prelude is being set
+// up. A hostile row added to prove the validator rejects it would run instead,
+// and then pass. See TestScriptHostileOverrideValuesArriveAsDataNotCode.
+func preflightSetup(gcloudStub, serverURL string) string {
+	return seamSetup(gcloudStub, serverURL, stubTokeninfoURL(serverURL))
+}
+
+// seamSetup emits a bash prelude that sets both seams to exactly the bytes
+// given, executing nothing.
+func seamSetup(gcloudStub, apiBase, tokeninfoURL string) string {
+	return fmt.Sprintf("%s\n_DI_API_BASE=%s\n_DI_TOKENINFO_URL=%s",
+		gcloudStub, shellQuote(apiBase), shellQuote(tokeninfoURL))
+}
+
+// preflightArgs builds the argument list for a DIRECT call to
+// di_preflight_rest_credential. The API base and tokeninfo URL are its last
+// two parameters; the function reads no environment at all.
+func preflightArgs(gcloudAccount, serverURL string) []string {
+	return []string{
+		gcloudAccount, "us-east4", "test-project",
+		serverURL, stubTokeninfoURL(serverURL),
+	}
+}
+
+func TestScriptPreflightFailsWithoutADC(t *testing.T) {
+	// The stub server must never be touched: with no token there is nothing
+	// to validate, so the preflight has to abort before any request goes out.
+	server, hits := newPreflightStub(t, `{}`, http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t,
+		brokenADCGcloudStub(argvLog),
+		"di_preflight_rest_credential",
+		preflightArgs("user@example.com", server.URL)...)
+
+	assert.NotEqual(t, 0, exitCode, "must fail when ADC is unavailable")
+	assert.Contains(t, stderr, "gcloud auth application-default login",
+		"error must name the exact remedy: gcloud auth application-default login")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the token must be minted from Application Default Credentials — "+
+			"`gcloud auth print-access-token` reads a different credential store "+
+			"and returns a token type the Cloud Run v2 API rejects "+
+			"(ACCESS_TOKEN_TYPE_UNSUPPORTED)")
+	assert.Equal(t, int32(0), hits.Load(),
+		"nothing may be sent over the wire when no token could be minted")
+}
+
+func TestScriptPreflightAbortsOnNon2xxGet(t *testing.T) {
+	// tokeninfo answers; the instances API rejects with 403.
+	server, _ := newPreflightStub(t,
+		`{"email":"user@example.com","email_verified":"true"}`,
+		http.StatusForbidden,
+		`{"error":{"code":403,"message":"permission denied"}}`)
+	argvLog := gcloudArgvLog(t)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t,
+		adcGcloudStub(argvLog),
+		"di_preflight_rest_credential",
+		preflightArgs("user@example.com", server.URL)...)
+
+	assert.NotEqual(t, 0, exitCode,
+		"must fail when validating GET returns non-2xx — this abort prevents "+
+			"step 3a from creating an Instance that step 3b cannot configure")
+	assert.Contains(t, stderr, "403",
+		"error must include the HTTP status code")
+	assert.Contains(t, stderr, "run.instances.list",
+		"a 403 means the credential is valid but unauthorized — the message must "+
+			"name the missing permission, not just tell the operator to re-login")
+	assert.Contains(t, stderr, "gcloud auth application-default login",
+		"error must name the remedy")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the validated token must come from Application Default Credentials")
+}
+
+func TestScriptPreflightWarnsOnIdentityMismatch(t *testing.T) {
+	// tokeninfo reports a different email than the active gcloud account.
+	server, _ := newPreflightStub(t,
+		`{"email":"adc-user@example.com","email_verified":"true"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	_, stderr, exitCode := runBashFuncWithSetup(t,
+		adcGcloudStub(argvLog),
+		"di_preflight_rest_credential",
+		preflightArgs("gcloud-user@example.com", server.URL)...)
+
+	assert.Equal(t, 0, exitCode,
+		"identity mismatch is a warning, not a failure — a deliberate mismatch "+
+			"is legitimate; stderr: %s", stderr)
+	assert.Contains(t, stderr, "WARNING",
+		"must emit a warning")
+	assert.Contains(t, stderr, "gcloud-user@example.com",
+		"warning must name the gcloud account")
+	assert.Contains(t, stderr, "adc-user@example.com",
+		"warning must name the ADC identity")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the compared identity must be the ADC identity")
+}
+
+// TestScriptPreflightSkipsComparisonWhenTokeninfoOmitsEmail pins the fix for
+// the false positive found in review r1. A service-account ADC token scoped to
+// cloud-platform gets a tokeninfo response with azp/aud/scope and NO email.
+// azp is a numeric client ID, so comparing it against the gcloud account's
+// email address can never match — the warning fired on every single
+// service-account run (metadata server, GCE, Cloud Shell, CI), which is alarm
+// fatigue on the exact signal the warning exists to carry.
+func TestScriptPreflightSkipsComparisonWhenTokeninfoOmitsEmail(t *testing.T) {
+	// Measured response shape from a real service-account ADC token.
+	server, _ := newPreflightStub(t,
+		`{"azp":"110532853671892060667","aud":"110532853671892060667",`+
+			`"scope":"https://www.googleapis.com/auth/cloud-platform","access_type":"online"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t,
+		adcGcloudStub(argvLog),
+		"di_preflight_rest_credential",
+		preflightArgs("operator@example.com", server.URL)...)
+
+	assert.Equal(t, 0, exitCode, "must succeed; stderr: %s", stderr)
+	assert.NotContains(t, stderr, "WARNING",
+		"must NOT warn: a numeric client ID can never equal an email address, so "+
+			"comparing them is a guaranteed false positive on every service-account ADC")
+	assert.Contains(t, stdout, "110532853671892060667",
+		"the client ID is still worth reporting")
+	assert.Contains(t, stdout, "skipped",
+		"the operator must be told the comparison was skipped, not left to infer "+
+			"a mismatch from two values that were never comparable")
+}
+
+func TestScriptPreflightSucceedsWithMatchingIdentity(t *testing.T) {
+	server, _ := newPreflightStub(t,
+		`{"email":"user@example.com","email_verified":"true"}`,
+		http.StatusOK, `{}`)
+	argvLog := gcloudArgvLog(t)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t,
+		adcGcloudStub(argvLog),
+		"di_preflight_rest_credential",
+		preflightArgs("user@example.com", server.URL)...)
+
+	assert.Equal(t, 0, exitCode, "must succeed when all checks pass; stderr: %s", stderr)
+	assert.NotContains(t, stderr, "WARNING",
+		"must NOT warn when identities match")
+	assert.Contains(t, stdout, "ADC credential validated successfully",
+		"must confirm successful validation")
+	assert.Contains(t, stdout, stubTokeninfoURL(server.URL),
+		"the tokeninfo URL must be echoed: the token travels to it in a query "+
+			"string, so a redirected endpoint must not be invisible in the output")
+	assert.Contains(t, readGcloudArgvLog(t, argvLog), "auth application-default print-access-token",
+		"the token must be minted from Application Default Credentials")
+}
+
+// ---------------------------------------------------------------------------
+// The host rule for the test-only URL seams
+//
+// di_validate_override_url is the newest and most security-sensitive function
+// in this script, and until review r2 it had NO direct test — it was reached
+// only through the preflight, with exactly one rejected input per seam. That
+// is precisely why a shallow bypass survived a mutation battery that caught
+// eight other defects: mutation testing proves the tests you have can detect
+// the defects you thought of, and says nothing about a function no test
+// addresses. Coverage of the caller is not coverage of the rule.
+//
+// So the rule gets a table, and the table is where new cases go.
+// ---------------------------------------------------------------------------
+
+// TestScriptValidateOverrideURL is the direct, table-driven test of the host
+// rule. The rejected rows are an evasion suite, not a formality: the `?` and
+// `#` rows are the live bypass found in review r2, where
+// `https://evil.example?.googleapis.com` passed the check and curl then
+// delivered `Authorization: Bearer <ADC token>` to evil.example, because curl
+// connects to the host before the `?`.
+//
+// Three later classes are pinned here too, each of which the host allowlist
+// alone does NOT catch:
+//   - a PERMITTED host with a path and a trailing `&z=`, which retargets the
+//     step 3b PATCH at another project's Instance (review r3);
+//   - strings that end in a permitted suffix but are not hostnames at all
+//     (whitespace, `%2f`, a non-numeric port) — rejected today only by curl's
+//     parser, which is not where the rule is supposed to live;
+//   - non-http(s) schemes, safe today only because curl sends no
+//     Authorization header on them.
+func TestScriptValidateOverrideURL(t *testing.T) {
+	allowed := []struct{ name, url string }{
+		{"regional Cloud Run endpoint (the real default)", "https://us-east4-run.googleapis.com"},
+		{"tokeninfo endpoint (the real default)", "https://oauth2.googleapis.com/tokeninfo"},
+		{"loopback stub", "http://127.0.0.1:45607"},
+		{"loopback stub with a path", "http://127.0.0.1:45607/tokeninfo"},
+		{"localhost", "http://localhost:8080"},
+		{"IPv6 loopback with port and path", "http://[::1]:9000/x"},
+		// DO NOT DELETE THE NEXT TWO ROWS AS REDUNDANT. They look like
+		// nice-to-haves and they are not: they are the only two rows in this
+		// table that still detect a regression of the host EXTRACTION to the
+		// old path-strip-only form. Measured — with `host="${host%%/*}"`
+		// restored, every reject row keeps its correct verdict, because the
+		// '?'/'#' guard and the host-shape assertion added later catch that
+		// class first. These two go red (uppercase is no longer folded; the
+		// userinfo is no longer stripped, so `a@b@…` fails the shape check).
+		// Delete them and the extraction has no pin at all.
+		{"uppercase host — hostnames are case-insensitive", "https://FOO.GOOGLEAPIS.COM"},
+		// Also the one input where this rule is deliberately MORE permissive
+		// than curl: curl refuses to parse a double-`@` authority at all,
+		// while the host after the last `@` really is permitted. Pinned so the
+		// intent is recorded rather than rediscovered (review r3, Nit 3).
+		{"double userinfo — host after the LAST @ is permitted", "https://a@b@oauth2.googleapis.com"},
+	}
+	for _, tc := range allowed {
+		t.Run("allow/"+tc.name, func(t *testing.T) {
+			_, stderr, exitCode := runBashFunc(t, "di_validate_override_url", "_DI_API_BASE", tc.url)
+			assert.Equal(t, 0, exitCode,
+				"%q is a legitimate value and must be accepted; stderr: %s", tc.url, stderr)
+		})
+	}
+
+	rejected := []struct{ name, url string }{
+		// The r2 bypass. curl connects to the host before the '?' or '#'.
+		{"query suffix (r2 bypass)", "https://evil.example?.googleapis.com"},
+		{"fragment suffix (r2 bypass)", "https://evil.example#.googleapis.com"},
+		{"query suffix after a port", "https://evil.tld:8080?.googleapis.com"},
+		{"query parameter suffix", "https://evil.tld?x=.googleapis.com"},
+		{"backslash suffix", `https://evil.example\.googleapis.com`},
+		// Prefix/suffix confusion.
+		{"hyphen instead of dot", "https://evil-googleapis.com"},
+		{"googleapis.com as a subdomain label", "https://googleapis.com.evil.tld"},
+		{"path suffix", "https://evil.tld/x.googleapis.com"},
+		{"loopback as a subdomain label", "https://127.0.0.1.evil.tld"},
+		// Userinfo: curl resolves the host after the LAST '@'.
+		{"userinfo", "https://x@evil.tld"},
+		{"permitted host as userinfo", "https://foo.googleapis.com@evil.tld"},
+		{"userinfo with a colon and a port", "https://user:pass@evil.tld:8080"},
+		// Fail-closed, documented in review r2 Nit 5.
+		{"trailing-dot FQDN (fail-closed, known)", "https://oauth2.googleapis.com."},
+		{"plain attacker host", "https://evil.example"},
+		// A host allowlist is not a URL allowlist. These two rows are caught
+		// ONLY by the '?'/'#' guard — the host really is permitted. The first
+		// is the measured payload from review r3: the trailing `&z=` swallows
+		// the path di_build_iap_patch_url appends, so the PATCH lands on
+		// another project's Instance with the operator's live token and a
+		// valid updateMask, and the operator's own Instance keeps IAP off.
+		{"permitted host retargeting the PATCH via a query",
+			"https://us-east4-run.googleapis.com/v2/projects/victim/locations/us-east4/instances/victim?updateMask=iapEnabled&z="},
+		{"permitted host with a fragment", "https://oauth2.googleapis.com/tokeninfo#x"},
+		// Not hostnames at all. Each ends in a permitted suffix and passes the
+		// allowlist; only the positive host-shape assertion rejects them. curl
+		// refuses all ten (exit 3, code 000) — that is the point: the rule must
+		// not depend on the client for its own postcondition.
+		{"space in the host", "https://evil.example .googleapis.com"},
+		{"tab in the host", "https://evil.example\t.googleapis.com"},
+		{"newline in the host", "https://evil.example\n.googleapis.com"},
+		{"carriage return in the host", "https://evil.example\r.googleapis.com"},
+		{"percent-encoded slash in the host", "https://evil.example%2f.googleapis.com"},
+		{"percent-encoded hash in the host", "https://evil.example%23.googleapis.com"},
+		{"percent-encoded question mark in the host", "https://evil.example%3f.googleapis.com"},
+		{"semicolon in the host", "https://evil.example;.googleapis.com"},
+		{"comma in the host", "https://evil.example,.googleapis.com"},
+		{"non-numeric port", "https://evil.example:8x.googleapis.com"},
+		// Scheme. Only http(s) can carry the Bearer header, but the rule says
+		// so itself rather than leaning on curl to decline.
+		{"non-http scheme on a permitted host", "dict://x.googleapis.com"},
+		{"file scheme", "file:///etc/passwd"},
+		{"no scheme", "evil.example"},
+		{"scheme-relative", "//evil.example"},
+	}
+	for _, tc := range rejected {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			_, stderr, exitCode := runBashFunc(t, "di_validate_override_url", "_DI_API_BASE", tc.url)
+			require.NotEqual(t, 0, exitCode,
+				"%q must be REJECTED. An accepted value here means the ADC token is "+
+					"delivered to that host — as a Bearer header on the API base, and "+
+					"in a query string on tokeninfo, where the receiver logs it.", tc.url)
+			assert.Contains(t, stderr, "_DI_API_BASE",
+				"the rejection must name the variable at fault")
+		})
+	}
+}
+
+// TestScriptHostileOverrideValuesArriveAsDataNotCode pins the property that
+// every other test in this file quietly assumes: an override value reaches
+// di_validate_override_url as the bytes the test wrote, and is never executed
+// on the way there.
+//
+// The table above exists to feed hostile strings to the validator. Both routes
+// from Go to bash used fmt.Sprintf("%q"), which is Go quoting, not shell
+// quoting. Interpolated into a bash double-quoted context, `$(...)` and
+// backticks RUN. A row added to prove the validator rejects a command
+// substitution would instead execute it during setup, then observe the
+// resulting empty-ish string being rejected, and report a pass. The row would
+// be evidence of nothing.
+//
+// So the assertion is not "the value was rejected" — that stays true either
+// way, which is exactly why the defect is invisible. It is "a sentinel the
+// substitution would have created does NOT exist". The sentinel lives in this
+// test's own t.TempDir(), so nothing else in the suite can create it, remove
+// it, or tidy it away between the run and the assertion; a shared path would
+// hand back a green that means nothing, which is the m5/m8 weak-pin shape.
+//
+// Both channels are covered because both were defective and they fail
+// independently: the argv channel (runBashFunc's arguments) and the seam
+// channel (the _DI_* assignments in a setup prelude).
+func TestScriptHostileOverrideValuesArriveAsDataNotCode(t *testing.T) {
+	// hostileURL returns a URL whose execution is observable: if any layer
+	// between Go and the validator evaluates it, the sentinel appears.
+	hostileURL := func(sentinel string) string {
+		return "https://$(touch " + sentinel + ").googleapis.com"
+	}
+
+	t.Run("argv channel", func(t *testing.T) {
+		sentinel := filepath.Join(t.TempDir(), "argv-channel-executed")
+
+		_, stderr, exitCode := runBashFunc(t, "di_validate_override_url",
+			"_DI_API_BASE", hostileURL(sentinel))
+
+		require.NotEqual(t, 0, exitCode, "the value must be rejected; stderr: %s", stderr)
+		assert.NoFileExists(t, sentinel,
+			"the override value was EXECUTED on its way to the validator. The "+
+				"rejection above is worthless: it judged whatever the shell "+
+				"produced, not the string this test wrote.")
+	})
+
+	t.Run("seam assignment channel", func(t *testing.T) {
+		sentinel := filepath.Join(t.TempDir(), "seam-channel-executed")
+		argvLog := gcloudArgvLog(t)
+		setup := seamSetup(fullGcloudStub(argvLog),
+			hostileURL(sentinel),
+			"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
+
+		_, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+			"--name", "test-name", "--project", "test-project",
+			"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
+
+		require.NotEqual(t, 0, exitCode, "the value must be rejected; stderr: %s", stderr)
+		assert.NoFileExists(t, sentinel,
+			"the seam value was EXECUTED while the prelude was being set up, "+
+				"before di_main ever ran. Every di_main-level pin that sets a "+
+				"seam is asserting against a string the shell rewrote.")
+		assert.NoFileExists(t, argvLog,
+			"and the rejection must still happen before any side effect")
+	})
+}
+
+// fullGcloudStub records argv and answers every gcloud call di_main makes up
+// to and including the ADC mint, then refuses the deploy. The seam-rejection
+// tests below use it deliberately: with a stub that fails earlier — at the SDK
+// capability probe, say — deleting the host check would still turn those tests
+// red, but for a reason that has nothing to do with the rule. This stub makes
+// the mutation signal mean what it says: if validation is missing, di_main
+// reaches the mint and the argv log exists.
+func fullGcloudStub(argvLog string) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "beta run instances --help")                   return 0 ;;
+    "config get account")                          printf '%%s\n' "operator@example.com" ;;
+    "projects describe "*)                         printf '%%s\n' "123456789" ;;
+    "auth application-default print-access-token") printf '%%s\n' "ya29.fake-test-token" ;;
+    "beta run instances deploy "*)
+      echo "test stub: refusing to really deploy" >&2
+      return 1 ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog)
+}
+
+// TestScriptRejectsNonGoogleTokeninfoHost pins the _DI_TOKENINFO_URL seam at
+// the di_main level. The token reaches tokeninfo as a URL query parameter,
+// where the receiving host logs it, and the script is documented as curl-able
+// — so `_DI_TOKENINFO_URL=https://evil.example bash <(curl ...)` is a
+// plausible copy-paste accident that exfiltrates a live cloud-platform
+// credential.
+//
+// This runs di_main, not the preflight, because di_main is now the only
+// reader of the variable. That makes the assertion stronger than it was: the
+// override is rejected before ANY side effect, so the gcloud stub records
+// nothing at all — not even the SDK capability probe that runs first.
+func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	setup := seamSetup(fullGcloudStub(argvLog),
+		"http://127.0.0.1:1", // permitted; never reached
+		"https://evil.example/tokeninfo")
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+		"--name", "test-name", "--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
+
+	// The exit code is the PREMISE, not a signal: a script that reached the
+	// network and failed there also exits non-zero. require, so the assertions
+	// that do discriminate are read against a run that actually failed.
+	require.NotEqual(t, 0, exitCode,
+		"must refuse to send an access token to a host outside googleapis.com")
+	// The host must be named BY THE REJECTION, not merely echoed somewhere in
+	// stderr — see the sibling test for why the bare host name carries no
+	// signal on its own.
+	assert.Contains(t, stderr, "refusing to send an access token to host 'evil.example'",
+		"the rejection must name the offending host")
+	assert.Contains(t, stderr, "_DI_TOKENINFO_URL",
+		"the rejection must name the variable at fault")
+	assert.NoFileExists(t, argvLog,
+		"the check must run before ANY side effect — no gcloud call, no token, "+
+			"nothing to leak and no Instance to strand")
+}
+
+// TestScriptRejectsNonGoogleAPIBase is the same pin on the other seam.
+// _DI_API_BASE was originally unrestricted on the grounds that it only
+// redirected a Bearer header on a read. That premise died when the seam was
+// extended to the step 3b PATCH: a redirected base does not merely make the
+// preflight lie, it no-ops the security-critical mutation and leaves a created
+// Instance with IAP off. Both seams carry the token; both live under one rule.
+func TestScriptRejectsNonGoogleAPIBase(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	setup := seamSetup(fullGcloudStub(argvLog),
+		"https://evil.example",
+		"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
+
+	_, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+		"--name", "test-name", "--project", "test-project",
+		"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
+
+	// PREMISE, not signal. With the check deleted this run still exits
+	// non-zero — di_main reaches the network and the connection to
+	// evil.example fails — so a bare NotEqual cannot tell the two apart. It is
+	// require rather than assert to say so in the code: it guards the
+	// assertions below, it does not add to their count.
+	require.NotEqual(t, 0, exitCode,
+		"must refuse to send an access token to a host outside googleapis.com")
+	// Assert the REJECTION MESSAGE, not the host name. `Contains(stderr,
+	// "evil.example")` passes with the check deleted, because curl's
+	// connection-failure message echoes the URL — review r3 measured it. Same
+	// class as the weak stub this file already fixed: red for the wrong
+	// reason is not signal, and an assertion that cannot fail inflates the
+	// count of assertions that can.
+	assert.Contains(t, stderr, "refusing to send an access token to host 'evil.example'",
+		"the rejection must name the offending host")
+	assert.Contains(t, stderr, "_DI_API_BASE",
+		"the rejection must name the variable at fault — with two seams under "+
+			"one rule, a message that does not say which one is a scavenger hunt")
+	assert.NoFileExists(t, argvLog,
+		"the check must run before ANY side effect — no gcloud call, no token, "+
+			"and no Instance that step 3b could not then configure")
+}
+
+// TestScriptSeamsAreReadInExactlyOnePlace pins the half of the invariant that
+// hoisting the resolution into di_main was supposed to buy, and which hoisting
+// alone does NOT enforce: "nothing reads a seam without having been validated."
+//
+// Passing the endpoints as parameters makes an unvalidated value visible at
+// the call site rather than invisible in the environment — but a future
+// function could still add its own ${_DI_API_BASE:-...} read and silently
+// reacquire the at-a-distance problem that review r2 flagged. Nothing else
+// would fail. So the count is pinned directly.
+//
+// It is pinned by counting the BARE NAME in comment-stripped text, not by
+// matching a read syntax. Review r3 probed the syntax version and walked past
+// it five ways — indirection, `printenv`, `env | grep`, a computed name, and a
+// `[[ -v VAR ]]` guard were all invisible to it — while an innocent comment
+// containing `${_DI_API_BASE:-...}` turned it red for nothing, and a pin that
+// fails on unrelated edits is a pin that gets deleted. Counting the name
+// catches six of those seven and additionally goes red if the validation call
+// is deleted, because that call is one of the two expected mentions. Only a
+// deliberately string-concatenated name escapes, and a refactor guard does not
+// need to stop an adversary.
+//
+// Expect exactly two mentions per seam: the `${SEAM:-default}` read inside its
+// resolver, and the string literal naming it in the di_validate_override_url
+// call in di_main.
+func TestScriptSeamsAreReadInExactlyOnePlace(t *testing.T) {
+	script := readDeployScript(t)
+	code := regexp.MustCompile(`(?m)^\s*#.*$`).ReplaceAllString(script, "")
+
+	for _, seam := range []struct{ variable, resolver string }{
+		{"_DI_API_BASE", "di_resolve_api_base"},
+		{"_DI_TOKENINFO_URL", "di_resolve_tokeninfo_url"},
+	} {
+		t.Run(seam.variable, func(t *testing.T) {
+			mentions := regexp.MustCompile(`\b`+seam.variable+`\b`).FindAllString(code, -1)
+			assert.Len(t, mentions, 2,
+				"%s must appear exactly twice in executable text: once as the read "+
+					"inside %s, once as the name passed to di_validate_override_url. "+
+					"A third is a second reader, and that is how the validation gets "+
+					"orphaned — resolved somewhere di_main's check cannot see, with no "+
+					"other test failing. A first-and-only one means the validation call "+
+					"itself is gone.",
+				seam.variable, seam.resolver)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +1112,8 @@ func TestScriptEnableIAPPatchBody(t *testing.T) {
 
 func TestScriptEnableIAPUpdateMask(t *testing.T) {
 	// Verify the PATCH URL contains the correct updateMask.
-	stdout, _, exitCode := runBashFunc(t, "di_build_iap_patch_url", "us-east4", "my-project", "my-instance")
+	stdout, _, exitCode := runBashFunc(t, "di_build_iap_patch_url",
+		"https://us-east4-run.googleapis.com", "us-east4", "my-project", "my-instance")
 	require.Equal(t, 0, exitCode)
 
 	url := strings.TrimSpace(stdout)
@@ -460,6 +1123,42 @@ func TestScriptEnableIAPUpdateMask(t *testing.T) {
 		"updateMask must include iapEnabled")
 	assert.Contains(t, url, "invokerIamDisabled",
 		"updateMask must include invokerIamDisabled")
+}
+
+// TestScriptDefaultAPIBaseIsTheRegionalEndpoint pins the DEFAULT endpoint —
+// the value every real deploy uses and no other test touches. Review r2 found
+// that dropping "-run" from it (https://run.googleapis.com) left the entire
+// suite green: TestScriptEnableIAPUpdateMask was the only test of the PATCH
+// URL and it asserts on the updateMask alone, never the host. The global
+// run.googleapis.com host does not serve these v2 instance paths, so that
+// mutation breaks every deploy and no test notices.
+//
+// The gap is pre-existing, but the base is now an environment-dependent
+// expression rather than a literal, which is exactly when a default-branch pin
+// starts earning its keep. runBashFunc scrubs _DI_* from the child environment
+// (see scrubbedEnv), so an ambient override cannot defeat this.
+func TestScriptDefaultAPIBaseIsTheRegionalEndpoint(t *testing.T) {
+	stdout, stderr, exitCode := runBashFunc(t, "di_resolve_api_base", "us-east4")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+
+	assert.Equal(t, "https://us-east4-run.googleapis.com", strings.TrimSpace(stdout),
+		"the default API base must be the REGIONAL Cloud Run endpoint. The global "+
+			"host does not serve /v2/projects/*/locations/*/instances, so a deploy "+
+			"against it fails at the preflight GET and at the step 3b PATCH.")
+
+	// And the region really is interpolated, not hardcoded.
+	stdout, _, exitCode = runBashFunc(t, "di_resolve_api_base", "europe-west1")
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "https://europe-west1-run.googleapis.com", strings.TrimSpace(stdout),
+		"the API base must follow --region")
+}
+
+// TestScriptDefaultTokeninfoURL pins the other default for the same reason.
+func TestScriptDefaultTokeninfoURL(t *testing.T) {
+	stdout, stderr, exitCode := runBashFunc(t, "di_resolve_tokeninfo_url")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+	assert.Equal(t, "https://oauth2.googleapis.com/tokeninfo", strings.TrimSpace(stdout),
+		"the default tokeninfo endpoint must be Google's")
 }
 
 // ---------------------------------------------------------------------------

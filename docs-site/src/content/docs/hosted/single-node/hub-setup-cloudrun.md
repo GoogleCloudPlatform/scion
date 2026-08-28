@@ -57,6 +57,32 @@ command returns "Invalid choice: 'instances'", update your SDK:
 `sudo apt-get update && sudo apt-get --only-upgrade install google-cloud-cli`.
 :::
 
+### Authentication
+
+The deploy requires **two** credentials. `gcloud auth` and Application Default
+Credentials (ADC) are separate credential stores — both must be configured:
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+```
+
+| Credential | Verify | Used by |
+|------------|--------|---------|
+| `gcloud auth login` | `gcloud auth list` | gcloud commands (instance create, IAM bindings) |
+| `gcloud auth application-default login` | `gcloud auth application-default print-access-token` | REST API call that enables IAP (step 3b) |
+
+:::caution[Two credential stores]
+These are usually the same identity. When they differ, gcloud commands run as one
+identity and the REST API call runs as another — which can cause a confusing
+permission failure on step 3b after step 3a succeeds. The deploy script compares
+the two identities and warns when they differ, **but only when the ADC token
+carries an `email` claim. Service-account ADC (metadata server, Cloud Shell, CI)
+does not, and the script says so and skips the comparison** — on those, verify by
+hand. Either way the fix is to ensure both credentials are configured for the
+same account.
+:::
+
 ### Deployer permissions
 
 The identity running the deploy needs these IAM roles on the target project:
