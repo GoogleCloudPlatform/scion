@@ -445,16 +445,12 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// Validate defaultAgent when provided: must be a reasonable length and
-	// must resolve to a non-deleted agent within this project.
+	// Validate defaultAgent when provided: length and resolution are checked
+	// by validateDefaultAgent (single source of truth — DEF-31).
 	// Trim first so whitespace-only input is treated as "no default agent"
 	// (matching the PATCH/clear behavior).
 	body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
 	if body.DefaultAgent != "" {
-		if len([]rune(body.DefaultAgent)) > 200 {
-			ValidationError(w, "defaultAgent identifier is too long", nil)
-			return
-		}
 		if err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent); err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
@@ -594,12 +590,10 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 	if body.DefaultAgent != nil {
 		// Validate defaultAgent: clearing (empty string) is always allowed;
 		// setting a value must resolve to a non-deleted agent in this project.
+		// Length and resolution are checked by validateDefaultAgent (single
+		// source of truth — DEF-31).
 		da := strings.TrimSpace(*body.DefaultAgent)
 		if da != "" {
-			if len([]rune(da)) > 200 {
-				ValidationError(w, "defaultAgent identifier is too long", nil)
-				return
-			}
 			if err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da); err != nil {
 				ValidationError(w, err.Error(), nil)
 				return
@@ -680,10 +674,19 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// validateDefaultAgent checks that the given identifier (slug or UUID) resolves
-// to a non-deleted agent within the specified project. Returns nil on success
-// or a user-facing error describing the validation failure.
+// validateDefaultAgent checks that the given identifier (slug or UUID) is a
+// valid length and resolves to a non-deleted agent within the specified project.
+// Returns nil on success or a user-facing error describing the validation failure.
+//
+// All defaultAgent format and length validation lives here so that create and
+// patch call sites share a single rule set — two copies of a validation rule
+// drift, and the drift is the bug (DEF-31).
 func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef string) error {
+	// Length gate: reject unreasonably long identifiers before hitting the DB.
+	if len([]rune(agentRef)) > 200 {
+		return fmt.Errorf("defaultAgent identifier is too long")
+	}
+
 	// Try slug lookup first (project-scoped, excludes soft-deleted).
 	a, err := s.store.GetAgentBySlug(ctx, projectID, agentRef)
 	if err == nil && a != nil {
