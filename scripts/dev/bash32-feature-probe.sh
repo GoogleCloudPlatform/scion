@@ -48,8 +48,13 @@ probe() {
   fi
 
   local verdict
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 0 ] && [ -z "$stderr_first_line" ]; then
     verdict="SUPPORTED"
+  elif [ "$rc" -eq 0 ] && [ -n "$stderr_first_line" ]; then
+    # Exit 0 but stderr non-empty: the command ran but the flag was silently
+    # rejected. declare -A on bash 3.2 does this — declare succeeds but -A is
+    # an invalid option, so the variable is indexed, not associative.
+    verdict="EXIT 0 BUT REJECTED (unsupported)"
   elif [ -n "$stderr_first_line" ] && echo "$stderr_first_line" | grep -q 'syntax error\|unexpected\|bad substitution\|parse error'; then
     verdict="PARSE ERROR (unsupported)"
   else
