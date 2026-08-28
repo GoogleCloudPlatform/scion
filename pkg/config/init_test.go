@@ -1358,11 +1358,3 @@ func TestInitMachine_NonCloudRun_SkipRuntimeCheckFalse_SeedsWorkstationTemplate(
 		t.Error("seeded settings.yaml matches the cloudrun-sandbox template — workstation should get workstation defaults")
 	}
 }
-
-// truncate returns at most n bytes of s.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
