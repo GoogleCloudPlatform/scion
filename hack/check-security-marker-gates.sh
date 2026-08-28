@@ -48,6 +48,10 @@
 #     REQUIRED: sendAgentRouted x2 (s.authorize + CheckAccess)
 #     AUDIT: sendAgentRouted x1 (logAuthzDenial — silent-denial path, no 403)
 #
+#   SenderID in messagebroker.go:
+#     REQUIRED: fanOutToProject x3 (B5/R1 — broadcast self-skip by canonical ID)
+#     REQUIRED: fanOutGlobal x3 (B5/R1 — global broadcast self-skip by canonical ID)
+#
 #   COMPOSITE: handleProjectBroadcast in handlers_agent_messaging.go must
 #   contain BOTH authenticatedSender AND ActionAttach.
 #

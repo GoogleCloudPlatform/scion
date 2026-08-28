@@ -32,9 +32,10 @@ var (
 func main() {
 	hamPath := "pkg/hub/handlers_agent_messaging.go"
 	hcvPath := "pkg/hub/handlers_chat_v2.go"
+	mbPath := "pkg/hub/messagebroker.go"
 
 	// File-existence precheck (exit 2).
-	for _, f := range []string{hamPath, hcvPath} {
+	for _, f := range []string{hamPath, hcvPath, mbPath} {
 		if _, err := os.Stat(f); err != nil {
 			fmt.Fprintf(os.Stderr, "ABORT: guarded file not found or not readable: %s\n", f)
 			fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is an environment/rename issue, not a guard failure.\n")
@@ -54,6 +55,13 @@ func main() {
 	hcv, err := parser.ParseFile(fset, hcvPath, nil, parser.ParseComments)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ABORT: could not parse %s: %v\n", hcvPath, err)
+		fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is a syntax error, not a guard failure.\n")
+		os.Exit(2)
+	}
+
+	mb, err := parser.ParseFile(fset, mbPath, nil, parser.ParseComments)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ABORT: could not parse %s: %v\n", mbPath, err)
 		fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is a syntax error, not a guard failure.\n")
 		os.Exit(2)
 	}
@@ -141,6 +149,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  sender-identity derivation AND project authorization simultaneously.\n")
 		rc = 1
 	}
+
+	// --- SenderID in messagebroker.go ---
+
+	// REQUIRED: 3 uses in fanOutToProject (B5/R1 — broadcast self-skip by ID)
+	assertRequired(
+		"SenderID in fanOutToProject (B5/R1 — broadcast self-skip by canonical ID)",
+		mb, mbPath, "fanOutToProject", "SenderID", 3)
+
+	// REQUIRED: 3 uses in fanOutGlobal (B5/R1 — global self-skip by ID)
+	assertRequired(
+		"SenderID in fanOutGlobal (B5/R1 — global broadcast self-skip by canonical ID)",
+		mb, mbPath, "fanOutGlobal", "SenderID", 3)
 
 	// --- Print results ---
 
