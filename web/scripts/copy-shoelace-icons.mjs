@@ -76,6 +76,7 @@ const USED_ICONS = [
   'clock',
   'cloud',
   'cloud-arrow-down',
+  'collection',
   'cloud-download',
   'cloud-upload',
   'clock-history',
