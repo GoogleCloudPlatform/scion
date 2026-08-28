@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -448,7 +449,7 @@ func TestUATEnforcement_AgentManageExpansionContents(t *testing.T) {
 	t.Run("agent:manage expands to only agent scopes", func(t *testing.T) {
 		require.NotEmpty(t, expanded, "agent:manage must expand to at least one scope")
 		for _, scope := range expanded {
-			assert.True(t, len(scope) > 6 && scope[:6] == "agent:", "agent:manage must only expand to agent:* scopes, got: %s", scope)
+			assert.True(t, strings.HasPrefix(scope, "agent:"), "agent:manage must only expand to agent:* scopes, got: %s", scope)
 		}
 	})
 
@@ -818,13 +819,13 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 
 	for _, tc := range newResources {
 		t.Run(tc.name+"_scope_present_passes", func(t *testing.T) {
-			scoped := NewScopedUserIdentity(nil, projectID, []string{tc.scope})
+			scoped := makeScopedIdentity("test-constraint-user", projectID, []string{tc.scope})
 			result := authz.enforceUATConstraints(scoped, tc.resource, tc.action)
 			assert.Nil(t, result, "enforceUATConstraints should pass (return nil) when scope %s is present", tc.scope)
 		})
 
 		t.Run(tc.name+"_scope_absent_denies", func(t *testing.T) {
-			scoped := NewScopedUserIdentity(nil, projectID, []string{"unrelated:scope"})
+			scoped := makeScopedIdentity("test-constraint-user", projectID, []string{"unrelated:scope"})
 			result := authz.enforceUATConstraints(scoped, tc.resource, tc.action)
 			require.NotNil(t, result, "enforceUATConstraints should deny when scope %s is absent", tc.scope)
 			assert.False(t, result.Allowed)
@@ -838,7 +839,7 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
 	authz := &AuthzService{}
 
-	scoped := NewScopedUserIdentity(nil, "some-project", []string{"broker:read"})
+	scoped := makeScopedIdentity("test-constraint-user", "some-project", []string{"broker:read"})
 	resource := brokerResource(&store.RuntimeBroker{ID: "broker-hub-1"})
 	result := authz.enforceUATConstraints(scoped, resource, ActionRead)
 
@@ -853,7 +854,7 @@ func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
 func TestEnforceUATConstraints_UserHubLevel(t *testing.T) {
 	authz := &AuthzService{}
 
-	scoped := NewScopedUserIdentity(nil, "some-project", []string{"user:read"})
+	scoped := makeScopedIdentity("test-constraint-user", "some-project", []string{"user:read"})
 	resource := userResource(&store.User{ID: "user-hub-1"})
 	result := authz.enforceUATConstraints(scoped, resource, ActionRead)
 
@@ -886,7 +887,7 @@ func TestEnforceUATConstraints_GCPServiceAccountHubLevel(t *testing.T) {
 		{"assign", ActionAssign, "gcp_service_account:assign"},
 	} {
 		t.Run(action.name, func(t *testing.T) {
-			scoped := NewScopedUserIdentity(nil, "some-project", []string{action.scope})
+			scoped := makeScopedIdentity("test-constraint-user", "some-project", []string{action.scope})
 			result := authz.enforceUATConstraints(scoped, hubSA, action.action)
 
 			require.NotNil(t, result, "hub-scoped gcp_service_account must be denied for UATs (action=%s)", action.name)
@@ -933,7 +934,7 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "quota:", "hub:"}
 		for scope := range validScopes {
 			for _, prefix := range excludedPrefixes {
-				assert.False(t, len(scope) >= len(prefix) && scope[:len(prefix)] == prefix,
+				assert.False(t, strings.HasPrefix(scope, prefix),
 					"ValidUATScopes must not include %s (authority-escalation scope)", scope)
 			}
 		}
