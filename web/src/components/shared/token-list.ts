@@ -47,100 +47,341 @@ interface ScopeOption {
   value: string;
   label: string;
   description: string;
+  /** Resource type extracted from the scope id (e.g. "agent" from "agent:create"). */
+  resource: string;
+  /** Whether this scope is an alias that expands to multiple scopes. */
+  isAlias: boolean;
+  /** For aliases, the list of scopes this alias expands to. */
+  expandsTo?: string[];
 }
 
-const AVAILABLE_SCOPES = [
-  { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
-  { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
-  { value: 'agent:delete', label: 'agent:delete', description: 'Delete agents' },
-  { value: 'agent:list', label: 'agent:list', description: 'List agents in the project' },
+/**
+ * Human-friendly labels for resource type groups in the scope selector.
+ */
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  agent: 'Agent',
+  broker: 'Broker',
+  gcp_service_account: 'GCP Service Account',
+  group: 'Group',
+  harness_config: 'Harness Config',
+  project: 'Project',
+  skill: 'Skill',
+  template: 'Template',
+  user: 'User',
+};
+
+/**
+ * Fallback scope list used when the dynamic fetch from /api/v1/auth/scopes fails.
+ */
+const FALLBACK_SCOPES: ScopeOption[] = [
+  {
+    value: 'agent:attach',
+    label: 'agent:attach',
+    description: 'Attach to agent sessions',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:create',
+    label: 'agent:create',
+    description: 'Create agents',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:delete',
+    label: 'agent:delete',
+    description: 'Delete agents',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:list',
+    label: 'agent:list',
+    description: 'List agents in the project',
+    resource: 'agent',
+    isAlias: false,
+  },
   {
     value: 'agent:manage',
     label: 'agent:manage',
-    description: 'All agent actions (convenience alias)',
+    description: 'All agent management operations',
+    resource: 'agent',
+    isAlias: true,
   },
-  { value: 'agent:port_access', label: 'agent:port_access', description: 'Access forwarded ports' },
-  { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
-  { value: 'broker:list', label: 'broker:list', description: 'List brokers' },
-  { value: 'broker:read', label: 'broker:read', description: 'Read brokers' },
+  {
+    value: 'agent:port_access',
+    label: 'agent:port_access',
+    description: 'Access forwarded ports',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:read',
+    label: 'agent:read',
+    description: 'Read agent status/metadata',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'broker:list',
+    label: 'broker:list',
+    description: 'List brokers',
+    resource: 'broker',
+    isAlias: false,
+  },
+  {
+    value: 'broker:read',
+    label: 'broker:read',
+    description: 'Read brokers',
+    resource: 'broker',
+    isAlias: false,
+  },
   {
     value: 'gcp_service_account:assign',
     label: 'gcp_service_account:assign',
     description: 'Assign GCP service accounts to agents',
+    resource: 'gcp_service_account',
+    isAlias: false,
   },
   {
     value: 'gcp_service_account:list',
     label: 'gcp_service_account:list',
     description: 'List GCP service accounts',
+    resource: 'gcp_service_account',
+    isAlias: false,
   },
   {
     value: 'gcp_service_account:read',
     label: 'gcp_service_account:read',
     description: 'Read GCP service accounts',
+    resource: 'gcp_service_account',
+    isAlias: false,
   },
   {
     value: 'gcp_service_account:verify',
     label: 'gcp_service_account:verify',
     description: 'Verify GCP service accounts',
+    resource: 'gcp_service_account',
+    isAlias: false,
   },
-  { value: 'group:addMember', label: 'group:addMember', description: 'Add group members' },
-  { value: 'group:create', label: 'group:create', description: 'Create groups' },
-  { value: 'group:delete', label: 'group:delete', description: 'Delete groups' },
-  { value: 'group:list', label: 'group:list', description: 'List groups' },
-  { value: 'group:read', label: 'group:read', description: 'Read groups' },
+  {
+    value: 'group:addMember',
+    label: 'group:addMember',
+    description: 'Add group members',
+    resource: 'group',
+    isAlias: false,
+  },
+  {
+    value: 'group:create',
+    label: 'group:create',
+    description: 'Create groups',
+    resource: 'group',
+    isAlias: false,
+  },
+  {
+    value: 'group:delete',
+    label: 'group:delete',
+    description: 'Delete groups',
+    resource: 'group',
+    isAlias: false,
+  },
+  {
+    value: 'group:list',
+    label: 'group:list',
+    description: 'List groups',
+    resource: 'group',
+    isAlias: false,
+  },
+  {
+    value: 'group:read',
+    label: 'group:read',
+    description: 'Read groups',
+    resource: 'group',
+    isAlias: false,
+  },
   {
     value: 'group:removeMember',
     label: 'group:removeMember',
     description: 'Remove group members',
+    resource: 'group',
+    isAlias: false,
   },
-  { value: 'group:update', label: 'group:update', description: 'Update groups' },
+  {
+    value: 'group:update',
+    label: 'group:update',
+    description: 'Update groups',
+    resource: 'group',
+    isAlias: false,
+  },
   {
     value: 'harness_config:create',
     label: 'harness_config:create',
     description: 'Create harness configs',
+    resource: 'harness_config',
+    isAlias: false,
   },
   {
     value: 'harness_config:delete',
     label: 'harness_config:delete',
     description: 'Delete harness configs',
+    resource: 'harness_config',
+    isAlias: false,
   },
   {
     value: 'harness_config:list',
     label: 'harness_config:list',
     description: 'List harness configs',
+    resource: 'harness_config',
+    isAlias: false,
   },
   {
     value: 'harness_config:read',
     label: 'harness_config:read',
     description: 'Read harness configs',
+    resource: 'harness_config',
+    isAlias: false,
   },
   {
     value: 'harness_config:update',
     label: 'harness_config:update',
     description: 'Update harness configs',
+    resource: 'harness_config',
+    isAlias: false,
   },
-  { value: 'project:clone', label: 'project:clone', description: 'Clone projects' },
-  { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
-  { value: 'project:update', label: 'project:update', description: 'Update projects' },
-  { value: 'skill:create', label: 'skill:create', description: 'Create skills' },
-  { value: 'skill:delete', label: 'skill:delete', description: 'Delete skills' },
-  { value: 'skill:list', label: 'skill:list', description: 'List skills' },
-  { value: 'skill:read', label: 'skill:read', description: 'Read skills' },
+  {
+    value: 'project:clone',
+    label: 'project:clone',
+    description: 'Clone projects',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'project:read',
+    label: 'project:read',
+    description: 'Read project metadata',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'project:update',
+    label: 'project:update',
+    description: 'Update projects',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'skill:create',
+    label: 'skill:create',
+    description: 'Create skills',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
+    value: 'skill:delete',
+    label: 'skill:delete',
+    description: 'Delete skills',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
+    value: 'skill:list',
+    label: 'skill:list',
+    description: 'List skills',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
+    value: 'skill:read',
+    label: 'skill:read',
+    description: 'Read skills',
+    resource: 'skill',
+    isAlias: false,
+  },
   {
     value: 'skill:register',
     label: 'skill:register',
     description: 'Register skills in registries',
+    resource: 'skill',
+    isAlias: false,
   },
-  { value: 'skill:update', label: 'skill:update', description: 'Update skills' },
-  { value: 'template:create', label: 'template:create', description: 'Create templates' },
-  { value: 'template:delete', label: 'template:delete', description: 'Delete templates' },
-  { value: 'template:list', label: 'template:list', description: 'List templates' },
-  { value: 'template:read', label: 'template:read', description: 'Read templates' },
-  { value: 'template:update', label: 'template:update', description: 'Update templates' },
-  { value: 'user:invite', label: 'user:invite', description: 'Invite users' },
-  { value: 'user:list', label: 'user:list', description: 'List users' },
-  { value: 'user:read', label: 'user:read', description: 'Read users' },
-] as const;
+  {
+    value: 'skill:update',
+    label: 'skill:update',
+    description: 'Update skills',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
+    value: 'template:create',
+    label: 'template:create',
+    description: 'Create templates',
+    resource: 'template',
+    isAlias: false,
+  },
+  {
+    value: 'template:delete',
+    label: 'template:delete',
+    description: 'Delete templates',
+    resource: 'template',
+    isAlias: false,
+  },
+  {
+    value: 'template:list',
+    label: 'template:list',
+    description: 'List templates',
+    resource: 'template',
+    isAlias: false,
+  },
+  {
+    value: 'template:read',
+    label: 'template:read',
+    description: 'Read templates',
+    resource: 'template',
+    isAlias: false,
+  },
+  {
+    value: 'template:update',
+    label: 'template:update',
+    description: 'Update templates',
+    resource: 'template',
+    isAlias: false,
+  },
+  {
+    value: 'user:invite',
+    label: 'user:invite',
+    description: 'Invite users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:list',
+    label: 'user:list',
+    description: 'List users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:read',
+    label: 'user:read',
+    description: 'Read users',
+    resource: 'user',
+    isAlias: false,
+  },
+];
+
+/** Groups scope options by resource type, preserving order. Returns [resourceType, scopes][] */
+function groupScopesByResource(scopes: ScopeOption[]): [string, ScopeOption[]][] {
+  const groups = new Map<string, ScopeOption[]>();
+  for (const scope of scopes) {
+    const key = scope.resource;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key)!.push(scope);
+  }
+  return Array.from(groups.entries());
+}
 
 @customElement('scion-token-list')
 export class ScionTokenList extends LitElement {
@@ -148,7 +389,7 @@ export class ScionTokenList extends LitElement {
   @state() private tokens: AccessToken[] = [];
   @state() private projects: Project[] = [];
   @state() private error: string | null = null;
-  @state() private availableScopes: ScopeOption[] = [...AVAILABLE_SCOPES];
+  @state() private availableScopes: ScopeOption[] = [...FALLBACK_SCOPES];
   private scopesCached = false;
 
   // Create dialog
@@ -159,6 +400,11 @@ export class ScionTokenList extends LitElement {
   @state() private createExpiry = '90';
   @state() private createLoading = false;
   @state() private createError: string | null = null;
+
+  /** Search filter for the scope selector. */
+  @state() private scopeFilter = '';
+  /** Tracks which resource type groups are collapsed in the scope selector. */
+  @state() private collapsedGroups: Set<string> = new Set();
 
   // Token reveal dialog (shown once after creation)
   @state() private revealDialogOpen = false;
@@ -249,10 +495,75 @@ export class ScionTokenList extends LitElement {
         flex-shrink: 0;
       }
 
+      .scope-selector {
+        max-height: 360px;
+        overflow-y: auto;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+      }
+
+      .scope-search {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        padding: 0.5rem;
+        background: var(--scion-surface, #ffffff);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .scope-group {
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .scope-group:last-child {
+        border-bottom: none;
+      }
+
+      .scope-group-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        cursor: pointer;
+        user-select: none;
+        background: var(--scion-bg-subtle, #f8fafc);
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--scion-text-muted, #64748b);
+        transition: background 0.15s ease;
+      }
+
+      .scope-group-header:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .scope-group-header sl-icon {
+        font-size: 0.75rem;
+        transition: transform 0.15s ease;
+      }
+
+      .scope-group-header sl-icon.collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .scope-group-header .scope-group-count {
+        margin-left: auto;
+        font-size: 0.6875rem;
+        font-weight: 400;
+        color: var(--scion-text-muted, #94a3b8);
+      }
+
+      .scope-group-items {
+        padding: 0.25rem 0;
+      }
+
       .scope-checkboxes {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 0.5rem;
+        gap: 0.25rem;
+        padding: 0 0.5rem;
       }
 
       @media (max-width: 640px) {
@@ -265,6 +576,12 @@ export class ScionTokenList extends LitElement {
         display: flex;
         align-items: flex-start;
         gap: 0.375rem;
+        padding: 0.25rem 0.25rem;
+        border-radius: 0.25rem;
+      }
+
+      .scope-checkbox-item:hover {
+        background: var(--scion-bg-subtle, #f8fafc);
       }
 
       .scope-checkbox-item sl-checkbox {
@@ -281,6 +598,39 @@ export class ScionTokenList extends LitElement {
         font-size: 0.6875rem;
         color: var(--scion-text-muted, #64748b);
         font-family: inherit;
+      }
+
+      .scope-alias-item {
+        background: var(--sl-color-primary-50, #eff6ff);
+        border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+        border-radius: 0.375rem;
+        margin: 0.25rem 0.5rem;
+        padding: 0.375rem 0.5rem;
+      }
+
+      .scope-alias-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.625rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--sl-color-primary-600, #2563eb);
+        margin-top: 0.125rem;
+      }
+
+      .scope-selected-count {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+      }
+
+      .scope-no-results {
+        padding: 1rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.8125rem;
       }
 
       .field-label {
@@ -309,7 +659,10 @@ export class ScionTokenList extends LitElement {
 
   /**
    * Fetch available scopes from /api/v1/auth/scopes and cache the result.
-   * Falls back to the hardcoded AVAILABLE_SCOPES list on failure.
+   * Falls back to the hardcoded FALLBACK_SCOPES list on failure.
+   *
+   * Scopes are enriched with `resource` (for grouping) and `isAlias` fields.
+   * Aliases are listed first within their resource group for visual separation.
    */
   private async loadScopes(): Promise<void> {
     if (this.scopesCached) return;
@@ -322,12 +675,33 @@ export class ScionTokenList extends LitElement {
       };
       const scopes: ScopeOption[] = [];
       for (const s of data.scopes || []) {
-        scopes.push({ value: s.id, label: s.id, description: s.description });
+        scopes.push({
+          value: s.id,
+          label: s.id,
+          description: s.description,
+          resource: s.resource,
+          isAlias: false,
+        });
       }
       for (const a of data.aliases || []) {
-        scopes.push({ value: a.id, label: a.id, description: a.description });
+        // Extract resource from the alias id (e.g. "agent:manage" -> "agent")
+        const resource = a.id.split(':')[0];
+        scopes.push({
+          value: a.id,
+          label: a.id,
+          description: a.description,
+          resource,
+          isAlias: true,
+          expandsTo: a.expands_to,
+        });
       }
-      scopes.sort((a, b) => a.value.localeCompare(b.value));
+      // Sort: aliases first within each resource, then alphabetically
+      scopes.sort((a, b) => {
+        if (a.resource !== b.resource) return a.resource.localeCompare(b.resource);
+        // Aliases before individual scopes within a group
+        if (a.isAlias !== b.isAlias) return a.isAlias ? -1 : 1;
+        return a.value.localeCompare(b.value);
+      });
       if (scopes.length > 0) {
         this.availableScopes = scopes;
         this.scopesCached = true;
@@ -387,11 +761,23 @@ export class ScionTokenList extends LitElement {
     this.createScopes = new Set();
     this.createExpiry = '90';
     this.createError = null;
+    this.scopeFilter = '';
+    this.collapsedGroups = new Set();
     this.createDialogOpen = true;
   }
 
   private closeCreateDialog(): void {
     this.createDialogOpen = false;
+  }
+
+  private toggleGroup(resource: string): void {
+    const next = new Set(this.collapsedGroups);
+    if (next.has(resource)) {
+      next.delete(resource);
+    } else {
+      next.add(resource);
+    }
+    this.collapsedGroups = next;
   }
 
   private toggleScope(scope: string): void {
@@ -727,7 +1113,25 @@ export class ScionTokenList extends LitElement {
     `;
   }
 
+  /**
+   * Filter scopes by the current search term, matching against
+   * the scope value, description, or resource type label.
+   */
+  private getFilteredScopes(): ScopeOption[] {
+    const filter = this.scopeFilter.toLowerCase().trim();
+    if (!filter) return this.availableScopes;
+    return this.availableScopes.filter(
+      (scope) =>
+        scope.value.toLowerCase().includes(filter) ||
+        scope.description.toLowerCase().includes(filter) ||
+        (RESOURCE_TYPE_LABELS[scope.resource] || scope.resource).toLowerCase().includes(filter)
+    );
+  }
+
   private renderCreateDialog() {
+    const filteredScopes = this.getFilteredScopes();
+    const groups = groupScopesByResource(filteredScopes);
+
     return html`
       <sl-dialog
         label="Create Access Token"
@@ -763,22 +1167,31 @@ export class ScionTokenList extends LitElement {
           </sl-select>
 
           <div>
-            <div class="field-label">Scopes</div>
-            <div class="scope-checkboxes">
-              ${this.availableScopes.map(
-                (scope) => html`
-                  <div class="scope-checkbox-item">
-                    <sl-checkbox
-                      ?checked=${this.createScopes.has(scope.value)}
-                      @sl-change=${() => this.toggleScope(scope.value)}
-                    >
-                      <span class="scope-checkbox-label">${scope.label}</span>
-                      <br />
-                      <span class="scope-checkbox-desc">${scope.description}</span>
-                    </sl-checkbox>
-                  </div>
-                `
-              )}
+            <div class="field-label">
+              Scopes
+              ${this.createScopes.size > 0
+                ? html`<span class="scope-selected-count"
+                    >(${this.createScopes.size} selected)</span
+                  >`
+                : nothing}
+            </div>
+            <div class="scope-selector">
+              <div class="scope-search">
+                <sl-input
+                  placeholder="Filter scopes..."
+                  size="small"
+                  clearable
+                  value=${this.scopeFilter}
+                  @sl-input=${(e: Event) => {
+                    this.scopeFilter = (e.target as HTMLInputElement).value;
+                  }}
+                >
+                  <sl-icon name="search" slot="prefix"></sl-icon>
+                </sl-input>
+              </div>
+              ${groups.length === 0
+                ? html`<div class="scope-no-results">No scopes match "${this.scopeFilter}"</div>`
+                : groups.map(([resource, scopes]) => this.renderScopeGroup(resource, scopes))}
             </div>
           </div>
 
@@ -817,6 +1230,82 @@ export class ScionTokenList extends LitElement {
           Create Token
         </sl-button>
       </sl-dialog>
+    `;
+  }
+
+  private renderScopeGroup(resource: string, scopes: ScopeOption[]) {
+    const isCollapsed = this.collapsedGroups.has(resource);
+    const label = RESOURCE_TYPE_LABELS[resource] || resource;
+    const selectedInGroup = scopes.filter((s) => this.createScopes.has(s.value)).length;
+    const aliases = scopes.filter((s) => s.isAlias);
+    const regularScopes = scopes.filter((s) => !s.isAlias);
+
+    return html`
+      <div class="scope-group">
+        <div
+          class="scope-group-header"
+          @click=${() => this.toggleGroup(resource)}
+          role="button"
+          tabindex="0"
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              this.toggleGroup(resource);
+            }
+          }}
+        >
+          <sl-icon name="chevron-down" class=${isCollapsed ? 'collapsed' : ''}></sl-icon>
+          ${label}
+          <span class="scope-group-count"
+            >${selectedInGroup > 0 ? `${selectedInGroup}/` : ''}${scopes.length}</span
+          >
+        </div>
+        ${isCollapsed
+          ? nothing
+          : html`
+              <div class="scope-group-items">
+                ${aliases.map((scope) => this.renderAliasScope(scope))}
+                <div class="scope-checkboxes">
+                  ${regularScopes.map((scope) => this.renderScopeCheckbox(scope))}
+                </div>
+              </div>
+            `}
+      </div>
+    `;
+  }
+
+  private renderAliasScope(scope: ScopeOption) {
+    return html`
+      <div class="scope-alias-item">
+        <sl-checkbox
+          ?checked=${this.createScopes.has(scope.value)}
+          @sl-change=${() => this.toggleScope(scope.value)}
+        >
+          <span class="scope-checkbox-label">${scope.label}</span>
+          <br />
+          <span class="scope-checkbox-desc">${scope.description}</span>
+          <br />
+          <span class="scope-alias-badge">
+            <sl-icon name="collection"></sl-icon>
+            Alias${scope.expandsTo ? ` — expands to ${scope.expandsTo.length} scopes` : ''}
+          </span>
+        </sl-checkbox>
+      </div>
+    `;
+  }
+
+  private renderScopeCheckbox(scope: ScopeOption) {
+    return html`
+      <div class="scope-checkbox-item">
+        <sl-checkbox
+          ?checked=${this.createScopes.has(scope.value)}
+          @sl-change=${() => this.toggleScope(scope.value)}
+        >
+          <span class="scope-checkbox-label">${scope.label}</span>
+          <br />
+          <span class="scope-checkbox-desc">${scope.description}</span>
+        </sl-checkbox>
+      </div>
     `;
   }
 
