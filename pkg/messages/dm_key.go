@@ -16,6 +16,7 @@ package messages
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -31,35 +32,47 @@ var validDMKinds = map[string]bool{
 // reference key for a direct-message conversation between two principals.
 //
 // Format: dm:<token1>:<token2> where each token is <kind>:<uuid>.
-//   - kind must be "user" or "agent" (lowercase).
-//   - UUID is normalised to canonical lowercase hex-with-hyphens.
+//   - kind must be exactly "user" or "agent" (case-sensitive, no normalisation).
+//   - UUID must be canonical lowercase hex-with-hyphens (no normalisation; non-canonical forms are rejected).
 //   - The two tokens are sorted byte-wise lexicographically.
 //
 // Because "agent:" < "user:" lexically, mixed pairs always render as
 // dm:agent:<aid>:user:<uid>. Same-kind pairs sort by UUID.
+//
+// Note: PrincipalKindFromAddress (used by messagebroker.go) folds kind to
+// lowercase before calling this function, so the kind rejection below does
+// not fire on that path. That upstream fold is tracked as a separate defect.
 func DMConversationKey(kindA, idA, kindB, idB string) (string, error) {
-	kindA = strings.ToLower(kindA)
-	kindB = strings.ToLower(kindB)
-
+	// No normalisation — reject non-canonical input.
 	if !validDMKinds[kindA] {
+		slog.Warn("DMConversationKey: rejected non-canonical kind", "received", kindA)
 		return "", fmt.Errorf("dm key: unknown kind %q (must be user or agent)", kindA)
 	}
 	if !validDMKinds[kindB] {
+		slog.Warn("DMConversationKey: rejected non-canonical kind", "received", kindB)
 		return "", fmt.Errorf("dm key: unknown kind %q (must be user or agent)", kindB)
 	}
 
-	// Parse and re-format UUIDs to canonical lowercase.
 	uA, err := uuid.Parse(idA)
 	if err != nil {
 		return "", fmt.Errorf("dm key: invalid UUID for %s: %w", kindA, err)
 	}
+	if uA.String() != idA {
+		slog.Warn("DMConversationKey: rejected non-canonical UUID", "kind", kindA, "shape", describeNonCanonicalUUID(idA))
+		return "", fmt.Errorf("dm key: non-canonical UUID %q for %s (expected %s)", idA, kindA, uA.String())
+	}
+
 	uB, err := uuid.Parse(idB)
 	if err != nil {
 		return "", fmt.Errorf("dm key: invalid UUID for %s: %w", kindB, err)
 	}
+	if uB.String() != idB {
+		slog.Warn("DMConversationKey: rejected non-canonical UUID", "kind", kindB, "shape", describeNonCanonicalUUID(idB))
+		return "", fmt.Errorf("dm key: non-canonical UUID %q for %s (expected %s)", idB, kindB, uB.String())
+	}
 
-	tokenA := kindA + ":" + uA.String()
-	tokenB := kindB + ":" + uB.String()
+	tokenA := kindA + ":" + idA
+	tokenB := kindB + ":" + idB
 
 	// Sort tokens lexicographically.
 	if tokenA > tokenB {
@@ -67,6 +80,26 @@ func DMConversationKey(kindA, idA, kindB, idB string) (string, error) {
 	}
 
 	return "dm:" + tokenA + ":" + tokenB, nil
+}
+
+// describeNonCanonicalUUID returns a shape description of a non-canonical UUID
+// string for logging purposes. It does not log the value itself.
+func describeNonCanonicalUUID(id string) string {
+	if strings.HasPrefix(id, "urn:uuid:") {
+		return "urn-prefixed"
+	}
+	if len(id) > 0 && id[0] == '{' {
+		return "braced"
+	}
+	if len(id) == 32 && !strings.Contains(id, "-") {
+		return "unhyphenated"
+	}
+	for _, c := range id {
+		if c >= 'A' && c <= 'F' {
+			return "uppercase-hex"
+		}
+	}
+	return "other"
 }
 
 // PrincipalKindFromAddress extracts the kind prefix ("user" or "agent") from
