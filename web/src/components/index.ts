@@ -49,6 +49,8 @@ export { ScionPageBrokers } from './pages/brokers.js';
 export { ScionPageAdminUsers } from './pages/admin-users.js';
 export { ScionPageAdminGroups } from './pages/admin-groups.js';
 export { ScionPageAdminQuotas } from './pages/admin-quotas.js';
+export { ScionPageAdminRoles } from './pages/admin-roles.js';
+export { ScionPageAdminRoleBindings } from './pages/admin-role-bindings.js';
 export { ScionPageProfileEnvVars } from './pages/profile-env-vars.js';
 export { ScionPageProfileSecrets } from './pages/profile-secrets.js';
 export { ScionPageProfileTeams } from './pages/profile-teams.js';
