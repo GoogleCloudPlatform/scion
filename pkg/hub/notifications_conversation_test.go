@@ -105,6 +105,10 @@ func TestCreateInboxMessage_StampsConversationID(t *testing.T) {
 // the subscriber has a non-UUID SubscriberID (e.g. a slug or federated identity),
 // createInboxMessage does not panic and the persisted message has an empty
 // ConversationID.
+//
+// DEF-32: when federated-identity → user UUID resolution is added to the store,
+// this expectation inverts — a non-UUID subscriber SHOULD resolve to a canonical
+// UUID and receive a ConversationID. Update this assertion when DEF-32 lands.
 func TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
@@ -164,6 +168,7 @@ func TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic(t *testing.T) {
 	}
 
 	last := msgs[len(msgs)-1]
+	// DEF-32: this assertion inverts when federated-identity resolution lands.
 	if last.ConversationID != "" {
 		t.Errorf("expected empty ConversationID for non-UUID subscriber, got %q", last.ConversationID)
 	}
