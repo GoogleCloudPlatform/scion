@@ -344,3 +344,59 @@ func TestCheckDMParticipantKey_UnparseableRef(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unparseable external_ref")
 }
+
+// ---------------------------------------------------------------------------
+// Cross-writer agreement test
+// ---------------------------------------------------------------------------
+
+// TestDMConversationKey_CrossWriterAgreement verifies that DMConversationKey
+// produces byte-identical keys to the SQL concatenation pattern used by four
+// SQL writers in webchannel_store that construct DM keys by concatenation
+// ('dm:agent:' + agentID + ':user:' + userID) without calling
+// DMConversationKey. This test pins that the two construction methods agree.
+// If the sort order or format ever changes, this test will catch the
+// divergence.
+func TestDMConversationKey_CrossWriterAgreement(t *testing.T) {
+	agentID := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+
+	// agent+user pair: SQL writers use "dm:agent:" + agentID + ":user:" + userID
+	// because "agent:" < "user:" lexically.
+	goKey, err := DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+
+	sqlKey := "dm:agent:" + agentID + ":user:" + userID
+	assert.Equal(t, sqlKey, goKey,
+		"DMConversationKey must produce byte-identical output to SQL concatenation pattern")
+}
+
+// ---------------------------------------------------------------------------
+// Rejection golden vectors for non-canonical UUID forms
+// ---------------------------------------------------------------------------
+
+// TestDMConversationKey_RejectsNonCanonicalUUID exercises every non-canonical
+// UUID form that uuid.Parse accepts but that does not match canonical
+// lowercase-hyphenated output.
+func TestDMConversationKey_RejectsNonCanonicalUUID(t *testing.T) {
+	canonical := "550e8400-e29b-41d4-a716-446655440000"
+
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{"uppercase", "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"},
+		{"mixed case", "6ba7b810-9dad-11d1-80b4-00C04FD430C8"},
+		{"braced", "{6ba7b810-9dad-11d1-80b4-00c04fd430c8}"},
+		{"unhyphenated", "6ba7b8109dad11d180b400c04fd430c8"},
+		{"urn:uuid: form", "urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DMConversationKey("user", tc.id, "agent", canonical)
+			require.Error(t, err, "non-canonical UUID %q must be rejected", tc.id)
+			assert.Contains(t, err.Error(), "non-canonical UUID",
+				"error message must mention non-canonical UUID")
+		})
+	}
+}
