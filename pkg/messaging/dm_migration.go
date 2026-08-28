@@ -203,7 +203,11 @@ func (s *DMMigrationService) stepRebuildParticipants(
 		return
 	}
 
-	// Add participants (idempotent — ErrAlreadyExists is expected for existing).
+	// No CheckDMParticipantKey guard here: {kindA, idA} and {kindB, idB} are
+	// derived from ParseDMKey on this row's own external_ref (line 184), so the
+	// check would re-parse the same string and compare its output to itself — a
+	// tautology. See mergeConversation (~line 439) for the site where principals
+	// are foreign and the guard is load-bearing.
 	added := 0
 	for _, p := range []struct{ kind, id string }{{kindA, idA}, {kindB, idB}} {
 		err := s.store.AddParticipant(ctx, &store.ConversationParticipant{
