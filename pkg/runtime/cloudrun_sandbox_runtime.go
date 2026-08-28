@@ -1145,15 +1145,19 @@ func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string
 	// tab empty in precisely the case the feature exists for. Try-and-
 	// fallback is strictly more robust: it does not consult the flag.
 
+	var reason string
 	if err != nil {
 		// Preserve the tmux failure for diagnostics. The operator gets
 		// the fallback content (better than empty), but the exec error
 		// is recorded so it can be found during debugging.
 		runtimeLog.Warn("tmux capture-pane failed, falling back to entrypoint log",
 			"agent_id", id, "error", err)
+		reason = "sandbox was not reachable via tmux"
+	} else {
+		reason = "tmux returned no terminal output"
 	}
 
-	return r.readEntrypointLogFromState(id)
+	return r.readEntrypointLogFromState(id, reason)
 }
 
 // readEntrypointLogFromState reads the entrypoint log from the host
@@ -1161,7 +1165,7 @@ func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string
 // This is the same file and the same host-side path that the DOA handler
 // (line 812-826) reads after a failed liveness probe — the mechanism
 // exists, this gives it an exit through GetLogs.
-func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id string) (string, error) {
+func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id, reason string) (string, error) {
 	entry := r.state.get(id)
 	if entry == nil {
 		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q not found in state store", id)
@@ -1186,8 +1190,10 @@ func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id string) (string, 
 
 	// Label the source so the operator knows this is startup output,
 	// not live terminal content. This is mandatory: without it, the
-	// output is indistinguishable from a live pane.
-	header := "[source: entrypoint log (startup) — sandbox was not reachable via tmux]\n"
+	// output is indistinguishable from a live pane. The reason is
+	// per-case so the operator can distinguish "agent is dead" from
+	// "agent has not printed yet."
+	header := fmt.Sprintf("[source: entrypoint log (startup) — %s]\n", reason)
 	return header + string(data), nil
 }
 

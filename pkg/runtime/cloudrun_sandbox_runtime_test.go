@@ -2031,9 +2031,13 @@ func TestCloudRunSandboxRuntime_GetLogs_FallbackServesDeadAgent(t *testing.T) {
 	}
 
 	// Source label must be present so the operator knows this is
-	// startup output, not live terminal content.
+	// startup output, not live terminal content. For a dead sandbox
+	// the reason must say "tmux exec failed", not "pane was empty."
 	if !strings.Contains(logs, "[source: entrypoint log (startup)") {
 		t.Errorf("GetLogs() fallback output missing source label.\ngot: %q", logs)
+	}
+	if !strings.Contains(logs, "sandbox was not reachable via tmux") {
+		t.Errorf("GetLogs() source label should say 'sandbox was not reachable via tmux' for dead sandbox.\ngot: %q", logs)
 	}
 }
 
@@ -2164,5 +2168,16 @@ func TestCloudRunSandboxRuntime_GetLogs_EmptyTmuxFallsThrough(t *testing.T) {
 	// startup output, not the live terminal being empty.
 	if !strings.Contains(logs, "[source: entrypoint log (startup)") {
 		t.Errorf("GetLogs() fallback output missing source label.\ngot: %q", logs)
+	}
+
+	// The label must say "tmux returned no terminal output" (observation),
+	// NOT "sandbox was not reachable via tmux" — the sandbox IS reachable,
+	// the pane is just empty. Using the unreachable label here would
+	// mislead an operator into concluding the agent is dead.
+	if !strings.Contains(logs, "tmux returned no terminal output") {
+		t.Errorf("GetLogs() empty-pane label should say 'tmux returned no terminal output'.\ngot: %q", logs)
+	}
+	if strings.Contains(logs, "not reachable via tmux") {
+		t.Errorf("GetLogs() empty-pane case must NOT use the unreachable label.\ngot: %q", logs)
 	}
 }
