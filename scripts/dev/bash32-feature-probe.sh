@@ -27,10 +27,6 @@ set -euo pipefail
 
 BASH_UNDER_TEST="${SCION_TEST_BASH:-bash}"
 
-# SC2016: single-quoted strings are sent to the interpreter under test; $-refs
-# are its variables, not ours.
-# shellcheck disable=SC2016
-
 # probe runs a single construct in its own subprocess and reports the result.
 # Arguments: NAME SNIPPET
 probe() {
@@ -78,6 +74,15 @@ echo ""
 
 # --- The ten constructs, one subprocess each ---
 # Leading with printf -v because a correction to the design doc is waiting on it.
+#
+# PRECONDITION: every snippet must be STDERR-CLEAN on success. The verdict logic
+# classifies exit 0 with stderr output as "EXIT 0 BUT REJECTED (unsupported)" —
+# that is how it catches declare -A, which exits 0 but prints "invalid option".
+# A snippet that legitimately writes to stderr while succeeding will be
+# misclassified as unsupported: silently, with a green run, producing a wrong
+# row in a matrix the design doc cites as measured. If you add a construct whose
+# success path writes to stderr, you must either suppress that output in the
+# snippet or extend the verdict logic to distinguish it.
 #
 # SC2016: every probe snippet is a literal string sent to the interpreter under
 # test via bash -c. Expanding $ here would destroy the measurement — we would
