@@ -244,9 +244,21 @@ func stubTokeninfoURL(serverURL string) string {
 // Only di_main reads these variables; every function below it takes the
 // endpoints as parameters. These two assignments are therefore the only place
 // the environment seam itself is exercised, which is deliberate.
+//
+// shellQuote, not %q, for the same reason as the argv channel — and here the
+// stakes are higher. %q into a bash DOUBLE-QUOTED context does not merely lose
+// a tab: `$(...)` and backticks are EXECUTED while the prelude is being set
+// up. A hostile row added to prove the validator rejects it would run instead,
+// and then pass. See TestScriptHostileOverrideValuesArriveAsDataNotCode.
 func preflightSetup(gcloudStub, serverURL string) string {
-	return fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
-		gcloudStub, serverURL, stubTokeninfoURL(serverURL))
+	return seamSetup(gcloudStub, serverURL, stubTokeninfoURL(serverURL))
+}
+
+// seamSetup emits a bash prelude that sets both seams to exactly the bytes
+// given, executing nothing.
+func seamSetup(gcloudStub, apiBase, tokeninfoURL string) string {
+	return fmt.Sprintf("%s\n_DI_API_BASE=%s\n_DI_TOKENINFO_URL=%s",
+		gcloudStub, shellQuote(apiBase), shellQuote(tokeninfoURL))
 }
 
 // preflightArgs builds the argument list for a DIRECT call to
@@ -512,6 +524,70 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 	}
 }
 
+// TestScriptHostileOverrideValuesArriveAsDataNotCode pins the property that
+// every other test in this file quietly assumes: an override value reaches
+// di_validate_override_url as the bytes the test wrote, and is never executed
+// on the way there.
+//
+// The table above exists to feed hostile strings to the validator. Both routes
+// from Go to bash used fmt.Sprintf("%q"), which is Go quoting, not shell
+// quoting. Interpolated into a bash double-quoted context, `$(...)` and
+// backticks RUN. A row added to prove the validator rejects a command
+// substitution would instead execute it during setup, then observe the
+// resulting empty-ish string being rejected, and report a pass. The row would
+// be evidence of nothing.
+//
+// So the assertion is not "the value was rejected" — that stays true either
+// way, which is exactly why the defect is invisible. It is "a sentinel the
+// substitution would have created does NOT exist". The sentinel lives in this
+// test's own t.TempDir(), so nothing else in the suite can create it, remove
+// it, or tidy it away between the run and the assertion; a shared path would
+// hand back a green that means nothing, which is the m5/m8 weak-pin shape.
+//
+// Both channels are covered because both were defective and they fail
+// independently: the argv channel (runBashFunc's arguments) and the seam
+// channel (the _DI_* assignments in a setup prelude).
+func TestScriptHostileOverrideValuesArriveAsDataNotCode(t *testing.T) {
+	// hostileURL returns a URL whose execution is observable: if any layer
+	// between Go and the validator evaluates it, the sentinel appears.
+	hostileURL := func(sentinel string) string {
+		return "https://$(touch " + sentinel + ").googleapis.com"
+	}
+
+	t.Run("argv channel", func(t *testing.T) {
+		sentinel := filepath.Join(t.TempDir(), "argv-channel-executed")
+
+		_, stderr, exitCode := runBashFunc(t, "di_validate_override_url",
+			"_DI_API_BASE", hostileURL(sentinel))
+
+		require.NotEqual(t, 0, exitCode, "the value must be rejected; stderr: %s", stderr)
+		assert.NoFileExists(t, sentinel,
+			"the override value was EXECUTED on its way to the validator. The "+
+				"rejection above is worthless: it judged whatever the shell "+
+				"produced, not the string this test wrote.")
+	})
+
+	t.Run("seam assignment channel", func(t *testing.T) {
+		sentinel := filepath.Join(t.TempDir(), "seam-channel-executed")
+		argvLog := gcloudArgvLog(t)
+		setup := seamSetup(fullGcloudStub(argvLog),
+			hostileURL(sentinel),
+			"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
+
+		_, stderr, exitCode := runBashFuncWithSetup(t, setup, "di_main",
+			"--name", "test-name", "--project", "test-project",
+			"--image", "ghcr.io/example/scion-omni:latest", "--region", "us-east4")
+
+		require.NotEqual(t, 0, exitCode, "the value must be rejected; stderr: %s", stderr)
+		assert.NoFileExists(t, sentinel,
+			"the seam value was EXECUTED while the prelude was being set up, "+
+				"before di_main ever ran. Every di_main-level pin that sets a "+
+				"seam is asserting against a string the shell rewrote.")
+		assert.NoFileExists(t, argvLog,
+			"and the rejection must still happen before any side effect")
+	})
+}
+
 // fullGcloudStub records argv and answers every gcloud call di_main makes up
 // to and including the ADC mint, then refuses the deploy. The seam-rejection
 // tests below use it deliberately: with a stub that fails earlier — at the SDK
@@ -550,8 +626,7 @@ func fullGcloudStub(argvLog string) string {
 // nothing at all — not even the SDK capability probe that runs first.
 func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
-	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
-		fullGcloudStub(argvLog),
+	setup := seamSetup(fullGcloudStub(argvLog),
 		"http://127.0.0.1:1", // permitted; never reached
 		"https://evil.example/tokeninfo")
 
@@ -584,8 +659,7 @@ func TestScriptRejectsNonGoogleTokeninfoHost(t *testing.T) {
 // Instance with IAP off. Both seams carry the token; both live under one rule.
 func TestScriptRejectsNonGoogleAPIBase(t *testing.T) {
 	argvLog := gcloudArgvLog(t)
-	setup := fmt.Sprintf("%s\n_DI_API_BASE=%q\n_DI_TOKENINFO_URL=%q",
-		fullGcloudStub(argvLog),
+	setup := seamSetup(fullGcloudStub(argvLog),
 		"https://evil.example",
 		"https://oauth2.googleapis.com/tokeninfo") // permitted; never reached
 

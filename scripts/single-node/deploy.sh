@@ -284,7 +284,7 @@ di_validate_override_url() {
   # rule again, and the point of this function is that the rule stands alone.
   local scheme="${url%%://*}"
   if [[ "${scheme,,}" != "http" && "${scheme,,}" != "https" ]]; then
-    echo "Error: $var_name must be an http:// or https:// URL." >&2
+    echo "Error: $var_name must be an http:// or https:// URL (got '$scheme')." >&2
     return 1
   fi
 
