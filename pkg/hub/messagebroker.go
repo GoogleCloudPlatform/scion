@@ -489,48 +489,45 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			Reason:     reason,
 		})
 	}
-	persistOK := true
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
-		persistOK = false
+		return
 	}
 
-	// B11/B13: everything below requires the message row to exist in the store.
-	// Skip attachment links, watermarks, and SSE publish when persistence
-	// failed — publishing an unpersisted message is not legal.
-	if persistOK {
-		// W7: Link the sender's attachments, recorded before publish, to the message
-		// row created here — the ID they need exists nowhere else. Done before the
-		// SSE event so a client refetching on it already sees them.
-		linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
+	// Everything below requires the message row to exist in the store.
+	// CreateMessage failure returns above, matching deliverToAgent's pattern.
 
-		// Stamp the DM watermark with the store-assigned message ID. The web
-		// channel spoke already registered the participant rows and bumped
-		// last_activity_at, but it runs before the ID exists — without this the
-		// unread indicator (last_message_id != last_read_message_id) never fires
-		// for agent replies.
-		if p.webChatStore != nil && storeMsg.ThreadID != "" {
-			switch {
-			case strings.HasPrefix(storeMsg.ThreadID, "dm:"):
-				registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
-				if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-					p.log.Error("Failed to stamp DM watermark",
-						"thread_id", storeMsg.ThreadID, "error", err)
-				}
-			case !strings.HasPrefix(storeMsg.ThreadID, "agent:"):
-				// Space topic. Same reasoning as DMs: the topic's unread dot is
-				// driven by last_message_id, and the spoke stamped only the
-				// activity timestamp.
-				if err := p.webChatStore.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-					p.log.Error("Failed to stamp topic watermark",
-						"thread_id", storeMsg.ThreadID, "error", err)
-				}
+	// W7: Link the sender's attachments, recorded before publish, to the message
+	// row created here — the ID they need exists nowhere else. Done before the
+	// SSE event so a client refetching on it already sees them.
+	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
+
+	// Stamp the DM watermark with the store-assigned message ID. The web
+	// channel spoke already registered the participant rows and bumped
+	// last_activity_at, but it runs before the ID exists — without this the
+	// unread indicator (last_message_id != last_read_message_id) never fires
+	// for agent replies.
+	if p.webChatStore != nil && storeMsg.ThreadID != "" {
+		switch {
+		case strings.HasPrefix(storeMsg.ThreadID, "dm:"):
+			registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
+			if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				p.log.Error("Failed to stamp DM watermark",
+					"thread_id", storeMsg.ThreadID, "error", err)
+			}
+		case !strings.HasPrefix(storeMsg.ThreadID, "agent:"):
+			// Space topic. Same reasoning as DMs: the topic's unread dot is
+			// driven by last_message_id, and the spoke stamped only the
+			// activity timestamp.
+			if err := p.webChatStore.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				p.log.Error("Failed to stamp topic watermark",
+					"thread_id", storeMsg.ThreadID, "error", err)
 			}
 		}
-
-		// Publish SSE event so connected browser clients receive real-time inbox updates.
-		p.events.PublishUserMessage(ctx, storeMsg)
 	}
+
+	// Publish SSE event so connected browser clients receive real-time inbox updates.
+	p.events.PublishUserMessage(ctx, storeMsg)
 
 	// W6: DM notification for agent → human replies via broker path.
 	if p.chatNotifier != nil && storeMsg.ThreadID != "" &&

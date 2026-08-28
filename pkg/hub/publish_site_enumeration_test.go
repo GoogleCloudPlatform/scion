@@ -24,15 +24,33 @@ import (
 	"testing"
 )
 
-// TestPublishUserMessageEnumeration uses go/ast to find every
-// PublishUserMessage call site (arity 2 — the event publish signature) in
-// non-test .go files under pkg/hub. Each site must appear in the "guarded"
-// set (the call only executes when CreateMessage has already succeeded).
-// Broker proxy calls (arity 4) are excluded from the population entirely —
-// persistence is handled by the deliverToUser callback, not by the caller.
-// Any unaccounted site causes a hard failure — this is the durable guard for
-// contract B11/B13: publishing an unpersisted message is not legal.
-func TestPublishUserMessageEnumeration(t *testing.T) {
+// TestPersistedRowEffectEnumeration uses go/ast to find every call site of
+// externally visible effects that require a persisted message row in non-test
+// .go files under pkg/hub. Each site must appear in the "guarded" set (the
+// call only executes when CreateMessage has already succeeded). Any unaccounted
+// site causes a hard failure.
+//
+// Effect categories in scope:
+//   - SSE publish: PublishUserMessage (arity 2 — the event publish signature).
+//     Broker proxy calls (arity 4) are excluded — persistence is handled by
+//     the deliverToUser callback, not by the caller.
+//   - DM notification dispatch: NotifyDMReceived.
+//
+// Effect categories deliberately NOT enumerated:
+//   - Watermark updates (TouchDMActivity, TouchTopicActivity): currently
+//     structurally guarded by early return or conditional scope in all
+//     existing call sites.
+//   - Attachment links (linkAttachmentRefs, LinkAttachmentToMessage):
+//     currently structurally guarded by early return or conditional scope
+//     in all existing call sites.
+//   - Audit log entries (messageLog.Info): currently structurally guarded
+//     by early return or conditional scope in all existing call sites.
+//
+// The latter three categories are omitted because adding them would require
+// receiver-type resolution beyond go/ast's capability. The two enumerated
+// categories are the ones with externally visible user impact (SSE event
+// delivery and push notifications).
+func TestPersistedRowEffectEnumeration(t *testing.T) {
 	// -------------------------------------------------------------------
 	// Guarded sites: each of these only executes after CreateMessage has
 	// succeeded (error return, else-branch, or conditional block).
@@ -52,10 +70,16 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 
 		// sendHumanToHuman: CreateMessage error triggers early return
 		// before publish.
-		"handlers_chat_v2.go:sendHumanToHuman": "CreateMessage error triggers early return before publish",
+		"handlers_chat_v2.go:sendHumanToHuman:publish": "CreateMessage error triggers early return before publish",
 
-		// deliverToUser: publish inside if persistOK block.
-		"messagebroker.go:deliverToUser": "Publish inside if persistOK block",
+		// sendHumanToHuman: DM notification after successful persist.
+		"handlers_chat_v2.go:sendHumanToHuman:notify": "CreateMessage error triggers early return before notification dispatch",
+
+		// deliverToUser: CreateMessage error triggers early return.
+		"messagebroker.go:deliverToUser:publish": "CreateMessage error triggers early return before all effects",
+
+		// deliverToUser: DM notification after successful persist.
+		"messagebroker.go:deliverToUser:notify": "CreateMessage error triggers early return before notification dispatch",
 
 		// handleBrokerInbound: publish in else branch of CreateMessage
 		// error check.
@@ -63,7 +87,11 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 
 		// handleAgentOutboundMessage: CreateMessage error triggers early
 		// return before publish.
-		"handlers_agent_messaging.go:handleAgentOutboundMessage": "CreateMessage error triggers early return before publish",
+		"handlers_agent_messaging.go:handleAgentOutboundMessage:publish": "CreateMessage error triggers early return before publish",
+
+		// handleAgentOutboundMessage: DM notification after successful
+		// persist (non-broker path only).
+		"handlers_agent_messaging.go:handleAgentOutboundMessage:notify": "CreateMessage error triggers early return before notification dispatch",
 
 		// handleAgentMessage: publish inside if persistedMsgID != empty
 		// block.
@@ -89,7 +117,7 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 
 	// -------------------------------------------------------------------
 	// Parse all non-test .go files under pkg/hub and find
-	// PublishUserMessage call sites.
+	// PublishUserMessage and NotifyDMReceived call sites.
 	// -------------------------------------------------------------------
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
@@ -103,6 +131,7 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 		file     string // base filename
 		line     int
 		funcName string // enclosing function name
+		target   string // "publish" or "notify"
 	}
 	var sites []callSite
 
@@ -118,14 +147,20 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 			t.Fatalf("failed to parse %s: %v", name, err)
 		}
 
-		// Walk the AST and find every CallExpr ending in
-		// PublishUserMessage.
+		// Walk the AST and find every CallExpr matching either
+		// PublishUserMessage (arity 2) or NotifyDMReceived.
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			if !isPublishUserMessageCall(call) {
+			var target string
+			switch {
+			case isPublishUserMessageCall(call):
+				target = "publish"
+			case isNotifyDMReceivedCall(call):
+				target = "notify"
+			default:
 				return true
 			}
 			pos := fset.Position(call.Pos())
@@ -134,19 +169,21 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 				file:     name,
 				line:     pos.Line,
 				funcName: funcName,
+				target:   target,
 			})
 			return true
 		})
 	}
 
 	if len(sites) == 0 {
-		t.Fatal("found zero PublishUserMessage call sites — the scanner is broken")
+		t.Fatal("found zero persisted-row effect call sites — the scanner is broken")
 	}
 
 	// -------------------------------------------------------------------
 	// Match each site to the accounted set. We match on file:enclosingFunc.
-	// When a function contains multiple PublishUserMessage calls, they are
-	// disambiguated by a suffix heuristic.
+	// When a function contains multiple enumerated calls, they are
+	// disambiguated by target kind ("publish" vs "notify") and, within the
+	// same target kind, by a suffix heuristic.
 	// -------------------------------------------------------------------
 
 	// Group sites by file:func to detect duplicates.
@@ -163,6 +200,7 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 
 	for gk, groupSites := range grouped {
 		if len(groupSites) == 1 {
+			// Single call in this function — try bare key first.
 			key := gk.file + ":" + gk.fn
 			if accounted[key] {
 				matched[key] = true
@@ -171,33 +209,71 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 					" (line "+itoa(groupSites[0].line)+")")
 			}
 		} else {
-			// Multiple PublishUserMessage calls in the same function.
-			// Try disambiguation using known suffix patterns.
-			for i, s := range groupSites {
-				key := gk.file + ":" + gk.fn
-				if accounted[key] && len(groupSites) == 1 {
-					matched[key] = true
-					continue
+			// Multiple enumerated calls in the same function.
+			// Check if they have mixed targets (publish + notify).
+			hasPublish := false
+			hasNotify := false
+			for _, s := range groupSites {
+				switch s.target {
+				case "publish":
+					hasPublish = true
+				case "notify":
+					hasNotify = true
 				}
-				// Try suffixed keys.
-				found := false
-				for _, suffix := range publishDisambiguationSuffixes(gk.file, gk.fn, i, len(groupSites)) {
-					candidate := gk.file + ":" + gk.fn + ":" + suffix
-					if accounted[candidate] {
-						matched[candidate] = true
-						found = true
-						break
-					}
-				}
-				if !found {
-					// Try bare key (for single-entry funcs that
-					// happened to be grouped).
-					if accounted[key] && !matched[key] {
+			}
+			mixedTargets := hasPublish && hasNotify
+
+			// Sub-group by target kind for disambiguation within each kind.
+			targetGroups := make(map[string][]callSite)
+			for _, s := range groupSites {
+				targetGroups[s.target] = append(targetGroups[s.target], s)
+			}
+
+			for target, tgSites := range targetGroups {
+				if len(tgSites) == 1 && mixedTargets {
+					// Single call of this target kind in a mixed-target
+					// function — use target as suffix.
+					key := gk.file + ":" + gk.fn + ":" + target
+					if accounted[key] {
 						matched[key] = true
 					} else {
-						unaccounted = append(unaccounted,
-							gk.file+":"+gk.fn+
-								" (line "+itoa(s.line)+", call #"+itoa(i+1)+")")
+						unaccounted = append(unaccounted, key+
+							" (line "+itoa(tgSites[0].line)+")")
+					}
+				} else if len(tgSites) == 1 && !mixedTargets {
+					// Two calls of the same target? Should not happen
+					// with len(tgSites)==1, but handle bare key.
+					key := gk.file + ":" + gk.fn
+					if accounted[key] {
+						matched[key] = true
+					} else {
+						unaccounted = append(unaccounted, key+
+							" (line "+itoa(tgSites[0].line)+")")
+					}
+				} else {
+					// Multiple calls of the same target kind — use
+					// target-specific disambiguation suffixes.
+					for i, s := range tgSites {
+						found := false
+						for _, suffix := range persistedRowDisambiguationSuffixes(gk.file, gk.fn, target, i, len(tgSites)) {
+							candidate := gk.file + ":" + gk.fn + ":" + suffix
+							if accounted[candidate] {
+								matched[candidate] = true
+								found = true
+								break
+							}
+						}
+						if !found {
+							// Try bare key (fallback).
+							key := gk.file + ":" + gk.fn
+							if accounted[key] && !matched[key] {
+								matched[key] = true
+							} else {
+								unaccounted = append(unaccounted,
+									gk.file+":"+gk.fn+
+										" (line "+itoa(s.line)+", "+target+" call #"+itoa(i+1)+")")
+							}
+						}
 					}
 				}
 			}
@@ -205,12 +281,13 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 	}
 
 	if len(unaccounted) > 0 {
-		t.Errorf("Found %d PublishUserMessage call site(s) not in guarded list:\n", len(unaccounted))
+		t.Errorf("Found %d persisted-row effect call site(s) not in guarded list:\n", len(unaccounted))
 		for _, u := range unaccounted {
 			t.Errorf("  - %s", u)
 		}
-		t.Error("\nEvery PublishUserMessage site (event publish, arity 2) must be " +
-			"in the guarded set (preceded by a successful CreateMessage). " +
+		t.Error("\nEvery PublishUserMessage site (event publish, arity 2) and " +
+			"NotifyDMReceived site must be in the guarded set " +
+			"(preceded by a successful CreateMessage). " +
 			"Add the new site to the guarded list in this test.")
 	}
 
@@ -222,7 +299,7 @@ func TestPublishUserMessageEnumeration(t *testing.T) {
 		}
 	}
 
-	t.Logf("Verified %d PublishUserMessage call sites (event publish, arity 2): %d guarded",
+	t.Logf("Verified %d persisted-row effect call sites: %d guarded",
 		len(sites), len(guarded))
 }
 
@@ -240,17 +317,28 @@ func isPublishUserMessageCall(call *ast.CallExpr) bool {
 	return false
 }
 
-// publishDisambiguationSuffixes returns candidate suffixes for multi-call
-// functions containing PublishUserMessage. The mapping is hard-coded for known
-// cases.
-func publishDisambiguationSuffixes(file, fn string, idx, total int) []string {
+// isNotifyDMReceivedCall returns true if the call expression is a call to
+// NotifyDMReceived (any arity).
+func isNotifyDMReceivedCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	return sel.Sel.Name == "NotifyDMReceived"
+}
+
+// persistedRowDisambiguationSuffixes returns candidate suffixes for multi-call
+// functions containing enumerated persisted-row effect calls. The target
+// parameter indicates whether this is a "publish" or "notify" call. The
+// mapping is hard-coded for known cases.
+func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int) []string {
 	switch {
-	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && total == 2:
+	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && target == "publish" && total == 2:
 		if idx == 0 {
 			return []string{"primary"}
 		}
 		return []string{"mention"}
-	case file == "handlers_agent_messaging.go" && fn == "handleGroupMessage" && total == 2:
+	case file == "handlers_agent_messaging.go" && fn == "handleGroupMessage" && target == "publish" && total == 2:
 		if idx == 0 {
 			return []string{"agent"}
 		}
