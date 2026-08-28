@@ -365,12 +365,23 @@ What that commits us to, measured on an arm64 Darwin 25.6.0 machine on 2026-08-2
 
 | Constraint | Measured | Consequence for the deploy script |
 |---|---|---|
-| `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `declare -A`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc`, no `printf -v` |
+| `bash` 3.2.57(1) | Both `/bin/bash` and the `PATH` bash | No `${v,,}`/`${v^^}`, no `declare -A`, no `mapfile`/`readarray`, no `local -n`, no `[[ -v ]]`, no `wait -n`, no `coproc` (derived — see below) |
 | `=~` quoted right-hand side | Trap confirmed present | From 3.2 on, quoting the pattern makes it match **literally**. The RHS must stay unquoted, and this is a security-relevant line — it feeds a host-shape assertion |
 | BSD `sed` | Rejects the GNU-style `--help` extractor | Assume BSD `sed`; no GNU-only addressing |
 | BSD `grep` 2.6.0-FreeBSD | — | No `-P` |
 | `awk` 20200816 (BWK) | — | Not `gawk`; no `gensub` |
 | `mktemp` with no template | Works | Not the portability hazard it was assumed to be |
+
+**Two kinds of claim are in that table and the difference matters.** The interpreter
+versions, the `=~` trap, the `sed` rejection and the `mktemp` result were *executed* on
+the hardware. The list of missing bash builtins in row one was *derived* from bash
+release history and was never run — and it was wrong in one entry: `printf -v` was added
+in bash **3.1**, so 3.2.57 has it. A list of things a shell cannot do is the easiest kind
+of claim to write from memory and the hardest kind to notice is unverified, because every
+entry is a prohibition nobody will trip over. It is being replaced by a matrix measured on
+the macOS runner, one subprocess per construct — several of these are *parse* errors
+rather than runtime errors, so probing them in one script measures a single parse failure
+and reports it as nine confirmations.
 
 **The general rule, which outlives the specific list: a portability fix is a semantics
 change until proven otherwise.** The obvious repair for `${host,,}` is a `tr` command
@@ -392,7 +403,7 @@ gate the day the fleet upgrades past bash 3.2.
 Instance and nowhere else, exactly as that section describes. But autodetect is not the
 only layer that decides what an agent runs on, and the layer above it — *profiles* —
 was never described here. A fresh deploy pre-selected `remote (kubernetes)`, which this
-tier cannot serve, so §1 step 5 was unreachable on an otherwise correct deploy.
+tier cannot serve, so §10 step 5 was unreachable on an otherwise correct deploy.
 
 **The mechanism is a substitution that is never written back.** `GetRuntime` resolves
 the configured runtime `docker`, observes it cannot work on an Instance, and returns
