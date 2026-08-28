@@ -162,6 +162,24 @@ jobs:
           SCION_TEST_BASH: /bin/bash
         run: ./scripts/dev/bash32-regex-probe.sh --check
 
+      # Measure which bash 4+ constructs 3.2.57 actually has. Each construct
+      # runs in its own subprocess so a parse error (which aborts the whole
+      # script) cannot mask the results of later probes. The control probe
+      # must succeed; if it doesn't, every other row is meaningless.
+      - name: Bash 3.2.57 feature matrix
+        env:
+          SCION_TEST_BASH: /bin/bash
+        run: |
+          set -euo pipefail
+          output="$(./scripts/dev/bash32-feature-probe.sh)"
+          printf '%s\n' "$output"
+          # Assert the control probe succeeded — if it didn't, the harness
+          # is broken and every other row is meaningless.
+          if ! printf '%s\n' "$output" | grep -q '^control.*SUPPORTED'; then
+            echo "::error::Control probe failed — the harness itself is broken."
+            exit 1
+          fi
+
       - name: Differential harness self-test under bash 3.2
         env:
           SCION_TEST_BASH: /bin/bash
