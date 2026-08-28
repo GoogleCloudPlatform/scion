@@ -352,6 +352,73 @@ func TestTailer_ContextCancelWithPartial(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Test: File deleted mid-tail with partial content → partial flushed.
+//
+// On Linux, os.File.Read on a deleted file does NOT return an error — the
+// fd remains valid (Unix semantics: unlink removes the directory entry,
+// but the open fd keeps the inode alive). So exit path 2 (read error from
+// ENOENT) is unreachable on POSIX systems with the current approach.
+//
+// This test verifies the practical behavior: when the file is deleted and
+// then the context is cancelled, the partial content is still flushed.
+// The context cancellation is the mechanism that actually triggers exit
+// on Linux when a file vanishes and the sandbox is torn down.
+// -----------------------------------------------------------------------
+
+func TestTailer_FileDeletedMidTailPartialFlush(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, entrypointLogFile)
+
+	// Write a partial line (no newline) — simulates a writer that dies mid-line.
+	if err := os.WriteFile(logPath, []byte("partial before delete"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out safeBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		doTailEntrypointLog(ctx, logPath, "slug", "agent-1", "proj-1", 0, &out)
+		close(done)
+	}()
+
+	// Give the tailer time to read the content into its buffer.
+	time.Sleep(500 * time.Millisecond)
+
+	// Delete the file. On Linux, the open fd is unaffected, but the
+	// file is gone from the filesystem. Cancel the context to simulate
+	// deleteOrWorkaround tearing down the sandbox.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	// Wait for goroutine exit.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tailer goroutine did not exit after file deletion + cancel")
+	}
+
+	lines := parseTailerLines(t, &out)
+	if len(lines) < 1 {
+		t.Fatalf("expected at least 1 line (partial), got %d: %s", len(lines), out.String())
+	}
+
+	// The last line should be the partial content.
+	last := lines[len(lines)-1]
+	if last.Message != "partial before delete" {
+		t.Errorf("partial message = %q, want %q", last.Message, "partial before delete")
+	}
+	if last.Labels["partial"] != "true" {
+		t.Errorf("missing partial:true label on deleted-file flush")
+	}
+}
+
+// -----------------------------------------------------------------------
 // Test: Buffer cap exceeded → truncated_line:true, no unbounded growth.
 // -----------------------------------------------------------------------
 

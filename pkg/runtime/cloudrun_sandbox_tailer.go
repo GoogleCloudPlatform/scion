@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,10 +61,6 @@ type tailerOutput struct {
 	Labels   map[string]string `json:"logging.googleapis.com/labels"`
 }
 
-// tailerWriter abstracts the output destination for testing.
-// In production this is os.Stdout; tests substitute a buffer.
-type tailerWriter = io.Writer
-
 // openRetrySchedule defines the backoff intervals for opening the
 // entrypoint log. Total wait: 250+500+1000+2000+4000 = 7750ms ≈ 8s.
 // After the schedule is exhausted, falls back to 5s polling.
@@ -87,7 +84,7 @@ func (r *CloudRunSandboxRuntime) tailEntrypointLog(ctx context.Context, slug, ag
 
 // doTailEntrypointLog is the testable core. The output destination is
 // injected so tests can capture structured JSON without touching stdout.
-func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project string, offset int64, w tailerWriter) {
+func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project string, offset int64, w io.Writer) {
 	labels := map[string]string{
 		"component":  "entrypoint-log-tailer",
 		"agent_id":   agentID,
@@ -122,9 +119,12 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 	// --- Phase 1: Open the file with bounded retry ---
 	f, opened := openWithRetry(ctx, logPath, slug, emit)
 	if !opened {
-		// Context was cancelled and the file was never opened.
-		// This is the highest-value diagnostic: the sandbox terminated
-		// without ever creating its entrypoint log.
+		// Two paths reach here:
+		// 1. Context cancelled + file never opened: the sandbox terminated
+		//    without ever creating its entrypoint log. This is the
+		//    highest-value diagnostic.
+		// 2. Persistent non-ENOENT error after retries: openWithRetry
+		//    already emitted its own ERROR; nothing more to say.
 		if ctx.Err() != nil {
 			emit("ERROR",
 				fmt.Sprintf("no entrypoint log was ever created for sandbox %q — "+
@@ -207,8 +207,13 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 			case <-time.After(sleep):
 			}
 
-			// After sleep, check for truncation.
+			// After sleep, check for truncation. Reset backoff if
+			// truncation was detected so fresh content is read promptly.
+			prevPos := pos
 			pos = checkTruncation(f, pos, logPath, slug, emit)
+			if pos < prevPos {
+				eofCount = 0
+			}
 		}
 	}
 }
@@ -219,17 +224,31 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 func openWithRetry(ctx context.Context, logPath, slug string, emit func(string, string, map[string]string)) (*os.File, bool) {
 	const postRetryInterval = 5 * time.Second
 
+	var lastErr error
 	for attempt := 0; ; attempt++ {
 		f, err := os.Open(logPath)
 		if err == nil {
 			return f, true
 		}
+		lastErr = err
 
-		if !errors.Is(err, fs.ErrNotExist) {
+		isNotExist := errors.Is(err, fs.ErrNotExist)
+
+		if !isNotExist {
 			// Non-ENOENT error: permission denied, I/O error, etc.
 			emit("WARNING",
 				fmt.Sprintf("entrypoint log open failed: %v — retrying", err),
 				nil)
+		}
+
+		// After the retry schedule is exhausted, persistent non-ENOENT
+		// errors are terminal: emit ERROR and exit. ENOENT continues
+		// polling at 5s (sandbox may be slow to start).
+		if attempt >= len(openRetrySchedule) && !isNotExist {
+			emit("ERROR",
+				fmt.Sprintf("entrypoint log open failed after %d retries: %v — giving up", attempt, lastErr),
+				nil)
+			return nil, false
 		}
 
 		// Determine wait interval.
@@ -311,13 +330,7 @@ func checkTruncation(f *os.File, pos int64, logPath, slug string, emit func(stri
 // and returns the remainder (the partial trailing content).
 func emitCompleteLines(buf []byte, emit func(string, string, map[string]string)) []byte {
 	for {
-		idx := -1
-		for i, b := range buf {
-			if b == '\n' {
-				idx = i
-				break
-			}
-		}
+		idx := bytes.IndexByte(buf, '\n')
 		if idx < 0 {
 			return buf
 		}
