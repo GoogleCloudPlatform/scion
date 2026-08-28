@@ -516,6 +516,27 @@ func isUniqueConstraintError(err error) bool {
 // Participant operations
 // ---------------------------------------------------------------------------
 
+// checkDMParticipantKey is the shared immutability guard for direct
+// conversations. Only principals named in the kind-encoded DM key may be
+// added or ensured. Both AddParticipant and EnsureParticipant route through
+// this predicate so the guard cannot diverge across call sites.
+//
+// For non-direct conversations the function is a no-op (returns nil).
+func checkDMParticipantKey(conv *ent.Conversation, principalKind, principalID string) error {
+	if string(conv.Kind) != "direct" {
+		return nil
+	}
+	kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
+	if parseErr != nil {
+		return fmt.Errorf("direct conversation has unparseable external_ref: %w", store.ErrInvalidInput)
+	}
+	if (principalKind != kindA || principalID != idA) &&
+		(principalKind != kindB || principalID != idB) {
+		return fmt.Errorf("participant (%s, %s) not named in direct conversation key: %w", principalKind, principalID, store.ErrInvalidInput)
+	}
+	return nil
+}
+
 // AddParticipant adds a principal to a conversation.
 // If a soft-removed participant with the same (conversation_id, principal_kind,
 // principal_id) exists (left_at IS NOT NULL), the row is re-activated instead
@@ -538,15 +559,8 @@ func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.Convers
 	if err != nil {
 		return fmt.Errorf("loading conversation for participant guard: %w", err)
 	}
-	if string(conv.Kind) == "direct" {
-		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
-		if parseErr != nil {
-			return fmt.Errorf("direct conversation has unparseable external_ref: %w", store.ErrInvalidInput)
-		}
-		if (p.PrincipalKind != kindA || p.PrincipalID != idA) &&
-			(p.PrincipalKind != kindB || p.PrincipalID != idB) {
-			return fmt.Errorf("participant (%s, %s) not named in direct conversation key: %w", p.PrincipalKind, p.PrincipalID, store.ErrInvalidInput)
-		}
+	if err := checkDMParticipantKey(conv, p.PrincipalKind, p.PrincipalID); err != nil {
+		return err
 	}
 
 	// Check for a soft-removed participant that can be re-joined.
@@ -603,6 +617,87 @@ func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.Convers
 
 	created, err := create.Save(ctx)
 	if err != nil {
+		return mapError(err)
+	}
+	p.ID = created.ID.String()
+	p.JoinedAt = created.JoinedAt
+	return nil
+}
+
+// EnsureParticipant ensures a participant row exists for the given principal.
+// If the participant already exists (active or soft-removed), the row is left
+// completely untouched — including left_at. Unlike AddParticipant, this does
+// NOT clear left_at on existing rows.
+//
+// Semantics: after a successful call the participant row exists. Already-existing
+// rows (whether active or soft-removed) are not modified and return nil, not an
+// error. A race-induced unique-constraint violation on insert also returns nil.
+func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.ConversationParticipant) error {
+	if p.ConversationID == "" || p.PrincipalID == "" {
+		return fmt.Errorf("conversationID and principalID are required: %w", store.ErrInvalidInput)
+	}
+	convUID, err := parseUUID(p.ConversationID)
+	if err != nil {
+		return err
+	}
+
+	// D-1 guard: shared predicate with AddParticipant.
+	conv, err := s.client.Conversation.Get(ctx, convUID)
+	if err != nil {
+		return fmt.Errorf("loading conversation for participant guard: %w", err)
+	}
+	if err := checkDMParticipantKey(conv, p.PrincipalKind, p.PrincipalID); err != nil {
+		return err
+	}
+
+	// Check for ANY existing row (active or soft-removed).
+	existing, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalKindEQ(conversationparticipant.PrincipalKind(p.PrincipalKind)),
+			conversationparticipant.PrincipalIDEQ(p.PrincipalID),
+		).
+		Only(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return err
+	}
+	if existing != nil {
+		// Row exists — leave it untouched (including left_at).
+		// Read back ID and JoinedAt so the caller's struct matches
+		// AddParticipant's post-condition on both paths.
+		p.ID = existing.ID.String()
+		p.JoinedAt = existing.JoinedAt
+		return nil
+	}
+
+	// No row exists — create it.
+	create := s.client.ConversationParticipant.Create().
+		SetConversationID(convUID).
+		SetPrincipalKind(conversationparticipant.PrincipalKind(p.PrincipalKind)).
+		SetPrincipalID(p.PrincipalID).
+		SetRole(conversationparticipant.Role(p.Role))
+
+	if p.ID != "" {
+		uid, pErr := parseUUID(p.ID)
+		if pErr != nil {
+			return pErr
+		}
+		create.SetID(uid)
+	}
+	if !p.JoinedAt.IsZero() {
+		create.SetJoinedAt(p.JoinedAt)
+	}
+	if p.Role == "" {
+		create.SetRole(conversationparticipant.RoleMember)
+	}
+
+	created, err := create.Save(ctx)
+	if err != nil {
+		// Race-safe: a concurrent insert may have created the row between
+		// our query and this insert. Treat that as success.
+		if isUniqueConstraintError(err) {
+			return nil
+		}
 		return mapError(err)
 	}
 	p.ID = created.ID.String()

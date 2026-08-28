@@ -289,6 +289,21 @@ func (m *mockConversationStore) AddParticipant(_ context.Context, p *store.Conve
 	return nil
 }
 
+func (m *mockConversationStore) EnsureParticipant(_ context.Context, p *store.ConversationParticipant) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// If any row exists (active or soft-removed), leave it untouched.
+	for _, existing := range m.participants {
+		if existing.ConversationID == p.ConversationID &&
+			existing.PrincipalKind == p.PrincipalKind &&
+			existing.PrincipalID == p.PrincipalID {
+			return nil
+		}
+	}
+	m.participants = append(m.participants, *p)
+	return nil
+}
+
 func (m *mockConversationStore) RemoveParticipant(_ context.Context, conversationID, principalKind, principalID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

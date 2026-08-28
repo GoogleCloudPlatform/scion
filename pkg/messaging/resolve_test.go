@@ -135,6 +135,17 @@ func (m *mockResolutionStore) AddParticipant(_ context.Context, p *store.Convers
 	return nil
 }
 
+func (m *mockResolutionStore) EnsureParticipant(_ context.Context, p *store.ConversationParticipant) error {
+	// If any row exists, leave it untouched.
+	for _, existing := range m.participants[p.ConversationID] {
+		if existing.PrincipalKind == p.PrincipalKind && existing.PrincipalID == p.PrincipalID {
+			return nil
+		}
+	}
+	m.participants[p.ConversationID] = append(m.participants[p.ConversationID], *p)
+	return nil
+}
+
 func (m *mockResolutionStore) ListParticipants(_ context.Context, conversationID string) ([]store.ConversationParticipant, error) {
 	return m.participants[conversationID], nil
 }

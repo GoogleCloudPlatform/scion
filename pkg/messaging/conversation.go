@@ -16,7 +16,6 @@ package messaging
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -43,6 +42,14 @@ type ParticipantAdder interface {
 	AddParticipant(ctx context.Context, p *store.ConversationParticipant) error
 }
 
+// ParticipantEnsurer is the minimal interface for idempotent participant
+// registration that preserves existing row state (including left_at).
+// Separated from ParticipantAdder because EnsureParticipant has different
+// semantics: insert-if-absent vs upsert-and-revive.
+type ParticipantEnsurer interface {
+	EnsureParticipant(ctx context.Context, p *store.ConversationParticipant) error
+}
+
 // ConversationResult carries the outcome of a resolve-or-create operation,
 // including the actual ExternalRef read back from the database.
 type ConversationResult struct {
@@ -61,7 +68,7 @@ type ConversationResult struct {
 func ResolveOrCreateDMConversation(
 	ctx context.Context,
 	cs ConversationUpserter,
-	pa ParticipantAdder,
+	pe ParticipantEnsurer,
 	log *slog.Logger,
 	senderKind, senderID, recipientKind, recipientID string,
 ) *ConversationResult {
@@ -99,38 +106,50 @@ func ResolveOrCreateDMConversation(
 		return nil
 	}
 
+	// B7 nil-pe guard: a nil ParticipantEnsurer must not panic. The function
+	// advertises non-fatal semantics for participant registration; a nil pe
+	// that panics would violate that contract. Log and skip.
+	if pe == nil {
+		log.Warn("skipping participant registration: nil ParticipantEnsurer (non-fatal)",
+			"external_ref", extRef)
+		return &ConversationResult{
+			ConversationID: result.ID,
+			ExternalRef:    result.ExternalRef,
+		}
+	}
+
 	// Register both participants so the DM appears in each party's sidebar.
 	// Errors are logged but not returned — participant registration is a listing
 	// concern, not an access concern (the DM key IS the access authority).
 	//
-	// This registration runs on EVERY resolve, not only on first create, and
-	// ErrAlreadyExists is swallowed. Registration is therefore idempotent and
-	// self-repairing: if one of the two AddParticipant calls fails transiently,
-	// the next message in the same DM retries it. Do not "fix" the swallowed
-	// error by returning it — that would make participant failure kill delivery,
-	// which is exactly backwards.
+	// This registration runs on EVERY resolve, not only on first create.
+	// EnsureParticipant is insert-if-absent: if the row already exists (active
+	// or soft-removed), it is left untouched — including left_at. This prevents
+	// resolve-driven calls from silently overwriting a user's listing preference
+	// (B6 un-leaving fix).
+	//
+	// Registration is self-repairing: if one of the two EnsureParticipant calls
+	// fails transiently, the next message in the same DM retries it.
 	//
 	// Race note: concurrent ResolveOrCreateDMConversation calls may both
-	// attempt AddParticipant. This is benign: AddParticipant's immutability
-	// guard reads Kind and ExternalRef, which are immutable for a conversation's
-	// lifetime (set at creation, never updated by UpsertConversationByExternalRef).
-	// Worst case is ErrAlreadyExists, which is swallowed below.
+	// attempt EnsureParticipant. This is benign: EnsureParticipant is
+	// idempotent and race-safe (unique constraint violations are mapped to nil).
 	for _, pp := range []struct{ kind, id string }{
 		{senderKind, senderID},
 		{recipientKind, recipientID},
 	} {
-		addErr := pa.AddParticipant(ctx, &store.ConversationParticipant{
+		ensureErr := pe.EnsureParticipant(ctx, &store.ConversationParticipant{
 			ConversationID: result.ID,
 			PrincipalKind:  pp.kind,
 			PrincipalID:    pp.id,
 			Role:           "member",
 		})
-		if addErr != nil && !errors.Is(addErr, store.ErrAlreadyExists) {
+		if ensureErr != nil {
 			log.Warn("participant registration failed (listing gap, not access)",
 				"conversation_id", result.ID,
 				"principal_kind", pp.kind,
 				"principal_id", pp.id,
-				"error", addErr)
+				"error", ensureErr)
 		}
 	}
 
