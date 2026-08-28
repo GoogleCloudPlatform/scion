@@ -819,10 +819,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 		}
-		// Publish SSE event so connected browser clients can update the
-		// per-agent conversation view in real time — mirrors the agent→user
-		// publish path in handleAgentOutboundMessage.
-		s.events.PublishUserMessage(ctx, storeMsg)
+		// B11/B13: only publish when persistence succeeded — publishing an
+		// unpersisted message is not legal.
+		if persistedMsgID != "" {
+			// Publish SSE event so connected browser clients can update the
+			// per-agent conversation view in real time — mirrors the agent→user
+			// publish path in handleAgentOutboundMessage.
+			s.events.PublishUserMessage(ctx, storeMsg)
+		}
 	}
 
 	// Managed agent path: deliver message directly via backend, bypass broker.
@@ -851,11 +855,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			managedMentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
 		}
 
+		// B11/B13: reflect persistence failure in the response status.
+		// The request still succeeds (dispatch worked), but the caller
+		// should know the message was not persisted.
+		managedStatus := "delivered"
+		if persistedMsgID == "" {
+			managedStatus = "delivered_not_persisted"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
 			MessageID:      persistedMsgID,
-			Status:         "delivered",
+			Status:         managedStatus,
 			Agent:          agent.Slug,
 			AgentPhase:     agent.Phase,
 			MentionResults: managedMentionResults,
@@ -932,11 +943,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
 	}
 
+	// B11/B13: reflect persistence failure in the response status.
+	deliveryStatus := "delivered"
+	if persistedMsgID == "" {
+		deliveryStatus = "delivered_not_persisted"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
 		MessageID:      persistedMsgID,
-		Status:         "delivered",
+		Status:         deliveryStatus,
 		Agent:          agent.Slug,
 		AgentPhase:     agent.Phase,
 		MentionResults: mentionResults,
@@ -1060,8 +1076,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			})
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+			} else {
+				// B11/B13: only publish when persistence succeeded.
+				s.events.PublishUserMessage(ctx, storeMsg)
 			}
-			s.events.PublishUserMessage(ctx, storeMsg)
 
 			if dispatcher == nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
@@ -1181,8 +1199,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			})
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+			} else {
+				// B11/B13: only publish when persistence succeeded.
+				s.events.PublishUserMessage(ctx, storeMsg)
 			}
-			s.events.PublishUserMessage(ctx, storeMsg)
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
 			delivered++
@@ -1555,7 +1575,10 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		} else {
 			persisted = true
 		}
-		s.events.PublishUserMessage(ctx, storeMsg)
+		// B11/B13: only publish when persistence succeeded.
+		if persisted {
+			s.events.PublishUserMessage(ctx, storeMsg)
+		}
 
 		// Dispatch to the mentioned agent's runtime.
 		dispatcher := s.GetDispatcher()
