@@ -773,3 +773,164 @@ func TestQuotaAPI_CreateEntitlement_ZeroValue(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusCreated, rec.Code)
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Fix B3 — nil quotaService returns empty usage (HIGH)
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_UsageMe_NilQuotaService(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	memberU := &store.User{
+		ID:          tid("quota-nil-qs"),
+		Email:       "quota-nil-qs@example.com",
+		DisplayName: "Nil QS User",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, memberU))
+
+	// Nil out the quotaService to simulate a store that doesn't support quotas.
+	srv.quotaService = nil
+
+	rec := doRequestAsUser(t, srv, memberU, http.MethodGet, "/api/v1/usage/me", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp myUsageResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Items, "nil quotaService should return empty usage items")
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix B3 — trailing slash on by-ID routes (MEDIUM-2)
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_GetLimitDefinition_TrailingSlash(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "trailing_slash_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	// Request with trailing slash — should still find the resource.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+created.ID+"/", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, created.ID, def.ID)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix B3 — whitespace-only names rejected (MEDIUM-3 / MEDIUM-4)
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_CreateLimitDefinition_WhitespaceOnlyName(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits", createLimitDefinitionRequest{
+		Name:         "   ",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_UpdateLimitDefinition_WhitespaceOnlyName(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "ws_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         "   ",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix B3 — empty SubjectType/SubjectID rejected (MEDIUM-5 / MEDIUM-6)
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_CreateEntitlement_EmptySubjectType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "ent_empty_st_create", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: "",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       10,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_CreateEntitlement_EmptySubjectID(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "ent_empty_sid_create", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "",
+		ScopeType:   "system",
+		Value:       10,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_UpdateEntitlement_EmptySubjectType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "ent_empty_st_update", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+	binding := createEntitlementViaAPI(t, srv, limit.ID, createEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       10,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+binding.ID, updateEntitlementBindingRequest{
+		SubjectType: "",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       20,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_UpdateEntitlement_EmptySubjectID(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "ent_empty_sid_update", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+	binding := createEntitlementViaAPI(t, srv, limit.ID, createEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       10,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+binding.ID, updateEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "",
+		ScopeType:   "system",
+		Value:       20,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

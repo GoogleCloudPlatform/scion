@@ -135,6 +135,7 @@ func (s *Server) handleAdminLimits(w http.ResponseWriter, r *http.Request) {
 // /api/v1/admin/limits/:id/entitlements.
 func (s *Server) handleAdminLimitByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/limits/")
+	path = strings.TrimSuffix(path, "/")
 	parts := strings.SplitN(path, "/", 2)
 	limitID := parts[0]
 	if limitID == "" {
@@ -263,6 +264,7 @@ func (s *Server) createLimitDefinition(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		BadRequest(w, "name is required")
 		return
@@ -337,6 +339,7 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		BadRequest(w, "name is required")
 		return
@@ -430,6 +433,15 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		return
 	}
 
+	if req.SubjectType == "" {
+		BadRequest(w, "subject_type is required")
+		return
+	}
+	if req.SubjectID == "" {
+		BadRequest(w, "subject_id is required")
+		return
+	}
+
 	if req.Value < 0 {
 		BadRequest(w, "value must be non-negative (0 means unlimited)")
 		return
@@ -507,6 +519,15 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 	var req updateEntitlementBindingRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.SubjectType == "" {
+		BadRequest(w, "subject_type is required")
+		return
+	}
+	if req.SubjectID == "" {
+		BadRequest(w, "subject_id is required")
 		return
 	}
 
@@ -628,6 +649,12 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.quotaService == nil {
+		// When quota service is unavailable, return empty usage.
+		writeJSON(w, http.StatusOK, myUsageResponse{Items: []myUsageEntry{}})
+		return
+	}
+
 	userID := identity.ID()
 
 	defs, err := s.store.ListLimitDefinitions(r.Context())
@@ -681,6 +708,10 @@ func (s *Server) requireWritePermissionForQuota(w http.ResponseWriter, r *http.R
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok {
+		Forbidden(w)
+		return nil, false
+	}
+	if s.authzService == nil {
 		Forbidden(w)
 		return nil, false
 	}
