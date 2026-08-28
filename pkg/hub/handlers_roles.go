@@ -411,9 +411,16 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	if bindings == nil {
 		bindings = []*store.RoleBinding{}
 	}
+
+	total, err := s.store.CountAllRoleBindings(r.Context())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
 		Items:      bindings,
-		TotalCount: len(bindings),
+		TotalCount: total,
 	})
 }
 
@@ -458,6 +465,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	}
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
 		BadRequest(w, "scopeType must be \"system\" or \"project\"")
+		return
+	}
+	if req.ScopeType == store.RoleScopeProject && req.ScopeID == "" {
+		BadRequest(w, "scope_id is required when scope_type is 'project'")
 		return
 	}
 

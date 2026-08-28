@@ -1712,6 +1712,9 @@ type RoleStore interface {
 	// The maximum allowed limit is 1000.
 	ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*RoleBinding, error)
 
+	// CountAllRoleBindings returns the total number of role bindings.
+	CountAllRoleBindings(ctx context.Context) (int, error)
+
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.
 	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)

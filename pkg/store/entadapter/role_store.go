@@ -228,6 +228,11 @@ func (r *RoleStore) ListAllRoleBindings(ctx context.Context, limit, offset int) 
 	return result, nil
 }
 
+// CountAllRoleBindings returns the total number of role bindings.
+func (r *RoleStore) CountAllRoleBindings(ctx context.Context) (int, error) {
+	return r.client.RoleBinding.Query().Count(ctx)
+}
+
 // GetRoleBinding retrieves a role binding by ID.
 func (r *RoleStore) GetRoleBinding(ctx context.Context, id string) (*store.RoleBinding, error) {
 	uid, err := parseGetID(id)

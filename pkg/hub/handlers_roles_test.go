@@ -335,6 +335,27 @@ func TestRolesAPI_CreateRoleBinding_InvalidPrincipalType(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestRolesAPI_CreateRoleBinding_ProjectScopeMissingScopeID(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "project-scope-no-id-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	// project-scoped binding with empty scope_id → 400
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "u1",
+		ScopeType:        "project",
+		ScopeID:          "",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "scope_id is required")
+}
+
 func TestRolesAPI_CreateRoleBinding_InvalidScopeType(t *testing.T) {
 	srv, _ := testServer(t)
 
