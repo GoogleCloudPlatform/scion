@@ -1177,3 +1177,192 @@ func runtimeNames(runtimes map[string]interface{}) []string {
 	}
 	return names
 }
+
+// TestInitMachine_CloudRunSandbox_SkipRuntimeCheckFalse_SeedsCorrectTemplate
+// is the load-bearing assertion for the environment-predicate-dominance fix.
+//
+// Scenario: CLOUD_RUN_INSTANCE set, sandbox binary present, but the caller
+// passes SkipRuntimeCheck: false (e.g. the Hub /api/system/init handler).
+// Before the fix, this fell into the else branch, called DetectLocalRuntime(),
+// and failed — or, if runtime detection happened to succeed, seeded the
+// workstation template instead of the cloudrun-sandbox template.
+//
+// After the fix, isCloudRunSandboxEnvironment() dominates: the machine fact
+// settles the template choice regardless of the caller preference.
+func TestInitMachine_CloudRunSandbox_SkipRuntimeCheckFalse_SeedsCorrectTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Simulate Cloud Run Instance with sandbox launcher.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-dominance")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Mock runtime detection to succeed with "docker" — this ensures the
+	// mutation test (inverting the condition to `if false`) seeds the WRONG
+	// template (workstation defaults) rather than erroring out, so the
+	// content assertion is the one that goes red. On a real Cloud Run Instance
+	// detection would fail, but for this test the content assertion is more
+	// valuable than the error assertion.
+	mockRuntimeDetection(t, "docker")
+
+	// SkipRuntimeCheck: false — the caller did NOT ask to skip detection.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: false}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	// Read the seeded file and assert its CONTENT matches the cloudrun-sandbox
+	// template. Byte-for-byte comparison is not possible because ensureBrokerID()
+	// mutates the file after seeding (adds broker_id, strips comments via YAML
+	// round-trip). The semantic comparison below catches the actual bug: seeding
+	// the wrong template.
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	seededPath := filepath.Join(globalDir, "settings.yaml")
+	seeded, err := os.ReadFile(seededPath)
+	if err != nil {
+		t.Fatalf("failed to read seeded settings.yaml: %v", err)
+	}
+
+	// Parse the seeded file.
+	var seededMap map[string]interface{}
+	if err := yaml.Unmarshal(seeded, &seededMap); err != nil {
+		t.Fatalf("failed to parse seeded settings.yaml: %v", err)
+	}
+
+	// Parse the embedded cloudrun-sandbox template for comparison.
+	expectedBytes, err := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
+	if err != nil {
+		t.Fatalf("failed to read embedded template: %v", err)
+	}
+	var expectedMap map[string]interface{}
+	if err := yaml.Unmarshal(expectedBytes, &expectedMap); err != nil {
+		t.Fatalf("failed to parse embedded template: %v", err)
+	}
+
+	// Assert the template-defining fields match: active_profile, profiles, runtimes.
+	// These are the fields that distinguish the cloudrun-sandbox template from the
+	// workstation template. Differences in broker_id or other post-seed mutations
+	// are expected and not bugs.
+	if ap := seededMap["active_profile"]; ap != expectedMap["active_profile"] {
+		t.Errorf("active_profile = %q, want %q", ap, expectedMap["active_profile"])
+	}
+
+	seededProfiles, _ := seededMap["profiles"].(map[string]interface{})
+	expectedProfiles, _ := expectedMap["profiles"].(map[string]interface{})
+
+	if len(seededProfiles) != len(expectedProfiles) {
+		t.Errorf("profile count: got %d (%v), want %d (%v)",
+			len(seededProfiles), profileNames(seededProfiles),
+			len(expectedProfiles), profileNames(expectedProfiles))
+	}
+	for name, ep := range expectedProfiles {
+		sp, ok := seededProfiles[name]
+		if !ok {
+			t.Errorf("profile %q missing from seeded settings", name)
+			continue
+		}
+		epMap, _ := ep.(map[string]interface{})
+		spMap, _ := sp.(map[string]interface{})
+		if epMap["runtime"] != spMap["runtime"] {
+			t.Errorf("profile %q runtime: got %q, want %q", name, spMap["runtime"], epMap["runtime"])
+		}
+	}
+
+	seededRuntimes, _ := seededMap["runtimes"].(map[string]interface{})
+	expectedRuntimes, _ := expectedMap["runtimes"].(map[string]interface{})
+	if len(seededRuntimes) != len(expectedRuntimes) {
+		t.Errorf("runtime count: got %d (%v), want %d (%v)",
+			len(seededRuntimes), runtimeNames(seededRuntimes),
+			len(expectedRuntimes), runtimeNames(expectedRuntimes))
+	}
+	for name := range expectedRuntimes {
+		if _, ok := seededRuntimes[name]; !ok {
+			t.Errorf("runtime %q missing from seeded settings", name)
+		}
+	}
+
+	// Negative: workstation-only profiles and runtimes must NOT be present.
+	for _, bad := range []string{"local", "remote"} {
+		if _, ok := seededProfiles[bad]; ok {
+			t.Errorf("profile %q is present — Cloud Run sandbox must not have workstation profiles", bad)
+		}
+	}
+	for _, bad := range []string{"docker", "podman", "kubernetes"} {
+		if _, ok := seededRuntimes[bad]; ok {
+			t.Errorf("runtime %q is present — Cloud Run sandbox must not have workstation runtimes", bad)
+		}
+	}
+}
+
+// TestInitMachine_NonCloudRun_SkipRuntimeCheckFalse_SeedsWorkstationTemplate
+// is the negative assertion: on a non-Cloud-Run machine with SkipRuntimeCheck
+// false, the workstation defaults must be seeded and DetectLocalRuntime must
+// be consulted. This protects against accidentally seeding the cloudrun
+// template on a laptop.
+func TestInitMachine_NonCloudRun_SkipRuntimeCheckFalse_SeedsWorkstationTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	// Not a Cloud Run Instance.
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return false }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Make runtime detection succeed — DetectLocalRuntime must be consulted.
+	mockRuntimeDetection(t, "docker")
+
+	// SkipRuntimeCheck: false — standard workstation init.
+	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: false}); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	seeded, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read seeded settings.yaml: %v", err)
+	}
+
+	var settingsMap map[string]interface{}
+	if err := yaml.Unmarshal(seeded, &settingsMap); err != nil {
+		t.Fatalf("failed to parse settings.yaml: %v", err)
+	}
+
+	// Must be workstation defaults: active_profile=local, profiles include local.
+	if ap, _ := settingsMap["active_profile"].(string); ap != "local" {
+		t.Errorf("active_profile = %q, want %q", ap, "local")
+	}
+	profiles, _ := settingsMap["profiles"].(map[string]interface{})
+	if _, hasLocal := profiles["local"]; !hasLocal {
+		t.Error("profile 'local' missing from workstation defaults")
+	}
+
+	// Must NOT have the cloudrun-sandbox profile or runtime.
+	if _, hasCRS := profiles["default"]; hasCRS {
+		dp, _ := profiles["default"].(map[string]interface{})
+		if rt, _ := dp["runtime"].(string); rt == "cloudrun-sandbox" {
+			t.Error("cloudrun-sandbox profile 'default' is present — workstation must not get the Cloud Run template")
+		}
+	}
+
+	// Verify the seeded content is NOT the cloudrun-sandbox template.
+	cloudrunTemplate, _ := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
+	if string(seeded) == string(cloudrunTemplate) {
+		t.Error("seeded settings.yaml matches the cloudrun-sandbox template — workstation should get workstation defaults")
+	}
+}
+
+// truncate returns at most n bytes of s.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}

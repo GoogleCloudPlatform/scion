@@ -585,7 +585,13 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		// the docker profile (local-only) on a non-local broker, leaving
 		// only the kubernetes profile — which cannot work on this tier
 		// (task #92).
-		if opt.SkipRuntimeCheck && isCloudRunSandboxEnvironment() {
+		//
+		// isCloudRunSandboxEnvironment() is a FACT about the machine
+		// (CLOUD_RUN_INSTANCE set + sandbox binary present).
+		// SkipRuntimeCheck is a CALLER PREFERENCE. The fact must dominate:
+		// a caller who asks for runtime detection on a platform where
+		// detection cannot succeed must still get the correct template.
+		if isCloudRunSandboxEnvironment() {
 			var err error
 			defaultSettings, err = EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
 			if err != nil {
