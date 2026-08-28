@@ -2833,3 +2833,538 @@ func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
 		t.Errorf("sends without idempotency key should create distinct messages, both got %q", resp1.ID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DEF-31: defaultAgent validation — cross-project and soft-deleted agent guard
+// ---------------------------------------------------------------------------
+
+// setupDEF31Projects creates two projects (A and B) with their own agents,
+// an in-memory WebChatStore, and returns everything the DEF-31 tests need.
+type def31Fixture struct {
+	srv      *Server
+	store    store.Store
+	wcs      WebChatStore
+	projA    *store.Project
+	projB    *store.Project
+	agentA   *store.Agent // lives in project A
+	agentB   *store.Agent // lives in project B
+	deletedA *store.Agent // soft-deleted agent in project A
+}
+
+func setupDEF31(t *testing.T) def31Fixture {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projA := &store.Project{ID: tid("def31-projA"), Name: "def31-projA", Slug: "def31-proja", Created: time.Now(), Updated: time.Now()}
+	projB := &store.Project{ID: tid("def31-projB"), Name: "def31-projB", Slug: "def31-projb", Created: time.Now(), Updated: time.Now()}
+	for _, p := range []*store.Project{projA, projB} {
+		if err := s.CreateProject(ctx, p); err != nil {
+			t.Fatalf("CreateProject(%s): %v", p.Name, err)
+		}
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	// Agent in project A.
+	agentA := &store.Agent{
+		ID:        tid("def31-agentA"),
+		ProjectID: projA.ID,
+		Name:      "Agent A",
+		Slug:      "agent-a",
+		Phase:     "running",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
+	}
+	// Agent in project B (foreign to A).
+	agentB := &store.Agent{
+		ID:        tid("def31-agentB"),
+		ProjectID: projB.ID,
+		Name:      "Agent B",
+		Slug:      "agent-b",
+		Phase:     "running",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
+	}
+	// Soft-deleted agent in project A.
+	deletedA := &store.Agent{
+		ID:        tid("def31-deletedA"),
+		ProjectID: projA.ID,
+		Name:      "Deleted Agent",
+		Slug:      "deleted-agent",
+		Phase:     "terminated",
+		DeletedAt: time.Now().UTC(),
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
+	}
+	for _, a := range []*store.Agent{agentA, agentB, deletedA} {
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("CreateAgent(%s): %v", a.Name, err)
+		}
+	}
+
+	return def31Fixture{
+		srv:      srv,
+		store:    s,
+		wcs:      wcs,
+		projA:    projA,
+		projB:    projB,
+		agentA:   agentA,
+		agentB:   agentB,
+		deletedA: deletedA,
+	}
+}
+
+// Test 1: Foreign-project UUID rejected.
+// An agent UUID from project B must not bind as defaultAgent on a topic in project A.
+func TestDEF31_ForeignProjectUUID_Rejected(t *testing.T) {
+	f := setupDEF31(t)
+
+	// Attempt to create a thread in project A with project-B's agent UUID as defaultAgent.
+	body := map[string]string{
+		"name":         "foreign-test",
+		"defaultAgent": f.agentB.ID,
+	}
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/chat/spaces/"+f.projA.ID+"/threads", body)
+	if rec.Code == http.StatusCreated {
+		t.Fatalf("expected rejection of foreign-project agent UUID, but got 201; "+
+			"the topic silently bound to agent %s from project B — this is the DEF-31 defect", f.agentB.ID)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for foreign-project agent, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Also test via PATCH (UpdateTopic).
+	ctx := context.Background()
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "def31-foreign-patch",
+		ProjectID: f.projA.ID,
+		Name:      "foreign-patch",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	da := f.agentB.ID
+	rec = doRequest(t, f.srv, http.MethodPatch, "/api/v1/chat/topics/def31-foreign-patch",
+		map[string]*string{"defaultAgent": &da})
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected rejection of foreign-project agent UUID on PATCH, but got 200")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for foreign-project agent on PATCH, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Test 2: Soft-deleted agent UUID rejected.
+// A soft-deleted agent must not bind as defaultAgent.
+func TestDEF31_SoftDeletedAgent_Rejected(t *testing.T) {
+	f := setupDEF31(t)
+
+	// Attempt to create a thread with a soft-deleted agent as defaultAgent.
+	body := map[string]string{
+		"name":         "deleted-test",
+		"defaultAgent": f.deletedA.ID,
+	}
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/chat/spaces/"+f.projA.ID+"/threads", body)
+	if rec.Code == http.StatusCreated {
+		t.Fatalf("expected rejection of soft-deleted agent UUID, but got 201; "+
+			"the topic silently bound to deleted agent %s — this is the DEF-31 defect", f.deletedA.ID)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for deleted agent, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Also test via PATCH.
+	ctx := context.Background()
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "def31-deleted-patch",
+		ProjectID: f.projA.ID,
+		Name:      "deleted-patch",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	da := f.deletedA.ID
+	rec = doRequest(t, f.srv, http.MethodPatch, "/api/v1/chat/topics/def31-deleted-patch",
+		map[string]*string{"defaultAgent": &da})
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected rejection of soft-deleted agent UUID on PATCH, but got 200")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for soft-deleted agent on PATCH, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Test 3: Rebinding case — soft-delete the bound default agent and confirm the
+// topic does not silently keep routing to it.
+// This tests ClearTopicDefaultAgent's effectiveness AND the lookup's deleted_at
+// filtering at the resolver level.
+func TestDEF31_Rebinding_AfterSoftDelete(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Create a live agent in project A specifically for this test.
+	liveAgent := &store.Agent{
+		ID:        tid("def31-live-rebind"),
+		ProjectID: f.projA.ID,
+		Name:      "Live Rebind Agent",
+		Slug:      "live-rebind",
+		Phase:     "running",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
+	}
+	if err := f.store.CreateAgent(ctx, liveAgent); err != nil {
+		t.Fatalf("CreateAgent(live-rebind): %v", err)
+	}
+
+	// Create topic with this agent as default.
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           "def31-rebind-topic",
+		ProjectID:    f.projA.ID,
+		Name:         "rebind-topic",
+		DefaultAgent: liveAgent.ID,
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Verify the binding is set.
+	topic, err := f.wcs.GetTopic(ctx, "def31-rebind-topic")
+	if err != nil || topic == nil {
+		t.Fatalf("GetTopic: %v", err)
+	}
+	if topic.DefaultAgent != liveAgent.ID {
+		t.Fatalf("expected default agent %s, got %q", liveAgent.ID, topic.DefaultAgent)
+	}
+
+	// Soft-delete the agent.
+	liveAgent.DeletedAt = time.Now().UTC()
+	if err := f.store.UpdateAgent(ctx, liveAgent); err != nil {
+		t.Fatalf("UpdateAgent (soft-delete): %v", err)
+	}
+
+	// Simulate what happens when an agent is deleted: ClearTopicDefaultAgent
+	// scrubs the binding from all topics in the project.
+	f.srv.ClearTopicDefaultAgent(ctx, liveAgent.ID, liveAgent.Slug, f.projA.ID)
+
+	// Confirm the topic no longer has a default agent.
+	topic, err = f.wcs.GetTopic(ctx, "def31-rebind-topic")
+	if err != nil || topic == nil {
+		t.Fatalf("GetTopic after clear: %v", err)
+	}
+	if topic.DefaultAgent != "" {
+		t.Errorf("expected default agent cleared after soft-delete, got %q", topic.DefaultAgent)
+	}
+
+	// Even if ClearTopicDefaultAgent had somehow failed (best-effort), the
+	// resolver at send time must not route to a deleted agent. To test this
+	// defence-in-depth, manually re-set the default and then verify the
+	// resolver rejects it.
+	da := liveAgent.ID
+	if err := f.wcs.UpdateTopic(ctx, "def31-rebind-topic", TopicUpdate{DefaultAgent: &da}); err != nil {
+		t.Fatalf("UpdateTopic (re-bind stale): %v", err)
+	}
+
+	// The validateDefaultAgent helper (called from ingress) would reject this,
+	// but we're testing the resolver's defence too. Call validateDefaultAgent
+	// directly to confirm.
+	if vErr := f.srv.validateDefaultAgent(ctx, f.projA.ID, liveAgent.ID); vErr == nil {
+		t.Error("validateDefaultAgent should reject a soft-deleted agent, but returned nil")
+	}
+}
+
+// Test 4: Paired positives — a legitimate slug and same-project UUID both bind.
+// A validator that refuses everything passes the negatives and is useless;
+// these tests prove we accept valid inputs.
+func TestDEF31_PairedPositives(t *testing.T) {
+	f := setupDEF31(t)
+
+	t.Run("slug_binds", func(t *testing.T) {
+		body := map[string]string{
+			"name":         "slug-positive",
+			"defaultAgent": f.agentA.Slug,
+		}
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/chat/spaces/"+f.projA.ID+"/threads", body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected 201 for valid slug, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var topic WebChatTopic
+		if err := json.NewDecoder(rec.Body).Decode(&topic); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if topic.DefaultAgent != f.agentA.Slug {
+			t.Errorf("defaultAgent = %q, want %q", topic.DefaultAgent, f.agentA.Slug)
+		}
+	})
+
+	t.Run("uuid_binds", func(t *testing.T) {
+		body := map[string]string{
+			"name":         "uuid-positive",
+			"defaultAgent": f.agentA.ID,
+		}
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/chat/spaces/"+f.projA.ID+"/threads", body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected 201 for valid same-project UUID, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var topic WebChatTopic
+		if err := json.NewDecoder(rec.Body).Decode(&topic); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if topic.DefaultAgent != f.agentA.ID {
+			t.Errorf("defaultAgent = %q, want %q", topic.DefaultAgent, f.agentA.ID)
+		}
+	})
+
+	t.Run("clear_via_patch", func(t *testing.T) {
+		// Create topic with a default agent, then clear it.
+		ctx := context.Background()
+		if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+			ID:           "def31-clear-patch",
+			ProjectID:    f.projA.ID,
+			Name:         "clear-positive",
+			DefaultAgent: f.agentA.Slug,
+			CreatedBy:    "dev",
+			CreatedAt:    time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+
+		empty := ""
+		rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/chat/topics/def31-clear-patch",
+			map[string]*string{"defaultAgent": &empty})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 when clearing defaultAgent, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var updated WebChatTopic
+		if err := json.NewDecoder(rec.Body).Decode(&updated); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if updated.DefaultAgent != "" {
+			t.Errorf("defaultAgent should be cleared, got %q", updated.DefaultAgent)
+		}
+	})
+}
+
+// Test 5: Mutation test — documents that the lookup scoping at the resolver
+// (handlers_chat_v2.go, inside the default-agent resolution block) is the
+// load-bearing fix. If the project-ID and deleted_at checks after the GetAgent
+// fallback were removed, a foreign-project or deleted agent UUID stored in
+// topic.DefaultAgent would silently bind and route messages to the wrong agent.
+//
+// This is not a build-tag gated subtest that literally reverts the code; instead
+// it is a structural assertion: the test exercises the resolver path directly
+// (via validateDefaultAgent, which performs the same two-step lookup with the
+// same guards) and asserts that:
+//
+//   - A foreign-project UUID is rejected (fails the projectID check).
+//   - A soft-deleted UUID is rejected (fails the DeletedAt check).
+//
+// If someone removes those guards, these assertions fail — that is the mutation.
+// The foreign-project test (Test 1) fails with a message naming the wrong-project
+// bind, not a panic or compile error, confirming the mutation is the defect.
+func TestDEF31_MutationTest_LookupScoping(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	t.Run("foreign_project_guard", func(t *testing.T) {
+		// validateDefaultAgent uses the same two-step lookup as the resolver.
+		// Without the projectID guard, this would return nil (agent found by
+		// GetAgent, no project filter).
+		err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.agentB.ID)
+		if err == nil {
+			t.Fatal("MUTATION DETECTED: validateDefaultAgent accepted a foreign-project " +
+				"agent UUID. The project-scoping guard in the GetAgent fallback has been " +
+				"removed or bypassed — this is the DEF-31 defect. The agent " + f.agentB.ID +
+				" belongs to project " + f.projB.ID + " but was accepted for project " + f.projA.ID)
+		}
+		// Confirm the error message is about not-found-in-project, not a panic.
+		if !strings.Contains(err.Error(), "not found in this project") {
+			t.Errorf("unexpected error message: %v (expected 'not found in this project')", err)
+		}
+	})
+
+	t.Run("soft_deleted_guard", func(t *testing.T) {
+		// Without the DeletedAt guard, this would return nil (agent found by
+		// GetAgent, no deletion filter).
+		err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.deletedA.ID)
+		if err == nil {
+			t.Fatal("MUTATION DETECTED: validateDefaultAgent accepted a soft-deleted " +
+				"agent UUID. The DeletedAt guard in the GetAgent fallback has been " +
+				"removed or bypassed — this is the DEF-31 defect. Agent " + f.deletedA.ID +
+				" is soft-deleted but was accepted")
+		}
+		if !strings.Contains(err.Error(), "not found in this project") {
+			t.Errorf("unexpected error message: %v (expected 'not found in this project')", err)
+		}
+	})
+
+	t.Run("valid_agent_still_accepted", func(t *testing.T) {
+		// Sanity check: the guards must not reject a valid same-project agent.
+		err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.agentA.ID)
+		if err != nil {
+			t.Fatalf("validateDefaultAgent rejected a valid same-project agent: %v", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// DEF-31 send-path resolver tests — end-to-end through handleConversationSend
+//
+// These tests write bad default_agent values directly via wcs.CreateTopic,
+// bypassing ingress validation, to simulate pre-existing rows in production.
+// They then POST a message through the HTTP handler and assert on the response
+// type: TypeInstruction means the resolver routed to an agent; TypeChat means
+// it fell through to the no-agent human-to-human path.
+//
+// These tests cover the load-bearing resolver guard at the send path —
+// the ONLY protection for pre-existing bad rows that ingress validation
+// cannot retroactively fix.
+// ---------------------------------------------------------------------------
+
+// TestDEF31_SendPath_ForeignProjectAgent_NotRouted simulates a pre-existing
+// topic row whose default_agent holds a UUID from another project. The
+// resolver must NOT route the message to that foreign agent.
+func TestDEF31_SendPath_ForeignProjectAgent_NotRouted(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Write a topic with the foreign-project agent UUID directly via the
+	// store, bypassing ingress validation — this simulates a pre-existing
+	// bad row.
+	topicID := tid("def31-send-foreign")
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    f.projA.ID,
+		Name:         "send-foreign",
+		DefaultAgent: f.agentB.ID, // agent from project B — foreign
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Send a message via the HTTP handler.
+	body := map[string]string{"content": "hello from bad row"}
+	rec := doRequest(t, f.srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// The resolver must NOT have routed to the foreign agent. If it did,
+	// the message type would be TypeInstruction. It should fall through to
+	// the human-to-human path and return TypeChat.
+	if resp.Type == messages.TypeInstruction {
+		t.Fatalf("RESOLVER GUARD FAILURE: message was routed to foreign-project agent %s "+
+			"(type=%s). The resolver's project-scoping guard is missing or broken — "+
+			"this is the DEF-31 defect at the send path", f.agentB.ID, resp.Type)
+	}
+	if resp.Type != messages.TypeChat {
+		t.Errorf("expected type %q (no-agent fallthrough), got %q", messages.TypeChat, resp.Type)
+	}
+}
+
+// TestDEF31_SendPath_SoftDeletedAgent_NotRouted simulates a pre-existing
+// topic row whose default_agent holds a same-project UUID that has since been
+// soft-deleted. The resolver must NOT route to it.
+func TestDEF31_SendPath_SoftDeletedAgent_NotRouted(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Write a topic with the soft-deleted agent UUID directly via the store.
+	topicID := tid("def31-send-deleted")
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    f.projA.ID,
+		Name:         "send-deleted",
+		DefaultAgent: f.deletedA.ID, // same project, but soft-deleted
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "hello from stale row"}
+	rec := doRequest(t, f.srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Type == messages.TypeInstruction {
+		t.Fatalf("RESOLVER GUARD FAILURE: message was routed to soft-deleted agent %s "+
+			"(type=%s). The resolver's deleted_at guard is missing or broken — "+
+			"this is the DEF-31 defect at the send path", f.deletedA.ID, resp.Type)
+	}
+	if resp.Type != messages.TypeChat {
+		t.Errorf("expected type %q (no-agent fallthrough), got %q", messages.TypeChat, resp.Type)
+	}
+}
+
+// TestDEF31_SendPath_ValidAgent_StillRoutes is the paired positive: a topic
+// with a valid, same-project default agent must still route messages through
+// it. Without this test, deleting the entire routing branch passes all tests.
+func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
+	f := setupDEF31(t)
+	ctx := context.Background()
+
+	// Write a topic with a valid same-project agent as default.
+	topicID := tid("def31-send-valid")
+	if err := f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    f.projA.ID,
+		Name:         "send-valid",
+		DefaultAgent: f.agentA.ID, // valid, same project, not deleted
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "hello from good row"}
+	rec := doRequest(t, f.srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// A valid default agent must cause agent routing — type should be
+	// TypeInstruction, not TypeChat.
+	if resp.Type != messages.TypeInstruction {
+		t.Fatalf("expected type %q (agent-routed via default), got %q — "+
+			"the default-agent routing branch may have been removed entirely",
+			messages.TypeInstruction, resp.Type)
+	}
+}
