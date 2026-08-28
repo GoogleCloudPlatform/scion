@@ -683,3 +683,53 @@ func TestTailer_EmptyLinesSkipped(t *testing.T) {
 		t.Errorf("line[1] = %q, want %q", lines[1].Message, "line two")
 	}
 }
+
+// -----------------------------------------------------------------------
+// Unit test: flushPartial emits with partial:true when buffer is non-empty,
+// and is a no-op when buffer is empty. This directly proves the logic used
+// by exit path 2 (read error / ENOENT) — the integration path is
+// unreachable on Linux (see TestTailer_FileDeletedMidTailPartialFlush)
+// but the function is proven correct here.
+// -----------------------------------------------------------------------
+
+func TestTailer_FlushPartialUnit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("non-empty buffer emits with partial:true", func(t *testing.T) {
+		var emitted []tailerOutput
+		emit := func(severity, message string, extra map[string]string) {
+			out := tailerOutput{Severity: severity, Message: message, Labels: extra}
+			emitted = append(emitted, out)
+		}
+
+		flushPartial([]byte("crash message fragment"), emit)
+
+		if len(emitted) != 1 {
+			t.Fatalf("expected 1 emission, got %d", len(emitted))
+		}
+		if emitted[0].Message != "crash message fragment" {
+			t.Errorf("message = %q, want %q", emitted[0].Message, "crash message fragment")
+		}
+		if emitted[0].Labels["partial"] != "true" {
+			t.Errorf("missing partial:true label")
+		}
+		if emitted[0].Severity != "INFO" {
+			t.Errorf("severity = %q, want INFO", emitted[0].Severity)
+		}
+	})
+
+	t.Run("empty buffer is no-op", func(t *testing.T) {
+		var emitted []tailerOutput
+		emit := func(severity, message string, extra map[string]string) {
+			out := tailerOutput{Severity: severity, Message: message, Labels: extra}
+			emitted = append(emitted, out)
+		}
+
+		flushPartial(nil, emit)
+		flushPartial([]byte{}, emit)
+
+		if len(emitted) != 0 {
+			t.Errorf("expected 0 emissions for empty buffer, got %d", len(emitted))
+		}
+	})
+}

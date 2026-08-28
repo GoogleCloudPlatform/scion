@@ -119,12 +119,9 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 	// --- Phase 1: Open the file with bounded retry ---
 	f, opened := openWithRetry(ctx, logPath, slug, emit)
 	if !opened {
-		// Two paths reach here:
-		// 1. Context cancelled + file never opened: the sandbox terminated
-		//    without ever creating its entrypoint log. This is the
-		//    highest-value diagnostic.
-		// 2. Persistent non-ENOENT error after retries: openWithRetry
-		//    already emitted its own ERROR; nothing more to say.
+		// openWithRetry only returns false when ctx is cancelled.
+		// The sandbox terminated without ever creating its entrypoint log.
+		// This is the highest-value diagnostic line the tailer can produce.
 		if ctx.Err() != nil {
 			emit("ERROR",
 				fmt.Sprintf("no entrypoint log was ever created for sandbox %q — "+
@@ -220,35 +217,32 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 
 // openWithRetry attempts to open the file with bounded retry and backoff.
 // Returns the open file and true, or nil and false if the file was never
-// successfully opened (context cancelled or persistent error).
+// successfully opened (context cancelled).
+//
+// DESIGN DEVIATION (deliberate): the design says persistent non-ENOENT
+// errors (permission denied, I/O error) should emit ERROR and exit after
+// the retry schedule is exhausted. This implementation keeps polling with
+// WARNING every 5s instead. Rationale: noisy beats absent. A permission
+// error on the log file will complain visibly until the sandbox is torn
+// down (watchCtx cancelled), which is correct — the error may be
+// transient (e.g. file being replaced atomically by another process),
+// and exiting early on an assumption would silence the channel permanently.
+// watchCtx provides the bounded lifetime regardless.
 func openWithRetry(ctx context.Context, logPath, slug string, emit func(string, string, map[string]string)) (*os.File, bool) {
 	const postRetryInterval = 5 * time.Second
 
-	var lastErr error
 	for attempt := 0; ; attempt++ {
 		f, err := os.Open(logPath)
 		if err == nil {
 			return f, true
 		}
-		lastErr = err
 
-		isNotExist := errors.Is(err, fs.ErrNotExist)
-
-		if !isNotExist {
+		if !errors.Is(err, fs.ErrNotExist) {
 			// Non-ENOENT error: permission denied, I/O error, etc.
+			// Keep retrying (see design deviation note above).
 			emit("WARNING",
 				fmt.Sprintf("entrypoint log open failed: %v — retrying", err),
 				nil)
-		}
-
-		// After the retry schedule is exhausted, persistent non-ENOENT
-		// errors are terminal: emit ERROR and exit. ENOENT continues
-		// polling at 5s (sandbox may be slow to start).
-		if attempt >= len(openRetrySchedule) && !isNotExist {
-			emit("ERROR",
-				fmt.Sprintf("entrypoint log open failed after %d retries: %v — giving up", attempt, lastErr),
-				nil)
-			return nil, false
 		}
 
 		// Determine wait interval.
