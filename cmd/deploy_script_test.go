@@ -426,11 +426,20 @@ func TestScriptValidateOverrideURL(t *testing.T) {
 		{"loopback stub with a path", "http://127.0.0.1:45607/tokeninfo"},
 		{"localhost", "http://localhost:8080"},
 		{"IPv6 loopback with port and path", "http://[::1]:9000/x"},
+		// DO NOT DELETE THE NEXT TWO ROWS AS REDUNDANT. They look like
+		// nice-to-haves and they are not: they are the only two rows in this
+		// table that still detect a regression of the host EXTRACTION to the
+		// old path-strip-only form. Measured — with `host="${host%%/*}"`
+		// restored, every reject row keeps its correct verdict, because the
+		// '?'/'#' guard and the host-shape assertion added later catch that
+		// class first. These two go red (uppercase is no longer folded; the
+		// userinfo is no longer stripped, so `a@b@…` fails the shape check).
+		// Delete them and the extraction has no pin at all.
 		{"uppercase host — hostnames are case-insensitive", "https://FOO.GOOGLEAPIS.COM"},
-		// The one input where this rule is deliberately MORE permissive than
-		// curl: curl refuses to parse a double-`@` authority at all, while the
-		// host after the last `@` really is permitted. Pinned so the intent is
-		// recorded rather than rediscovered (review r3, Nit 3).
+		// Also the one input where this rule is deliberately MORE permissive
+		// than curl: curl refuses to parse a double-`@` authority at all,
+		// while the host after the last `@` really is permitted. Pinned so the
+		// intent is recorded rather than rediscovered (review r3, Nit 3).
 		{"double userinfo — host after the LAST @ is permitted", "https://a@b@oauth2.googleapis.com"},
 	}
 	for _, tc := range allowed {
