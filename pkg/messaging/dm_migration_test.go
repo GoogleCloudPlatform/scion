@@ -338,6 +338,12 @@ func TestStep2_IdempotentExistingParticipants(t *testing.T) {
 
 // TestStep3a_EmptyRefRowSkipped verifies that an empty-ref row is left
 // keyless per the B14 ruling — it is NOT merged or re-keyed.
+//
+// DEF-29 (open): a direct conversation's external_ref IS its access-control
+// basis; a keyless row has no ACL. This test pins current-but-wrong behaviour —
+// the migration skips empty-ref rows rather than resolving them. Expectations
+// will invert when DEF-29 closes; correct resolution is operator review, not
+// migration.
 func TestStep3a_EmptyRefRowSkipped(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
@@ -403,6 +409,12 @@ func TestStep3a_EmptyRefRowSkipped(t *testing.T) {
 
 // TestStep3a_EmptyRefNotRekeyed verifies that an empty-ref row with no
 // existing kind-encoded counterpart is NOT re-keyed in place (B14 ruling).
+//
+// DEF-29 (open): a direct conversation's external_ref IS its access-control
+// basis; a keyless row has no ACL. This test pins current-but-wrong behaviour —
+// the migration does not fabricate a key from the participant index. Expectations
+// will invert when DEF-29 closes; correct resolution is operator review, not
+// migration.
 func TestStep3a_EmptyRefNotRekeyed(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
@@ -441,6 +453,12 @@ func TestStep3a_EmptyRefNotRekeyed(t *testing.T) {
 
 // TestStep3a_EmptyRefSkippedRegardlessOfParticipantCount verifies that
 // empty-ref rows are skipped regardless of participant count (B14 ruling).
+//
+// DEF-29 (open): a direct conversation's external_ref IS its access-control
+// basis; a keyless row has no ACL. This test pins current-but-wrong behaviour —
+// the migration skips empty-ref rows even when only one participant exists.
+// Expectations will invert when DEF-29 closes; correct resolution is operator
+// review, not migration.
 func TestStep3a_EmptyRefSkippedRegardlessOfParticipantCount(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
@@ -704,6 +722,11 @@ func TestDryRun_NoWrites(t *testing.T) {
 // empty-ref direct conversations are left keyless (B14 ruling) and counted
 // as EmptyRefSkipped for operator visibility.
 // Floor: the test creates at least 2 such rows before migration (rule 14).
+//
+// DEF-29 (open): a keyless direct row has no ACL. This test pins current-but-wrong
+// behaviour — the migration leaves these rows keyless because deriving a key from
+// the listing index would fabricate an ACL (B14 ruling). Expectations will invert
+// when DEF-29 closes; correct resolution is operator review, not migration.
 func TestGuardA_Migration_EmptyRefDirectRowsSkipped(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
@@ -1139,6 +1162,11 @@ func TestB1_SharedPredicate_MergeConversationDirectly(t *testing.T) {
 //
 // Mutation contract: reverting the skip (restoring the old stepMergeOrRekeyEmptyRef
 // logic) causes this test to fail because the row gets re-keyed.
+//
+// DEF-29 (open): a keyless direct row has no ACL. This test pins current-but-wrong
+// behaviour — the migration leaves these rows keyless because deriving a key from
+// the listing index would fabricate an ACL (B14 ruling). Expectations will invert
+// when DEF-29 closes; correct resolution is operator review, not migration.
 func TestB14_EmptyRefRowLeftKeyless(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
