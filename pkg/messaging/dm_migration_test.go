@@ -989,3 +989,129 @@ func TestB2_MergeAbortsOnRestampFailure(t *testing.T) {
 	assert.NotEmpty(t, result.Errors,
 		"result.Errors must be non-empty after re-stamp failure")
 }
+
+// ---------------------------------------------------------------------------
+// B1: D-1 guard routing — mergeConversation must filter participants
+// ---------------------------------------------------------------------------
+
+// TestB1_MergeRejectsStrangerParticipant verifies that mergeConversation does
+// NOT copy a participant that is not named in the target DM key. The two
+// legitimate participants are still copied (positive control).
+//
+// Mutation contract: removing the CheckDMParticipantKey filter causes this
+// test to fail because the stranger gets copied to the target conversation.
+func TestB1_MergeRejectsStrangerParticipant(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	strangerID := uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	// Old-format row with stranger in participant list.
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native",
+		ExternalRef: "dm:" + userID + ":" + agentID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: strangerID})
+
+	// Target kind-encoded row.
+	targetKey := mustDMKey("user", userID, "agent", agentID)
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: targetKey},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	svc := NewDMMigrationService(ms)
+	_, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	// Stranger must NOT be in target's participant list.
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalID == strangerID {
+			t.Errorf("stranger %s was injected into DM keyed %s", strangerID, targetKey)
+		}
+	}
+
+	// Positive control: named participants ARE present.
+	var hasUser, hasAgent bool
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalKind == "user" && p.PrincipalID == userID {
+			hasUser = true
+		}
+		if p.PrincipalKind == "agent" && p.PrincipalID == agentID {
+			hasAgent = true
+		}
+	}
+	assert.True(t, hasUser, "named user must be present in target")
+	assert.True(t, hasAgent, "named agent must be present in target")
+}
+
+// TestB1_SharedPredicate_MergeConversationDirectly calls mergeConversation
+// directly (not through Run) with a stranger participant and asserts rejection.
+// This proves that the shared messages.CheckDMParticipantKey predicate is the
+// enforcement point for mergeConversation — a test that only exercises Run
+// would pass against two divergent copies of the guard logic.
+func TestB1_SharedPredicate_MergeConversationDirectly(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	strangerID := uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	targetKey := mustDMKey("user", userID, "agent", agentID)
+
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native",
+		ExternalRef: ""},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: strangerID})
+
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: targetKey},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	svc := NewDMMigrationService(ms)
+	result := &DMMigrationResult{}
+	oldParts := ms.participants[oldConvID]
+
+	mergeErr := svc.mergeConversation(ctx, oldConvID, newConvID, oldParts, result)
+	require.NoError(t, mergeErr)
+
+	// Stranger must NOT be in target.
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalID == strangerID {
+			t.Errorf("stranger %s was injected into DM via direct mergeConversation call", strangerID)
+		}
+	}
+
+	// Positive control: named participants are present.
+	var hasUser, hasAgent bool
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalKind == "user" && p.PrincipalID == userID {
+			hasUser = true
+		}
+		if p.PrincipalKind == "agent" && p.PrincipalID == agentID {
+			hasAgent = true
+		}
+	}
+	assert.True(t, hasUser, "named user must be present via direct mergeConversation call")
+	assert.True(t, hasAgent, "named agent must be present via direct mergeConversation call")
+
+	// At least one error about skipping the stranger.
+	var foundSkipError bool
+	for _, e := range result.Errors {
+		if strings.Contains(e, "skip participant") && strings.Contains(e, strangerID) {
+			foundSkipError = true
+		}
+	}
+	assert.True(t, foundSkipError, "expected error about skipping stranger participant")
+}

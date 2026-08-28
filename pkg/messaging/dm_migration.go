@@ -485,8 +485,23 @@ func (s *DMMigrationService) mergeConversation(
 		return fmt.Errorf("aborting merge %s → %s: re-stamp failed, old row left intact", oldConvID, newConvID)
 	}
 
+	// B1 D-1 GUARD ROUTING: look up the target conversation to get its kind
+	// and external_ref, then filter each old participant through
+	// CheckDMParticipantKey before copying. This prevents a stranger in the
+	// old row's participant table from being injected into the target DM.
+	targetConv, err := s.store.GetConversation(ctx, newConvID)
+	if err != nil {
+		return fmt.Errorf("loading target conversation %s for participant guard: %w", newConvID, err)
+	}
+
 	// Copy missing participants to the target conversation.
 	for _, p := range oldParticipants {
+		if guardErr := messages.CheckDMParticipantKey(targetConv.Kind, targetConv.ExternalRef, p.PrincipalKind, p.PrincipalID); guardErr != nil {
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("skip participant %s:%s (not named in target DM key): %v",
+					p.PrincipalKind, p.PrincipalID, guardErr))
+			continue
+		}
 		err := s.store.AddParticipant(ctx, &store.ConversationParticipant{
 			ID:             uuid.NewString(),
 			ConversationID: newConvID,
