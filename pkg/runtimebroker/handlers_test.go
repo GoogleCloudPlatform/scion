@@ -3394,7 +3394,6 @@ profiles:
 	if profiles[0].Name != "remote" || profiles[0].Type != "kubernetes" {
 		t.Errorf("FACT 1: expected remote/kubernetes, got %s/%s", profiles[0].Name, profiles[0].Type)
 	}
-	t.Log("FACT 1 CONFIRMED: on cloudrun-sandbox broker with workstation defaults, only remote/kubernetes survives the filter")
 
 	// === FACT 2: Filter predicate analysis ===
 	// isLocalOnlyRuntime("kubernetes") is false — this is WHY kubernetes
@@ -3406,7 +3405,6 @@ profiles:
 	if !isLocalOnlyRuntime("docker") {
 		t.Fatal("FACT 2: isLocalOnlyRuntime('docker') should be true")
 	}
-	t.Log("FACT 2 CONFIRMED: kubernetes survives filter because isLocalOnlyRuntime('kubernetes')=false — predicate answers wrong question")
 
 	// === FACT 3: Workstation broker preserves all profiles ===
 	// On a docker broker, !isLocalOnlyRuntime("docker") = !true = false,
@@ -3427,7 +3425,6 @@ profiles:
 	if len(workstationProfiles) < 2 {
 		t.Errorf("FACT 3: expected >= 2 profiles on docker broker, got %d", len(workstationProfiles))
 	}
-	t.Log("FACT 3 CONFIRMED: docker broker keeps all profiles (filter condition false for local broker)")
 
 	// === SUPPLEMENTARY: len(profiles)==0 fallback produces correct result ===
 	// The existing fallback at handlers.go:226-230 returns:
@@ -3472,5 +3469,4 @@ profiles:
 	if fallbackProfiles[0].Type != "cloudrun-sandbox" {
 		t.Errorf("FALLBACK: expected type 'cloudrun-sandbox', got %q", fallbackProfiles[0].Type)
 	}
-	t.Log("FALLBACK CONFIRMED: len(profiles)==0 fallback returns {default, cloudrun-sandbox, true}")
 }

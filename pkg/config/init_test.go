@@ -1062,60 +1062,16 @@ func TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92(t *testing.T) {
 	}
 }
 
-// TestInitMachine_CloudRunSandbox_RevertGuard_Task92 verifies that REVERTING
-// the Cloud Run sandbox fix (removing the template branch in init.go)
-// produces the buggy outcome: an empty profile selection resolves to a
-// runtime that cannot work on this tier (docker, from the workstation
-// defaults). This test runs through real InitMachine with the sandbox
-// detection DISABLED (simulating a reverted fix), then asserts the broken
-// state. It is the O4 fix guard: unlike the regression test in
-// handlers_test.go (which hardcodes YAML and tests the filter), this test
-// proves the fix is load-bearing by showing what happens WITHOUT it.
-func TestInitMachine_CloudRunSandbox_RevertGuard_Task92(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	origHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", origHome) }()
-
-	// Run InitMachine WITHOUT Cloud Run sandbox detection. This simulates
-	// what happens if the fix is reverted: SkipRuntimeCheck=true falls
-	// through to the docker-default path.
-	t.Setenv("CLOUD_RUN_INSTANCE", "")
-	origSandboxBinExists := sandboxBinExists
-	sandboxBinExists = func(path string) bool { return false }
-	defer func() { sandboxBinExists = origSandboxBinExists }()
-
-	if err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true}); err != nil {
-		t.Fatalf("InitMachine failed: %v", err)
+// TestDefaultSandboxBin_MatchesLiteral pins config's unexported
+// defaultSandboxBin against the same literal that
+// TestSandboxBinConstantSync_Task92 (in the external config_test package)
+// pins runtime.DefaultSandboxBin against. Together these two tests catch
+// drift in either direction. (O5)
+func TestDefaultSandboxBin_MatchesLiteral(t *testing.T) {
+	if defaultSandboxBin != "/usr/local/gcp/bin/sandbox" {
+		t.Errorf("defaultSandboxBin = %q, want %q — update both config and runtime if this changes",
+			defaultSandboxBin, "/usr/local/gcp/bin/sandbox")
 	}
-
-	// Load effective settings — what the broker sees.
-	globalDir := filepath.Join(tmpDir, GlobalDir)
-	vs, _, err := LoadEffectiveSettings(globalDir)
-	if err != nil {
-		t.Fatalf("LoadEffectiveSettings failed: %v", err)
-	}
-
-	// WITHOUT the fix, ActiveProfile is "local" and ResolveRuntime("") yields
-	// "docker" — which is correct for a workstation but WRONG for Cloud Run
-	// sandbox. This documents the broken state.
-	if vs.ActiveProfile != "local" {
-		t.Errorf("reverted: ActiveProfile = %q, want %q (workstation default)", vs.ActiveProfile, "local")
-	}
-	_, runtimeType, err := vs.ResolveRuntime("")
-	if err != nil {
-		t.Fatalf("reverted: ResolveRuntime(\"\") failed: %v", err)
-	}
-	if runtimeType != "docker" {
-		t.Errorf("reverted: ResolveRuntime(\"\") = %q, want %q (workstation default)", runtimeType, "docker")
-	}
-
-	// This is the bug: on Cloud Run sandbox with docker defaults, the only
-	// profile buildInfoProfiles would keep is remote/kubernetes (docker is
-	// filtered as local-only), and an empty selection resolves to docker
-	// (not cloudrun-sandbox). Either path produces a broken agent.
-	t.Log("CONFIRMED: without the fix, empty selection resolves to docker — the bug")
 }
 
 // TestInitMachine_CloudRunSandbox_WithoutSandboxBin_FallsBack verifies that

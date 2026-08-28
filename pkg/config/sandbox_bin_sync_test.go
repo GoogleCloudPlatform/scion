@@ -30,12 +30,11 @@ import (
 // a cloudrun-sandbox profile while GetRuntime picks a different runtime —
 // a silent mismatch.
 //
-// Because init.go's constant is unexported (to avoid exporting an
-// implementation detail from a lower-level package), this test asserts
-// against the hardcoded literal that both copies share. If runtime's
-// exported constant changes, this test fails; if init.go's copy changes,
-// the InitMachine pin tests fail (they exercise isCloudRunSandboxEnvironment
-// which uses the constant). Together they catch drift in either direction. (O5)
+// This test asserts runtime.DefaultSandboxBin against the hardcoded literal.
+// config's unexported defaultSandboxBin is NOT pinned by the InitMachine
+// tests (they mock the sandboxBinExists seam, making them path-independent).
+// The internal assertion below is the only thing that catches config-side
+// drift. (O5)
 func TestSandboxBinConstantSync_Task92(t *testing.T) {
 	// This is the path hardcoded in both pkg/config/init.go (unexported
 	// defaultSandboxBin) and pkg/runtime/cloudrun_sandbox_runtime.go
@@ -43,7 +42,7 @@ func TestSandboxBinConstantSync_Task92(t *testing.T) {
 	const expectedPath = "/usr/local/gcp/bin/sandbox"
 
 	if runtime.DefaultSandboxBin != expectedPath {
-		t.Errorf("runtime.DefaultSandboxBin = %q, want %q — config/init.go has %q hardcoded; if this changed, update both",
-			runtime.DefaultSandboxBin, expectedPath, expectedPath)
+		t.Errorf("runtime.DefaultSandboxBin = %q, want %q — update both config and runtime if this changes",
+			runtime.DefaultSandboxBin, expectedPath)
 	}
 }
