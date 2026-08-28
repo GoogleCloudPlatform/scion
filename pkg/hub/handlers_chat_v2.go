@@ -1203,6 +1203,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)
 				s.messageLog.Warn("User lacks attach permission for mentioned agent",
 					"user", user.ID(), "agent", mentionAgent.Slug)
+				// Update the MentionResult so the client sees the skip.
+				for i, mr := range mentionResults {
+					if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+						mentionResults[i].Status = "unauthorized"
+						mentionResults[i].Error = "insufficient permissions"
+						break
+					}
+				}
 				continue
 			}
 			mentionMsg := messages.NewMention(msg.Sender, "agent:"+mentionAgent.Slug, content, msg.Recipient)
