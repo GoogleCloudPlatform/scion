@@ -461,14 +461,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
-		} else if msg.SenderID != "" && msg.RecipientID != "" {
-			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
-			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
-			if sOK && rOK {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+		} else if msg.RecipientID != "" {
+			if recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient); rOK {
+				convResult = p.resolveDMConversation(ctx, msg, recipientKind, msg.RecipientID)
 			} else {
-				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
-					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
+				p.log.Warn("skipping DM conversation resolution: recipient kind undetermined",
+					"recipient", msg.Recipient, "recipient_id", msg.RecipientID)
 			}
 		}
 		if convResult != nil {
@@ -636,13 +634,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
 			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
-		} else if msg.SenderID != "" && agent.ID != "" {
-			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
-			} else {
-				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
-					"sender", msg.Sender, "sender_id", msg.SenderID)
-			}
+		} else if agent.ID != "" {
+			convResult = p.resolveDMConversation(ctx, msg, "agent", agent.ID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
@@ -825,6 +818,27 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
+}
+
+// resolveDMConversation derives the sender kind from msg.Sender and delegates
+// to messaging.ResolveOrCreateDMConversation. recipientKind and recipientID
+// are caller-supplied because the two call sites obtain them differently:
+// deliverToUser derives both from the message, deliverToAgent hardcodes "agent".
+// Returns nil (and logs) when the sender address is unparseable or SenderID is
+// empty — callers treat nil as "no conversation resolved" (Phase 5 non-fatal).
+func (p *MessageBrokerProxy) resolveDMConversation(ctx context.Context, msg *messages.StructuredMessage, recipientKind, recipientID string) *messaging.ConversationResult {
+	if msg.SenderID == "" {
+		p.log.Warn("skipping DM conversation resolution: empty SenderID",
+			"sender", msg.Sender)
+		return nil
+	}
+	senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender)
+	if !ok {
+		p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
+			"sender", msg.Sender, "sender_id", msg.SenderID)
+		return nil
+	}
+	return messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, recipientID)
 }
 
 // containsSuffix checks if a dot-separated subject string ends with the given suffix.
