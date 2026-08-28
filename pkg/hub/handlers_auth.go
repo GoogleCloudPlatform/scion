@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -1577,6 +1578,61 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 			"id":    user.ID(),
 			"email": user.Email(),
 		},
+	})
+}
+
+// AuthScopeEntry is a single UAT scope in the scopes endpoint response.
+type AuthScopeEntry struct {
+	ID          string `json:"id"`
+	Resource    string `json:"resource"`
+	Action      string `json:"action"`
+	Description string `json:"description"`
+}
+
+// AuthScopeAlias is a convenience alias that expands to multiple scopes.
+type AuthScopeAlias struct {
+	ID          string   `json:"id"`
+	Description string   `json:"description"`
+	ExpandsTo   []string `json:"expands_to"`
+}
+
+// AuthScopesResponse is the response for GET /api/v1/auth/scopes.
+type AuthScopesResponse struct {
+	Scopes  []AuthScopeEntry `json:"scopes"`
+	Aliases []AuthScopeAlias `json:"aliases"`
+}
+
+// handleAuthScopes handles GET /api/v1/auth/scopes.
+// Returns all valid UAT scopes from the permissions registry.
+func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	options := permissions.UATScopeOptions(false)
+	scopes := make([]AuthScopeEntry, 0, len(options))
+	for _, opt := range options {
+		scopes = append(scopes, AuthScopeEntry{
+			ID:          opt.UATScope,
+			Resource:    opt.Resource,
+			Action:      opt.Action,
+			Description: opt.Description,
+		})
+	}
+
+	manageScopes := permissions.UATManageScopes()
+	aliases := []AuthScopeAlias{
+		{
+			ID:          permissions.UATScopeAgentManage,
+			Description: "All agent management operations",
+			ExpandsTo:   manageScopes,
+		},
+	}
+
+	writeJSON(w, http.StatusOK, AuthScopesResponse{
+		Scopes:  scopes,
+		Aliases: aliases,
 	})
 }
 

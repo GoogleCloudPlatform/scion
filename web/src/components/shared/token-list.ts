@@ -43,6 +43,12 @@ interface AccessToken {
   created: string;
 }
 
+interface ScopeOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
 const AVAILABLE_SCOPES = [
   { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
   { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
@@ -55,10 +61,85 @@ const AVAILABLE_SCOPES = [
   },
   { value: 'agent:port_access', label: 'agent:port_access', description: 'Access forwarded ports' },
   { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
+  { value: 'broker:list', label: 'broker:list', description: 'List brokers' },
+  { value: 'broker:read', label: 'broker:read', description: 'Read brokers' },
+  {
+    value: 'gcp_service_account:assign',
+    label: 'gcp_service_account:assign',
+    description: 'Assign GCP service accounts to agents',
+  },
+  {
+    value: 'gcp_service_account:list',
+    label: 'gcp_service_account:list',
+    description: 'List GCP service accounts',
+  },
+  {
+    value: 'gcp_service_account:read',
+    label: 'gcp_service_account:read',
+    description: 'Read GCP service accounts',
+  },
+  {
+    value: 'gcp_service_account:verify',
+    label: 'gcp_service_account:verify',
+    description: 'Verify GCP service accounts',
+  },
+  { value: 'group:addMember', label: 'group:addMember', description: 'Add group members' },
+  { value: 'group:create', label: 'group:create', description: 'Create groups' },
+  { value: 'group:delete', label: 'group:delete', description: 'Delete groups' },
+  { value: 'group:list', label: 'group:list', description: 'List groups' },
+  { value: 'group:read', label: 'group:read', description: 'Read groups' },
+  {
+    value: 'group:removeMember',
+    label: 'group:removeMember',
+    description: 'Remove group members',
+  },
+  { value: 'group:update', label: 'group:update', description: 'Update groups' },
+  {
+    value: 'harness_config:create',
+    label: 'harness_config:create',
+    description: 'Create harness configs',
+  },
+  {
+    value: 'harness_config:delete',
+    label: 'harness_config:delete',
+    description: 'Delete harness configs',
+  },
+  {
+    value: 'harness_config:list',
+    label: 'harness_config:list',
+    description: 'List harness configs',
+  },
+  {
+    value: 'harness_config:read',
+    label: 'harness_config:read',
+    description: 'Read harness configs',
+  },
+  {
+    value: 'harness_config:update',
+    label: 'harness_config:update',
+    description: 'Update harness configs',
+  },
   { value: 'project:clone', label: 'project:clone', description: 'Clone projects' },
   { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
   { value: 'project:update', label: 'project:update', description: 'Update projects' },
+  { value: 'skill:create', label: 'skill:create', description: 'Create skills' },
+  { value: 'skill:delete', label: 'skill:delete', description: 'Delete skills' },
+  { value: 'skill:list', label: 'skill:list', description: 'List skills' },
+  { value: 'skill:read', label: 'skill:read', description: 'Read skills' },
+  {
+    value: 'skill:register',
+    label: 'skill:register',
+    description: 'Register skills in registries',
+  },
+  { value: 'skill:update', label: 'skill:update', description: 'Update skills' },
+  { value: 'template:create', label: 'template:create', description: 'Create templates' },
+  { value: 'template:delete', label: 'template:delete', description: 'Delete templates' },
+  { value: 'template:list', label: 'template:list', description: 'List templates' },
+  { value: 'template:read', label: 'template:read', description: 'Read templates' },
+  { value: 'template:update', label: 'template:update', description: 'Update templates' },
   { value: 'user:invite', label: 'user:invite', description: 'Invite users' },
+  { value: 'user:list', label: 'user:list', description: 'List users' },
+  { value: 'user:read', label: 'user:read', description: 'Read users' },
 ] as const;
 
 @customElement('scion-token-list')
@@ -67,6 +148,8 @@ export class ScionTokenList extends LitElement {
   @state() private tokens: AccessToken[] = [];
   @state() private projects: Project[] = [];
   @state() private error: string | null = null;
+  @state() private availableScopes: ScopeOption[] = [...AVAILABLE_SCOPES];
+  private scopesCached = false;
 
   // Create dialog
   @state() private createDialogOpen = false;
@@ -220,7 +303,39 @@ export class ScionTokenList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    void this.loadScopes();
     void this.loadData();
+  }
+
+  /**
+   * Fetch available scopes from /api/v1/auth/scopes and cache the result.
+   * Falls back to the hardcoded AVAILABLE_SCOPES list on failure.
+   */
+  private async loadScopes(): Promise<void> {
+    if (this.scopesCached) return;
+    try {
+      const res = await apiFetch('/api/v1/auth/scopes');
+      if (!res.ok) return; // keep fallback
+      const data = (await res.json()) as {
+        scopes?: Array<{ id: string; resource: string; action: string; description: string }>;
+        aliases?: Array<{ id: string; description: string; expands_to: string[] }>;
+      };
+      const scopes: ScopeOption[] = [];
+      for (const s of data.scopes || []) {
+        scopes.push({ value: s.id, label: s.id, description: s.description });
+      }
+      for (const a of data.aliases || []) {
+        scopes.push({ value: a.id, label: a.id, description: a.description });
+      }
+      scopes.sort((a, b) => a.value.localeCompare(b.value));
+      if (scopes.length > 0) {
+        this.availableScopes = scopes;
+        this.scopesCached = true;
+      }
+    } catch {
+      // Keep fallback list — log for debugging
+      console.warn('Failed to fetch dynamic scopes, using fallback list');
+    }
   }
 
   private async loadData(): Promise<void> {
@@ -650,7 +765,7 @@ export class ScionTokenList extends LitElement {
           <div>
             <div class="field-label">Scopes</div>
             <div class="scope-checkboxes">
-              ${AVAILABLE_SCOPES.map(
+              ${this.availableScopes.map(
                 (scope) => html`
                   <div class="scope-checkbox-item">
                     <sl-checkbox
