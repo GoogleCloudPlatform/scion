@@ -352,26 +352,34 @@ func TestTailer_ContextCancelWithPartial(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
-// Test: File deleted mid-tail with partial content → partial flushed.
+// Test: Real read error drives exit path 2 end-to-end (EISDIR trick).
 //
-// On Linux, os.File.Read on a deleted file does NOT return an error — the
-// fd remains valid (Unix semantics: unlink removes the directory entry,
-// but the open fd keeps the inode alive). So exit path 2 (read error from
-// ENOENT) is unreachable on POSIX systems with the current approach.
+// On Linux, os.Open on a directory succeeds, but Read returns EISDIR —
+// a genuine non-EOF read error from a real syscall on a real descriptor.
+// This is the same shape as an EIO from disk corruption: openWithRetry
+// opens the path, seekToOffset stats it, the read loop hits a real read
+// error, and the goroutine exits via exit path 2.
 //
-// This test verifies the practical behavior: when the file is deleted and
-// then the context is cancelled, the partial content is still flushed.
-// The context cancellation is the mechanism that actually triggers exit
-// on Linux when a file vanishes and the sandbox is torn down.
+// Limitation: EISDIR fires on the first Read, before any bytes enter
+// lineBuf, so flushPartial is called with an empty buffer (a no-op).
+// This test proves exit path 2 is REACHABLE and the goroutine EXITS
+// CLEANLY via that path — but does not go red if flushPartial is
+// deleted, because there is no content to flush.
+//
+// Getting content into lineBuf AND triggering a non-EOF read error on
+// the same fd would require io.Reader injection (refactoring the read
+// loop), which was ruled out for this PR. The flushPartial function
+// itself is mutation-tested by TestTailer_FlushPartialUnit.
 // -----------------------------------------------------------------------
 
-func TestTailer_FileDeletedMidTailPartialFlush(t *testing.T) {
+func TestTailer_ReadErrorExitPath2(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	logPath := filepath.Join(dir, entrypointLogFile)
 
-	// Write a partial line (no newline) — simulates a writer that dies mid-line.
-	if err := os.WriteFile(logPath, []byte("partial before delete"), 0644); err != nil {
+	// Create the "log file" as a directory. os.Open succeeds on a
+	// directory; Read returns EISDIR — a real non-EOF read error.
+	logPath := filepath.Join(dir, entrypointLogFile)
+	if err := os.Mkdir(logPath, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -385,36 +393,13 @@ func TestTailer_FileDeletedMidTailPartialFlush(t *testing.T) {
 		close(done)
 	}()
 
-	// Give the tailer time to read the content into its buffer.
-	time.Sleep(500 * time.Millisecond)
-
-	// Delete the file. On Linux, the open fd is unaffected, but the
-	// file is gone from the filesystem. Cancel the context to simulate
-	// deleteOrWorkaround tearing down the sandbox.
-	if err := os.Remove(logPath); err != nil {
-		t.Fatal(err)
-	}
-	cancel()
-
-	// Wait for goroutine exit.
+	// The goroutine should exit quickly — EISDIR is immediate.
 	select {
 	case <-done:
+		// Exit path 2 reached: goroutine exited on a real read error
+		// without hanging or requiring context cancellation.
 	case <-time.After(5 * time.Second):
-		t.Fatal("tailer goroutine did not exit after file deletion + cancel")
-	}
-
-	lines := parseTailerLines(t, &out)
-	if len(lines) < 1 {
-		t.Fatalf("expected at least 1 line (partial), got %d: %s", len(lines), out.String())
-	}
-
-	// The last line should be the partial content.
-	last := lines[len(lines)-1]
-	if last.Message != "partial before delete" {
-		t.Errorf("partial message = %q, want %q", last.Message, "partial before delete")
-	}
-	if last.Labels["partial"] != "true" {
-		t.Errorf("missing partial:true label on deleted-file flush")
+		t.Fatal("tailer goroutine did not exit after read error (EISDIR)")
 	}
 }
 

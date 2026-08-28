@@ -171,14 +171,13 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 		}
 
 		if readErr != nil && readErr != io.EOF {
-			// File deleted mid-tail or I/O error.
-			if errors.Is(readErr, fs.ErrNotExist) {
-				runtimeLog.Info("entrypoint-log-tailer: file deleted mid-tail",
-					"path", logPath, "sandbox", slug)
-			} else {
-				runtimeLog.Warn("entrypoint-log-tailer: read error",
-					"path", logPath, "error", readErr, "sandbox", slug)
-			}
+			// I/O error (EIO, EISDIR, etc.). read() operates on a file
+			// descriptor, not a path — it never returns ENOENT. File
+			// deletion is invisible to the reader on POSIX (the fd keeps
+			// the inode alive); context cancellation is the exit mechanism
+			// when the sandbox is torn down.
+			runtimeLog.Warn("entrypoint-log-tailer: read error",
+				"path", logPath, "error", readErr, "sandbox", slug)
 			flushPartial(lineBuf, emit)
 			return
 		}
