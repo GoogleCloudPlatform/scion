@@ -1121,9 +1121,55 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 }
 
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	// Use tmux capture-pane to get the scrollback buffer.
+	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
-	return runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	if err == nil {
+		return logs, nil
+	}
+
+	// tmux failed — the sandbox is likely dead. Fall back to reading
+	// the entrypoint log from the host filesystem via the state entry.
+	//
+	// WHY FALLBACK, NOT FLAG CHECK: on this tier, liveness flags have
+	// been wrong before (#17: hub reported agents "running" when the
+	// entrypoint had hung). Try-and-fallback is strictly more robust:
+	// if tmux works, you get tmux output; if it fails for any reason
+	// (dead sandbox, exec failure, corrupted state), you get the
+	// entrypoint log. There is no case where the fallback harms a live
+	// sandbox — tmux success returns immediately above.
+	return r.readEntrypointLogFromState(id)
+}
+
+// readEntrypointLogFromState reads the entrypoint log from the host
+// filesystem using the AgentHome path stored in the sandbox state entry.
+// This is the same file and the same host-side path that the DOA handler
+// (line 812-826) reads after a failed liveness probe — the mechanism
+// exists, this gives it an exit through GetLogs.
+func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id string) (string, error) {
+	entry := r.state.get(id)
+	if entry == nil {
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q not found in state store", id)
+	}
+	if entry.AgentHome == "" {
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q has no AgentHome in state entry", id)
+	}
+
+	logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// State the observation, not the inference.
+			return fmt.Sprintf("[no entrypoint log at %s]", logPath), nil
+		}
+		return "", fmt.Errorf("cloudrun-sandbox: failed to read entrypoint log at %s: %w", logPath, err)
+	}
+
+	if len(data) == 0 {
+		return fmt.Sprintf("[entrypoint log at %s is empty]", logPath), nil
+	}
+
+	return string(data), nil
 }
 
 func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
