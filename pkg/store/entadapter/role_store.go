@@ -200,10 +200,23 @@ func (r *RoleStore) DeleteRoleDefinition(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListAllRoleBindings returns all role bindings (admin view).
-func (r *RoleStore) ListAllRoleBindings(ctx context.Context) ([]*store.RoleBinding, error) {
+// ListAllRoleBindings returns all role bindings (admin view) with pagination.
+// A limit of 0 defaults to 100. The maximum allowed limit is 1000.
+func (r *RoleStore) ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*store.RoleBinding, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
 	rbs, err := r.client.RoleBinding.Query().
 		Order(ent.Desc(rolebinding.FieldCreated)).
+		Limit(limit).
+		Offset(offset).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)

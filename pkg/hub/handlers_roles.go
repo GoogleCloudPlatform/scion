@@ -18,6 +18,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -326,6 +327,19 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// CanDelegate check: actor must hold all permissions in the updated role.
+	if s.authzService != nil {
+		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
+			Type:                  GrantTypeCustomRole,
+			CustomRolePermissions: req.Permissions,
+			ScopeType:             existing.ScopeType,
+		})
+		if !decision.Allowed {
+			writeForbidden(w, "cannot update role: "+decision.Reason)
+			return
+		}
+	}
+
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.Permissions = req.Permissions
@@ -387,7 +401,9 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 // ---------------------------------------------------------------------------
 
 func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
-	bindings, err := s.store.ListAllRoleBindings(r.Context())
+	limit, offset := parsePaginationParams(r)
+
+	bindings, err := s.store.ListAllRoleBindings(r.Context(), limit, offset)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -399,6 +415,22 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		Items:      bindings,
 		TotalCount: len(bindings),
 	})
+}
+
+// parsePaginationParams extracts limit and offset from query parameters.
+// Returns 0 for limit (store uses default) and 0 for offset if not provided.
+func parsePaginationParams(r *http.Request) (limit, offset int) {
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }
 
 func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user UserIdentity) {

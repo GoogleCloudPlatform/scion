@@ -1708,7 +1708,9 @@ type RoleStore interface {
 	DeleteRoleDefinition(ctx context.Context, id string) error
 
 	// ListAllRoleBindings returns all role bindings (admin view).
-	ListAllRoleBindings(ctx context.Context) ([]*RoleBinding, error)
+	// limit and offset control pagination. A limit of 0 defaults to 100.
+	// The maximum allowed limit is 1000.
+	ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*RoleBinding, error)
 
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.

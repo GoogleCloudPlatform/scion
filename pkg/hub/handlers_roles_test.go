@@ -17,8 +17,10 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -577,4 +579,191 @@ func TestRolesAPI_UpdateRoleDefinition_InvalidPermissions(t *testing.T) {
 		Permissions: []string{"nonexistent.permission"},
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: Non-admin identity
+// ---------------------------------------------------------------------------
+
+const (
+	nonAdminUserID    = "11111111-1111-1111-1111-111111111111"
+	nonAdminUserEmail = "scoped-admin@test.local"
+)
+
+// doRequestAsIdentity performs an HTTP request with a custom identity injected
+// into the context. This bypasses the dev-auth super-admin fast-path by using
+// an AuthenticatedUser whose Role() != "admin", so that CanDelegate and
+// permission-based route guards are actually exercised.
+func doRequestAsIdentity(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			t.Fatalf("failed to marshal body: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	// Inject the custom identity directly into the context so the route
+	// guard and handler see a non-admin user instead of the DevUser.
+	ctx := contextWithIdentity(req.Context(), identity)
+	req = req.WithContext(ctx)
+
+	// Serve using the mux directly (bypassing auth middleware) since the
+	// identity is already in the context. The route guards and handlers
+	// call GetIdentityFromContext, which will find our injected identity.
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// setupNonAdminUser creates a non-admin user identity and grants it specific
+// permissions via a custom role binding. Returns the identity.
+//
+// The user gets a role binding granting the specified permissions at system scope.
+func setupNonAdminUser(t *testing.T, st store.Store, perms []string) *AuthenticatedUser {
+	t.Helper()
+	ctx := t.Context()
+
+	user := NewAuthenticatedUser(nonAdminUserID, nonAdminUserEmail, "Scoped Admin", "member", "api")
+
+	// Create a custom role definition with the requested permissions.
+	rd, err := st.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-scoped-admin-" + t.Name(),
+		Description: "Test scoped admin role",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: perms,
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	// Bind it to our test user.
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      nonAdminUserID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test-setup",
+	})
+	require.NoError(t, err)
+
+	return user
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Non-admin CanDelegate enforcement
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_NonAdmin_CreateRole_WithHeldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role.create, role.read, and agent.read permissions.
+	user := setupNonAdminUser(t, st, []string{"role.create", "role.read", "agent.read"})
+
+	// Create a role containing only permissions the user holds → should succeed.
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/roles", createRoleDefinitionRequest{
+		Name:        "non-admin-created-role",
+		Description: "Created by non-admin",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var def store.RoleDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, "non-admin-created-role", def.Name)
+	assert.Equal(t, []string{"agent.read"}, def.Permissions)
+}
+
+func TestRolesAPI_NonAdmin_CreateRole_WithUnheldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role.create and agent.read, but NOT user.suspend.
+	user := setupNonAdminUser(t, st, []string{"role.create", "role.read", "agent.read"})
+
+	// Try to create a role containing user.suspend → should get 403 (CanDelegate denies).
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/roles", createRoleDefinitionRequest{
+		Name:        "escalated-role",
+		Description: "Attempting privilege escalation",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read", "user.suspend"},
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestRolesAPI_NonAdmin_UpdateRole_WithUnheldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role.create, role.update, role.read, and agent.read.
+	user := setupNonAdminUser(t, st, []string{"role.create", "role.update", "role.read", "agent.read"})
+
+	// First, create a role as admin (DevUser) with only agent.read.
+	created := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "update-escalation-test",
+		Description: "Role to be updated by non-admin",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Non-admin tries to update the role to add user.suspend → should get 403.
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPut, "/api/v1/admin/roles/"+created.ID, updateRoleDefinitionRequest{
+		Name:        "update-escalation-test",
+		Description: "Escalated",
+		Permissions: []string{"agent.read", "user.suspend"},
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestRolesAPI_NonAdmin_CreateBinding_WithHeldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role_binding.create, role_binding.read, and agent.read.
+	user := setupNonAdminUser(t, st, []string{"role_binding.create", "role_binding.read", "agent.read"})
+
+	// Create a role as admin with only agent.read (a permission our user holds).
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "binding-held-test",
+		Description: "Contains only held permissions",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Non-admin creates binding for this role → should succeed.
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "some-other-user",
+		ScopeType:        "system",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestRolesAPI_NonAdmin_CreateBinding_WithUnheldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role_binding.create, role_binding.read, and agent.read
+	// but NOT user.suspend.
+	user := setupNonAdminUser(t, st, []string{"role_binding.create", "role_binding.read", "agent.read"})
+
+	// Create a role as admin that includes user.suspend (a permission our user does NOT hold).
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "binding-unheld-test",
+		Description: "Contains unheld permissions",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read", "user.suspend"},
+	})
+
+	// Non-admin tries to create binding for this role → should get 403.
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "some-other-user",
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 }
