@@ -43,6 +43,12 @@ interface AccessToken {
   created: string;
 }
 
+interface ScopeOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
 const AVAILABLE_SCOPES = [
   { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
   { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
@@ -142,6 +148,8 @@ export class ScionTokenList extends LitElement {
   @state() private tokens: AccessToken[] = [];
   @state() private projects: Project[] = [];
   @state() private error: string | null = null;
+  @state() private availableScopes: ScopeOption[] = [...AVAILABLE_SCOPES];
+  private scopesCached = false;
 
   // Create dialog
   @state() private createDialogOpen = false;
@@ -295,7 +303,39 @@ export class ScionTokenList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    void this.loadScopes();
     void this.loadData();
+  }
+
+  /**
+   * Fetch available scopes from /api/v1/auth/scopes and cache the result.
+   * Falls back to the hardcoded AVAILABLE_SCOPES list on failure.
+   */
+  private async loadScopes(): Promise<void> {
+    if (this.scopesCached) return;
+    try {
+      const res = await apiFetch('/api/v1/auth/scopes');
+      if (!res.ok) return; // keep fallback
+      const data = (await res.json()) as {
+        scopes?: Array<{ id: string; resource: string; action: string; description: string }>;
+        aliases?: Array<{ id: string; description: string; expands_to: string[] }>;
+      };
+      const scopes: ScopeOption[] = [];
+      for (const s of data.scopes || []) {
+        scopes.push({ value: s.id, label: s.id, description: s.description });
+      }
+      for (const a of data.aliases || []) {
+        scopes.push({ value: a.id, label: a.id, description: a.description });
+      }
+      scopes.sort((a, b) => a.value.localeCompare(b.value));
+      if (scopes.length > 0) {
+        this.availableScopes = scopes;
+        this.scopesCached = true;
+      }
+    } catch {
+      // Keep fallback list — log for debugging
+      console.warn('Failed to fetch dynamic scopes, using fallback list');
+    }
   }
 
   private async loadData(): Promise<void> {
@@ -725,7 +765,7 @@ export class ScionTokenList extends LitElement {
           <div>
             <div class="field-label">Scopes</div>
             <div class="scope-checkboxes">
-              ${AVAILABLE_SCOPES.map(
+              ${this.availableScopes.map(
                 (scope) => html`
                   <div class="scope-checkbox-item">
                     <sl-checkbox
