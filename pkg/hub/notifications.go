@@ -650,15 +650,23 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID st
 		return
 	}
 
-	// F2: resolve agent slug for display. After the B5 auth-derivation
-	// override, SenderName may be a raw UUID (the agent ID). Resolve it
-	// to the human-readable slug for the notification text. This runs
-	// AFTER the muted and presence gates so the lookup only fires when a
-	// notification will actually be written. On failure, fall back to the
-	// current label — display resolution must never drop a notification.
-	if msg.SenderID != "" {
-		if agent, err := cn.store.GetAgent(ctx, msg.SenderID); err == nil && agent.Slug != "" {
-			senderName = agent.Slug
+	// F2: resolve agent display name. After the B5 auth-derivation
+	// override, the broker path sets SenderName to the raw UUID (the
+	// agent ID). Resolve it to the human-readable Name (preferred) or
+	// Slug (fallback) for the notification text. The guard ensures we
+	// only look up when SenderName IS the UUID — other callers
+	// (handlers_agent_messaging.go:353, handlers_chat_v2.go:1293)
+	// already pass a proper label and must not be clobbered. This also
+	// avoids a pointless GetAgent call on the user-to-user DM path.
+	// On lookup failure, fall back to the current label — display
+	// resolution must never drop a notification.
+	if msg.SenderID != "" && msg.SenderName == msg.SenderID {
+		if agent, err := cn.store.GetAgent(ctx, msg.SenderID); err == nil {
+			if agent.Name != "" {
+				senderName = agent.Name
+			} else if agent.Slug != "" {
+				senderName = agent.Slug
+			}
 		}
 	}
 

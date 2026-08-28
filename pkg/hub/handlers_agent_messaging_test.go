@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/stretchr/testify/require"
 )
 
 // postOutbound sends one agent→human message as the given agent.
@@ -998,5 +999,73 @@ func TestBroker_R2_FanOutGlobalSelfSkipBySenderID(t *testing.T) {
 	if selfN > 0 {
 		t.Errorf("SELF-DELIVERY in fanOutGlobal: sender received its own broadcast (%d rows). "+
 			"fanOutGlobal must skip by SenderID, not by the Sender display label.", selfN)
+	}
+}
+
+// R3b/F4: When a broadcast has an agent-prefixed Sender but empty SenderID,
+// the fan-out cannot self-skip and the sender silently receives its own
+// broadcast. The R3b warning makes this visible. This test asserts the
+// warning fires — without it, the safety net can silently disappear.
+func TestBroker_R3b_WarnOnEmptySenderID(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "r3b", Slug: "r3b",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID: api.NewUUID(), Name: "warn-agent", Slug: "warn-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Capture log output via a slog handler backed by a bytes.Buffer.
+	var logBuf bytes.Buffer
+	handler := slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := slog.New(handler)
+
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, logger)
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	proxy.subscribeAgent(project.ID, agent.Slug)
+
+	// Agent-prefixed Sender, but NO SenderID — the exact scenario R3b warns about.
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type:      messages.TypeInstruction,
+		Sender:    "agent:warn-agent",
+		SenderID:  "", // deliberately empty
+		Msg:       "self-skip impossible",
+	}
+
+	// Test fanOutToProject warning.
+	proxy.fanOutToProject(ctx, project.ID, msg)
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "self-skip not possible") {
+		t.Errorf("fanOutToProject: expected R3b warning in log output, got:\n%s", logged)
+	}
+
+	// Reset and test fanOutGlobal warning.
+	logBuf.Reset()
+	proxy.fanOutGlobal(ctx, msg)
+
+	logged = logBuf.String()
+	if !strings.Contains(logged, "self-skip not possible") {
+		t.Errorf("fanOutGlobal: expected R3b warning in log output, got:\n%s", logged)
 	}
 }

@@ -235,16 +235,22 @@ func TestChatNotifier_DMReceivedCreatesNotification(t *testing.T) {
 
 // B5/F2: After the auth-derivation override, SenderName arrives as a raw UUID
 // (the agent ID) because the Sender field is "agent:"+UUID. NotifyDMReceived
-// must resolve SenderID → agent slug for the notification display text. On
-// lookup failure it falls back to the original label (fail-open, not fail-closed
-// — dropping a notification is worse than showing a UUID).
+// must resolve SenderID → agent display name for the notification text. Name
+// is preferred over Slug, matching handlers_agent_messaging.go:353-357.
+// On lookup failure it falls back to the original label (fail-open, not
+// fail-closed — dropping a notification is worse than showing a UUID).
+//
+// F3: the resolution only fires when SenderName == SenderID (the UUID form).
+// When a caller already passes a proper label (agent.Name, user display name),
+// it must NOT be clobbered.
 func TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID(t *testing.T) {
 	env := setupChatNotifTest(t)
 	defer env.unsub()
 
 	ctx := context.Background()
 
-	// Create project and agent so the slug lookup succeeds.
+	// Create project and agent. Name and Slug differ so we can assert
+	// Name is preferred over Slug.
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "f2-notif", Slug: "f2-notif",
 		Visibility: store.VisibilityPrivate,
@@ -252,7 +258,7 @@ func TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID(t *testing.T) {
 	require.NoError(t, env.store.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID: api.NewUUID(), Name: "helpful-bot", Slug: "helpful-bot",
+		ID: api.NewUUID(), Name: "Helpful Bot", Slug: "helpful-bot",
 		ProjectID: project.ID, Phase: "running",
 		Visibility: store.VisibilityPrivate,
 	}
@@ -276,16 +282,16 @@ func TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID(t *testing.T) {
 	var payload ChatNotificationEvent
 	require.NoError(t, json.Unmarshal(evt.Data, &payload))
 
-	// The notification must display the slug, not the UUID.
-	assert.Equal(t, "helpful-bot", payload.SenderName,
-		"notification SenderName must be the agent slug, not the raw UUID")
+	// The notification must display agent.Name (preferred), not UUID or Slug.
+	assert.Equal(t, "Helpful Bot", payload.SenderName,
+		"notification SenderName must be agent.Name, not the raw UUID or slug")
 
 	// Also check the persisted notification text.
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, recipientID, false)
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)
-	assert.Contains(t, notifs[0].Message, "helpful-bot",
-		"persisted notification text must use the agent slug")
+	assert.Contains(t, notifs[0].Message, "Helpful Bot",
+		"persisted notification text must use agent.Name")
 	assert.NotContains(t, notifs[0].Message, agent.ID,
 		"persisted notification text must not contain the raw UUID")
 }

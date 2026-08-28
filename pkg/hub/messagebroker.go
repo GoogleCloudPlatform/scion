@@ -713,7 +713,10 @@ func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID stri
 	// will silently receive its own broadcast. Do not guess from the slug —
 	// that is the bug B5/R1 removed. Just make it loud so it is caught in
 	// logs rather than silently regressing.
-	if msg.Broadcasted && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
+	// The Broadcasted flag is not checked: these functions are only reached
+	// from broadcast subscriptions, and omitting the flag is exactly the
+	// class of publisher error R3b guards against.
+	if strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
 		p.log.Warn("Broadcast has agent Sender but empty SenderID — self-skip not possible",
 			"sender", msg.Sender, "projectID", projectID)
 	}
@@ -745,7 +748,7 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 	p.log.Debug("Global broadcast to all agents", "count", len(result.Items))
 
 	// R3b: same warning as fanOutToProject — see comment there.
-	if msg.Broadcasted && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
+	if strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
 		p.log.Warn("Global broadcast has agent Sender but empty SenderID — self-skip not possible",
 			"sender", msg.Sender)
 	}
