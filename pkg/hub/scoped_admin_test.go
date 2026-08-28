@@ -173,7 +173,7 @@ func TestScopedAdmin_HubAdminDeniedMaintenanceOperations(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "hub-admin should be denied maintenance operations")
 }
 
-func TestScopedAdmin_HubAdminDeniedDiagnosticsLogs(t *testing.T) {
+func TestScopedAdmin_HubAdminAccessesDiagnosticsLogsViaReadAllPolicy(t *testing.T) {
 	srv, _, hubAdmin, _ := setupScopedAdminTest(t)
 
 	// GET /api/v1/admin/diagnostics/logs — permission: hub.diagnostics.read (NOT in hub-admin role)
@@ -203,7 +203,7 @@ func TestScopedAdmin_HubAdminDeniedAuthReset(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "hub-admin should be denied auth reset")
 }
 
-func TestScopedAdmin_HubAdminDeniedPolicyList(t *testing.T) {
+func TestScopedAdmin_HubAdminAccessesPolicyListViaReadAllPolicy(t *testing.T) {
 	srv, _, hubAdmin, _ := setupScopedAdminTest(t)
 
 	// GET /api/v1/policies — RouteHubAdmin, permission: policy.read (NOT in hub-admin role)
@@ -219,8 +219,9 @@ func TestScopedAdmin_HubAdminDeniedPolicyList(t *testing.T) {
 func TestScopedAdmin_HubAdminDeniedPolicyCreate(t *testing.T) {
 	srv, _, hubAdmin, _ := setupScopedAdminTest(t)
 
-	// POST /api/v1/policies — RouteHubAdmin, permission: policy.read (NOT in hub-admin)
-	// The route guard blocks at policy.read before the handler even runs.
+	// POST /api/v1/policies — The route guard passes (metadata action=read matches
+	// hub-member-read-all policy). The handler enforces policy.create permission
+	// via its own Decide call (handlers_policies.go), which denies non-super-admins.
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/policies", map[string]interface{}{
 		"name":        "test-policy",
 		"description": "test",
@@ -383,8 +384,8 @@ func TestScopedAdmin_ProjectAdminDeniedUnboundProject(t *testing.T) {
 		"name": "Renamed",
 	})
 	// Project admin for X should not be able to modify project Y
-	assert.NotEqual(t, http.StatusOK, rec.Code,
-		"project-admin should NOT be able to modify unbound project")
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"project-admin should be forbidden from modifying unbound project")
 }
 
 func TestScopedAdmin_ProjectAdminDeniedHubLevelWriteOperations(t *testing.T) {
@@ -678,8 +679,8 @@ func TestScopedAdmin_HubAdminDeniedPolicyAuthoring(t *testing.T) {
 
 	t.Run("policy_create_denied", func(t *testing.T) {
 		// POST /api/v1/policies — the route guard passes (action=read from metadata),
-		// but the handler itself enforces super-admin-only policy creation via
-		// CanDelegate with GrantTypePolicy, which always denies non-super-admin.
+		// but the handler itself enforces super-admin-only policy creation via a
+		// Decide check for policy.create permission, which is not in the hub-admin role.
 		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/policies", map[string]interface{}{
 			"name":        "escalation-policy",
 			"description": "should be denied",
