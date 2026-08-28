@@ -1509,3 +1509,67 @@ func TestEnsureParticipant_DM_ThirdPartyRejection(t *testing.T) {
 	assert.Contains(t, addErr.Error(), "not named in direct conversation key")
 	assert.Contains(t, ensureErr.Error(), "not named in direct conversation key")
 }
+
+// TestEnsureParticipant_PopulatesCallerStruct verifies that EnsureParticipant
+// populates p.ID and p.JoinedAt from the existing row, matching AddParticipant's
+// post-condition. This is a READ-BACK, not a write — the DB row is untouched.
+func TestEnsureParticipant_PopulatesCallerStruct(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Add userB via AddParticipant, then soft-remove.
+	addP := &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}
+	require.NoError(t, s.AddParticipant(ctx, addP))
+	require.NoError(t, s.RemoveParticipant(ctx, conv.ID, "user", userB))
+
+	// Record DB state for the soft-removed row.
+	convUID, err := parseUUID(conv.ID)
+	require.NoError(t, err)
+	dbRow, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalIDEQ(userB),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, dbRow.LeftAt, "precondition: left_at must be set")
+	originalLeftAt := *dbRow.LeftAt
+
+	// Call EnsureParticipant with a fresh struct (zero ID, zero JoinedAt).
+	ensureP := &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}
+	require.Empty(t, ensureP.ID, "precondition: p.ID must be zero before call")
+	require.True(t, ensureP.JoinedAt.IsZero(), "precondition: p.JoinedAt must be zero before call")
+
+	// (a) returns nil
+	err = s.EnsureParticipant(ctx, ensureP)
+	require.NoError(t, err)
+
+	// (b) left_at unchanged in DB
+	afterRow, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalIDEQ(userB),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, afterRow.LeftAt, "left_at must remain set")
+	assert.True(t, originalLeftAt.Equal(*afterRow.LeftAt),
+		"left_at must be unchanged: original=%v, after=%v", originalLeftAt, *afterRow.LeftAt)
+
+	// (c) p.ID and p.JoinedAt now match the existing row
+	assert.Equal(t, dbRow.ID.String(), ensureP.ID,
+		"p.ID must be populated from existing row")
+	assert.True(t, dbRow.JoinedAt.Equal(ensureP.JoinedAt),
+		"p.JoinedAt must be populated from existing row: expected=%v, got=%v",
+		dbRow.JoinedAt, ensureP.JoinedAt)
+}

@@ -663,6 +663,10 @@ func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.Conv
 	}
 	if existing != nil {
 		// Row exists — leave it untouched (including left_at).
+		// Read back ID and JoinedAt so the caller's struct matches
+		// AddParticipant's post-condition on both paths.
+		p.ID = existing.ID.String()
+		p.JoinedAt = existing.JoinedAt
 		return nil
 	}
 
