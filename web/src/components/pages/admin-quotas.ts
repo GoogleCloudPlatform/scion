@@ -93,6 +93,7 @@ export class ScionPageAdminQuotas extends LitElement {
   @state() private expandedLimitId: string | null = null;
   @state() private entitlements: EntitlementBinding[] = [];
   @state() private entitlementsLoading = false;
+  @state() private entitlementsError: string | null = null;
   @state() private usageDetail: UsageByLimitResponse | null = null;
 
   // --- Create/Edit limit dialog ---
@@ -112,6 +113,7 @@ export class ScionPageAdminQuotas extends LitElement {
   @state() private showDeleteDialog = false;
   @state() private deleteTarget: { type: 'limit' | 'entitlement'; id: string; name: string } | null = null;
   @state() private deleteLoading = false;
+  @state() private deleteDialogError: string | null = null;
 
   static override styles = css`
     :host {
@@ -524,6 +526,7 @@ export class ScionPageAdminQuotas extends LitElement {
     this.entitlementsLoading = true;
     this.entitlements = [];
     this.usageDetail = null;
+    this.entitlementsError = null;
 
     try {
       const [entRes, usageRes] = await Promise.all([
@@ -541,6 +544,7 @@ export class ScionPageAdminQuotas extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load entitlements:', err);
+      this.entitlementsError = err instanceof Error ? err.message : 'Failed to load entitlements';
     } finally {
       this.entitlementsLoading = false;
     }
@@ -675,6 +679,7 @@ export class ScionPageAdminQuotas extends LitElement {
   private confirmDeleteLimit(limit: LimitDefinition, e: Event): void {
     e.stopPropagation();
     this.deleteTarget = { type: 'limit', id: limit.id, name: limit.name };
+    this.deleteDialogError = null;
     this.showDeleteDialog = true;
   }
 
@@ -684,6 +689,7 @@ export class ScionPageAdminQuotas extends LitElement {
       id: binding.id,
       name: `${binding.subjectType}:${binding.subjectId}`,
     };
+    this.deleteDialogError = null;
     this.showDeleteDialog = true;
   }
 
@@ -691,6 +697,7 @@ export class ScionPageAdminQuotas extends LitElement {
     if (!this.deleteTarget) return;
 
     this.deleteLoading = true;
+    this.deleteDialogError = null;
 
     try {
       let url: string;
@@ -706,8 +713,15 @@ export class ScionPageAdminQuotas extends LitElement {
       }
 
       const wasLimitDelete = this.deleteTarget.type === 'limit';
+
+      // Clear expanded state before reload to avoid referencing deleted limit
+      if (wasLimitDelete) {
+        this.expandedLimitId = null;
+      }
+
       this.showDeleteDialog = false;
       this.deleteTarget = null;
+      this.deleteDialogError = null;
 
       // Reload appropriate data
       await this.loadData();
@@ -715,8 +729,7 @@ export class ScionPageAdminQuotas extends LitElement {
         await this.loadEntitlements(this.expandedLimitId);
       }
     } catch (err) {
-      console.error('Delete failed:', err);
-      this.showDeleteDialog = false;
+      this.deleteDialogError = err instanceof Error ? err.message : 'Failed to delete';
     } finally {
       this.deleteLoading = false;
     }
@@ -861,7 +874,12 @@ export class ScionPageAdminQuotas extends LitElement {
           </tbody>
         </table>
       </div>
-      ${this.expandedLimitId ? this.renderDetailPanel(this.limits.find((l) => l.id === this.expandedLimitId)!) : nothing}
+      ${this.expandedLimitId
+        ? (() => {
+            const limit = this.limits.find((l) => l.id === this.expandedLimitId);
+            return limit ? this.renderDetailPanel(limit) : nothing;
+          })()
+        : nothing}
     `;
   }
 
@@ -924,9 +942,11 @@ export class ScionPageAdminQuotas extends LitElement {
           </div>
           ${this.entitlementsLoading
             ? html`<div class="loading-state" style="padding: 1.5rem"><sl-spinner></sl-spinner></div>`
-            : this.entitlements.length === 0
-              ? html`<div class="inline-empty">No entitlement bindings for this limit. The default value (${this.formatValue(limit.defaultValue)}) applies to all subjects.</div>`
-              : html`
+            : this.entitlementsError
+              ? html`<sl-alert variant="danger" open class="dialog-error">${this.entitlementsError}</sl-alert>`
+              : this.entitlements.length === 0
+                ? html`<div class="inline-empty">No entitlement bindings for this limit. The default value (${this.formatValue(limit.defaultValue)}) applies to all subjects.</div>`
+                : html`
                 <table class="entitlement-table">
                   <thead>
                     <tr>
@@ -965,9 +985,11 @@ export class ScionPageAdminQuotas extends LitElement {
           </div>
           ${this.entitlementsLoading
             ? html`<div class="loading-state" style="padding: 1.5rem"><sl-spinner></sl-spinner></div>`
-            : !this.usageDetail || this.usageDetail.reservations.length === 0
-              ? html`<div class="inline-empty">No active usage reservations.</div>`
-              : html`
+            : this.entitlementsError
+              ? nothing
+              : !this.usageDetail || this.usageDetail.reservations.length === 0
+                ? html`<div class="inline-empty">No active usage reservations.</div>`
+                : html`
                 <div style="margin-bottom: 0.75rem">
                   <span class="meta-text">Total active: <strong>${this.usageDetail.totalActive}</strong></span>
                 </div>
@@ -1167,8 +1189,11 @@ export class ScionPageAdminQuotas extends LitElement {
       <sl-dialog
         label="Confirm Delete"
         ?open=${this.showDeleteDialog}
-        @sl-hide=${() => { this.showDeleteDialog = false; this.deleteTarget = null; }}
+        @sl-hide=${() => { this.showDeleteDialog = false; this.deleteTarget = null; this.deleteDialogError = null; }}
       >
+        ${this.deleteDialogError
+          ? html`<sl-alert variant="danger" open class="dialog-error">${this.deleteDialogError}</sl-alert>`
+          : nothing}
         <p>
           Are you sure you want to delete ${this.deleteTarget?.type === 'limit' ? 'limit definition' : 'entitlement binding'}
           <strong>${this.deleteTarget?.name}</strong>? This action cannot be undone.
