@@ -87,7 +87,8 @@ set -euo pipefail
 #                    the same stripped value and agree.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--self-test" ]; then
-  export SHELL_DIFFERENTIAL_SELFTEST=done
+  # 'done' is quoted so shellcheck does not read it as the loop keyword (SC1010).
+  export SHELL_DIFFERENTIAL_SELFTEST='done'
   d="$(mktemp -d)"
   trap 'rm -rf "$d"' EXIT
 

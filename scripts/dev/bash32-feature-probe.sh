@@ -78,13 +78,23 @@ echo ""
 
 # --- The ten constructs, one subprocess each ---
 # Leading with printf -v because a correction to the design doc is waiting on it.
+#
+# SC2016: every probe snippet is a literal string sent to the interpreter under
+# test via bash -c. Expanding $ here would destroy the measurement — we would
+# test THIS shell's variables, not the construct in the child.
+# shellcheck disable=SC2016
 probe 'printf -v'    'printf -v x "%s" hello; [ "$x" = hello ]'
+# shellcheck disable=SC2016
 probe '${v,,}'       'v=ABC; echo "${v,,}"'
+# shellcheck disable=SC2016
 probe '${v^^}'       'v=abc; echo "${v^^}"'
+# shellcheck disable=SC2016
 probe 'declare -A'   'declare -A m; m[k]=v; [ "${m[k]}" = v ]'
 probe 'mapfile'      'echo hello | mapfile -t arr'
 probe 'readarray'    'echo hello | readarray -t arr'
+# shellcheck disable=SC2016
 probe 'local -n'     'f() { local -n ref=$1; ref=42; }; x=0; f x; [ "$x" = 42 ]'
 probe '[[ -v ]]'     'x=1; [[ -v x ]]'
 probe 'wait -n'      'sleep 0 & wait -n'
+# shellcheck disable=SC2016
 probe 'coproc'       'coproc cat; echo hi >&${COPROC[1]}; exec {COPROC[1]}>&-; read -r line <&${COPROC[0]}; [ "$line" = hi ]'
