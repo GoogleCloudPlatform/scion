@@ -57,16 +57,19 @@ func TestBypassCensus(t *testing.T) {
 	}
 
 	allowlist := []allowEntry{
+		// These are engine-internal keeps — permanent or deprecating-with-replacement.
+
 		// ─── Engine-internal keeps (permanent) ───────────────────────────
 		// These are part of the authorization engine, not handler-level bypasses.
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "checkAccessForUser admin bypass (KEEP)"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AuthorizeReadBatch short-circuit (KEEP)"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "Decide explain trace admin check"},
 		{file: "authz_candelegate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "CanDelegate super-admin bypass (KEEP)"},
+		{file: "capabilities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "checkAccessPrecomputed admin bypass (KEEP — mirrors checkAccessForUser step 1)"},
 		{file: "authz_delegation_ceiling.go", lineSubstr: "IsSystemAdmin", description: "delegation ceiling system admin check (KEEP)"},
 
 		// ─── Authorization infrastructure (permanent or deprecating) ─────
-		{file: "authorize.go", lineSubstr: "func (s *Server) requireAdmin(", description: "requireAdmin helper definition (DEPRECATE later)"},
+		{file: "authorize.go", lineSubstr: "func (s *Server) requireAdmin(", description: "requireAdmin helper definition (DEPRECATED — fallback only)"},
 		{file: "authorize.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "requireAdmin implementation"},
 		{file: "authorize.go", lineSubstr: "requireAdmin(w, r)", description: "requireAdminHandler wrapper"},
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
@@ -74,27 +77,8 @@ func TestBypassCensus(t *testing.T) {
 		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "comment reference"},
 
-		// ─── Capabilities (will be updated in PR-A7) ─────────────────────
-		{file: "capabilities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "capability computation (PR-A7)"},
-		{file: "capabilities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "capability computation (PR-A7)"},
-		{file: "capabilities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "capability computation (PR-A7)"},
-
-		// ─── Audit explain endpoint (will be updated in PR-A7) ───────────
-		{file: "audit_authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "explain endpoint admin check (PR-A7)"},
-
-		// ─── Handler-level bypasses (will be removed in PR-A2 through PR-A6) ──
-
-		// Settings and config (PR-A2) — converted to permission-based checks
-
-		// User management (PR-A3) — converted to permission-based checks
-
-		// Operations (PR-A4) — 10 handler bypass sites converted to permission-based route guards.
-		// The AdminModeMiddleware bypass at admin_mode.go:113 remains as infrastructure.
+		// ─── AdminModeMiddleware bypass (infrastructure, KEEP) ───────────
 		{file: "admin_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AdminModeMiddleware admin bypass (infrastructure, KEEP)"},
-
-		// Integrations and hooks (PR-A5) — converted to permission-based checks
-
-		// Resource handlers (PR-A6) — converted to permission-based checks
 
 		// ─── Auth/identity infrastructure (non-bypass references) ────────
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation comment reference"},

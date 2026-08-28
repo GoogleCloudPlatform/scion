@@ -191,10 +191,8 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 		return &Capabilities{Actions: []string{}}
 	}
 
-	// Admin short-circuit: return all actions
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		return allActions(actions)
-	}
+	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
+	// Hub-admins get correct capabilities from their role bindings.
 	if IsScopedUserIdentity(identity) {
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
@@ -230,10 +228,8 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		return &Capabilities{Actions: []string{}}
 	}
 
-	// Admin short-circuit
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		return allActions(actions)
-	}
+	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
+	// Hub-admins get correct capabilities from their role bindings.
 
 	resource := Resource{
 		Type:       resourceType,
@@ -277,15 +273,8 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
-	// Admin short-circuit: return all actions for all resources
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		allCap := allActions(actions)
-		caps := make([]*Capabilities, len(resources))
-		for i := range caps {
-			caps[i] = allCap
-		}
-		return caps
-	}
+	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
+	// Hub-admins get correct capabilities from their role bindings.
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
@@ -293,9 +282,6 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		}
 		return caps
 	}
-
-	// Pre-fetch principals and policies once for the identity
-	principals, policies := a.precomputeForIdentity(ctx, identity)
 
 	// Per-batch project ownership cache. Most batches list resources from a
 	// single project, so this collapses to one lookup per project.
@@ -316,18 +302,12 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return v
 	}
 
+	// Precompute group memberships and policies once for the entire batch,
+	// rather than re-deriving them on every CheckAccess call.
+	principals, policies := a.precomputeForIdentity(ctx, identity)
+
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
-		// Owner short-circuit
-		if resource.OwnerID != "" && resource.OwnerID == identity.ID() {
-			caps[i] = allActions(actions)
-			continue
-		}
-		// Ancestry short-circuit: ancestors get full access
-		if canAccessAsAncestor(identity.ID(), resource) {
-			caps[i] = allActions(actions)
-			continue
-		}
 		// Project owner/admin short-circuit
 		if isProjectOwner(projectIDForResource(resource)) {
 			caps[i] = allActions(actions)
@@ -400,6 +380,12 @@ func (a *AuthzService) precomputeForIdentity(ctx context.Context, identity Ident
 
 // checkAccessPrecomputed evaluates access using pre-fetched principals and policies.
 func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.PrincipalRef, policies []store.Policy, resource Resource, action Action) Decision {
+	// Admin bypass: mirrors checkAccessForUser step 1 so batch callers
+	// that skip CheckAccess still grant admins full access.
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
+		return Decision{Allowed: true, Reason: "admin bypass"}
+	}
+
 	// Owner bypass (already handled in batch caller, but kept for single-resource calls)
 	if user, ok := identity.(UserIdentity); ok {
 		if resource.OwnerID != "" && resource.OwnerID == user.ID() {
