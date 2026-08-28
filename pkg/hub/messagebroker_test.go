@@ -425,7 +425,7 @@ func TestMessageBrokerProxy_ProjectBroadcast(t *testing.T) {
 func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
-	setupBrokerTestAgent(t, s, projectID, "sender-agent", "running")
+	senderAgent := setupBrokerTestAgent(t, s, projectID, "sender-agent", "running")
 	setupBrokerTestAgent(t, s, projectID, tid("other-agent"), "running")
 
 	events := NewChannelEventPublisher()
@@ -444,6 +444,10 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 
 	msg := messages.NewInstruction("agent:sender-agent", "project:test-project", "any updates?")
 	msg.Broadcasted = true
+	// R3: production now always sets SenderID from auth (B5 override at
+	// handleProjectBroadcast:1261-1270). The fan-out self-skip relies on
+	// SenderID, not the display-label Sender field.
+	msg.SenderID = senderAgent.ID
 	_ = proxy.PublishBroadcast(context.Background(), projectID, msg)
 
 	time.Sleep(100 * time.Millisecond)

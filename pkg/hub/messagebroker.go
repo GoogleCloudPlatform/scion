@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -454,6 +455,42 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Visibility:  msg.Visibility,
 		CreatedAt:   time.Now(),
 	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !msg.Broadcasted {
+		var convResult *messaging.ConversationResult
+		if msg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+		} else if msg.SenderID != "" && msg.RecipientID != "" {
+			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
+			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+			if sOK && rOK {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+			} else {
+				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
 	}
@@ -593,6 +630,40 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     time.Now(),
 	}
+	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !msg.Broadcasted {
+		var convResult *messaging.ConversationResult
+		if msg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID)
+		} else if msg.SenderID != "" && agent.ID != "" {
+			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+			} else {
+				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
+					"sender", msg.Sender, "sender_id", msg.SenderID)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
 		return
@@ -637,9 +708,24 @@ func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID stri
 
 	p.log.Debug("Broadcasting to project agents", "project_id", projectID, "count", len(result.Items))
 
+	// R3b: warn when a broadcast carries an agent-prefixed Sender but no
+	// SenderID. Without SenderID the self-skip cannot fire and the sender
+	// will silently receive its own broadcast. Do not guess from the slug —
+	// that is the bug B5/R1 removed. Just make it loud so it is caught in
+	// logs rather than silently regressing.
+	// The Broadcasted flag is not checked: these functions are only reached
+	// from broadcast subscriptions, and omitting the flag is exactly the
+	// class of publisher error R3b guards against.
+	if strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
+		p.log.Warn("Broadcast has agent Sender but empty SenderID — self-skip not possible",
+			"sender", msg.Sender, "projectID", projectID)
+	}
+
 	for _, agent := range result.Items {
-		// Skip the sender if it's an agent in this project
-		if msg.Sender == "agent:"+agent.Slug {
+		// B5/R1: skip the sender by ID, not by the display-label Sender field.
+		// Sender is a display label that may be in UUID form after the B5
+		// auth-derivation override; SenderID is the canonical identity.
+		if msg.SenderID != "" && msg.SenderID == agent.ID {
 			continue
 		}
 		agentMsg := *msg // copy to set per-agent recipient
@@ -661,8 +747,15 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 
 	p.log.Debug("Global broadcast to all agents", "count", len(result.Items))
 
+	// R3b: same warning as fanOutToProject — see comment there.
+	if strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID == "" {
+		p.log.Warn("Global broadcast has agent Sender but empty SenderID — self-skip not possible",
+			"sender", msg.Sender)
+	}
+
 	for _, agent := range result.Items {
-		if msg.Sender == "agent:"+agent.Slug {
+		// B5/R1: skip the sender by ID, not by the display-label Sender field.
+		if msg.SenderID != "" && msg.SenderID == agent.ID {
 			continue
 		}
 		agentMsg := *msg

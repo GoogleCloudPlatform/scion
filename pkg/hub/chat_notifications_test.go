@@ -233,6 +233,156 @@ func TestChatNotifier_DMReceivedCreatesNotification(t *testing.T) {
 	assert.Contains(t, n.Message, "Hello there!")
 }
 
+// B5/F2: After the auth-derivation override, SenderName arrives as a raw UUID
+// (the agent ID) because the Sender field is "agent:"+UUID. NotifyDMReceived
+// must resolve SenderID → agent display name for the notification text. Name
+// is preferred over Slug, matching handlers_agent_messaging.go:353-357.
+// On lookup failure it falls back to the original label (fail-open, not
+// fail-closed — dropping a notification is worse than showing a UUID).
+//
+// F3: the resolution only fires when SenderName == SenderID (the UUID form).
+// When a caller already passes a proper label (agent.Name, user display name),
+// it must NOT be clobbered.
+func TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID(t *testing.T) {
+	env := setupChatNotifTest(t)
+	defer env.unsub()
+
+	ctx := context.Background()
+
+	// Create project and agent. Name and Slug differ so we can assert
+	// Name is preferred over Slug.
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "f2-notif", Slug: "f2-notif",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, env.store.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID: api.NewUUID(), Name: "Helpful Bot", Slug: "helpful-bot",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, env.store.CreateAgent(ctx, agent))
+
+	recipientID := api.NewUUID()
+	conversationKey := "dm:agent:" + agent.ID + ":user:" + recipientID
+
+	// SenderName is the UUID form (what TrimPrefix produces after B5 override).
+	env.notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderID:        agent.ID,
+		SenderName:      agent.ID, // raw UUID, not slug
+		ConversationKey: conversationKey,
+		Preview:         "Hello from the bot!",
+		ProjectID:       project.ID,
+	})
+
+	evt := drainNotification(env.notifCh, 2*time.Second)
+	require.NotNil(t, evt, "expected a notification event")
+
+	var payload ChatNotificationEvent
+	require.NoError(t, json.Unmarshal(evt.Data, &payload))
+
+	// The notification must display agent.Name (preferred), not UUID or Slug.
+	assert.Equal(t, "Helpful Bot", payload.SenderName,
+		"notification SenderName must be agent.Name, not the raw UUID or slug")
+
+	// Also check the persisted notification text.
+	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, recipientID, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.Contains(t, notifs[0].Message, "Helpful Bot",
+		"persisted notification text must use agent.Name")
+	assert.NotContains(t, notifs[0].Message, agent.ID,
+		"persisted notification text must not contain the raw UUID")
+}
+
+// B5/F3/F6: When a caller already passes a proper label (e.g.
+// handlers_agent_messaging.go:353-357 passing agent.Name), the F2 slug
+// resolution must NOT overwrite it. The guard SenderName == SenderID
+// ensures the lookup only fires when SenderName is the raw UUID.
+// This test uses a SenderName distinct from both agent.Name and
+// agent.Slug so it fails if the guard is removed (resolution would
+// overwrite with Name) or if the preference order changes.
+func TestChatNotifier_DMReceived_DoesNotClobberCallerLabel(t *testing.T) {
+	env := setupChatNotifTest(t)
+	defer env.unsub()
+
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "f6-noclobber", Slug: "f6-noclobber",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, env.store.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID: api.NewUUID(), Name: "Agent Real Name", Slug: "agent-slug",
+		ProjectID: project.ID, Phase: "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, env.store.CreateAgent(ctx, agent))
+
+	recipientID := api.NewUUID()
+
+	// Caller supplies a label distinct from both Name and Slug.
+	// This is what handlers_agent_messaging.go:353-357 does (passes
+	// agent.Name), but we use a third string so the test is sensitive
+	// to any overwrite, not just Slug-over-Name.
+	env.notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderID:        agent.ID,
+		SenderName:      "Caller Chosen Label",
+		ConversationKey: "dm:agent:" + agent.ID + ":user:" + recipientID,
+		Preview:         "hello",
+		ProjectID:       project.ID,
+	})
+
+	evt := drainNotification(env.notifCh, 2*time.Second)
+	require.NotNil(t, evt, "expected a notification event")
+
+	var payload ChatNotificationEvent
+	require.NoError(t, json.Unmarshal(evt.Data, &payload))
+
+	assert.Equal(t, "Caller Chosen Label", payload.SenderName,
+		"caller-supplied label must not be overwritten by slug resolution")
+
+	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, recipientID, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.Contains(t, notifs[0].Message, "Caller Chosen Label",
+		"persisted notification must use the caller-supplied label")
+}
+
+// B5/F2 fallback: when the agent lookup fails (e.g. deleted agent), the
+// notification must still be created with the original label, not dropped.
+func TestChatNotifier_DMReceived_FallsBackOnLookupFailure(t *testing.T) {
+	env := setupChatNotifTest(t)
+	defer env.unsub()
+
+	ctx := context.Background()
+	recipientID := api.NewUUID()
+	nonexistentAgentID := api.NewUUID()
+	conversationKey := "dm:agent:" + nonexistentAgentID + ":user:" + recipientID
+
+	// SenderName is the UUID (agent not in store — lookup will fail).
+	env.notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderID:        nonexistentAgentID,
+		SenderName:      nonexistentAgentID,
+		ConversationKey: conversationKey,
+		Preview:         "Ghost message",
+		ProjectID:       "",
+	})
+
+	evt := drainNotification(env.notifCh, 2*time.Second)
+	require.NotNil(t, evt, "notification must still be created on lookup failure (fail-open)")
+
+	var payload ChatNotificationEvent
+	require.NoError(t, json.Unmarshal(evt.Data, &payload))
+
+	// Falls back to the UUID label — not ideal but the notification is not dropped.
+	assert.Equal(t, nonexistentAgentID, payload.SenderName,
+		"on lookup failure, SenderName must fall back to the original label")
+}
+
 // TestChatNotifier_EventPreviewMatchesMessageTruncation pins the two
 // renderings of the same text to one truncation rule. The tray row reads the
 // formatted Message; the browser popup reads Preview. If they truncate

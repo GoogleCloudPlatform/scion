@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -248,6 +249,33 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Visibility:  req.Visibility,
 		CreatedAt:   time.Now(),
 	}
+
+	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
+	var convResult *messaging.ConversationResult
+	if req.ThreadID != "" {
+		convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, req.ThreadID, agent.ProjectID)
+	} else if agent.ID != "" && recipientID != "" {
+		convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "agent", agent.ID, "user", recipientID)
+	}
+	if convResult != nil {
+		storeMsg.ConversationID = convResult.ConversationID
+	}
+	// Always log divergence — even when convResult is nil, that is a divergence signal.
+	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
+	convID := ""
+	actualRef := ""
+	if convResult != nil {
+		convID = convResult.ConversationID
+		actualRef = convResult.ExternalRef
+	}
+	match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+	messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+		MessageID:  storeMsg.ID,
+		OldRouting: oldRouting,
+		NewRouting: messaging.NewRoutingStr(convID),
+		Match:      match,
+		Reason:     reason,
+	})
 
 	// Build a structured message for external dispatch paths.
 	structuredMsg := &messages.StructuredMessage{
@@ -509,32 +537,26 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if req.StructuredMessage != nil {
 		structuredMsg = req.StructuredMessage
 		plainMessage = req.StructuredMessage.Msg
-		// Populate sender from the authenticated identity when the client
-		// didn't provide one (e.g. web UI sends structured_message without sender).
-		if structuredMsg.Sender == "" {
-			structuredMsg.Sender = "user:unknown"
-			if user := GetUserIdentityFromContext(ctx); user != nil {
-				structuredMsg.SenderID = user.ID()
-				if name := user.DisplayName(); name != "" {
-					structuredMsg.Sender = "user:" + name
-				} else if email := user.Email(); email != "" {
-					structuredMsg.Sender = "user:" + email
-				}
-			} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-				structuredMsg.SenderID = agentIdent.ID()
-				structuredMsg.Sender = "agent:" + agentIdent.ID()
+		// B5 SECURITY FIX: ALWAYS derive sender identity from the
+		// authenticated context. Client-supplied Sender and SenderID are
+		// untrusted inputs that must never be used as conversation key
+		// inputs — the DM key IS the access authority for direct
+		// conversations and there is no second check to catch a wrong one.
+		//
+		// This also fixes the downstream broker path: the broker receives
+		// the published message and inherits these (now auth-derived) fields.
+		structuredMsg.Sender = "user:unknown"
+		structuredMsg.SenderID = ""
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			structuredMsg.SenderID = user.ID()
+			if name := user.DisplayName(); name != "" {
+				structuredMsg.Sender = "user:" + name
+			} else if email := user.Email(); email != "" {
+				structuredMsg.Sender = "user:" + email
 			}
-		}
-		// Backfill SenderID from auth context when the client set Sender
-		// but omitted SenderID (e.g. CLI-originated agent-to-agent messages).
-		// Without this, inter-agent message queries by ParticipantID miss
-		// messages where the agent was the sender.
-		if structuredMsg.SenderID == "" {
-			if user := GetUserIdentityFromContext(ctx); user != nil {
-				structuredMsg.SenderID = user.ID()
-			} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-				structuredMsg.SenderID = agentIdent.ID()
-			}
+		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			structuredMsg.SenderID = agentIdent.ID()
+			structuredMsg.Sender = "agent:" + agentIdent.ID()
 		}
 		// Default version, timestamp and type when the client omits them
 		// (e.g. the web UI sends a minimal structured_message).
@@ -755,6 +777,36 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
+		var convResult *messaging.ConversationResult
+		if structuredMsg.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, structuredMsg.ThreadID, agent.ProjectID)
+		} else if agent.ID != "" {
+			// B5 SECURITY: derive sender identity for the DM key from the
+			// authenticated context, never from the message payload.
+			if authKind, authID := authenticatedSender(ctx); authID != "" {
+				convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
@@ -979,6 +1031,33 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				DispatchState: store.MessageDispatchDispatched,
 				CreatedAt:     time.Now(),
 			}
+			// Phase 5 dual-write: resolve-or-create conversation for group set message.
+			// B5 SECURITY: derive sender from authenticated context, never payload.
+			var convResult *messaging.ConversationResult
+			if agent.ID != "" {
+				if authKind, authID := authenticatedSender(ctx); authID != "" {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
+				}
+			}
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, "")
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}
@@ -1073,6 +1152,33 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				GroupID:     groupID,
 				CreatedAt:   time.Now(),
 			}
+			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
+			// B5 SECURITY: derive sender from authenticated context, never payload.
+			var convResult *messaging.ConversationResult
+			if userID != "" {
+				if authKind, authID := authenticatedSender(ctx); authID != "" {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
+				}
+			}
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(userMsg.SenderID, userID, "")
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}
@@ -1147,21 +1253,37 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Populate sender from authenticated identity when not provided by the client.
-	if req.StructuredMessage.Sender == "" {
-		req.StructuredMessage.Sender = "user:unknown"
-		if userIdent != nil {
-			req.StructuredMessage.SenderID = userIdent.ID()
-			if name := userIdent.DisplayName(); name != "" {
-				req.StructuredMessage.Sender = "user:" + name
-			} else if email := userIdent.Email(); email != "" {
-				req.StructuredMessage.Sender = "user:" + email
-			}
-		} else if agentIdent != nil {
-			req.StructuredMessage.SenderID = agentIdent.ID()
-			req.StructuredMessage.Sender = "agent:" + agentIdent.ID()
+	// B5 SECURITY FIX: ALWAYS derive sender identity from the
+	// authenticated context, same as handleAgentMessage. Client-supplied
+	// Sender and SenderID are untrusted and must not be used as DM key
+	// inputs or for routing decisions (self-skip).
+	req.StructuredMessage.Sender = "user:unknown"
+	req.StructuredMessage.SenderID = ""
+	if userIdent != nil {
+		req.StructuredMessage.SenderID = userIdent.ID()
+		if name := userIdent.DisplayName(); name != "" {
+			req.StructuredMessage.Sender = "user:" + name
+		} else if email := userIdent.Email(); email != "" {
+			req.StructuredMessage.Sender = "user:" + email
 		}
+	} else if agentIdent != nil {
+		req.StructuredMessage.SenderID = agentIdent.ID()
+		req.StructuredMessage.Sender = "agent:" + agentIdent.ID()
 	}
+
+	// B5 SECURITY FIX: force Broadcasted = true server-side. The client
+	// must not control whether its message is treated as a broadcast —
+	// that is a routing fact the server knows. Without this, a client
+	// setting Broadcasted=false walks the message through the DM
+	// dual-write in deliverToAgent, creating a DM conversation per
+	// running agent.
+	req.StructuredMessage.Broadcasted = true
+
+	// Use authenticated identity for self-skip, not the Sender field.
+	// The Sender field is a display label; the auth identity is the
+	// security-relevant identity. A forged Sender could change which
+	// agents are targeted.
+	authKind, authID := authenticatedSender(ctx)
 
 	// Compute broadcast targeting: list all agents, classify by phase.
 	allResult, err := s.store.ListAgents(ctx, store.AgentFilter{
@@ -1175,7 +1297,8 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	var targeted int
 	skippedBreakdown := make(map[string]int)
 	for _, agent := range allResult.Items {
-		if req.StructuredMessage.Sender == "agent:"+agent.Slug {
+		// Skip the sending agent to avoid self-delivery.
+		if authKind == "agent" && agent.ID == authID {
 			continue
 		}
 		if agent.Phase == string(state.PhaseRunning) {
@@ -1192,7 +1315,8 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// Collect running agents from the already-fetched list for direct fan-out.
 	var runningAgents []store.Agent
 	for _, agent := range allResult.Items {
-		if req.StructuredMessage.Sender == "agent:"+agent.Slug {
+		// Skip the sending agent to avoid self-delivery.
+		if authKind == "agent" && agent.ID == authID {
 			continue
 		}
 		if agent.Phase == string(state.PhaseRunning) {
@@ -1452,4 +1576,22 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	}
 
 	return results
+}
+
+// authenticatedSender returns the principal kind ("user" or "agent") and ID
+// from the request's authenticated context. Returns ("", "") when no
+// authenticated identity is present.
+//
+// B5 SECURITY: DM conversation key inputs MUST come from the authenticated
+// context, never from the client-supplied message payload. The key IS the
+// access control list for direct conversations — any guess on any input to
+// the key derivation is a guess on the ACL.
+func authenticatedSender(ctx context.Context) (kind, id string) {
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		return "user", user.ID()
+	}
+	if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+		return "agent", agent.ID()
+	}
+	return "", ""
 }

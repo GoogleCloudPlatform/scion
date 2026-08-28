@@ -650,6 +650,26 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID st
 		return
 	}
 
+	// F2: resolve agent display name. After the B5 auth-derivation
+	// override, the broker path sets SenderName to the raw UUID (the
+	// agent ID). Resolve it to the human-readable Name (preferred) or
+	// Slug (fallback) for the notification text. The guard ensures we
+	// only look up when SenderName IS the UUID — other callers
+	// (handlers_agent_messaging.go:353, handlers_chat_v2.go:1293)
+	// already pass a proper label and must not be clobbered. This also
+	// avoids a pointless GetAgent call on the user-to-user DM path.
+	// On lookup failure, fall back to the current label — display
+	// resolution must never drop a notification.
+	if msg.SenderID != "" && msg.SenderName == msg.SenderID {
+		if agent, err := cn.store.GetAgent(ctx, msg.SenderID); err == nil {
+			if agent.Name != "" {
+				senderName = agent.Name
+			} else if agent.Slug != "" {
+				senderName = agent.Slug
+			}
+		}
+	}
+
 	message := formatChatNotification(ChatNotificationDMReceived, senderName, "", msg.Preview)
 
 	notif := cn.buildChatNotification(recipientUserID, ChatNotificationDMReceived, message, msg.ProjectID)
@@ -661,7 +681,10 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID st
 	}
 
 	// A DM has no thread name; make sure a stale one cannot ride along.
+	// Also propagate the resolved slug (if any) so the SSE event payload
+	// carries the human-readable name, not the raw UUID.
 	dmMsg := msg
+	dmMsg.SenderName = senderName
 	dmMsg.ConversationName = ""
 	cn.events.PublishChatNotification(ctx, notif, dmMsg)
 	cn.log.Info("DM notification created",
