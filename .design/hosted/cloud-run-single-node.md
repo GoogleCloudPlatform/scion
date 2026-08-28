@@ -265,6 +265,11 @@ Three consequences for tooling:
   against the surface that will consume it, as early as the deploy can do so — the
   preflight, not the point of use.
 
+**This section describes runtime autodetection only, and that is not the whole of what
+an agent runs on.** The profile layer above it makes its own selection and does not learn
+what autodetect decided — see §4.7, which is the same argument as this section's, one
+layer up, and which cost a §1 blocker to find.
+
 ### 4.4 The runtime is named `cloudrun-sandbox`
 
 `cloudrun-instances` is taken by a real implementation of the opposite topology
@@ -380,6 +385,57 @@ to fetch, verify or compile — and the runner also supplies the BSD userland an
 hardware, which a compiled bash on Linux would not. The runner image is pinned to a
 specific version rather than `macos-latest`, because a moving alias silently retires the
 gate the day the fleet upgrades past bash 3.2.
+
+### 4.7 The profile layer never learns what the runtime layer decided
+
+**§4.3 is correct and was not enough.** Autodetect picks `cloudrun-sandbox` on an
+Instance and nowhere else, exactly as that section describes. But autodetect is not the
+only layer that decides what an agent runs on, and the layer above it — *profiles* —
+was never described here. A fresh deploy pre-selected `remote (kubernetes)`, which this
+tier cannot serve, so §1 step 5 was unreachable on an otherwise correct deploy.
+
+**The mechanism is a substitution that is never written back.** `GetRuntime` resolves
+the configured runtime `docker`, observes it cannot work on an Instance, and returns
+`cloudrun-sandbox` instead. That substitution happens at the runtime layer and stays
+there. The `local` profile still *declares* `docker`. Nothing tells the profile layer
+what the runtime layer chose.
+
+`buildInfoProfiles` then filters the profile list against the broker's actual runtime,
+and drops any profile that is local-only when the broker is not. So it drops `local`
+**because the declaration and the substitution disagree** — and keeps `remote`, whose
+`kubernetes` survives only because it is *not local-only*. **The filter discards the one
+profile this broker can serve and keeps the one it cannot.** One profile then remains, so
+the UI auto-selects it, and the operator is given the broken option by default and never
+sees a choice.
+
+**This is the same error §4.3 already warns about, one layer up.** That section's
+argument is that `K_SERVICE` answers a nearby question rather than yours.
+`isLocalOnlyRuntime` is a negative predicate standing in for a positive one: the question
+that matters is *can this broker serve this profile*, and the code asks *is this profile
+local-only*. Those coincide on a workstation and diverge on every hosted tier. **A
+predicate that is right by coincidence is right until the environment changes, which is
+precisely what a new tier is.**
+
+**Decided: the tier seeds its own settings**, following the multi-node tier's existing
+`hub-settings-template.yaml` precedent, so a `default` profile exists that declares
+`cloudrun-sandbox` explicitly. Delivery is via `InitMachine`, not the deploy script —
+`deploy.sh` runs on the operator's machine (§4.6) and is the wrong place for a decision
+about the server's own configuration.
+
+**One mechanism here is load-bearing and was measured, not assumed:** koanf loads the
+embedded defaults *first* and the seeded template *after*, so the scalar `active_profile`
+is **overwritten** while the `profiles` map **merges**. The fix depends entirely on that
+asymmetry. It is pinned by a test that runs the real `InitMachine` against the real
+settings loader and asserts the effective post-merge state; pins written against the
+seeded *file* pass whether the fix is present or not.
+
+**Deferred, and named here so it is not lost: the predicate itself is still wrong.**
+Correcting it would remove the unservable option from the menu rather than merely
+demoting it — an operator can still select `remote (kubernetes)` today and get a dead
+agent. It is deferred because `buildInfoProfiles` is shared with the multi-node Cloud Run
+tier and with workstation brokers, where offering a remote profile is a legitimate
+feature. **That makes it a product decision about other tiers, not a defect fix within
+this one**, and this design does not get to make it unilaterally.
 
 ## 5. Durability — Tier 0, pure ephemeral
 
@@ -635,7 +691,8 @@ Additionally, for review:
 10. Autodetect selects `cloudrun-sandbox` on an Instance and does not select it
     anywhere else (§4.3).
 11. The omni image is produced by the chained build, and no harness version is pinned
-    in two places (§4.1).
+    in two places (§4.1). **Verified — run.** The chained build produces the omni
+    image and the result is verified by digest.
 12. **A deploy interrupted or failed between Instance creation and IAP configuration
     leaves no Instance reachable without IAP** (§6.1). Verify by inducing the failure,
     not by reading the ordering. The check is whether an Instance exists *and answers*
@@ -648,8 +705,16 @@ Additionally, for review:
     the wrong reason, and this one is checking for the absence of a runtime error, which
     is the failure mode most easily faked by not executing the line at all.
 
-**On 12 and 13, the same caution applies and it is the lesson of this tier so far:
-both are negative criteria.** "No unprotected Instance" and "no bash-4 construct" are
-satisfied by a check that never ran. Neither should be recorded as met until it has
-been observed *failing* against a deliberately broken input. **Verified — run.** The chained build produces the omni
-    image and the result is verified by digest.
+14. **A fresh deploy pre-selects a runtime profile the tier can actually serve** (§4.7),
+    and the operator reaches a running agent without choosing one. Verify on a deploy
+    that has never had its settings touched — the defect this replaces was invisible to
+    every existing test because the tests asserted the seeded file rather than the
+    effective settings after the merge.
+
+**On 12, 13 and 14 the same caution applies, and it is the lesson of this tier so far:
+all three are negative criteria.** "No unprotected Instance", "no bash-4 construct" and
+"no unservable profile" are each satisfied by a check that never ran. None should be
+recorded as met until it has been observed *failing* against a deliberately broken
+input — for 14 specifically, against a reverted fix, because a profile test that passes
+with the fix removed is the exact defect that was found and removed twice during its
+review.
