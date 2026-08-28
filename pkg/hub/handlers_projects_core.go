@@ -212,17 +212,27 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 	// Check if user has admin-level list visibility via permission.
 	hasAdminView := false
-	if user, ok := identity.(UserIdentity); ok {
-		hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "project", ID: "hub"},
-			Action:     Action("list"),
-			Permission: "project.list",
-		}).Allowed
+	if identity != nil {
+		if user, ok := identity.(UserIdentity); ok {
+			hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
+				Principal:  principalContextForIdentity(user),
+				Credential: credentialContextForIdentity(user),
+				Resource:   Resource{Type: "project", ID: "hub"},
+				Action:     Action("list"),
+				Permission: "project.list",
+			}).Allowed
+		}
 	}
-	if identity != nil && !hasAdminView {
-		// Non-admin: use authorizedList for policy-enforced filtering.
+	if hasAdminView {
+		// Admin view: direct store query without authorization filtering.
+		result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	} else if identity != nil {
+		// Authenticated non-admin: use authorizedList for policy-enforced filtering.
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Project], error) {
 			page, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {
@@ -236,13 +246,8 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else {
-		// Admin or unauthenticated: direct store query.
-		result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		// Unauthenticated: return empty list (no identity to authorize against).
+		items = []store.Project{}
 	}
 
 	// Enrich owner display names

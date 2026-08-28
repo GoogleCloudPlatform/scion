@@ -35,10 +35,15 @@ func (s *Server) handleSetTemplate(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	// Require project.clone permission for template management.
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
+	// Require project.clone permission for template management (user identity only).
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
 		Unauthorized(w)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
 		return
 	}
 	if !s.authzService.Decide(r.Context(), AuthzRequest{

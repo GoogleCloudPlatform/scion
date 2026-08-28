@@ -738,10 +738,15 @@ func (s *Server) getHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Require hub.settings.update permission.
-	user := GetUserIdentityFromContext(ctx)
-	if user == nil {
+	// Require hub.settings.update permission (user identity only).
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
 		Unauthorized(w)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
 		return
 	}
 	if !s.authzService.Decide(ctx, AuthzRequest{
