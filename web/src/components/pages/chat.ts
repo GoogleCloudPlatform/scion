@@ -825,7 +825,7 @@ export class ScionPageChat extends LitElement {
 
   private async fetchAgentCapabilities(agentId: string): Promise<void> {
     if (this.agentCapabilities.has(agentId)) {
-      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'message');
+      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'attach');
       return;
     }
 
