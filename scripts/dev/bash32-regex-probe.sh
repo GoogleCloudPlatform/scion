@@ -4,11 +4,16 @@
 # bash 3.2 as on bash 5?
 #
 # WHY THIS FILE EXISTS AS A FILE. The bash 3.2 answer below was obtained by a
-# human running this block on his own Mac (bash 3.2.57, arm64 Darwin), because
-# macOS still ships the last GPLv2 bash and CI here cannot fetch its source.
-# That output cost a laptop and a person's time and cannot be re-obtained on
-# demand, so it is recorded rather than remembered. If you are tempted to
-# re-litigate "does 3.2 handle =~ differently", read EXPECTED_BASH32 first.
+# human running this block on his own Mac (bash 3.2.57, arm64 Darwin), before
+# this repo had any macOS CI. It is recorded rather than remembered because a
+# result nobody can reproduce on demand degrades into "someone said it once".
+# If you are tempted to re-litigate "does 3.2 handle =~ differently", read
+# EXPECTED_BASH32 first.
+#
+# It is kept now that .github/workflows/macos-bash32.yml exists, because the
+# workflow does not replace it -- the workflow RUNS it, so every macOS job
+# checks a second real 3.2 against this record on different hardware. One
+# laptop is an anecdote; a laptop plus a runner that keeps agreeing is a pin.
 #
 # THE QUESTION IS NOT ACADEMIC. bash 3.2 changed the meaning of a QUOTED
 # right-hand side: from 3.2 on, quoting the pattern makes it match LITERALLY
