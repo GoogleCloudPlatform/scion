@@ -39,6 +39,7 @@ type DMMigrationResult struct {
 	ParticipantsAdded int      // step 2: participants derived from key
 	EmptyRefMerged    int      // step 3a: empty-ref rows merged with existing
 	EmptyRefRekeyed   int      // step 3a: empty-ref rows re-keyed in place
+	EmptyRefSkipped   int      // step 3a: empty-ref rows left keyless (B14 ruling)
 	OldFormatRekeyed  int      // step 3b: old dm:X:Y rows re-keyed
 	Unparseable       int      // rows that could not be processed
 	Ambiguous         int      // IDs found in neither or both tables
@@ -259,80 +260,19 @@ func (s *DMMigrationService) countMissingParticipants(
 // ---------------------------------------------------------------------------
 
 func (s *DMMigrationService) stepMergeOrRekeyEmptyRef(
-	ctx context.Context,
-	conv *store.Conversation,
-	dryRun bool,
+	_ context.Context,
+	_ *store.Conversation,
+	_ bool,
 	result *DMMigrationResult,
 ) {
-	// Read participants to determine the two principals.
-	parts, err := s.store.ListParticipants(ctx, conv.ID)
-	if err != nil {
-		result.Unparseable++
-		result.Errors = append(result.Errors,
-			fmt.Sprintf("step3a: list participants for %s: %v", conv.ID, err))
-		return
-	}
-
-	// Filter to active participants (no LeftAt).
-	var active []store.ConversationParticipant
-	for _, p := range parts {
-		if p.LeftAt == nil {
-			active = append(active, p)
-		}
-	}
-
-	if len(active) != 2 {
-		result.Unparseable++
-		return
-	}
-
-	// Validate kinds.
-	if !isValidDMKind(active[0].PrincipalKind) || !isValidDMKind(active[1].PrincipalKind) {
-		result.Unparseable++
-		return
-	}
-
-	// Compute the kind-encoded key.
-	newKey, err := messages.DMConversationKey(
-		active[0].PrincipalKind, active[0].PrincipalID,
-		active[1].PrincipalKind, active[1].PrincipalID,
-	)
-	if err != nil {
-		result.Unparseable++
-		result.Errors = append(result.Errors,
-			fmt.Sprintf("step3a: compute key for %s: %v", conv.ID, err))
-		return
-	}
-
-	// Check if a row with this key already exists.
-	existing, err := s.store.GetConversationByExternalRef(ctx, "native", newKey)
-	if err == nil && existing != nil && existing.ID != conv.ID {
-		// Merge case: re-stamp messages and soft-delete old row.
-		if dryRun {
-			result.EmptyRefMerged++
-			return
-		}
-		if mergeErr := s.mergeConversation(ctx, conv.ID, existing.ID, active, result); mergeErr != nil {
-			result.Errors = append(result.Errors,
-				fmt.Sprintf("step3a: merge %s → %s: %v", conv.ID, existing.ID, mergeErr))
-			return
-		}
-		result.EmptyRefMerged++
-	} else {
-		// Re-key in place.
-		if dryRun {
-			result.EmptyRefRekeyed++
-			return
-		}
-		conv.ExternalRef = newKey
-		conv.ProjectID = nil // DMs are global (DEF-10)
-		if err := s.store.UpdateConversation(ctx, conv); err != nil {
-			result.Errors = append(result.Errors,
-				fmt.Sprintf("step3a: re-key %s: %v", conv.ID, err))
-			return
-		}
-		result.EmptyRefRekeyed++
-	}
+	// B14 RULING: an empty-ref direct row has no ACL. Deriving a key from the
+	// participant index would fabricate an ACL from the listing index, inverting
+	// the direction of authority. Left keyless for operator review.
+	//
+	// Distinction: re-keying a malformed-but-parseable key (where principals
+	// are already named in the data) is normalization. Inventing a key from
+	// the index is fabrication. This row has no key data at all.
+	result.EmptyRefSkipped++
 }
 
 // ---------------------------------------------------------------------------
