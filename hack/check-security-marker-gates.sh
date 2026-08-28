@@ -70,7 +70,9 @@
 # Why not `go run`? Because `go run` collapses all non-zero exit codes into 1,
 # destroying the exit-1/exit-2 distinction that the CI step depends on.
 
-cd "$(dirname "$0")/.."
+set -euo pipefail
+
+cd "$(dirname "$0")/.." || exit 2
 
 tmpbin=$(mktemp)
 trap 'rm -f "$tmpbin"' EXIT
