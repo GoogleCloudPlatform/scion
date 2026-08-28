@@ -1253,21 +1253,37 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Populate sender from authenticated identity when not provided by the client.
-	if req.StructuredMessage.Sender == "" {
-		req.StructuredMessage.Sender = "user:unknown"
-		if userIdent != nil {
-			req.StructuredMessage.SenderID = userIdent.ID()
-			if name := userIdent.DisplayName(); name != "" {
-				req.StructuredMessage.Sender = "user:" + name
-			} else if email := userIdent.Email(); email != "" {
-				req.StructuredMessage.Sender = "user:" + email
-			}
-		} else if agentIdent != nil {
-			req.StructuredMessage.SenderID = agentIdent.ID()
-			req.StructuredMessage.Sender = "agent:" + agentIdent.ID()
+	// B5 SECURITY FIX: ALWAYS derive sender identity from the
+	// authenticated context, same as handleAgentMessage. Client-supplied
+	// Sender and SenderID are untrusted and must not be used as DM key
+	// inputs or for routing decisions (self-skip).
+	req.StructuredMessage.Sender = "user:unknown"
+	req.StructuredMessage.SenderID = ""
+	if userIdent != nil {
+		req.StructuredMessage.SenderID = userIdent.ID()
+		if name := userIdent.DisplayName(); name != "" {
+			req.StructuredMessage.Sender = "user:" + name
+		} else if email := userIdent.Email(); email != "" {
+			req.StructuredMessage.Sender = "user:" + email
 		}
+	} else if agentIdent != nil {
+		req.StructuredMessage.SenderID = agentIdent.ID()
+		req.StructuredMessage.Sender = "agent:" + agentIdent.ID()
 	}
+
+	// B5 SECURITY FIX: force Broadcasted = true server-side. The client
+	// must not control whether its message is treated as a broadcast —
+	// that is a routing fact the server knows. Without this, a client
+	// setting Broadcasted=false walks the message through the DM
+	// dual-write in deliverToAgent, creating a DM conversation per
+	// running agent.
+	req.StructuredMessage.Broadcasted = true
+
+	// Use authenticated identity for self-skip, not the Sender field.
+	// The Sender field is a display label; the auth identity is the
+	// security-relevant identity. A forged Sender could change which
+	// agents are targeted.
+	authKind, authID := authenticatedSender(ctx)
 
 	// Compute broadcast targeting: list all agents, classify by phase.
 	allResult, err := s.store.ListAgents(ctx, store.AgentFilter{
@@ -1281,7 +1297,8 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	var targeted int
 	skippedBreakdown := make(map[string]int)
 	for _, agent := range allResult.Items {
-		if req.StructuredMessage.Sender == "agent:"+agent.Slug {
+		// Skip the sending agent to avoid self-delivery.
+		if authKind == "agent" && agent.ID == authID {
 			continue
 		}
 		if agent.Phase == string(state.PhaseRunning) {
@@ -1298,7 +1315,8 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// Collect running agents from the already-fetched list for direct fan-out.
 	var runningAgents []store.Agent
 	for _, agent := range allResult.Items {
-		if req.StructuredMessage.Sender == "agent:"+agent.Slug {
+		// Skip the sending agent to avoid self-delivery.
+		if authKind == "agent" && agent.ID == authID {
 			continue
 		}
 		if agent.Phase == string(state.PhaseRunning) {

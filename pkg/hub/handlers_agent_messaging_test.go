@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -393,6 +395,234 @@ func TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T)
 		if strings.Contains(m.Sender, victim.Email) || strings.Contains(m.Sender, victim.DisplayName) {
 			t.Errorf("stored message %s has Sender=%q containing victim identity; should use attacker",
 				m.ID, m.Sender)
+		}
+	}
+}
+
+// B5/F1 SECURITY: handleProjectBroadcast is a sibling ingress that fans out
+// to every running agent. Without the fix, a spoofed Sender/SenderID with
+// Broadcasted=false creates a DM conversation per running agent under the
+// victim's identity — wider blast radius than the handleAgentMessage path.
+//
+// This test verifies both halves of the fix:
+//   - (a) unconditional auth-derivation of sender
+//   - (b) Broadcasted forced to true server-side
+func TestBroadcast_B5F1_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "b5-f1-broadcast", Slug: "b5-f1-broadcast",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	attacker := &store.User{
+		ID: api.NewUUID(), Email: "attacker@example.com",
+		DisplayName: "Attacker", Role: store.UserRoleMember, Status: "active",
+	}
+	victim := &store.User{
+		ID: api.NewUUID(), Email: "victim@example.com",
+		DisplayName: "Victim", Role: store.UserRoleMember, Status: "active",
+	}
+	if err := s.CreateUser(ctx, attacker); err != nil {
+		t.Fatalf("CreateUser attacker: %v", err)
+	}
+	if err := s.CreateUser(ctx, victim); err != nil {
+		t.Fatalf("CreateUser victim: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID: api.NewUUID(), Name: "target-agent", Slug: "target-agent",
+		ProjectID: project.ID, Phase: "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Set up broker infrastructure so the broadcast reaches deliverToAgent.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.subscribeProjectBroadcast(project.ID)
+	proxy.subscribeAgent(project.ID, agent.Slug)
+
+	// Attacker sends broadcast with spoofed sender (victim's identity)
+	// and Broadcasted=false to try to reach the DM dual-write path.
+	spoofed := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Type:        messages.TypeInstruction,
+		Sender:      "user:" + victim.Email,
+		SenderID:    victim.ID,
+		Msg:         "broadcast as the victim",
+		Broadcasted: false, // client attempts to disable broadcast flag
+	}
+	body, _ := json.Marshal(BroadcastMessageRequest{StructuredMessage: spoofed})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/broadcast", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(),
+		NewAuthenticatedUser(attacker.ID, attacker.Email, attacker.DisplayName, "user", "web")))
+
+	rr := httptest.NewRecorder()
+	srv.handleProjectBroadcast(rr, req, project.ID)
+	t.Logf("broadcast response: %d %s", rr.Code, rr.Body.String())
+
+	// Give async bus fan-out time to land.
+	spoofedKey, err := messages.DMConversationKey("user", victim.ID, "agent", agent.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey spoofed: %v", err)
+	}
+	honestKey, err := messages.DMConversationKey("user", attacker.ID, "agent", agent.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey honest: %v", err)
+	}
+	t.Logf("spoofed key (victim):  %s", spoofedKey)
+	t.Logf("honest key (attacker): %s", honestKey)
+
+	// Wait briefly for async processing.
+	deadline := time.Now().Add(3 * time.Second)
+	var spoofedFound, honestFound bool
+	for time.Now().Before(deadline) {
+		if !spoofedFound {
+			if c, e := s.GetConversationByExternalRef(ctx, "native", spoofedKey); e == nil && c != nil {
+				spoofedFound = true
+				t.Logf("SPOOFED conversation found: id=%s ref=%s", c.ID, c.ExternalRef)
+			}
+		}
+		if !honestFound {
+			if c, e := s.GetConversationByExternalRef(ctx, "native", honestKey); e == nil && c != nil {
+				honestFound = true
+				t.Logf("honest conversation found: id=%s ref=%s", c.ID, c.ExternalRef)
+			}
+		}
+		if spoofedFound || honestFound {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if spoofedFound {
+		t.Errorf("SECURITY VIOLATION (B5/F1): broadcast ingress minted DM conversation "+
+			"under spoofed victim key %s. handleProjectBroadcast must derive sender "+
+			"from auth context and force Broadcasted=true.", spoofedKey)
+	}
+
+	// The broadcast path should NOT create DM conversations at all
+	// (Broadcasted=true skips the dual-write). Neither key should exist.
+	if honestFound {
+		t.Errorf("broadcast created DM conversation under honest key %s — "+
+			"Broadcasted must be forced true server-side to skip the DM dual-write", honestKey)
+	}
+}
+
+// B5/F1b: The Broadcasted flag must be forced to true server-side on the
+// broadcast path. Without this, a client setting Broadcasted=false walks the
+// message through the DM dual-write in deliverToAgent, creating a DM
+// conversation per running agent in the project.
+func TestBroadcast_B5F1b_BroadcastedForcedTrueServerSide(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "b5-bcast-flag", Slug: "b5-bcast-flag",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	user := &store.User{
+		ID: api.NewUUID(), Email: "user@example.com",
+		DisplayName: "User", Role: store.UserRoleMember, Status: "active",
+	}
+	if err := s.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Create two agents so we can verify broadcast reaches them with
+	// Broadcasted=true (which skips DM dual-write).
+	agent1 := &store.Agent{
+		ID: api.NewUUID(), Name: "a1", Slug: "a1",
+		ProjectID: project.ID, Phase: "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	agent2 := &store.Agent{
+		ID: api.NewUUID(), Name: "a2", Slug: "a2",
+		ProjectID: project.ID, Phase: "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	for _, a := range []*store.Agent{agent1, agent2} {
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("CreateAgent %s: %v", a.Slug, err)
+		}
+	}
+
+	// Set up broker.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.subscribeProjectBroadcast(project.ID)
+	proxy.subscribeAgent(project.ID, agent1.Slug)
+	proxy.subscribeAgent(project.ID, agent2.Slug)
+
+	// Client explicitly sends Broadcasted=false.
+	msg := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Type:        messages.TypeInstruction,
+		Msg:         "should be broadcast",
+		Broadcasted: false,
+	}
+	body, _ := json.Marshal(BroadcastMessageRequest{StructuredMessage: msg})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/broadcast", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(),
+		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, "user", "web")))
+
+	rr := httptest.NewRecorder()
+	srv.handleProjectBroadcast(rr, req, project.ID)
+	t.Logf("broadcast response: %d %s", rr.Code, rr.Body.String())
+
+	// Wait for async processing.
+	time.Sleep(2 * time.Second)
+
+	// With Broadcasted forced true, NO DM conversations should be created.
+	for _, a := range []*store.Agent{agent1, agent2} {
+		key, err := messages.DMConversationKey("user", user.ID, "agent", a.ID)
+		if err != nil {
+			t.Fatalf("DMConversationKey for %s: %v", a.Slug, err)
+		}
+		conv, convErr := s.GetConversationByExternalRef(ctx, "native", key)
+		if convErr == nil && conv != nil {
+			t.Errorf("DM conversation created for agent %s (key=%s) — "+
+				"Broadcasted flag was not forced to true server-side", a.Slug, key)
 		}
 	}
 }
