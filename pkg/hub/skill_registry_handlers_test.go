@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,14 +27,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// newRegistryTestServer creates a fully initialized test server with authzService
+// so that route guards and Decide-based permission checks work.
 func newRegistryTestServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	srv := &Server{store: s}
+	srv, s := testServer(t)
+	seedRoleDefinitions(context.Background(), s)
 	return srv, s
 }
 
@@ -198,30 +197,70 @@ func TestSkillRegistryCRUD_InvalidEndpoint(t *testing.T) {
 	}
 }
 
-func TestSkillRegistryCRUD_NonAdminRejected(t *testing.T) {
-	srv, _ := newRegistryTestServer(t)
-	member := NewAuthenticatedUser("user-1", "user@test.com", "User", "member", "cli")
+// TestSkillRegistryRouteGuard_PermissionBased verifies that the skill registry
+// route guard enforces skill.register permission. Hub-admins with skill.register
+// in their role should be allowed; regular members should be denied.
+func TestSkillRegistryRouteGuard_PermissionBased(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
 
-	// List
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/skill-registries", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
-	rr := httptest.NewRecorder()
-	srv.handleSkillRegistries(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("list: expected 403, got %d", rr.Code)
+	// Create a hub-admin user
+	hubAdminUser := &store.User{
+		ID: tid("ha-sr"), Email: "ha-sr@test.com", DisplayName: "Hub Admin",
+		Role: "member", Status: "active",
+	}
+	memberUser := &store.User{
+		ID: tid("mem-sr"), Email: "mem-sr@test.com", DisplayName: "Member",
+		Role: "member", Status: "active",
+	}
+	if err := s.CreateUser(ctx, hubAdminUser); err != nil {
+		t.Fatalf("create hub-admin: %v", err)
+	}
+	if err := s.CreateUser(ctx, memberUser); err != nil {
+		t.Fatalf("create member: %v", err)
 	}
 
-	// Create
-	body := `{"name":"test","endpoint":"https://example.com"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/skill-registries", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get hub-admin role definition: %v", err)
+	}
+	if _, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      hubAdminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+	}); err != nil {
+		t.Fatalf("create hub-admin binding: %v", err)
+	}
+
+	okHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	meta := routeMetadataTable["/api/v1/skill-registries"]
+	handler := srv.routeGuard(meta, okHandler)
+
+	// Hub-admin should be allowed (skill.register is in hub-admin role)
+	hubAdmin := NewAuthenticatedUser(tid("ha-sr"), "ha-sr@test.com", "Hub Admin", "member", "api")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/skill-registries", nil)
+	req = req.WithContext(contextWithIdentity(ctx, hubAdmin))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("hub-admin with skill.register: expected 200, got %d", rr.Code)
+	}
+
+	// Regular member should be denied
+	member := NewAuthenticatedUser(tid("mem-sr"), "mem-sr@test.com", "Member", "member", "api")
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/skill-registries", nil)
+	req = req.WithContext(contextWithIdentity(ctx, member))
 	rr = httptest.NewRecorder()
-	srv.handleSkillRegistries(rr, req)
+	handler(rr, req)
 
 	if rr.Code != http.StatusForbidden {
-		t.Errorf("create: expected 403, got %d", rr.Code)
+		t.Errorf("regular member: expected 403, got %d", rr.Code)
 	}
 }
 

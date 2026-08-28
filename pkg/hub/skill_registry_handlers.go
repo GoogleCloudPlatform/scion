@@ -97,10 +97,7 @@ func (s *Server) handleSkillRegistryByID(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) listSkillRegistries(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	result, err := s.store.ListSkillRegistries(r.Context(), store.ListOptions{})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -111,8 +108,10 @@ func (s *Server) listSkillRegistries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createSkillRegistry(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireAdmin(w, r)
-	if !ok {
+	// Route guard enforces skill.register permission.
+	identity := GetUserIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
 		return
 	}
 
@@ -187,10 +186,7 @@ func (s *Server) createSkillRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSkillRegistry(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	registry, err := s.store.GetSkillRegistry(r.Context(), id)
 	if err != nil {
 		// Try by name
@@ -205,10 +201,7 @@ func (s *Server) getSkillRegistry(w http.ResponseWriter, r *http.Request, id str
 }
 
 func (s *Server) updateSkillRegistry(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	ctx := r.Context()
 	registry, err := s.store.GetSkillRegistry(ctx, id)
 	if err != nil {
@@ -266,10 +259,7 @@ func (s *Server) updateSkillRegistry(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (s *Server) deleteSkillRegistry(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	ctx := r.Context()
 	registry, err := s.store.GetSkillRegistry(ctx, id)
 	if err != nil {
@@ -294,10 +284,7 @@ func (s *Server) pinSkillHash(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	ctx := r.Context()
 	registry, err := s.store.GetSkillRegistry(ctx, id)
 	if err != nil {
@@ -341,10 +328,7 @@ func (s *Server) listPinnedHashes(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	ctx := r.Context()
 	registry, err := s.store.GetSkillRegistry(ctx, id)
 	if err != nil {
@@ -380,10 +364,7 @@ func (s *Server) unpinSkillHash(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces skill.register permission.
 	ctx := r.Context()
 	registry, err := s.store.GetSkillRegistry(ctx, id)
 	if err != nil {

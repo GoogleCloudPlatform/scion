@@ -187,7 +187,18 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	var configs []store.HarnessConfig
 	var nextCursor string
 	var totalCount int
-	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
+	// Check if user has admin-level list visibility via permission.
+	hasAdminView := false
+	if user, ok := identity.(UserIdentity); ok {
+		hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: "harness_config", ID: "hub"},
+			Action:     Action("list"),
+			Permission: "harness_config.list",
+		}).Allowed
+	}
+	if identity != nil && !hasAdminView {
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.HarnessConfig], error) {
 			page, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {

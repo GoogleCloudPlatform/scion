@@ -101,19 +101,9 @@ type EvaluateResponse struct {
 
 // handlePolicies handles GET and POST on /api/v1/policies
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could create or list policies.
-	//
-	// Phase 1F CanDelegate note: CanDelegate enforcement for policy creation
-	// is implicit via the requireAdmin gate — only super-admins can create,
-	// update, bind, or delete policies. The CanDelegate policy path returns
-	// "policy authoring requires super-admin" for any non-super-admin caller.
-	// If policy routes are ever opened to scoped admins, an explicit
-	// CanDelegate check must be added here.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces policy.read for all methods (super-admin-only:
+	// policy permissions are not in the hub-admin role).
+	// Write operations perform additional inline permission checks below.
 	switch r.Method {
 	case http.MethodGet:
 		s.listPolicies(w, r)
@@ -184,6 +174,24 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Require policy.create permission (super-admin-only: policy.create is
+	// not in the hub-admin role).
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+	if !s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "policy", ID: "hub"},
+		Action:     Action("create"),
+		Permission: "policy.create",
+	}).Allowed {
+		Forbidden(w)
+		return
+	}
 
 	var req CreatePolicyRequest
 	if err := readJSON(r, &req); err != nil {
@@ -327,12 +335,7 @@ func (s *Server) handlePolicyRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could read policy definitions.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces policy.read (super-admin-only).
 	ctx := r.Context()
 
 	policy, err := s.store.GetPolicy(ctx, id)
@@ -350,13 +353,24 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could modify policies.
-	if _, ok := s.requireAdmin(w, r); !ok {
+	ctx := r.Context()
+
+	// Require policy.update permission (super-admin-only).
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
 		return
 	}
-
-	ctx := r.Context()
+	if !s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "policy", ID: "hub"},
+		Action:     Action("update"),
+		Permission: "policy.update",
+	}).Allowed {
+		Forbidden(w)
+		return
+	}
 
 	policy, err := s.store.GetPolicy(ctx, id)
 	if err != nil {
@@ -434,13 +448,24 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 }
 
 func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could delete policies.
-	if _, ok := s.requireAdmin(w, r); !ok {
+	ctx := r.Context()
+
+	// Require policy.delete permission (super-admin-only).
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
 		return
 	}
-
-	ctx := r.Context()
+	if !s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "policy", ID: "hub"},
+		Action:     Action("delete"),
+		Permission: "policy.delete",
+	}).Allowed {
+		Forbidden(w)
+		return
+	}
 
 	// Look up the policy before deleting so we can record a tombstone for
 	// seeded policies.
@@ -493,12 +518,8 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request, id string)
 
 // handlePolicyBindings handles GET and POST on /api/v1/policies/{policyId}/bindings
 func (s *Server) handlePolicyBindings(w http.ResponseWriter, r *http.Request, policyID string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could manage policy bindings.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
+	// Route guard enforces policy.read (super-admin-only).
+	// POST requires additional policy.create permission.
 	ctx := r.Context()
 
 	// Verify policy exists
@@ -534,6 +555,23 @@ func (s *Server) listPolicyBindings(w http.ResponseWriter, r *http.Request, poli
 
 func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policyID string) {
 	ctx := r.Context()
+
+	// Require policy.create permission for binding mutations (super-admin-only).
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+	if !s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "policy", ID: "hub"},
+		Action:     Action("create"),
+		Permission: "policy.create",
+	}).Allowed {
+		Forbidden(w)
+		return
+	}
 
 	var req AddPolicyBindingRequest
 	if err := readJSON(r, &req); err != nil {
@@ -581,13 +619,26 @@ func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policy
 
 // handlePolicyBindingByID handles DELETE on /api/v1/policies/{policyId}/bindings/{type}/{id}
 func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request, policyID, bindingPath string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could manage policy bindings.
-	if _, ok := s.requireAdmin(w, r); !ok {
+	// Route guard enforces policy.read (super-admin-only).
+	// DELETE requires additional policy.delete permission.
+	ctx := r.Context()
+
+	// Require policy.delete permission for binding removal (super-admin-only).
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
 		return
 	}
-
-	ctx := r.Context()
+	if !s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "policy", ID: "hub"},
+		Action:     Action("delete"),
+		Permission: "policy.delete",
+	}).Allowed {
+		Forbidden(w)
+		return
+	}
 
 	// Parse bindingPath as "type/id"
 	parts := strings.SplitN(bindingPath, "/", 2)
@@ -671,15 +722,24 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization: only admins or the evaluated principal can call this
-	if callerUser, ok := callerIdentity.(UserIdentity); ok {
-		if callerUser.Role() != "admin" && callerIdentity.ID() != req.PrincipalID {
+	// Authorization: users with policy.read or the evaluated principal can call this.
+	// Self-evaluation is always allowed; cross-principal evaluation requires
+	// the policy.read permission (super-admin-only).
+	if callerIdentity.ID() != req.PrincipalID {
+		hasPermission := false
+		if callerUser, ok := callerIdentity.(UserIdentity); ok {
+			hasPermission = s.authzService.Decide(ctx, AuthzRequest{
+				Principal:  principalContextForIdentity(callerUser),
+				Credential: credentialContextForIdentity(callerUser),
+				Resource:   Resource{Type: "policy", ID: "hub"},
+				Action:     Action("read"),
+				Permission: "policy.read",
+			}).Allowed
+		}
+		if !hasPermission {
 			Forbidden(w)
 			return
 		}
-	} else if callerIdentity.ID() != req.PrincipalID {
-		Forbidden(w)
-		return
 	}
 
 	// Build the resource

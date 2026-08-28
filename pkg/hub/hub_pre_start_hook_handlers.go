@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -53,7 +54,13 @@ func (s *Server) requireHubAdmin(w http.ResponseWriter, r *http.Request) (UserId
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 		return nil, false
 	}
-	if !IsUnscopedLocalPlatformAdmin(identity) {
+	if !s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     Action("update"),
+		Permission: "hub.lifecycle_hooks.update",
+	}).Allowed {
 		Forbidden(w)
 		return nil, false
 	}
@@ -76,8 +83,14 @@ func (s *Server) requireHubHookReader(w http.ResponseWriter, r *http.Request) (U
 
 // isHubAdminIdentity reports whether the identity may see hub hook script
 // bodies in read responses.
-func isHubAdminIdentity(identity UserIdentity) bool {
-	return IsUnscopedLocalPlatformAdmin(identity)
+func (s *Server) isHubAdminIdentity(ctx context.Context, identity UserIdentity) bool {
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     Action("read"),
+		Permission: "hub.lifecycle_hooks.read",
+	}).Allowed
 }
 
 // redactHubHookScript returns a copy suitable for readers that need hub hook
@@ -142,7 +155,7 @@ func (s *Server) handleHubPreStartHooks(w http.ResponseWriter, r *http.Request) 
 
 		// Hub hook scripts may embed infrastructure secrets. Non-admin callers
 		// only need {id, name, slug, status, scope} for the inherited banner.
-		if !isHubAdminIdentity(identity) {
+		if !s.isHubAdminIdentity(ctx, identity) {
 			redacted := make([]*store.ProjectPreStartHook, 0, len(hooks))
 			for _, h := range hooks {
 				if redactedHook := redactHubHookScript(h); redactedHook != nil {
@@ -287,7 +300,7 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if !isHubAdminIdentity(identity) {
+		if !s.isHubAdminIdentity(ctx, identity) {
 			hook = redactHubHookScript(hook)
 		}
 		writeJSON(w, http.StatusOK, hook)

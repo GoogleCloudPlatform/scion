@@ -123,7 +123,29 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	var groupItems []store.Group
 	var nextCursor string
 	var totalCount int
-	if user, ok := identity.(UserIdentity); identity != nil && (!ok || !IsUnscopedLocalPlatformAdmin(user)) {
+	// Check if user has admin-level list visibility via permission.
+	hasAdminView := false
+	if identity != nil {
+		if user, ok := identity.(UserIdentity); ok {
+			hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
+				Principal:  principalContextForIdentity(user),
+				Credential: credentialContextForIdentity(user),
+				Resource:   Resource{Type: "group", ID: "hub"},
+				Action:     Action("list"),
+				Permission: "group.list",
+			}).Allowed
+		}
+	}
+	if hasAdminView {
+		// Admin view: direct store query without authorization filtering.
+		result, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	} else if identity != nil {
+		// Authenticated non-admin: use authorizedList for policy-enforced filtering.
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
 			page, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {
@@ -137,12 +159,8 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else {
-		result, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		// Unauthenticated: return empty list (no identity to authorize against).
+		groupItems = []store.Group{}
 	}
 	groups := make([]GroupWithCapabilities, 0, len(groupItems))
 	if identity == nil {
@@ -566,7 +584,13 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	} else {
 		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
-		isPlatformAdmin := IsUnscopedLocalPlatformAdmin(userIdent)
+		isPlatformAdmin := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   Resource{Type: "group", ID: "hub"},
+			Action:     Action("update"),
+			Permission: "group.update",
+		}).Allowed
 		if !isResourceOwner && !isPlatformAdmin {
 			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
 			switch req.Role {
