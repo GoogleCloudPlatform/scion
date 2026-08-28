@@ -25,8 +25,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// mockConversationUpserter is a test double for ConversationUpserter and
-// ParticipantAdder.
+// mockConversationUpserter is a test double for ConversationUpserter,
+// ParticipantAdder, and ParticipantEnsurer.
 type mockConversationUpserter struct {
 	// lastConv captures the most recent conversation passed to Upsert.
 	lastConv *store.Conversation
@@ -38,6 +38,10 @@ type mockConversationUpserter struct {
 	participants []store.ConversationParticipant
 	// addPartErr is the injected error for AddParticipant.
 	addPartErr error
+	// ensuredParticipants captures EnsureParticipant calls (tracked separately).
+	ensuredParticipants []store.ConversationParticipant
+	// ensurePartErr is the injected error for EnsureParticipant.
+	ensurePartErr error
 }
 
 func (m *mockConversationUpserter) UpsertConversationByExternalRef(
@@ -61,6 +65,14 @@ func (m *mockConversationUpserter) AddParticipant(_ context.Context, p *store.Co
 		return m.addPartErr
 	}
 	m.participants = append(m.participants, *p)
+	return nil
+}
+
+func (m *mockConversationUpserter) EnsureParticipant(_ context.Context, p *store.ConversationParticipant) error {
+	if m.ensurePartErr != nil {
+		return m.ensurePartErr
+	}
+	m.ensuredParticipants = append(m.ensuredParticipants, *p)
 	return nil
 }
 
@@ -242,33 +254,33 @@ func TestResolveOrCreateDMConversation_RegistersBothParticipants(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if len(mock.participants) != 2 {
-		t.Fatalf("expected 2 participants, got %d", len(mock.participants))
+	if len(mock.ensuredParticipants) != 2 {
+		t.Fatalf("expected 2 ensured participants, got %d", len(mock.ensuredParticipants))
 	}
 	// Sender is registered first.
-	if mock.participants[0].PrincipalKind != "agent" || mock.participants[0].PrincipalID != "6ba7b810-9dad-11d1-80b4-00c04fd430c8" {
-		t.Errorf("unexpected sender participant: %+v", mock.participants[0])
+	if mock.ensuredParticipants[0].PrincipalKind != "agent" || mock.ensuredParticipants[0].PrincipalID != "6ba7b810-9dad-11d1-80b4-00c04fd430c8" {
+		t.Errorf("unexpected sender participant: %+v", mock.ensuredParticipants[0])
 	}
-	if mock.participants[0].Role != "member" {
-		t.Errorf("expected role 'member', got %q", mock.participants[0].Role)
+	if mock.ensuredParticipants[0].Role != "member" {
+		t.Errorf("expected role 'member', got %q", mock.ensuredParticipants[0].Role)
 	}
 	// Recipient is registered second.
-	if mock.participants[1].PrincipalKind != "user" || mock.participants[1].PrincipalID != "550e8400-e29b-41d4-a716-446655440000" {
-		t.Errorf("unexpected recipient participant: %+v", mock.participants[1])
+	if mock.ensuredParticipants[1].PrincipalKind != "user" || mock.ensuredParticipants[1].PrincipalID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("unexpected recipient participant: %+v", mock.ensuredParticipants[1])
 	}
-	if mock.participants[1].Role != "member" {
-		t.Errorf("expected role 'member', got %q", mock.participants[1].Role)
+	if mock.ensuredParticipants[1].Role != "member" {
+		t.Errorf("expected role 'member', got %q", mock.ensuredParticipants[1].Role)
 	}
 	// Both point at the same conversation.
-	if mock.participants[0].ConversationID != "conv-part-test" || mock.participants[1].ConversationID != "conv-part-test" {
+	if mock.ensuredParticipants[0].ConversationID != "conv-part-test" || mock.ensuredParticipants[1].ConversationID != "conv-part-test" {
 		t.Error("participant conversation IDs should match the resolved conversation")
 	}
 }
 
 func TestResolveOrCreateDMConversation_ParticipantErrorIsNonFatal(t *testing.T) {
 	mock := &mockConversationUpserter{
-		returnConv: &store.Conversation{ID: "conv-err", ExternalRef: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"},
-		addPartErr: errors.New("db error"),
+		returnConv:    &store.Conversation{ID: "conv-err", ExternalRef: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"},
+		ensurePartErr: errors.New("db error"),
 	}
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -303,14 +315,14 @@ func TestResolveOrCreateDMConversation_ThirdPartyGuardDocumented(t *testing.T) {
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
 
-	if len(mock.participants) != 2 {
-		t.Fatalf("expected exactly 2 participants from ResolveOrCreateDMConversation, got %d", len(mock.participants))
+	if len(mock.ensuredParticipants) != 2 {
+		t.Fatalf("expected exactly 2 ensured participants from ResolveOrCreateDMConversation, got %d", len(mock.ensuredParticipants))
 	}
 
 	// Verify the two principals match the key inputs.
 	kinds := map[string]string{
-		mock.participants[0].PrincipalID: mock.participants[0].PrincipalKind,
-		mock.participants[1].PrincipalID: mock.participants[1].PrincipalKind,
+		mock.ensuredParticipants[0].PrincipalID: mock.ensuredParticipants[0].PrincipalKind,
+		mock.ensuredParticipants[1].PrincipalID: mock.ensuredParticipants[1].PrincipalKind,
 	}
 	if kinds["6ba7b810-9dad-11d1-80b4-00c04fd430c8"] != "agent" {
 		t.Error("expected agent participant")
@@ -320,13 +332,12 @@ func TestResolveOrCreateDMConversation_ThirdPartyGuardDocumented(t *testing.T) {
 	}
 }
 
-func TestResolveOrCreateDMConversation_AlreadyExistsSwallowed(t *testing.T) {
-	// When AddParticipant returns ErrAlreadyExists (upsert found an existing
-	// conversation whose participants are already registered), the function
-	// must succeed silently — no warning log.
+func TestResolveOrCreateDMConversation_IdempotentEnsure(t *testing.T) {
+	// EnsureParticipant returns nil for already-existing rows (no
+	// ErrAlreadyExists to swallow). The function must succeed silently.
 	mock := &mockConversationUpserter{
 		returnConv: &store.Conversation{ID: "conv-idem", ExternalRef: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"},
-		addPartErr: store.ErrAlreadyExists,
+		// ensurePartErr is nil — simulating the "row already exists" case.
 	}
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -335,14 +346,14 @@ func TestResolveOrCreateDMConversation_AlreadyExistsSwallowed(t *testing.T) {
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
 	if got == nil {
-		t.Fatal("expected non-nil result when AddParticipant returns ErrAlreadyExists")
+		t.Fatal("expected non-nil result when EnsureParticipant returns nil")
 	}
 	if got.ConversationID != "conv-idem" {
 		t.Errorf("expected conv-idem, got %q", got.ConversationID)
 	}
 	output := buf.String()
 	if strings.Contains(output, "participant registration failed") {
-		t.Errorf("ErrAlreadyExists should be swallowed silently, but got warning log: %s", output)
+		t.Errorf("nil return from EnsureParticipant should produce no warning log, got: %s", output)
 	}
 }
 
@@ -552,6 +563,43 @@ func TestResolveOrCreateThreadConversation_DMKeyRefusalLogsDistinctly(t *testing
 	}
 	if strings.Contains(output, "thread conversation resolution failed") {
 		t.Errorf("refusal log should NOT contain the old resolution-failed text, got: %s", output)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B7 nil-pe guard test
+// ---------------------------------------------------------------------------
+
+func TestResolveOrCreateDMConversation_NilParticipantEnsurer(t *testing.T) {
+	// B7: a nil ParticipantEnsurer must not panic. The function advertises
+	// non-fatal semantics for participant registration, and a nil pe that
+	// panics violates that contract. Assert: returns non-nil ConversationResult
+	// AND no panic.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-nil-pe",
+			ExternalRef: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000",
+		},
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Pass nil as pe — must not panic.
+	got := ResolveOrCreateDMConversation(context.Background(), mock, nil, logger,
+		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		"user", "550e8400-e29b-41d4-a716-446655440000")
+	if got == nil {
+		t.Fatal("expected non-nil ConversationResult with nil pe — conversation itself resolved")
+	}
+	if got.ConversationID != "conv-nil-pe" {
+		t.Errorf("expected ConversationID conv-nil-pe, got %q", got.ConversationID)
+	}
+	if got.ExternalRef != "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("expected ExternalRef from mock, got %q", got.ExternalRef)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "nil ParticipantEnsurer") {
+		t.Errorf("expected warning log about nil ParticipantEnsurer, got: %s", output)
 	}
 }
 

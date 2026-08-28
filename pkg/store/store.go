@@ -1638,6 +1638,11 @@ type ConversationStore interface {
 	// Returns ErrAlreadyExists if the participant already exists.
 	AddParticipant(ctx context.Context, p *ConversationParticipant) error
 
+	// EnsureParticipant ensures a participant row exists. If the participant
+	// already exists (active or soft-removed), the row is left untouched.
+	// Unlike AddParticipant, this does not clear left_at on existing rows.
+	EnsureParticipant(ctx context.Context, p *ConversationParticipant) error
+
 	// RemoveParticipant soft-removes a participant by setting LeftAt.
 	// Returns ErrNotFound if the participant doesn't exist.
 	RemoveParticipant(ctx context.Context, conversationID, principalKind, principalID string) error

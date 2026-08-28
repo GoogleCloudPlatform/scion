@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -1317,4 +1318,194 @@ func TestAddParticipant_DM_ReAddAfterSoftRemove(t *testing.T) {
 	// Rule 14: Assert non-zero floor — at least 2 participants examined.
 	require.GreaterOrEqual(t, len(participants), 2,
 		"floor violation: expected at least 2 participants")
+}
+
+// ---------------------------------------------------------------------------
+// EnsureParticipant tests (B6, B9 fixes)
+// ---------------------------------------------------------------------------
+
+// TestEnsureParticipant_InsertIfAbsent verifies that EnsureParticipant creates
+// a new participant row when none exists, and is idempotent on repeat calls.
+func TestEnsureParticipant_InsertIfAbsent(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Ensure participant A — no prior row.
+	err := s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	})
+	require.NoError(t, err)
+
+	// Verify participant was created.
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	require.Len(t, participants, 1)
+	assert.Equal(t, userA, participants[0].PrincipalID)
+
+	// Call EnsureParticipant again — must be idempotent (no error).
+	err = s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	})
+	require.NoError(t, err, "second EnsureParticipant call must be idempotent")
+
+	// Still exactly one active participant.
+	participants, err = s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 1)
+}
+
+// TestEnsureParticipant_DoesNotClearLeftAt (B6) verifies that EnsureParticipant
+// on a soft-removed row leaves left_at UNCHANGED — pinning the exact timestamp.
+func TestEnsureParticipant_DoesNotClearLeftAt(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Add both participants via AddParticipant.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	}))
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}))
+
+	// Soft-remove userB.
+	require.NoError(t, s.RemoveParticipant(ctx, conv.ID, "user", userB))
+
+	// Record the exact left_at timestamp.
+	convUID, err := parseUUID(conv.ID)
+	require.NoError(t, err)
+	softRemoved, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalIDEQ(userB),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, softRemoved.LeftAt, "left_at must be set after RemoveParticipant")
+	originalLeftAt := *softRemoved.LeftAt
+
+	// Call EnsureParticipant for the soft-removed participant.
+	err = s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	})
+	require.NoError(t, err)
+
+	// Assert left_at is UNCHANGED — pin the exact timestamp.
+	afterEnsure, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalIDEQ(userB),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, afterEnsure.LeftAt, "left_at must still be set after EnsureParticipant")
+	assert.True(t, originalLeftAt.Equal(*afterEnsure.LeftAt),
+		"left_at must be unchanged: original=%v, after=%v", originalLeftAt, *afterEnsure.LeftAt)
+}
+
+// TestEnsureParticipant_ResolveAfterLeave (B6) is the full scenario test:
+// create DM, add both participants, soft-remove one, then call EnsureParticipant.
+// The left_at timestamp must be preserved exactly.
+func TestEnsureParticipant_ResolveAfterLeave(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// Add both participants.
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userA, Role: "member",
+	}))
+	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	}))
+
+	// Soft-remove userB (user "leaves" / hides the DM).
+	require.NoError(t, s.RemoveParticipant(ctx, conv.ID, "user", userB))
+
+	// Record exact left_at.
+	convUID, err := parseUUID(conv.ID)
+	require.NoError(t, err)
+	before, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalIDEQ(userB),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, before.LeftAt)
+	pinnedLeftAt := *before.LeftAt
+
+	// Simulate resolve-driven EnsureParticipant (what ResolveOrCreateDMConversation does).
+	err = s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userB, Role: "member",
+	})
+	require.NoError(t, err)
+
+	// Assert left_at is unchanged.
+	after, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalIDEQ(userB),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, after.LeftAt, "left_at must remain set after EnsureParticipant")
+	assert.True(t, pinnedLeftAt.Equal(*after.LeftAt),
+		"left_at must be exactly preserved: pinned=%v, actual=%v", pinnedLeftAt, *after.LeftAt)
+
+	// userB should NOT appear in active participant list (left_at is still set).
+	activeParticipants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, activeParticipants, 1, "only userA should be active")
+	assert.Equal(t, userA, activeParticipants[0].PrincipalID)
+}
+
+// TestEnsureParticipant_DM_ThirdPartyRejection verifies that the D-1 guard
+// shared predicate rejects third parties via EnsureParticipant, same as
+// AddParticipant. Testing BOTH methods proves the guard cannot diverge.
+func TestEnsureParticipant_DM_ThirdPartyRejection(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	userA := uuid.NewString()
+	userB := uuid.NewString()
+	userC := uuid.NewString() // intruder — NOT named in key
+
+	conv := newTestDMConversation("user", userA, "user", userB)
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	// AddParticipant rejects third party.
+	addErr := s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userC, Role: "member",
+	})
+	require.Error(t, addErr, "AddParticipant must reject third party")
+	assert.ErrorIs(t, addErr, store.ErrInvalidInput)
+
+	// EnsureParticipant rejects the same third party.
+	ensureErr := s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: userC, Role: "member",
+	})
+	require.Error(t, ensureErr, "EnsureParticipant must reject third party")
+	assert.ErrorIs(t, ensureErr, store.ErrInvalidInput)
+
+	// Both errors should contain the same diagnostic message pattern.
+	assert.Contains(t, addErr.Error(), "not named in direct conversation key")
+	assert.Contains(t, ensureErr.Error(), "not named in direct conversation key")
 }
