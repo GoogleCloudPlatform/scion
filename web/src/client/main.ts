@@ -253,6 +253,16 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/admin-users.js'),
   },
   {
+    pattern: /^\/admin\/roles$/,
+    tag: 'scion-page-admin-roles',
+    load: () => import('../components/pages/admin-roles.js'),
+  },
+  {
+    pattern: /^\/admin\/role-bindings$/,
+    tag: 'scion-page-admin-role-bindings',
+    load: () => import('../components/pages/admin-role-bindings.js'),
+  },
+  {
     pattern: /^\/admin\/groups$/,
     tag: 'scion-page-admin-groups',
     load: () => import('../components/pages/admin-groups.js'),
@@ -542,6 +552,8 @@ const ADMIN_ROUTES = new Set([
   'scion-page-admin-maintenance',
   'scion-page-admin-users',
   'scion-page-admin-groups',
+  'scion-page-admin-roles',
+  'scion-page-admin-role-bindings',
   'scion-page-admin-group-detail',
   'scion-page-admin-quotas',
   'scion-page-admin-server-config',
