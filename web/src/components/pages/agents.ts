@@ -1017,7 +1017,7 @@ export class ScionPageAgents extends LitElement {
     const isLoading = this.actionLoading[agent.id] || false;
 
     return html`
-      ${can(agent._capabilities, 'message')
+      ${can(agent._capabilities, 'attach')
         ? html`
             <sl-tooltip content="Message">
               <span style="display: inline-flex">

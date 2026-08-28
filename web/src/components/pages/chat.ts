@@ -825,7 +825,7 @@ export class ScionPageChat extends LitElement {
 
   private async fetchAgentCapabilities(agentId: string): Promise<void> {
     if (this.agentCapabilities.has(agentId)) {
-      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'message');
+      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'attach');
       return;
     }
 
@@ -834,7 +834,7 @@ export class ScionPageChat extends LitElement {
       if (res.ok) {
         const agent = (await res.json()) as { _capabilities?: Capabilities };
         this.agentCapabilities.set(agentId, agent._capabilities);
-        this.selectedAgentCanSend = can(agent._capabilities, 'message');
+        this.selectedAgentCanSend = can(agent._capabilities, 'attach');
       }
     } catch {
       this.selectedAgentCanSend = false;
