@@ -65,6 +65,7 @@ func TestBypassCensus(t *testing.T) {
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AuthorizeReadBatch short-circuit (KEEP)"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "Decide explain trace admin check"},
 		{file: "authz_candelegate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "CanDelegate super-admin bypass (KEEP)"},
+		{file: "capabilities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "checkAccessPrecomputed admin bypass (KEEP — mirrors checkAccessForUser step 1)"},
 		{file: "authz_delegation_ceiling.go", lineSubstr: "IsSystemAdmin", description: "delegation ceiling system admin check (KEEP)"},
 
 		// ─── Authorization infrastructure (permanent or deprecating) ─────

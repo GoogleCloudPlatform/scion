@@ -302,18 +302,12 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return v
 	}
 
+	// Precompute group memberships and policies once for the entire batch,
+	// rather than re-deriving them on every CheckAccess call.
+	principals, policies := a.precomputeForIdentity(ctx, identity)
+
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
-		// Owner short-circuit
-		if resource.OwnerID != "" && resource.OwnerID == identity.ID() {
-			caps[i] = allActions(actions)
-			continue
-		}
-		// Ancestry short-circuit: ancestors get full access
-		if canAccessAsAncestor(identity.ID(), resource) {
-			caps[i] = allActions(actions)
-			continue
-		}
 		// Project owner/admin short-circuit
 		if isProjectOwner(projectIDForResource(resource)) {
 			caps[i] = allActions(actions)
@@ -322,7 +316,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 
 		var allowed []string
 		for _, action := range actions {
-			decision := a.CheckAccess(ctx, identity, resource, action)
+			decision := a.checkAccessPrecomputed(identity, principals, policies, resource, action)
 			if decision.Allowed {
 				allowed = append(allowed, string(action))
 			}
@@ -386,6 +380,12 @@ func (a *AuthzService) precomputeForIdentity(ctx context.Context, identity Ident
 
 // checkAccessPrecomputed evaluates access using pre-fetched principals and policies.
 func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.PrincipalRef, policies []store.Policy, resource Resource, action Action) Decision {
+	// Admin bypass: mirrors checkAccessForUser step 1 so batch callers
+	// that skip CheckAccess still grant admins full access.
+	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
+		return Decision{Allowed: true, Reason: "admin bypass"}
+	}
+
 	// Owner bypass (already handled in batch caller, but kept for single-resource calls)
 	if user, ok := identity.(UserIdentity); ok {
 		if resource.OwnerID != "" && resource.OwnerID == user.ID() {
