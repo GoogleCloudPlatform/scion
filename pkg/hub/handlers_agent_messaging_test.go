@@ -765,6 +765,22 @@ func TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity(t *testing.T) {
 		t.Fatalf("CreateUser victim: %v", err)
 	}
 
+	// Give the attacker minimum project membership so the ActionAttach authz
+	// check added by #1347 passes and broadcastDirect actually runs.
+	ensureHubMembership(ctx, s, attacker.ID)
+	project.CreatedBy = attacker.ID
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	if err != nil {
+		t.Fatalf("GetGroupBySlug: %v", err)
+	}
+	_ = s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    membersGroup.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   attacker.ID,
+		Role:       store.GroupMemberRoleMember,
+	})
+
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
 		ProjectID: project.ID, Phase: "running",
