@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -1046,3 +1047,116 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 		t.Fatalf("expected the attachment to be linked to the delivered message, got %+v", linked)
 	}
 }
+
+// TestResolveDMConversation_BothPathsAgree verifies that the user path
+// (PrincipalKindFromAddress for the recipient) and the agent path
+// (hardcoded "agent" kind) produce the same conversation ID when given
+// the same principal pair.
+func TestResolveDMConversation_BothPathsAgree(t *testing.T) {
+	s := newBrokerTestStore(t)
+	log := slog.Default()
+	ctx := context.Background()
+
+	proxy := &MessageBrokerProxy{
+		store: s,
+		log:   log,
+	}
+
+	agentID := api.NewUUID()
+	userID := api.NewUUID()
+
+	msg := messages.NewInstruction("agent:test-bot", "user:alice", "hello")
+	msg.SenderID = agentID
+	msg.RecipientID = userID
+
+	// User path: derive recipientKind from msg.Recipient
+	recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+	if !rOK {
+		t.Fatal("expected recipient kind to resolve")
+	}
+	resultUser := proxy.resolveDMConversation(ctx, msg, recipientKind, msg.RecipientID)
+	if resultUser == nil {
+		t.Fatal("expected non-nil conversation result from user path")
+	}
+
+	// Agent path: caller knows recipient is an agent, hardcode kind
+	// Build the reciprocal message: user sends to agent
+	msgAgent := messages.NewInstruction("user:alice", "agent:test-bot", "hi back")
+	msgAgent.SenderID = userID
+	msgAgent.RecipientID = agentID
+
+	resultAgent := proxy.resolveDMConversation(ctx, msgAgent, "agent", agentID)
+	if resultAgent == nil {
+		t.Fatal("expected non-nil conversation result from agent path")
+	}
+
+	if resultUser.ConversationID != resultAgent.ConversationID {
+		t.Fatalf("conversation IDs differ: user-path=%q agent-path=%q",
+			resultUser.ConversationID, resultAgent.ConversationID)
+	}
+}
+
+// TestResolveDMConversation_BroadcastSkipped verifies that the helper returns
+// nil and does not create a conversation when msg.Broadcasted is true. The
+// helper itself does not check Broadcasted — the guard lives in the callers —
+// so this test checks the callers' guards indirectly by exercising deliverToUser
+// and verifying no conversation_id is set on the persisted message.
+func TestResolveDMConversation_BroadcastSkipped(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	log := slog.Default()
+	ctx := context.Background()
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(log)
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, log)
+
+	msg := messages.NewInstruction("agent:sender-bot", "user:bob", "broadcast hello")
+	msg.SenderID = api.NewUUID()
+	msg.RecipientID = api.NewUUID()
+	msg.Broadcasted = true
+
+	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: msg.RecipientID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != "" {
+		t.Fatalf("expected empty ConversationID for broadcast, got %q", result.Items[0].ConversationID)
+	}
+}
+
+// TestResolveDMConversation_EmptySenderID verifies the helper returns nil when
+// SenderID is empty, without panicking.
+func TestResolveDMConversation_EmptySenderID(t *testing.T) {
+	s := newBrokerTestStore(t)
+	log := slog.Default()
+	ctx := context.Background()
+
+	proxy := &MessageBrokerProxy{
+		store: s,
+		log:   log,
+	}
+
+	msg := messages.NewInstruction("agent:test-bot", "user:alice", "hello")
+	// Deliberately leave SenderID empty.
+	msg.SenderID = ""
+	msg.RecipientID = api.NewUUID()
+
+	result := proxy.resolveDMConversation(ctx, msg, "user", msg.RecipientID)
+	if result != nil {
+		t.Fatalf("expected nil result when SenderID is empty, got %+v", result)
+	}
+}
+
+// Compile-time check: ensure messaging import is used by verifying the type
+// is accessible. This prevents "imported and not used" errors.
+var _ *messaging.ConversationResult
