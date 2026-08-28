@@ -732,12 +732,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/limits/": {
 		Pattern: "/api/v1/admin/limits/", RouteID: "admin.limits.byId",
 		Classification: RouteHubAdmin,
-		Permission:     "quota.update", Resource: "quota", Action: "update",
+		Permission:     "quota.read", Resource: "quota", Action: "read",
 	},
 	"/api/v1/admin/entitlements/": {
 		Pattern: "/api/v1/admin/entitlements/", RouteID: "admin.entitlements.byId",
 		Classification: RouteHubAdmin,
-		Permission:     "quota.update", Resource: "quota", Action: "update",
+		Permission:     "quota.read", Resource: "quota", Action: "read",
 	},
 	"/api/v1/admin/usage": {
 		Pattern: "/api/v1/admin/usage", RouteID: "admin.usage",

@@ -601,3 +601,175 @@ func TestQuotaAPI_UsageMe_MethodNotAllowed(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/usage/me", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Fix R1 — Route guard permission: by-ID paths use quota.read
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_RouteMetadata_ByIDPathsUseReadPermission(t *testing.T) {
+	// Verify the route guard for by-ID paths uses quota.read (not quota.update),
+	// so that users with only read permission can GET individual resources.
+	limitByID := routeMetadataTable["/api/v1/admin/limits/"]
+	assert.Equal(t, "quota.read", limitByID.Permission,
+		"limit by-ID route guard should require quota.read")
+	assert.Equal(t, "read", limitByID.Action)
+
+	entByID := routeMetadataTable["/api/v1/admin/entitlements/"]
+	assert.Equal(t, "quota.read", entByID.Permission,
+		"entitlement by-ID route guard should require quota.read")
+	assert.Equal(t, "read", entByID.Action)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix R3 — updateLimitDefinition rejects blank name
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_UpdateLimitDefinition_BlankName(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "update_blank_name", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         "",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix M1 — System-seeded limits cannot be updated
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a system-seeded limit directly in the store.
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_update_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         "renamed_system_limit",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 200,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// Verify it was not modified.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, "system_update_test", def.Name)
+	assert.Equal(t, int64(100), def.DefaultValue)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix M2 — Negative value validation
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_CreateLimitDefinition_NegativeDefaultValue(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits", createLimitDefinitionRequest{
+		Name:         "neg_default_limit",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: -5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_UpdateLimitDefinition_NegativeDefaultValue(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "neg_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         "neg_update_limit",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: -10,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_CreateEntitlement_NegativeValue(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "neg_ent_create_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       -1,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_UpdateEntitlement_NegativeValue(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "neg_ent_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+	binding := createEntitlementViaAPI(t, srv, limit.ID, createEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       10,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+binding.ID, updateEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       -5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// Zero values are valid (0 means unlimited).
+func TestQuotaAPI_CreateLimitDefinition_ZeroDefaultValue(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits", createLimitDefinitionRequest{
+		Name:         "zero_default_limit",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 0,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestQuotaAPI_CreateEntitlement_ZeroValue(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "zero_ent_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: "user",
+		SubjectID:   "user-1",
+		ScopeType:   "system",
+		Value:       0,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code)
+}

@@ -268,6 +268,11 @@ func (s *Server) createLimitDefinition(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
+	if req.DefaultValue < 0 {
+		BadRequest(w, "default_value must be non-negative (0 means unlimited)")
+		return
+	}
+
 	now := time.Now()
 	def := &store.LimitDefinition{
 		ID:           uuid.New().String(),
@@ -332,6 +337,16 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	if req.Name == "" {
+		BadRequest(w, "name is required")
+		return
+	}
+
+	if req.DefaultValue < 0 {
+		BadRequest(w, "default_value must be non-negative (0 means unlimited)")
+		return
+	}
+
 	existing, err := s.store.GetLimitDefinition(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -339,6 +354,12 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// System-seeded limit definitions cannot be modified.
+	if existing.System {
+		writeForbidden(w, "system-seeded limit definitions cannot be modified")
 		return
 	}
 
@@ -406,6 +427,11 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 	var req createEntitlementBindingRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Value < 0 {
+		BadRequest(w, "value must be non-negative (0 means unlimited)")
 		return
 	}
 
@@ -484,6 +510,11 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	if req.Value < 0 {
+		BadRequest(w, "value must be non-negative (0 means unlimited)")
+		return
+	}
+
 	existing, err := s.store.GetEntitlementBinding(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -548,7 +579,10 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 	for _, def := range defs {
 		reservations, err := s.store.ListActiveReservations(r.Context(), def.ID, store.QuotaScopeSystem, "")
 		activeCount := 0
-		if err == nil {
+		if err != nil {
+			slog.Error("failed to list active reservations for usage summary",
+				"limit_id", def.ID, "error", err)
+		} else {
 			activeCount = len(reservations)
 		}
 		entries = append(entries, usageSummaryEntry{
