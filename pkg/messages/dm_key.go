@@ -84,6 +84,26 @@ func PrincipalKindFromAddress(address string) (string, bool) {
 	return "", false
 }
 
+// CheckDMParticipantKey validates that the given principal is named in a direct
+// conversation's kind-encoded DM key. For non-direct conversations the function
+// is a no-op (returns nil). This is the canonical shared implementation of the
+// D-1 immutability guard, used by both the store layer (AddParticipant /
+// EnsureParticipant) and the migration layer (mergeConversation).
+func CheckDMParticipantKey(convKind, externalRef, principalKind, principalID string) error {
+	if convKind != "direct" {
+		return nil
+	}
+	kindA, idA, kindB, idB, parseErr := ParseDMKey(externalRef)
+	if parseErr != nil {
+		return fmt.Errorf("direct conversation has unparseable external_ref: %w", parseErr)
+	}
+	if (principalKind != kindA || principalID != idA) &&
+		(principalKind != kindB || principalID != idB) {
+		return fmt.Errorf("participant (%s, %s) not named in direct conversation key", principalKind, principalID)
+	}
+	return nil
+}
+
 // ParseDMKey parses a key produced by DMConversationKey back into its
 // constituent parts. The returned kinds and IDs are in sorted token order
 // (the same order they appear in the key).

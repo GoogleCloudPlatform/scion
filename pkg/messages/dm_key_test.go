@@ -268,3 +268,40 @@ func TestDMConversationKey_GoldenVectors(t *testing.T) {
 	key2, _ := DMConversationKey(vectors[1].kindA, vectors[1].idA, vectors[1].kindB, vectors[1].idB)
 	assert.Equal(t, key1, key2, "reversed argument order must produce the same key")
 }
+
+// ---------------------------------------------------------------------------
+// CheckDMParticipantKey tests
+// ---------------------------------------------------------------------------
+
+func TestCheckDMParticipantKey_NonDirectIsNoop(t *testing.T) {
+	err := CheckDMParticipantKey("group", "anything", "user", uuid.NewString())
+	assert.NoError(t, err, "non-direct conversations should pass unconditionally")
+}
+
+func TestCheckDMParticipantKey_AcceptsNamedParticipant(t *testing.T) {
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+	key, err := DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+
+	assert.NoError(t, CheckDMParticipantKey("direct", key, "user", userID))
+	assert.NoError(t, CheckDMParticipantKey("direct", key, "agent", agentID))
+}
+
+func TestCheckDMParticipantKey_RejectsStranger(t *testing.T) {
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+	strangerID := uuid.NewString()
+	key, err := DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+
+	err = CheckDMParticipantKey("direct", key, "user", strangerID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not named in direct conversation key")
+}
+
+func TestCheckDMParticipantKey_UnparseableRef(t *testing.T) {
+	err := CheckDMParticipantKey("direct", "garbage-key", "user", uuid.NewString())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unparseable external_ref")
+}

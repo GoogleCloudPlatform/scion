@@ -39,6 +39,7 @@ type DMMigrationResult struct {
 	ParticipantsAdded int      // step 2: participants derived from key
 	EmptyRefMerged    int      // step 3a: empty-ref rows merged with existing
 	EmptyRefRekeyed   int      // step 3a: empty-ref rows re-keyed in place
+	EmptyRefSkipped   int      // step 3a: empty-ref rows left keyless (B14 ruling)
 	OldFormatRekeyed  int      // step 3b: old dm:X:Y rows re-keyed
 	Unparseable       int      // rows that could not be processed
 	Ambiguous         int      // IDs found in neither or both tables
@@ -202,7 +203,11 @@ func (s *DMMigrationService) stepRebuildParticipants(
 		return
 	}
 
-	// Add participants (idempotent — ErrAlreadyExists is expected for existing).
+	// No CheckDMParticipantKey guard here: {kindA, idA} and {kindB, idB} are
+	// derived from ParseDMKey on this row's own external_ref (line 184), so the
+	// check would re-parse the same string and compare its output to itself — a
+	// tautology. See mergeConversation (~line 439) for the site where principals
+	// are foreign and the guard is load-bearing.
 	added := 0
 	for _, p := range []struct{ kind, id string }{{kindA, idA}, {kindB, idB}} {
 		err := s.store.AddParticipant(ctx, &store.ConversationParticipant{
@@ -259,80 +264,19 @@ func (s *DMMigrationService) countMissingParticipants(
 // ---------------------------------------------------------------------------
 
 func (s *DMMigrationService) stepMergeOrRekeyEmptyRef(
-	ctx context.Context,
-	conv *store.Conversation,
-	dryRun bool,
+	_ context.Context,
+	_ *store.Conversation,
+	_ bool,
 	result *DMMigrationResult,
 ) {
-	// Read participants to determine the two principals.
-	parts, err := s.store.ListParticipants(ctx, conv.ID)
-	if err != nil {
-		result.Unparseable++
-		result.Errors = append(result.Errors,
-			fmt.Sprintf("step3a: list participants for %s: %v", conv.ID, err))
-		return
-	}
-
-	// Filter to active participants (no LeftAt).
-	var active []store.ConversationParticipant
-	for _, p := range parts {
-		if p.LeftAt == nil {
-			active = append(active, p)
-		}
-	}
-
-	if len(active) != 2 {
-		result.Unparseable++
-		return
-	}
-
-	// Validate kinds.
-	if !isValidDMKind(active[0].PrincipalKind) || !isValidDMKind(active[1].PrincipalKind) {
-		result.Unparseable++
-		return
-	}
-
-	// Compute the kind-encoded key.
-	newKey, err := messages.DMConversationKey(
-		active[0].PrincipalKind, active[0].PrincipalID,
-		active[1].PrincipalKind, active[1].PrincipalID,
-	)
-	if err != nil {
-		result.Unparseable++
-		result.Errors = append(result.Errors,
-			fmt.Sprintf("step3a: compute key for %s: %v", conv.ID, err))
-		return
-	}
-
-	// Check if a row with this key already exists.
-	existing, err := s.store.GetConversationByExternalRef(ctx, "native", newKey)
-	if err == nil && existing != nil && existing.ID != conv.ID {
-		// Merge case: re-stamp messages and soft-delete old row.
-		if dryRun {
-			result.EmptyRefMerged++
-			return
-		}
-		if mergeErr := s.mergeConversation(ctx, conv.ID, existing.ID, active, result); mergeErr != nil {
-			result.Errors = append(result.Errors,
-				fmt.Sprintf("step3a: merge %s → %s: %v", conv.ID, existing.ID, mergeErr))
-			return
-		}
-		result.EmptyRefMerged++
-	} else {
-		// Re-key in place.
-		if dryRun {
-			result.EmptyRefRekeyed++
-			return
-		}
-		conv.ExternalRef = newKey
-		conv.ProjectID = nil // DMs are global (DEF-10)
-		if err := s.store.UpdateConversation(ctx, conv); err != nil {
-			result.Errors = append(result.Errors,
-				fmt.Sprintf("step3a: re-key %s: %v", conv.ID, err))
-			return
-		}
-		result.EmptyRefRekeyed++
-	}
+	// B14 RULING: an empty-ref direct row has no ACL. Deriving a key from the
+	// participant index would fabricate an ACL from the listing index, inverting
+	// the direction of authority. Left keyless for operator review.
+	//
+	// Distinction: re-keying a malformed-but-parseable key (where principals
+	// are already named in the data) is normalization. Inventing a key from
+	// the index is fabrication. This row has no key data at all.
+	result.EmptyRefSkipped++
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +395,7 @@ func (s *DMMigrationService) mergeConversation(
 	result *DMMigrationResult,
 ) error {
 	// Re-stamp all messages from old conversation to new.
+	var restampFailed bool
 	cursor := ""
 	for {
 		page, err := s.store.ListMessages(ctx, store.MessageFilter{
@@ -465,6 +410,7 @@ func (s *DMMigrationService) mergeConversation(
 
 		for _, msg := range page.Items {
 			if err := s.store.SetMessageConversationID(ctx, msg.ID, newConvID); err != nil {
+				restampFailed = true
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("re-stamp message %s: %v", msg.ID, err))
 			}
@@ -476,8 +422,33 @@ func (s *DMMigrationService) mergeConversation(
 		cursor = page.NextCursor
 	}
 
+	// B2 ATOMICITY: if any re-stamp failed, abort the merge. Under-migrating
+	// is recoverable; deleting the source row while messages still reference
+	// it is data loss.
+	if restampFailed {
+		return fmt.Errorf("aborting merge %s → %s: re-stamp failed, old row left intact", oldConvID, newConvID)
+	}
+
+	// B1 D-1 GUARD ROUTING: look up the target conversation to get its kind
+	// and external_ref, then filter each old participant through
+	// CheckDMParticipantKey before copying. This prevents a stranger in the
+	// old row's participant table from being injected into the target DM.
+	targetConv, err := s.store.GetConversation(ctx, newConvID)
+	if err != nil {
+		return fmt.Errorf("loading target conversation %s for participant guard: %w", newConvID, err)
+	}
+	if targetConv == nil {
+		return fmt.Errorf("target conversation %s not found (nil without error)", newConvID)
+	}
+
 	// Copy missing participants to the target conversation.
 	for _, p := range oldParticipants {
+		if guardErr := messages.CheckDMParticipantKey(targetConv.Kind, targetConv.ExternalRef, p.PrincipalKind, p.PrincipalID); guardErr != nil {
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("skip participant %s:%s (not named in target DM key): %v",
+					p.PrincipalKind, p.PrincipalID, guardErr))
+			continue
+		}
 		err := s.store.AddParticipant(ctx, &store.ConversationParticipant{
 			ID:             uuid.NewString(),
 			ConversationID: newConvID,

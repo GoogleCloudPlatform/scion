@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -335,9 +336,15 @@ func TestStep2_IdempotentExistingParticipants(t *testing.T) {
 // Step 3a: Empty-ref merge/re-key tests
 // ---------------------------------------------------------------------------
 
-// TestStep3a_MergeEmptyRefWithExisting verifies that an empty-ref row is merged
-// with an existing kind-encoded row — messages re-stamped, old row deleted.
-func TestStep3a_MergeEmptyRefWithExisting(t *testing.T) {
+// TestStep3a_EmptyRefRowSkipped verifies that an empty-ref row is left
+// keyless per the B14 ruling — it is NOT merged or re-keyed.
+//
+// DEF-29 (open): a direct conversation's external_ref IS its access-control
+// basis; a keyless row has no ACL. This test pins current-but-wrong behaviour —
+// the migration skips empty-ref rows rather than resolving them. Expectations
+// will invert when DEF-29 closes; correct resolution is operator review, not
+// migration.
+func TestStep3a_EmptyRefRowSkipped(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
 
@@ -360,7 +367,7 @@ func TestStep3a_MergeEmptyRefWithExisting(t *testing.T) {
 		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID},
 	)
 
-	// Existing kind-encoded row for the same pair.
+	// Existing kind-encoded row for the same pair (merge target would be this).
 	extRef := mustDMKey("user", userID, "agent", agentID)
 	ms.addConv(&store.Conversation{
 		ID:          newConvID,
@@ -384,19 +391,31 @@ func TestStep3a_MergeEmptyRefWithExisting(t *testing.T) {
 	result, err := svc.Run(ctx, DMMigrationConfig{})
 	require.NoError(t, err)
 
-	// Old row should be soft-deleted.
-	assert.NotNil(t, ms.conversations[oldConvID].DeletedAt, "old row should be soft-deleted")
+	// B14: old row must NOT be soft-deleted — left for operator review.
+	assert.Nil(t, ms.conversations[oldConvID].DeletedAt, "empty-ref row must not be soft-deleted")
 
-	// Message should be re-stamped to the new conversation.
-	assert.Equal(t, newConvID, ms.messages[msgID].ConversationID,
-		"message should be re-stamped to new conversation")
+	// Message must still point at old conversation.
+	assert.Equal(t, oldConvID, ms.messages[msgID].ConversationID,
+		"message must still reference old conversation (no merge)")
 
-	assert.Equal(t, 1, result.EmptyRefMerged, "EmptyRefMerged should be 1")
+	// External ref must still be empty.
+	assert.Equal(t, "", ms.conversations[oldConvID].ExternalRef,
+		"external_ref must remain empty")
+
+	assert.Equal(t, 1, result.EmptyRefSkipped, "EmptyRefSkipped should be 1")
+	assert.Equal(t, 0, result.EmptyRefMerged, "EmptyRefMerged should be 0")
+	assert.Equal(t, 0, result.EmptyRefRekeyed, "EmptyRefRekeyed should be 0")
 }
 
-// TestStep3a_RekeyEmptyRefInPlace verifies that an empty-ref row with no
-// existing kind-encoded counterpart gets re-keyed in place.
-func TestStep3a_RekeyEmptyRefInPlace(t *testing.T) {
+// TestStep3a_EmptyRefNotRekeyed verifies that an empty-ref row with no
+// existing kind-encoded counterpart is NOT re-keyed in place (B14 ruling).
+//
+// DEF-29 (open): a direct conversation's external_ref IS its access-control
+// basis; a keyless row has no ACL. This test pins current-but-wrong behaviour —
+// the migration does not fabricate a key from the participant index. Expectations
+// will invert when DEF-29 closes; correct resolution is operator review, not
+// migration.
+func TestStep3a_EmptyRefNotRekeyed(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
 
@@ -408,7 +427,7 @@ func TestStep3a_RekeyEmptyRefInPlace(t *testing.T) {
 	ms.users[userID] = &store.User{ID: userID, Email: "test@example.com"}
 	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "test-agent"}
 
-	// Empty-ref row with a ProjectID that should be cleared.
+	// Empty-ref row with a ProjectID.
 	ms.addConv(&store.Conversation{
 		ID:          convID,
 		Kind:        "direct",
@@ -424,24 +443,30 @@ func TestStep3a_RekeyEmptyRefInPlace(t *testing.T) {
 	result, err := svc.Run(ctx, DMMigrationConfig{})
 	require.NoError(t, err)
 
-	// External ref should be set to the kind-encoded key.
-	expectedKey := mustDMKey("user", userID, "agent", agentID)
+	// B14: external ref must remain empty — no fabrication from index.
 	conv := ms.conversations[convID]
-	assert.Equal(t, expectedKey, conv.ExternalRef, "ExternalRef should be set to kind-encoded key")
-	assert.Nil(t, conv.ProjectID, "ProjectID should be nil (DMs are global)")
-	assert.Equal(t, 1, result.EmptyRefRekeyed, "EmptyRefRekeyed should be 1")
+	assert.Equal(t, "", conv.ExternalRef, "ExternalRef must remain empty (B14)")
+	assert.Equal(t, &projectID, conv.ProjectID, "ProjectID must be unchanged")
+	assert.Equal(t, 1, result.EmptyRefSkipped, "EmptyRefSkipped should be 1")
+	assert.Equal(t, 0, result.EmptyRefRekeyed, "EmptyRefRekeyed should be 0")
 }
 
-// TestStep3a_SkipsWhenParticipantsNot2 verifies that empty-ref rows with != 2
-// active participants are skipped.
-func TestStep3a_SkipsWhenParticipantsNot2(t *testing.T) {
+// TestStep3a_EmptyRefSkippedRegardlessOfParticipantCount verifies that
+// empty-ref rows are skipped regardless of participant count (B14 ruling).
+//
+// DEF-29 (open): a direct conversation's external_ref IS its access-control
+// basis; a keyless row has no ACL. This test pins current-but-wrong behaviour —
+// the migration skips empty-ref rows even when only one participant exists.
+// Expectations will invert when DEF-29 closes; correct resolution is operator
+// review, not migration.
+func TestStep3a_EmptyRefSkippedRegardlessOfParticipantCount(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
 
 	convID := uuid.NewString()
 	userID := uuid.NewString()
 
-	// Only 1 participant.
+	// Only 1 participant — previously this was Unparseable, now it's EmptyRefSkipped.
 	ms.addConv(&store.Conversation{
 		ID:          convID,
 		Kind:        "direct",
@@ -455,7 +480,7 @@ func TestStep3a_SkipsWhenParticipantsNot2(t *testing.T) {
 	result, err := svc.Run(ctx, DMMigrationConfig{})
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, result.Unparseable, "should be unparseable with 1 participant")
+	assert.Equal(t, 1, result.EmptyRefSkipped, "empty-ref row should be skipped (B14)")
 	assert.Equal(t, 0, result.EmptyRefRekeyed)
 	assert.Equal(t, 0, result.EmptyRefMerged)
 }
@@ -679,7 +704,8 @@ func TestDryRun_NoWrites(t *testing.T) {
 	// Statistics should be computed.
 	assert.Equal(t, 3, result.TotalScanned, "should scan all 3 conversations")
 	assert.Equal(t, 2, result.ParticipantsAdded, "should count 2 missing participants")
-	assert.Equal(t, 1, result.EmptyRefRekeyed, "should count 1 re-key")
+	assert.Equal(t, 1, result.EmptyRefSkipped, "should count 1 empty-ref skipped (B14)")
+	assert.Equal(t, 0, result.EmptyRefRekeyed, "should count 0 re-key (B14 ruling)")
 	assert.Equal(t, 1, result.OldFormatRekeyed, "should count 1 old-format re-key")
 
 	// No actual changes should be made.
@@ -692,10 +718,16 @@ func TestDryRun_NoWrites(t *testing.T) {
 // Guard tests (permanent post-migration invariant assertions)
 // ---------------------------------------------------------------------------
 
-// TestGuardA_Migration_NoEmptyRefDirectRows asserts that after migration,
-// zero non-deleted direct conversations have an empty external_ref.
+// TestGuardA_Migration_EmptyRefDirectRowsSkipped asserts that after migration,
+// empty-ref direct conversations are left keyless (B14 ruling) and counted
+// as EmptyRefSkipped for operator visibility.
 // Floor: the test creates at least 2 such rows before migration (rule 14).
-func TestGuardA_Migration_NoEmptyRefDirectRows(t *testing.T) {
+//
+// DEF-29 (open): a keyless direct row has no ACL. This test pins current-but-wrong
+// behaviour — the migration leaves these rows keyless because deriving a key from
+// the listing index would fabricate an ACL (B14 ruling). Expectations will invert
+// when DEF-29 closes; correct resolution is operator review, not migration.
+func TestGuardA_Migration_EmptyRefDirectRowsSkipped(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
 
@@ -735,10 +767,10 @@ func TestGuardA_Migration_NoEmptyRefDirectRows(t *testing.T) {
 
 	// Run migration.
 	svc := NewDMMigrationService(ms)
-	_, err := svc.Run(ctx, DMMigrationConfig{})
+	result, err := svc.Run(ctx, DMMigrationConfig{})
 	require.NoError(t, err)
 
-	// Guard assertion: zero non-deleted direct conversations with empty ref.
+	// Guard assertion: empty-ref rows are left in place (B14), counted as skipped.
 	var directCount, emptyRefCount int
 	for _, conv := range ms.conversations {
 		if conv.Kind != "direct" || conv.DeletedAt != nil {
@@ -753,8 +785,11 @@ func TestGuardA_Migration_NoEmptyRefDirectRows(t *testing.T) {
 	// Rule 14: floor — at least 3 rows examined.
 	require.GreaterOrEqual(t, directCount, 3,
 		"floor violation: expected at least 3 direct conversations, found %d", directCount)
-	assert.Equal(t, 0, emptyRefCount,
-		"found %d non-deleted direct conversations with empty external_ref", emptyRefCount)
+	// B14: empty-ref rows are left keyless, so they persist.
+	assert.Equal(t, 2, emptyRefCount,
+		"empty-ref rows must be left keyless per B14 ruling")
+	assert.Equal(t, 2, result.EmptyRefSkipped,
+		"EmptyRefSkipped should count the left-behind rows")
 }
 
 // TestGuardB_Migration_EveryDMRowHasTwoParticipants asserts that after migration,
@@ -927,9 +962,254 @@ func TestMigration_MixedScenarios(t *testing.T) {
 
 	assert.Equal(t, 3, result.TotalScanned)
 	assert.Equal(t, 2, result.ParticipantsAdded, "2 participants from kind-encoded row")
-	assert.Equal(t, 1, result.EmptyRefRekeyed, "1 empty-ref re-keyed")
+	assert.Equal(t, 1, result.EmptyRefSkipped, "1 empty-ref skipped (B14)")
+	assert.Equal(t, 0, result.EmptyRefRekeyed, "0 empty-ref re-keyed (B14)")
 	assert.Equal(t, 1, result.OldFormatRekeyed, "1 old-format re-keyed")
 	assert.Equal(t, 0, result.Unparseable)
 	assert.Equal(t, 0, result.Ambiguous)
 	assert.Len(t, result.Errors, 0)
+}
+
+// ---------------------------------------------------------------------------
+// B2: Atomicity — re-stamp failure must not delete the old row
+// ---------------------------------------------------------------------------
+
+// failingRestamp wraps the mock and makes message re-stamping always fail.
+type failingRestamp struct{ *mockMigrationStore }
+
+func (f *failingRestamp) SetMessageConversationID(_ context.Context, _, _ string) error {
+	return errors.New("simulated DB failure during re-stamp")
+}
+
+// TestB2_MergeAbortsOnRestampFailure verifies that mergeConversation does NOT
+// soft-delete the old conversation row when re-stamping messages fails.
+//
+// Mutation contract: removing the restampFailed abort check causes this test
+// to fail because the old row gets soft-deleted despite re-stamp failure.
+func TestB2_MergeAbortsOnRestampFailure(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	// Old-format row (triggers step3b merge path) with a message.
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native",
+		ExternalRef: directMessageExternalRef(userID, agentID)},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	// Target kind-encoded row.
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: mustDMKey("user", userID, "agent", agentID)},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	msgID := uuid.NewString()
+	ms.addMessage(&store.Message{ID: msgID, ConversationID: oldConvID, Msg: "important history"})
+
+	svc := NewDMMigrationService(&failingRestamp{ms})
+	result, _ := svc.Run(ctx, DMMigrationConfig{})
+
+	// (a) Old row must NOT be soft-deleted.
+	assert.Nil(t, ms.conversations[oldConvID].DeletedAt,
+		"old row must not be soft-deleted when re-stamp fails")
+
+	// (b) Message must still point at old conversation.
+	assert.Equal(t, oldConvID, ms.messages[msgID].ConversationID,
+		"message must still reference old conversation after re-stamp failure")
+
+	// (c) Errors must be reported.
+	assert.NotEmpty(t, result.Errors,
+		"result.Errors must be non-empty after re-stamp failure")
+}
+
+// ---------------------------------------------------------------------------
+// B1: D-1 guard routing — mergeConversation must filter participants
+// ---------------------------------------------------------------------------
+
+// TestB1_MergeRejectsStrangerParticipant verifies that mergeConversation does
+// NOT copy a participant that is not named in the target DM key. The two
+// legitimate participants are still copied (positive control).
+//
+// Mutation contract: removing the CheckDMParticipantKey filter causes this
+// test to fail because the stranger gets copied to the target conversation.
+func TestB1_MergeRejectsStrangerParticipant(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	strangerID := uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	// Old-format row with stranger in participant list.
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native",
+		ExternalRef: "dm:" + userID + ":" + agentID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: strangerID})
+
+	// Target kind-encoded row.
+	targetKey := mustDMKey("user", userID, "agent", agentID)
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: targetKey},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	svc := NewDMMigrationService(ms)
+	_, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	// Stranger must NOT be in target's participant list.
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalID == strangerID {
+			t.Errorf("stranger %s was injected into DM keyed %s", strangerID, targetKey)
+		}
+	}
+
+	// Positive control: named participants ARE present.
+	var hasUser, hasAgent bool
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalKind == "user" && p.PrincipalID == userID {
+			hasUser = true
+		}
+		if p.PrincipalKind == "agent" && p.PrincipalID == agentID {
+			hasAgent = true
+		}
+	}
+	assert.True(t, hasUser, "named user must be present in target")
+	assert.True(t, hasAgent, "named agent must be present in target")
+}
+
+// TestB1_SharedPredicate_MergeConversationDirectly calls mergeConversation
+// directly (not through Run) with a stranger participant and asserts rejection.
+// This proves that the shared messages.CheckDMParticipantKey predicate is the
+// enforcement point for mergeConversation — a test that only exercises Run
+// would pass against two divergent copies of the guard logic.
+func TestB1_SharedPredicate_MergeConversationDirectly(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	strangerID := uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	targetKey := mustDMKey("user", userID, "agent", agentID)
+
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native",
+		ExternalRef: ""},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: strangerID})
+
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: targetKey},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	svc := NewDMMigrationService(ms)
+	result := &DMMigrationResult{}
+	oldParts := ms.participants[oldConvID]
+
+	mergeErr := svc.mergeConversation(ctx, oldConvID, newConvID, oldParts, result)
+	require.NoError(t, mergeErr)
+
+	// Stranger must NOT be in target.
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalID == strangerID {
+			t.Errorf("stranger %s was injected into DM via direct mergeConversation call", strangerID)
+		}
+	}
+
+	// Positive control: named participants are present.
+	var hasUser, hasAgent bool
+	for _, p := range ms.participants[newConvID] {
+		if p.PrincipalKind == "user" && p.PrincipalID == userID {
+			hasUser = true
+		}
+		if p.PrincipalKind == "agent" && p.PrincipalID == agentID {
+			hasAgent = true
+		}
+	}
+	assert.True(t, hasUser, "named user must be present via direct mergeConversation call")
+	assert.True(t, hasAgent, "named agent must be present via direct mergeConversation call")
+
+	// At least one error about skipping the stranger.
+	var foundSkipError bool
+	for _, e := range result.Errors {
+		if strings.Contains(e, "skip participant") && strings.Contains(e, strangerID) {
+			foundSkipError = true
+		}
+	}
+	assert.True(t, foundSkipError, "expected error about skipping stranger participant")
+}
+
+// ---------------------------------------------------------------------------
+// B14: Empty-ref ruling — empty-ref rows left keyless
+// ---------------------------------------------------------------------------
+
+// TestB14_EmptyRefRowLeftKeyless verifies that an empty-ref direct row is left
+// keyless and participant-less after migration. The migration must NOT derive
+// a key from the participant index (that would be fabrication of an ACL).
+//
+// Mutation contract: reverting the skip (restoring the old stepMergeOrRekeyEmptyRef
+// logic) causes this test to fail because the row gets re-keyed.
+//
+// DEF-29 (open): a keyless direct row has no ACL. This test pins current-but-wrong
+// behaviour — the migration leaves these rows keyless because deriving a key from
+// the listing index would fabricate an ACL (B14 ruling). Expectations will invert
+// when DEF-29 closes; correct resolution is operator review, not migration.
+func TestB14_EmptyRefRowLeftKeyless(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+	convID := uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	// Empty-ref direct row with 2 active participants.
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: "",
+	},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "agent", PrincipalID: agentID},
+	)
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	conv := ms.conversations[convID]
+
+	// (a) External ref must still be empty.
+	assert.Equal(t, "", conv.ExternalRef,
+		"external_ref must remain empty — deriving a key from the index is fabrication")
+
+	// (b) Row must NOT be soft-deleted.
+	assert.Nil(t, conv.DeletedAt,
+		"empty-ref row must not be soft-deleted")
+
+	// (c) EmptyRefSkipped counter must be 1.
+	assert.Equal(t, 1, result.EmptyRefSkipped,
+		"EmptyRefSkipped should be 1")
+
+	// (d) EmptyRefMerged and EmptyRefRekeyed must both be 0.
+	assert.Equal(t, 0, result.EmptyRefMerged,
+		"EmptyRefMerged should be 0")
+	assert.Equal(t, 0, result.EmptyRefRekeyed,
+		"EmptyRefRekeyed should be 0")
 }

@@ -523,16 +523,11 @@ func isUniqueConstraintError(err error) bool {
 //
 // For non-direct conversations the function is a no-op (returns nil).
 func checkDMParticipantKey(conv *ent.Conversation, principalKind, principalID string) error {
-	if string(conv.Kind) != "direct" {
-		return nil
+	if conv == nil {
+		return fmt.Errorf("%w: conversation is nil", store.ErrInvalidInput)
 	}
-	kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
-	if parseErr != nil {
-		return fmt.Errorf("direct conversation has unparseable external_ref: %w", store.ErrInvalidInput)
-	}
-	if (principalKind != kindA || principalID != idA) &&
-		(principalKind != kindB || principalID != idB) {
-		return fmt.Errorf("participant (%s, %s) not named in direct conversation key: %w", principalKind, principalID, store.ErrInvalidInput)
+	if err := messages.CheckDMParticipantKey(string(conv.Kind), conv.ExternalRef, principalKind, principalID); err != nil {
+		return fmt.Errorf("%w: %w", store.ErrInvalidInput, err)
 	}
 	return nil
 }
