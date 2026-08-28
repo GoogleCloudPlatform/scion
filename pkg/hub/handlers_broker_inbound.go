@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -264,6 +265,21 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if req.Message.Metadata != nil {
 		if gid, ok := req.Message.Metadata["group_id"]; ok {
 			storeMsg.GroupID = gid
+		}
+	}
+	// B15 dual-write: resolve-or-create conversation for broker inbound messages.
+	{
+		var convResult *messaging.ConversationResult
+		if req.Message.ThreadID != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, log, req.Message.ThreadID, agent.ProjectID)
+		} else if senderUserID != "" && agent.ID != "" {
+			senderKind, sOK := messages.PrincipalKindFromAddress(req.Message.Sender)
+			if sOK {
+				convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, log, senderKind, senderUserID, "agent", agent.ID)
+			}
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
 		}
 	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {

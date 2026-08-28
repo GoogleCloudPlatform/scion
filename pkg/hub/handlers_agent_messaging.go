@@ -1569,6 +1569,21 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		if mentionMsg.Metadata != nil {
 			storeMsg.GroupID = mentionMsg.Metadata["group_id"]
 		}
+		// B15 dual-write: resolve-or-create conversation for agent mention dispatch.
+		{
+			var convResult *messaging.ConversationResult
+			if mentionMsg.ThreadID != "" {
+				convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, mentionMsg.ThreadID, primaryAgent.ProjectID)
+			} else if mentionMsg.SenderID != "" && mentionAgent.ID != "" {
+				senderKind, sOK := messages.PrincipalKindFromAddress(mentionMsg.Sender)
+				if sOK {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, senderKind, mentionMsg.SenderID, "agent", mentionAgent.ID)
+				}
+			}
+			if convResult != nil {
+				storeMsg.ConversationID = convResult.ConversationID
+			}
+		}
 		var persisted bool
 		if createErr := s.store.CreateMessage(ctx, storeMsg); createErr != nil {
 			s.messageLog.Error("Failed to persist mention message", "slug", r.Slug, "error", createErr)

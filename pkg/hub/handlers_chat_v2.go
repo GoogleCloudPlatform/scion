@@ -63,6 +63,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -1136,6 +1137,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
 	}
+	// B15 dual-write: resolve-or-create conversation for web chat user→agent messages.
+	{
+		var convResult *messaging.ConversationResult
+		if key != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID)
+		} else if user.ID() != "" && primaryAgent.ID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
+	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
@@ -1237,6 +1250,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				DispatchState: store.MessageDispatchDispatched,
 				CreatedAt:     now,
 			}
+			// B15 dual-write: resolve-or-create conversation for web chat mention fan-out.
+			{
+				var convResult *messaging.ConversationResult
+				if key != "" {
+					convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID)
+				} else if user.ID() != "" && mentionAgent.ID != "" {
+					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
+				}
+				if convResult != nil {
+					mentionStoreMsg.ConversationID = convResult.ConversationID
+				}
+			}
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 			} else {
@@ -1328,6 +1353,18 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		ThreadID:      key,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
+	}
+	// B15 dual-write: resolve-or-create conversation for human-to-human messages.
+	{
+		var convResult *messaging.ConversationResult
+		if key != "" {
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID)
+		} else if user.ID() != "" && recipientID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
+		}
+		if convResult != nil {
+			storeMsg.ConversationID = convResult.ConversationID
+		}
 	}
 
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
