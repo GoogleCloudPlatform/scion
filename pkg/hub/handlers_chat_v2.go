@@ -1115,6 +1115,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
+	// Check user has attach permission on the primary agent.
+	if !s.authorize(w, r, agentResource(primaryAgent), ActionAttach) {
+		return "" // authorize writes 403
+	}
+
 	// Persist the message.
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
@@ -1189,6 +1194,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Handle additional mentioned agents (fan-out).
 	if len(agents) > 1 {
 		for _, mentionAgent := range agents[1:] {
+			// Check attach permission on each mentioned agent — skip silently
+			// rather than returning 403 since the user may have attach on some
+			// mentioned agents but not others. The primary agent check above
+			// already hard-fails for the main recipient.
+			decision := s.authzService.CheckAccess(ctx, user, agentResource(mentionAgent), ActionAttach)
+			if !decision.Allowed {
+				logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)
+				s.messageLog.Warn("User lacks attach permission for mentioned agent",
+					"user", user.ID(), "agent", mentionAgent.Slug)
+				continue
+			}
 			mentionMsg := messages.NewMention(msg.Sender, "agent:"+mentionAgent.Slug, content, msg.Recipient)
 			mentionMsg.SenderID = msg.SenderID
 			mentionMsg.RecipientID = mentionAgent.ID
