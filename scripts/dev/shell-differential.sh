@@ -87,6 +87,7 @@ set -euo pipefail
 #                    the same stripped value and agree.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--self-test" ]; then
+  export SHELL_DIFFERENTIAL_SELFTEST=done
   d="$(mktemp -d)"
   trap 'rm -rf "$d"' EXIT
 

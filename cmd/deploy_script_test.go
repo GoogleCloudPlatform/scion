@@ -1474,6 +1474,51 @@ func TestScriptEnableIAPPatchBodyViaStubServer(t *testing.T) {
 // Preflight: gcloud capability check
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shell-differential self-test: banner invocation count
+// ---------------------------------------------------------------------------
+
+// TestShellDifferentialSelfTestBannerCount asserts that running
+// `shell-differential.sh --self-test` executes the self-test banner exactly
+// once. Without the SHELL_DIFFERENTIAL_SELFTEST export at the top of the
+// --self-test block, each of the four check() calls spawns a 4-argument child
+// that hits the guard at :146 and triggers a redundant nested self-test — five
+// total invocations instead of one.
+//
+// The visible stdout count is 1 either way, because check() redirects its
+// children's output to /dev/null and the guard captures the nested self-test
+// via command substitution. So this test measures TOTAL invocations via a
+// sideband file: a patched copy of the script appends a marker on every
+// banner execution, and the test counts markers.
+func TestShellDifferentialSelfTestBannerCount(t *testing.T) {
+	scriptPath := filepath.Join(repoRoot(t), "scripts", "dev", "shell-differential.sh")
+	scriptContent, err := os.ReadFile(scriptPath)
+	require.NoError(t, err)
+
+	traceFile := filepath.Join(t.TempDir(), "banner-trace")
+	patched := strings.Replace(
+		string(scriptContent),
+		`echo "self-test: ${SCION_TEST_BASH:-bash}"`,
+		fmt.Sprintf(`echo "self-test: ${SCION_TEST_BASH:-bash}"; echo x >> %q`, traceFile),
+		1,
+	)
+	patchedScript := filepath.Join(t.TempDir(), "shell-differential.sh")
+	require.NoError(t, os.WriteFile(patchedScript, []byte(patched), 0755))
+
+	cmd := exec.Command(patchedScript, "--self-test")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "self-test must pass; output: %s", output)
+
+	traceData, err := os.ReadFile(traceFile)
+	require.NoError(t, err, "trace file must exist — the banner was never reached")
+	count := strings.Count(string(traceData), "x")
+	assert.Equal(t, 1, count,
+		"self-test banner must execute exactly once; got %d — each extra "+
+			"invocation is a redundant self-test spawned because "+
+			"SHELL_DIFFERENTIAL_SELFTEST was not exported to check()'s children",
+		count)
+}
+
 func TestScriptCheckGcloudInstances_FailureMessage(t *testing.T) {
 	// On this container (gcloud 575.0.0), the preflight SHOULD fail.
 	// On a container with gcloud 582+, skip this test.
