@@ -74,8 +74,7 @@ export class ScionPageAdminRoles extends LitElement {
 
   // Action state
   @state() private actionInProgress = false;
-  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
-    null;
+  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
 
   static override styles = css`
     :host {
@@ -621,11 +620,7 @@ export class ScionPageAdminRoles extends LitElement {
         </div>
       </div>
 
-      ${this.loading
-        ? this.renderLoading()
-        : this.error
-          ? this.renderError()
-          : this.renderRoles()}
+      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderRoles()}
       ${this.renderCreateDialog()} ${this.renderEditDialog()} ${this.renderDeleteDialog()}
     `;
   }

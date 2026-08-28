@@ -68,7 +68,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   @state() private error: string | null = null;
 
   // Role name lookup cache
-  private roleNameMap = new Map<string, string>();
+  @state() private roleNameMap: Record<string, string> = {};
 
   // Dialog state
   @state() private showCreateDialog = false;
@@ -84,8 +84,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
   // Action state
   @state() private actionInProgress = false;
-  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
-    null;
+  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
 
   static override styles = css`
     :host {
@@ -345,10 +344,11 @@ export class ScionPageAdminRoleBindings extends LitElement {
       this.roles = rolesData.items || [];
 
       // Build role name lookup
-      this.roleNameMap = new Map();
+      const map: Record<string, string> = {};
       for (const role of this.roles) {
-        this.roleNameMap.set(role.id, role.name);
+        map[role.id] = role.name;
       }
+      this.roleNameMap = map;
     } catch (err) {
       console.error('Failed to load role bindings:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load role bindings';
@@ -362,7 +362,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   // ---------------------------------------------------------------------------
 
   private getRoleName(roleDefinitionId: string): string {
-    return this.roleNameMap.get(roleDefinitionId) || roleDefinitionId;
+    return this.roleNameMap[roleDefinitionId] || roleDefinitionId;
   }
 
   private get totalPages(): number {
