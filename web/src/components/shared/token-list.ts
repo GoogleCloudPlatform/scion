@@ -108,6 +108,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     description: 'All agent management operations',
     resource: 'agent',
     isAlias: true,
+    expandsTo: [
+      'agent:attach',
+      'agent:create',
+      'agent:delete',
+      'agent:list',
+      'agent:port_access',
+      'agent:read',
+    ],
   },
   {
     value: 'agent:port_access',
@@ -1178,6 +1186,7 @@ export class ScionTokenList extends LitElement {
             <div class="scope-selector">
               <div class="scope-search">
                 <sl-input
+                  aria-label="Filter scopes"
                   placeholder="Filter scopes..."
                   size="small"
                   clearable
@@ -1247,6 +1256,7 @@ export class ScionTokenList extends LitElement {
           @click=${() => this.toggleGroup(resource)}
           role="button"
           tabindex="0"
+          aria-expanded=${!isCollapsed}
           @keydown=${(e: KeyboardEvent) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();

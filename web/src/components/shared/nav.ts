@@ -157,9 +157,14 @@ export class ScionNav extends LitElement {
     // The backend enforces authorization — a 200 means the user is permitted.
     try {
       const res = await apiFetch('/api/v1/admin/roles');
-      this.hasAdminCapabilities = res.ok;
+      // Only apply result if user hasn't changed during the fetch
+      if (this.adminCheckUserId === userId) {
+        this.hasAdminCapabilities = res.ok;
+      }
     } catch {
-      this.hasAdminCapabilities = false;
+      if (this.adminCheckUserId === userId) {
+        this.hasAdminCapabilities = false;
+      }
     }
   }
 
