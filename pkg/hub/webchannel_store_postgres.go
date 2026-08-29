@@ -970,42 +970,6 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 	return results, nextCursor, nil
 }
 
-// GetTopicConversationID returns the conversation_id for a webchat topic.
-// Returns ("", error) if the topic does not exist or is soft-deleted.
-// Returns ("", nil) if the topic exists but has no conversation_id yet.
-// This method implements the messaging.TopicConversationLookup interface.
-func (s *pgWebChatStore) GetTopicConversationID(ctx context.Context, topicID string) (string, error) {
-	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1 AND deleted_at IS NULL`
-	var convID string
-	err := s.db.QueryRowContext(ctx, query, topicID).Scan(&convID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
-		}
-		return "", fmt.Errorf("webchat store: get topic conversation_id: %w", err)
-	}
-	return convID, nil
-}
-
-// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
-// webchat topic regardless of its deletion state.
-//
-// Soft-deletion is not declassification. A tombstoned native topic is still
-// a native topic for the purpose of "should I mint." Deletion hides a topic
-// from users; it must not make the mint guard forget the topic was ours.
-func (s *pgWebChatStore) GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error) {
-	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1`
-	var convID string
-	err := s.db.QueryRowContext(ctx, query, topicID).Scan(&convID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
-		}
-		return "", fmt.Errorf("webchat store: get topic conversation_id (including deleted): %w", err)
-	}
-	return convID, nil
-}
-
 // ---------------------------------------------------------------------------
 // Wave-2 Migrations (Postgres)
 // ---------------------------------------------------------------------------
