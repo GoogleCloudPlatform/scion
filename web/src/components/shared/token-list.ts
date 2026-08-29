@@ -113,9 +113,17 @@ const FALLBACK_SCOPES: ScopeOption[] = [
       'agent:create',
       'agent:delete',
       'agent:list',
+      'agent:message',
       'agent:port_access',
       'agent:read',
     ],
+  },
+  {
+    value: 'agent:message',
+    label: 'agent:message',
+    description: 'Send messages to agents',
+    resource: 'agent',
+    isAlias: false,
   },
   {
     value: 'agent:port_access',

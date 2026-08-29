@@ -1551,7 +1551,7 @@ const (
 	UATScopeAgentList       = permissions.ResourceAgent + ":" + permissions.ActionList
 	UATScopeAgentStart      = "agent:start"    // legacy stale scope; not valid for new tokens
 	UATScopeAgentStop       = "agent:stop"     // legacy stale scope; not valid for new tokens
-	UATScopeAgentMessage    = "agent:message"  // legacy stale scope; not valid for new tokens
+	UATScopeAgentMessage    = "agent:message"  // registry-backed scope (D2); valid for new tokens
 	UATScopeAgentDispatch   = "agent:dispatch" // legacy stale scope; not valid for new tokens
 	UATScopeAgentDelete     = permissions.ResourceAgent + ":" + permissions.ActionDelete
 	UATScopeAgentAttach     = permissions.ResourceAgent + ":" + permissions.ActionAttach

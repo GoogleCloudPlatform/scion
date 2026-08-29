@@ -83,7 +83,6 @@ func TestUATScopesAreRegistryDerived(t *testing.T) {
 	for _, stale := range []string{
 		store.UATScopeAgentStart,
 		store.UATScopeAgentStop,
-		store.UATScopeAgentMessage,
 		store.UATScopeAgentDispatch,
 	} {
 		if store.UATValidScopes[stale] {
@@ -123,7 +122,7 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 
 func TestTokenScopeSurfacesDoNotExposeStaleUATScopes(t *testing.T) {
 	cliHelp := permissions.UATScopeHelp()
-	for _, stale := range []string{"agent:start", "agent:stop", "agent:message", "agent:dispatch"} {
+	for _, stale := range []string{"agent:start", "agent:stop", "agent:dispatch"} {
 		if strings.Contains(cliHelp, stale) {
 			t.Fatalf("generated CLI help still exposes stale UAT scope %q", stale)
 		}
