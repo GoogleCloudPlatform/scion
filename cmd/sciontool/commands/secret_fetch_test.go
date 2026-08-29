@@ -121,6 +121,41 @@ func TestFetchSecretOverrides_HTTPError(t *testing.T) {
 	assert.Nil(t, overrides)
 }
 
+// TestFetchSecretOverrides_UnknownStatusExcluded verifies that a per-key
+// result with an unrecognised status is NOT included in the returned map.
+// This guards against the hub adding a fifth status that the client
+// silently treats as success — the default branch in fetchSecretOverrides
+// must exclude the key and log, not include it.
+//
+// Mutation: remove the default branch (or change it to set overrides[s.Key]).
+// The test must go red.
+func TestFetchSecretOverrides_UnknownStatusExcluded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := hub.SecretFetchResponse{
+			Secrets: []hub.SecretFetchResult{
+				{Key: "KNOWN", Value: "FAKE-KEY-SENTINEL-not-a-real-credential", Status: hub.SecretStatusOK},
+				{Key: "FUTURE", Value: "some-value", Status: "some_future_status", Error: "not a known status"},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := hub.NewClientWithConfig(srv.URL, "test-token", "agent-1")
+	overrides := fetchSecretOverrides(client, []string{"KNOWN", "FUTURE"})
+
+	// The known-ok key must be present.
+	require.NotNil(t, overrides)
+	assert.Equal(t, "FAKE-KEY-SENTINEL-not-a-real-credential", overrides["KNOWN"])
+
+	// The unknown-status key must NOT be present — fail-closed.
+	_, hasFuture := overrides["FUTURE"]
+	assert.False(t, hasFuture,
+		"a result with an unknown status must be excluded from overrides — "+
+			"if this fails, the default branch is leaking unknown statuses into the env")
+}
+
 func TestFetchSecretOverrides_AllNonOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := hub.SecretFetchResponse{
