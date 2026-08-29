@@ -397,10 +397,35 @@ di_preflight_rest_credential() {
 
   echo "    ADC token minted (${#tok} chars, prefix: ${tok:0:4}...)"
 
+  # --- Keep the token out of curl's argv ---
+  # A live access token on the command line is readable by any local user via
+  # ps(1), leaks into shell history, and appears in set -x traces.  Three sites
+  # originally carried the token in curl's argv: two -H "Authorization: Bearer …"
+  # headers and one URL query parameter (?access_token=…).
+  #
+  # FIX: -K <configfile> hides the Bearer header from the process table;
+  # -d @<file> POSTs the tokeninfo query to avoid placing it in the URL.
+  # Measured: POST to the tokeninfo endpoint with access_token as form data
+  # returns HTTP 400 {"error":"invalid_token"} for a bad token — i.e. the body
+  # is parsed.  A 405 would mean the method is rejected; 400 invalid_token
+  # confirms POST is a supported method.
+  #
+  # None of the three sites requires the token in a URL.  The tokeninfo endpoint
+  # accepts the token via POST body, and the other two are standard Bearer auth.
+  local auth_config_file tokeninfo_data_file
+  auth_config_file="$(mktemp)"
+  tokeninfo_data_file="$(mktemp)"
+  printf '%s\n' "header = \"Authorization: Bearer ${tok}\"" > "$auth_config_file"
+  printf '%s' "access_token=${tok}" > "$tokeninfo_data_file"
+
+  # Clean up temp files containing credential material on every exit path.
+  # shellcheck disable=SC2064
+  trap "rm -f '$auth_config_file' '$tokeninfo_data_file'" RETURN
+
   # --- Resolve ADC identity via tokeninfo ---
   echo "    Resolving ADC identity via $tokeninfo_url"
   local tokeninfo_resp
-  tokeninfo_resp="$(curl -s "${tokeninfo_url}?access_token=${tok}" 2>&1)" || true
+  tokeninfo_resp="$(curl -s -d @"$tokeninfo_data_file" "${tokeninfo_url}" 2>&1)" || true
 
   # tokeninfo does not always carry "email": a service-account token scoped
   # only to cloud-platform returns azp/aud/scope and no email. azp is a
@@ -444,7 +469,7 @@ di_preflight_rest_credential() {
   resp_file="$(mktemp)"
   local http_code
   http_code="$(curl -s -o "$resp_file" -w "%{http_code}" \
-    -H "Authorization: Bearer ${tok}" \
+    -K "$auth_config_file" \
     "$list_url")" || {
     echo "Error: could not connect to $list_url — check network connectivity" >&2
     rm -f "$resp_file"
@@ -858,12 +883,18 @@ di_main() {
 
   local patch_resp_file
   patch_resp_file="$(mktemp)"
+
+  # Keep the token out of curl's argv — same rationale as the preflight.
+  local auth_config_file
+  auth_config_file="$(mktemp)"
+  printf '%s\n' "header = \"Authorization: Bearer ${access_token}\"" > "$auth_config_file"
+
   # shellcheck disable=SC2064
-  trap "rm -f '$patch_resp_file'" RETURN
+  trap "rm -f '$patch_resp_file' '$auth_config_file'" RETURN
   local http_code
   http_code="$(curl -s -o "$patch_resp_file" -w "%{http_code}" \
     -X PATCH \
-    -H "Authorization: Bearer ${access_token}" \
+    -K "$auth_config_file" \
     -H "Content-Type: application/json" \
     -d "$(di_iap_patch_body)" \
     "$patch_url")" || {
