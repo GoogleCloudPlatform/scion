@@ -1013,6 +1013,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 
 	dispatcher := s.GetDispatcher()
 
+	// Phase 3 msg-authz: extract sender identity once for per-recipient checks.
+	senderIdentity := GetIdentityFromContext(ctx)
+
 	// Note: retries are sequential — large groups with unreachable members
 	// may block for up to N × 30s. Future work: parallel dispatch.
 	for i, recip := range recipients {
@@ -1023,6 +1026,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			agent, err := s.store.GetAgentBySlug(ctx, projectID, api.Slugify(recip.Name))
 			if err != nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent not found: " + recip.Name}
+				continue
+			}
+
+			// Phase 3 msg-authz: Check message authorization per group recipient.
+			allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, agent, false)
+			if !allowed {
+				results[i] = GroupMessageRecipientResult{
+					Recipient: recipStr,
+					Status:    "unauthorized",
+					Error:     "message delivery denied",
+				}
 				continue
 			}
 
@@ -1380,7 +1394,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	targeted = len(authorizedAgents)
 	if filtered > 0 {
 		skipped += filtered
-		skippedBreakdown["unauthorized"] = filtered
+		// Don't expose unauthorized count in response — information leakage (MEDIUM-1).
 	}
 	runningAgents = authorizedAgents
 
@@ -1549,6 +1563,9 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
 
+	// Phase 3 msg-authz: extract sender identity once for per-mention checks.
+	senderIdentity := GetIdentityFromContext(ctx)
+
 	// Aggregate timeout for all mention dispatches (O1): 30s total to avoid
 	// blocking the HTTP response for up to N × 10s in the worst case.
 	aggregateCtx, aggregateCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1571,6 +1588,14 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		if !ok {
 			results[i].Status = "error"
 			results[i].Error = "agent resolved but not found for dispatch"
+			continue
+		}
+
+		// Phase 3 msg-authz: Check message authorization per mention recipient.
+		mentionAllowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
+		if !mentionAllowed {
+			results[i].Status = "unauthorized"
+			results[i].Error = "message delivery denied"
 			continue
 		}
 

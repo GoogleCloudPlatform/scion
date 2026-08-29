@@ -494,8 +494,11 @@ func TestHandleGroupMessage_PublishesOnPersistSuccess(t *testing.T) {
 	body, _ := json.Marshal(MessageRequest{StructuredMessage: structuredMsg})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+anchor.ID+"/message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	// Phase 3 msg-authz: use admin role so the super-admin bypass in
+	// authorizeAgentMessage passes — this test validates publish-on-persist,
+	// not message authorization.
 	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "user", "web")))
+		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "admin", "web")))
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, anchor.ID)
@@ -566,6 +569,11 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 
+	// Phase 3 msg-authz: inject admin identity so authorizeAgentMessage
+	// passes — this test validates publish-on-persist, not authorization.
+	ctx = contextWithIdentity(ctx,
+		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "admin", "web"))
+
 	results := srv.processMentions(ctx, []string{"mentioned"}, primary, originalMsg)
 
 	// The mention should still produce a result (dispatch may fail, but that's OK).
@@ -630,6 +638,11 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 		Version:   messages.Version,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
+
+	// Phase 3 msg-authz: inject admin identity so authorizeAgentMessage
+	// passes — this test validates publish-on-persist, not authorization.
+	ctx = contextWithIdentity(ctx,
+		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "admin", "web"))
 
 	results := srv.processMentions(ctx, []string{"mentioned2"}, primary, originalMsg)
 	t.Logf("mention ok results: %+v", results)
