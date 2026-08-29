@@ -52,9 +52,9 @@ type CascadeAgentDetail struct {
 
 // CascadeResult describes which descendants were updated (or would be updated) in a cascade operation.
 type CascadeResult struct {
-	Count    int                  `json:"count"`              // Number of descendants updated
-	AgentIDs []string             `json:"agent_ids"`          // IDs of updated descendants
-	Details  []CascadeAgentDetail `json:"details,omitempty"`  // Per-agent transition details (populated for dryRun and cascade)
+	Count    int                  `json:"count"`             // Number of descendants updated
+	AgentIDs []string             `json:"agent_ids"`         // IDs of updated descendants
+	Details  []CascadeAgentDetail `json:"details,omitempty"` // Per-agent transition details (populated for dryRun and cascade)
 }
 
 // ---------------------------------------------------------------------------
