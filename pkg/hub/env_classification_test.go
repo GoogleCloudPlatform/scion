@@ -65,6 +65,9 @@ func TestClassifyEnvKeys_EmptyIsNoOp(t *testing.T) {
 
 // =============================================================================
 // GITHUB_TOKEN ordering: App minter AFTER secret-store injection (#127, P3a)
+//
+// Writer IDs (H6, H7, H8, H10, etc.) are defined in the env-writer inventory:
+//   .design/hosted/127-env-writer-inventory.md
 // =============================================================================
 
 // TestGitHubToken_AppMinterOverridesSecretStore verifies the classification
