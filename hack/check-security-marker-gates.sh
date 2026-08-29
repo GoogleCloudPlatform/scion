@@ -52,6 +52,18 @@
 #     REQUIRED: fanOutToProject x3 (B5/R1 — broadcast self-skip by canonical ID)
 #     REQUIRED: fanOutGlobal x3 (B5/R1 — global broadcast self-skip by canonical ID)
 #
+#   Broadcasted in handlers_agent_messaging.go:
+#     REQUIRED: handleProjectBroadcast x1 (B5 — server-side broadcast forcing)
+#
+#   parseDMKeyIDs in handlers_agent_messaging.go:
+#     REQUIRED: handleAgentOutboundMessage x1, handleAgentMessage x1 (#1322 — DM key ownership)
+#
+#   parseDMKeyIDs in handlers_chat_v2.go:
+#     REQUIRED: func definition x1 (#1322 — must exist)
+#
+#   isDMParticipant in handlers_chat_v2.go:
+#     REQUIRED: func definition x1 (#1322 — kind-label tightening, must exist)
+#
 #   handlers_broker_inbound.go (parallel entry point to handlers_agent_messaging):
 #     REQUIRED: ActionAttach x1 in handleBrokerInbound (#1347 — broker inbound authz)
 #     REQUIRED: CheckAccess x1 in handleBrokerInbound (#1347 — policy check)

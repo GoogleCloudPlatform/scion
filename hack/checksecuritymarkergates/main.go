@@ -158,6 +158,39 @@ func main() {
 		rc = 1
 	}
 
+	// --- Broadcasted forcing in handlers_agent_messaging.go ---
+
+	// REQUIRED: Broadcasted = true server-side forcing in handleProjectBroadcast.
+	// Without this, a client setting Broadcasted=false walks the message through
+	// the DM path with a spoofed sender, bypassing broadcast authorization.
+	assertRequired(
+		"Broadcasted in handleProjectBroadcast (B5 — server-side broadcast forcing)",
+		ham, hamPath, "handleProjectBroadcast", "Broadcasted", 1)
+
+	// --- parseDMKeyIDs in handlers_agent_messaging.go ---
+
+	// REQUIRED: DM key ownership verification (#1322).
+	// parseDMKeyIDs validates that the DM thread_id matches the resolved sender
+	// and agent. Without it, a user can claim a DM key belonging to another
+	// user's conversation.
+	assertRequired(
+		"parseDMKeyIDs in handleAgentOutboundMessage (#1322 — DM key ownership)",
+		ham, hamPath, "handleAgentOutboundMessage", "parseDMKeyIDs", 1)
+
+	assertRequired(
+		"parseDMKeyIDs in handleAgentMessage (#1322 — DM key ownership)",
+		ham, hamPath, "handleAgentMessage", "parseDMKeyIDs", 1)
+
+	// --- parseDMKeyIDs and isDMParticipant definitions in handlers_chat_v2.go ---
+
+	assertFuncDef(
+		"parseDMKeyIDs function definition (#1322 — must exist)",
+		hcv, hcvPath, "parseDMKeyIDs", 1)
+
+	assertFuncDef(
+		"isDMParticipant function definition (#1322 — kind-label tightening, must exist)",
+		hcv, hcvPath, "isDMParticipant", 1)
+
 	// --- SenderID in messagebroker.go ---
 
 	// REQUIRED: 3 uses in fanOutToProject (B5/R1 — broadcast self-skip by ID)
