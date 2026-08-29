@@ -23,6 +23,7 @@
 if [ -n "$GITHUB_TOKEN" ]; then
     export SCION_GIT_TOKEN="$GITHUB_TOKEN"
     unset GITHUB_TOKEN
+    # shellcheck disable=SC2016  # ${SCION_GIT_TOKEN} expanded at helper invocation, not config write
     git config --global credential.helper \
         '!f() { echo "password=${SCION_GIT_TOKEN}"; echo "username=oauth2"; }; f'
 fi
