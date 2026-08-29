@@ -132,10 +132,11 @@ func TestHandleAgentCloudLogs_AgentNotFound(t *testing.T) {
 
 	srv.Handler().ServeHTTP(w, req)
 
-	// When logQueryService is nil, returns 501 before looking up the agent.
-	// This is correct: "Cloud Logging is not configured" supersedes agent resolution.
-	if w.Code != http.StatusNotImplemented {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+	// Agent lookup runs before the logQueryService nil check (PR #1393),
+	// so a non-existent agent gets 404 without revealing whether Cloud Logging
+	// is configured. This is the security improvement from PR #1393.
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
 
