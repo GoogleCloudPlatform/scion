@@ -29,9 +29,10 @@ type AgentProjectLookup interface {
 }
 
 // validateMessageContent checks every Message invariant that does not depend
-// on conversation attribution. It is the shared core of both ValidateMessage
-// (native callers that already have a ConversationID) and ValidateLegacyMessage
-// (legacy callers where attribution runs after validation).
+// on conversation attribution. It is the shared core used by
+// ValidateLegacyMessage (legacy callers where attribution runs after
+// validation). ConversationID is checked separately by ValidateAttributed
+// after the conversation attribution layer has set a real one.
 func validateMessageContent(msg *Message) error {
 	if msg == nil {
 		return fmt.Errorf("message must not be nil")
@@ -56,25 +57,6 @@ func validateMessageContent(msg *Message) error {
 	// ReplyToID, if present, must not be empty string.
 	if msg.ReplyToID != nil && *msg.ReplyToID == "" {
 		return fmt.Errorf("reply_to_id must not be empty when set")
-	}
-	return nil
-}
-
-// ValidateMessage checks that a Message is internally consistent.
-// It delegates to msg.Validate() for structural checks (ID, From, Kind,
-// Visibility, kind/intent/event mutual-exclusivity), then adds domain-level
-// checks that only the standalone validator knows about.
-// Every rule has a corresponding test that fails when the rule is removed.
-func ValidateMessage(msg *Message) error {
-	if err := validateMessageContent(msg); err != nil {
-		return err
-	}
-	// ConversationID is required for native-type callers, which always have
-	// one by construction. Legacy callers use ValidateLegacyMessage (which
-	// skips this check) followed by ValidateAttributed (which performs it
-	// after conversation attribution has set a real ConversationID).
-	if msg.ConversationID == "" {
-		return fmt.Errorf("conversation_id is required")
 	}
 	return nil
 }
@@ -199,19 +181,4 @@ func ValidateCrossProjectAddressees(
 		)
 	}
 	return nil
-}
-
-// ValidateMessageAddressees performs the full addressee validation including
-// the cross-project check (AC-33). Callers that have a store and addressees
-// should call this after ValidateMessage/ValidateLegacyMessage.
-func ValidateMessageAddressees(
-	ctx context.Context,
-	agentStore AgentProjectLookup,
-	msg *Message,
-	addrs []Addressee,
-) error {
-	if err := ValidateAddressees(addrs, msg); err != nil {
-		return err
-	}
-	return ValidateCrossProjectAddressees(ctx, agentStore, addrs)
 }
