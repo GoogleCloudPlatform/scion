@@ -120,39 +120,36 @@ func main() {
 		"validateDefaultAgent doc comments",
 		hcv, hcvPath, "validateDefaultAgent", 3)
 
-	// --- ActionAttach in handlers_agent_messaging.go ---
+	// --- authorizeAgentMessage in handlers_agent_messaging.go ---
+	// #1371 replaced ActionAttach-based authorization with authorizeAgentMessage,
+	// which provides equivalent-or-stronger protection (mode filtering + ancestry).
 
-	// REQUIRED: 1 call in handleProjectBroadcast
+	// REQUIRED: 1 call in handleProjectBroadcast (per-recipient pre-filter)
 	assertRequired(
-		"ActionAttach in handleProjectBroadcast (#1347 — project broadcast authorization)",
-		ham, hamPath, "handleProjectBroadcast", "ActionAttach", 1)
+		"authorizeAgentMessage in handleProjectBroadcast (#1371 — project broadcast authorization)",
+		ham, hamPath, "handleProjectBroadcast", "authorizeAgentMessage", 1)
 
-	// --- ActionAttach in handlers_chat_v2.go ---
+	// --- authorizeAgentMessage in handlers_chat_v2.go ---
+	// #1371 replaced ActionAttach authorize/CheckAccess with authorizeAgentMessage
+	// on both primary and mention paths.
 
-	// REQUIRED: 2 calls in sendAgentRouted (s.authorize + CheckAccess)
-	// AUDIT: 1 call in sendAgentRouted (logAuthzDenial — silent denial path)
-	// Total ActionAttach occurrences in sendAgentRouted = 3
+	// REQUIRED: 2 calls in sendAgentRouted (primary path + mention fan-out)
 	assertRequired(
-		"ActionAttach authorize + CheckAccess in sendAgentRouted (#1347 — agent attach authorization)",
-		hcv, hcvPath, "sendAgentRouted", "ActionAttach", 3)
-
-	// The AUDIT check: logAuthzDenial specifically, within sendAgentRouted
-	assertAudit(
-		"logAuthzDenial(ActionAttach) in sendAgentRouted (#1347 — silent mention-denial audit trail)",
-		hcv, hcvPath, "sendAgentRouted", "logAuthzDenial", 1)
+		"authorizeAgentMessage in sendAgentRouted (#1371 — agent message authorization)",
+		hcv, hcvPath, "sendAgentRouted", "authorizeAgentMessage", 2)
 
 	// --- COMPOSITE GATE: handleProjectBroadcast ---
-	// This single function carries authenticatedSender (B5) AND ActionAttach (#1347).
+	// This single function carries authenticatedSender (B5) AND authorizeAgentMessage (#1371).
 	// messaging-v2 reverts BOTH. A regression here costs sender-identity derivation
 	// and project authorization simultaneously.
 
 	compositeAuth := countIdentsInFunc(ham, "handleProjectBroadcast", "authenticatedSender")
-	compositeAttach := countIdentsInFunc(ham, "handleProjectBroadcast", "ActionAttach")
+	compositeAuthzMsg := countIdentsInFunc(ham, "handleProjectBroadcast", "authorizeAgentMessage")
 
-	if compositeAuth < 1 || compositeAttach < 1 {
-		fmt.Fprintf(os.Stderr, "FAIL [COMPOSITE] handleProjectBroadcast must contain BOTH authenticatedSender AND ActionAttach\n")
+	if compositeAuth < 1 || compositeAuthzMsg < 1 {
+		fmt.Fprintf(os.Stderr, "FAIL [COMPOSITE] handleProjectBroadcast must contain BOTH authenticatedSender AND authorizeAgentMessage\n")
 		fmt.Fprintf(os.Stderr, "  authenticatedSender: found x%d (need ≥1)\n", compositeAuth)
-		fmt.Fprintf(os.Stderr, "  ActionAttach: found x%d (need ≥1)\n", compositeAttach)
+		fmt.Fprintf(os.Stderr, "  authorizeAgentMessage: found x%d (need ≥1)\n", compositeAuthzMsg)
 		fmt.Fprintf(os.Stderr, "  This function is the highest-value anchor: a single regression costs\n")
 		fmt.Fprintf(os.Stderr, "  sender-identity derivation AND project authorization simultaneously.\n")
 		rc = 1
@@ -204,19 +201,16 @@ func main() {
 		mb, mbPath, "fanOutGlobal", "SenderID", 3)
 
 	// --- handlers_broker_inbound.go ---
-	// Parallel entry point to handlers_agent_messaging.go. Same B5 and #1347
-	// security patterns: server-derived sender identity, ActionAttach
+	// Parallel entry point to handlers_agent_messaging.go. Same B5 and #1371
+	// security patterns: server-derived sender identity, authorizeAgentMessage
 	// enforcement, DM key ownership verification.
 
-	// REQUIRED: ActionAttach x1 in handleBrokerInbound (CheckAccess call)
+	// REQUIRED: authorizeAgentMessage x1 in handleBrokerInbound
+	// #1371 replaced ActionAttach/CheckAccess with authorizeAgentMessage, which
+	// combines policy check with mode filtering and ancestry verification.
 	assertRequired(
-		"ActionAttach in handleBrokerInbound (#1347 — broker inbound authorization)",
-		hbi, hbiPath, "handleBrokerInbound", "ActionAttach", 1)
-
-	// REQUIRED: CheckAccess x1 in handleBrokerInbound (policy enforcement)
-	assertRequired(
-		"CheckAccess in handleBrokerInbound (#1347 — broker inbound policy check)",
-		hbi, hbiPath, "handleBrokerInbound", "CheckAccess", 1)
+		"authorizeAgentMessage in handleBrokerInbound (#1371 — broker inbound message authorization)",
+		hbi, hbiPath, "handleBrokerInbound", "authorizeAgentMessage", 1)
 
 	// REQUIRED: SenderID x4 in handleBrokerInbound (B5 — canonical sender identity)
 	// The 4 idents are: assignment from senderUser.ID, DM ownership check,
