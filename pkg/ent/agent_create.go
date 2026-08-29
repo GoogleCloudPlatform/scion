@@ -130,6 +130,20 @@ func (_c *AgentCreate) SetNillableVisibility(v *string) *AgentCreate {
 	return _c
 }
 
+// SetMessageMode sets the "message_mode" field.
+func (_c *AgentCreate) SetMessageMode(v agent.MessageMode) *AgentCreate {
+	_c.mutation.SetMessageMode(v)
+	return _c
+}
+
+// SetNillableMessageMode sets the "message_mode" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableMessageMode(v *agent.MessageMode) *AgentCreate {
+	if v != nil {
+		_c.SetMessageMode(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
 func (_c *AgentCreate) SetLabels(v map[string]string) *AgentCreate {
 	_c.mutation.SetLabels(v)
@@ -614,6 +628,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultVisibility
 		_c.mutation.SetVisibility(v)
 	}
+	if _, ok := _c.mutation.MessageMode(); !ok {
+		v := agent.DefaultMessageMode
+		_c.mutation.SetMessageMode(v)
+	}
 	if _, ok := _c.mutation.CurrentTurns(); !ok {
 		v := agent.DefaultCurrentTurns
 		_c.mutation.SetCurrentTurns(v)
@@ -682,6 +700,14 @@ func (_c *AgentCreate) check() error {
 	}
 	if _, ok := _c.mutation.Visibility(); !ok {
 		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Agent.visibility"`)}
+	}
+	if _, ok := _c.mutation.MessageMode(); !ok {
+		return &ValidationError{Name: "message_mode", err: errors.New(`ent: missing required field "Agent.message_mode"`)}
+	}
+	if v, ok := _c.mutation.MessageMode(); ok {
+		if err := agent.MessageModeValidator(v); err != nil {
+			return &ValidationError{Name: "message_mode", err: fmt.Errorf(`ent: validator failed for field "Agent.message_mode": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.CurrentTurns(); !ok {
 		return &ValidationError{Name: "current_turns", err: errors.New(`ent: missing required field "Agent.current_turns"`)}
@@ -774,6 +800,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Visibility(); ok {
 		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
 		_node.Visibility = value
+	}
+	if value, ok := _c.mutation.MessageMode(); ok {
+		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
+		_node.MessageMode = value
 	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
@@ -1119,6 +1149,18 @@ func (u *AgentUpsert) SetVisibility(v string) *AgentUpsert {
 // UpdateVisibility sets the "visibility" field to the value that was provided on create.
 func (u *AgentUpsert) UpdateVisibility() *AgentUpsert {
 	u.SetExcluded(agent.FieldVisibility)
+	return u
+}
+
+// SetMessageMode sets the "message_mode" field.
+func (u *AgentUpsert) SetMessageMode(v agent.MessageMode) *AgentUpsert {
+	u.Set(agent.FieldMessageMode, v)
+	return u
+}
+
+// UpdateMessageMode sets the "message_mode" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateMessageMode() *AgentUpsert {
+	u.SetExcluded(agent.FieldMessageMode)
 	return u
 }
 
@@ -1827,6 +1869,20 @@ func (u *AgentUpsertOne) SetVisibility(v string) *AgentUpsertOne {
 func (u *AgentUpsertOne) UpdateVisibility() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateVisibility()
+	})
+}
+
+// SetMessageMode sets the "message_mode" field.
+func (u *AgentUpsertOne) SetMessageMode(v agent.MessageMode) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetMessageMode(v)
+	})
+}
+
+// UpdateMessageMode sets the "message_mode" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateMessageMode() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateMessageMode()
 	})
 }
 
@@ -2787,6 +2843,20 @@ func (u *AgentUpsertBulk) SetVisibility(v string) *AgentUpsertBulk {
 func (u *AgentUpsertBulk) UpdateVisibility() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateVisibility()
+	})
+}
+
+// SetMessageMode sets the "message_mode" field.
+func (u *AgentUpsertBulk) SetMessageMode(v agent.MessageMode) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetMessageMode(v)
+	})
+}
+
+// UpdateMessageMode sets the "message_mode" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateMessageMode() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateMessageMode()
 	})
 }
 

@@ -133,7 +133,7 @@ func TestComputeScopeCapabilities_AdminGetsAllScopeActions(t *testing.T) {
 	// Super-admin still gets all scope actions after short-circuit removal.
 	admin := NewAuthenticatedUser("admin-scope-regr", "admin-scope-regr@example.com", "Admin", "admin", "api")
 	caps := srv.authzService.ComputeScopeCapabilities(ctx, admin, "", "", "agent")
-	assert.Equal(t, []string{"create", "list", "stop_all"}, caps.Actions)
+	assert.Equal(t, []string{"create", "list", "stop_all", "message"}, caps.Actions)
 }
 
 func TestComputeCapabilitiesBatch_AdminGetsAllAfterConversion(t *testing.T) {
@@ -585,7 +585,7 @@ func TestComputeScopeCapabilities(t *testing.T) {
 	admin := NewAuthenticatedUser("admin-scope-cap", "admin-scope@example.com", "Admin", "admin", "api")
 
 	caps := srv.authzService.ComputeScopeCapabilities(ctx, admin, "", "", "agent")
-	assert.Equal(t, []string{"create", "list", "stop_all"}, caps.Actions)
+	assert.Equal(t, []string{"create", "list", "stop_all", "message"}, caps.Actions)
 }
 
 func TestComputeScopeCapabilities_NoPolicy(t *testing.T) {

@@ -57,6 +57,7 @@ type Agent struct {
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`
 	Visibility        string            `json:"visibility,omitempty"`
+	MessageMode       string            `json:"messageMode,omitempty"`
 	StateVersion      int64             `json:"stateVersion,omitempty"`
 	ExitCode          *int              `json:"exitCode,omitempty"`
 	ExitReason        string            `json:"exitReason,omitempty"`

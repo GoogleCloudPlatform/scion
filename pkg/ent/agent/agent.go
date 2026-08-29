@@ -34,6 +34,8 @@ const (
 	FieldDelegationEnabled = "delegation_enabled"
 	// FieldVisibility holds the string denoting the visibility field in the database.
 	FieldVisibility = "visibility"
+	// FieldMessageMode holds the string denoting the message_mode field in the database.
+	FieldMessageMode = "message_mode"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -137,6 +139,7 @@ var Columns = []string{
 	FieldOwnerID,
 	FieldDelegationEnabled,
 	FieldVisibility,
+	FieldMessageMode,
 	FieldLabels,
 	FieldAnnotations,
 	FieldPhase,
@@ -241,6 +244,34 @@ func StatusValidator(s Status) error {
 	}
 }
 
+// MessageMode defines the type for the "message_mode" enum field.
+type MessageMode string
+
+// MessageModeProject is the default value of the MessageMode enum.
+const DefaultMessageMode = MessageModeProject
+
+// MessageMode values.
+const (
+	MessageModeNone    MessageMode = "none"
+	MessageModeLineage MessageMode = "lineage"
+	MessageModeBranch  MessageMode = "branch"
+	MessageModeProject MessageMode = "project"
+)
+
+func (mm MessageMode) String() string {
+	return string(mm)
+}
+
+// MessageModeValidator is a validator for the "message_mode" field enum values. It is called by the builders before save.
+func MessageModeValidator(mm MessageMode) error {
+	switch mm {
+	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject:
+		return nil
+	default:
+		return fmt.Errorf("agent: invalid enum value for message_mode field: %q", mm)
+	}
+}
+
 // OrderOption defines the ordering options for the Agent queries.
 type OrderOption func(*sql.Selector)
 
@@ -292,6 +323,11 @@ func ByDelegationEnabled(opts ...sql.OrderTermOption) OrderOption {
 // ByVisibility orders the results by the visibility field.
 func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
+}
+
+// ByMessageMode orders the results by the message_mode field.
+func ByMessageMode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMessageMode, opts...).ToFunc()
 }
 
 // ByPhase orders the results by the phase field.

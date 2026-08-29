@@ -59,6 +59,7 @@ var (
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project"}, Default: "project"},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "phase", Type: field.TypeString, Nullable: true},
@@ -99,7 +100,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[39]},
+				Columns:    []*schema.Column{AgentsColumns[40]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -108,7 +109,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[39]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[40]},
 			},
 		},
 	}

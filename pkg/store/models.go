@@ -87,7 +87,8 @@ type Agent struct {
 	// Ownership
 	CreatedBy  string `json:"createdBy,omitempty"`
 	OwnerID    string `json:"ownerId,omitempty"`
-	Visibility string `json:"visibility"` // private, team, public
+	Visibility  string `json:"visibility"`  // private, team, public
+	MessageMode string `json:"messageMode"` // none, lineage, branch, project
 
 	// Ancestry chain for transitive access control.
 	// Ordered list of ancestor IDs: [root, ..., parent].
@@ -699,6 +700,7 @@ type TemplateConfig struct {
 	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
 	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
 	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
+	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project
 }
 
 // HubAccessConfig defines what Hub API scopes an agent created from this template receives.
@@ -770,6 +772,14 @@ const (
 	VisibilityPrivate = api.VisibilityPrivate
 	VisibilityTeam    = api.VisibilityTeam
 	VisibilityPublic  = api.VisibilityPublic
+)
+
+// MessageMode constants define the messaging reach of an agent.
+const (
+	MessageModeNone    = "none"    // Sealed: no messaging (send or receive)
+	MessageModeLineage = "lineage" // Ancestry users only; no agent-to-agent edges
+	MessageModeBranch  = "branch"  // Ancestry users + parent agent + direct children
+	MessageModeProject = "project" // Bidirectional with all agents and users in project
 )
 
 // =============================================================================

@@ -646,6 +646,26 @@ func VisibilityContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldVisibility, v))
 }
 
+// MessageModeEQ applies the EQ predicate on the "message_mode" field.
+func MessageModeEQ(v MessageMode) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldMessageMode, v))
+}
+
+// MessageModeNEQ applies the NEQ predicate on the "message_mode" field.
+func MessageModeNEQ(v MessageMode) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldMessageMode, v))
+}
+
+// MessageModeIn applies the In predicate on the "message_mode" field.
+func MessageModeIn(vs ...MessageMode) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldMessageMode, vs...))
+}
+
+// MessageModeNotIn applies the NotIn predicate on the "message_mode" field.
+func MessageModeNotIn(vs ...MessageMode) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldMessageMode, vs...))
+}
+
 // LabelsIsNil applies the IsNil predicate on the "labels" field.
 func LabelsIsNil() predicate.Agent {
 	return predicate.Agent(sql.FieldIsNull(FieldLabels))

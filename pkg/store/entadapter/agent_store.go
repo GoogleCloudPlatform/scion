@@ -116,6 +116,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		Created:             a.Created,
 		Updated:             a.Updated,
 		Visibility:          a.Visibility,
+		MessageMode:         string(a.MessageMode),
 		Ancestry:            a.Ancestry,
 		StateVersion:        a.StateVersion,
 	}
@@ -242,6 +243,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 
 	if a.Visibility != "" {
 		create.SetVisibility(a.Visibility)
+	}
+	if a.MessageMode != "" {
+		create.SetMessageMode(agent.MessageMode(a.MessageMode))
 	}
 	if a.Labels != nil {
 		create.SetLabels(a.Labels)
@@ -393,6 +397,10 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetVisibility(a.Visibility).
 		SetUpdated(now).
 		SetStateVersion(newVersion)
+
+	if a.MessageMode != "" {
+		update.SetMessageMode(agent.MessageMode(a.MessageMode))
+	}
 
 	if a.ExitCode != nil {
 		update.SetExitCode(*a.ExitCode)

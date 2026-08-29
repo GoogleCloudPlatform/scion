@@ -570,7 +570,8 @@ func (s *Server) createAgentInProject(
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.
 	var effectiveRole AgentRole
-	var parentRole AgentRole // empty for user-created agents; set in agent-caller branch
+	var parentRole AgentRole  // empty for user-created agents; set in agent-caller branch
+	var parentMessageMode string // parent's message_mode for inheritance (D10)
 	requestedRole := AgentRole(req.AgentRole)
 
 	// Read project max agent role from annotations (default: full)
@@ -615,6 +616,7 @@ func (s *Server) createAgentInProject(
 				"parent_agent_id", agentIdent.ID(), "error", err)
 		} else {
 			parentRole, _ = agentRoleAndScopes(creatorAgent)
+			parentMessageMode = creatorAgent.MessageMode
 		}
 
 		// Validate stored parentRole to guard against corrupted data.
@@ -1005,6 +1007,18 @@ func (s *Server) createAgentInProject(
 	}
 
 	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName, effectiveRole)
+
+	// Resolve message_mode (D10 spawn defaults):
+	//   1. Template specifies message_mode → use it.
+	//   2. Parent agent exists → inherit parent's message_mode.
+	//   3. Otherwise → default to "project" (handled by Ent schema default).
+	if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
+		agent.MessageMode = resolvedTemplate.Config.MessageMode
+	} else if parentMessageMode != "" {
+		agent.MessageMode = parentMessageMode
+	} else {
+		agent.MessageMode = store.MessageModeProject
+	}
 
 	// Populate GCP identity in applied config.
 	// Default to "block" mode when no GCP identity is specified, so agents

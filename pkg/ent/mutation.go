@@ -1654,6 +1654,7 @@ type AgentMutation struct {
 	owner_id               *uuid.UUID
 	delegation_enabled     *bool
 	visibility             *string
+	message_mode           *agent.MessageMode
 	labels                 *map[string]string
 	annotations            *map[string]string
 	phase                  *string
@@ -2169,6 +2170,42 @@ func (m *AgentMutation) OldVisibility(ctx context.Context) (v string, err error)
 // ResetVisibility resets all changes to the "visibility" field.
 func (m *AgentMutation) ResetVisibility() {
 	m.visibility = nil
+}
+
+// SetMessageMode sets the "message_mode" field.
+func (m *AgentMutation) SetMessageMode(am agent.MessageMode) {
+	m.message_mode = &am
+}
+
+// MessageMode returns the value of the "message_mode" field in the mutation.
+func (m *AgentMutation) MessageMode() (r agent.MessageMode, exists bool) {
+	v := m.message_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMessageMode returns the old "message_mode" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldMessageMode(ctx context.Context) (v agent.MessageMode, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMessageMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMessageMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMessageMode: %w", err)
+	}
+	return oldValue.MessageMode, nil
+}
+
+// ResetMessageMode resets all changes to the "message_mode" field.
+func (m *AgentMutation) ResetMessageMode() {
+	m.message_mode = nil
 }
 
 // SetLabels sets the "labels" field.
@@ -3832,7 +3869,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 39)
+	fields := make([]string, 0, 40)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -3859,6 +3896,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.visibility != nil {
 		fields = append(fields, agent.FieldVisibility)
+	}
+	if m.message_mode != nil {
+		fields = append(fields, agent.FieldMessageMode)
 	}
 	if m.labels != nil {
 		fields = append(fields, agent.FieldLabels)
@@ -3976,6 +4016,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.DelegationEnabled()
 	case agent.FieldVisibility:
 		return m.Visibility()
+	case agent.FieldMessageMode:
+		return m.MessageMode()
 	case agent.FieldLabels:
 		return m.Labels()
 	case agent.FieldAnnotations:
@@ -4063,6 +4105,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldDelegationEnabled(ctx)
 	case agent.FieldVisibility:
 		return m.OldVisibility(ctx)
+	case agent.FieldMessageMode:
+		return m.OldMessageMode(ctx)
 	case agent.FieldLabels:
 		return m.OldLabels(ctx)
 	case agent.FieldAnnotations:
@@ -4194,6 +4238,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetVisibility(v)
+		return nil
+	case agent.FieldMessageMode:
+		v, ok := value.(agent.MessageMode)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMessageMode(v)
 		return nil
 	case agent.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -4690,6 +4741,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldVisibility:
 		m.ResetVisibility()
+		return nil
+	case agent.FieldMessageMode:
+		m.ResetMessageMode()
 		return nil
 	case agent.FieldLabels:
 		m.ResetLabels()
