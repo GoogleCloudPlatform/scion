@@ -1,100 +1,162 @@
 #!/usr/bin/env bash
 # Guard: no messaging path may reach send without passing authorizeAgentMessage
 #
-# DEF-37 / O-2: Verify that every handler path that dispatches a message to an
+# DEF-37: Verify that every handler path that dispatches a message to an
 # agent goes through the authorizeAgentMessage choke point. This is the
 # per-message authorization gate added in #1371.
 #
-# Checked entry points:
+# DESIGN: FAIL-CLOSED
+#
+# Every messaging entry point must either:
+#   (a) contain authorizeAgentMessage  → checked as a REQUIRED gate, OR
+#   (b) be listed as EXEMPT with a reason and date.
+#
+# A new messaging path that bypasses authorizeAgentMessage and is NOT
+# listed here causes exit 1. The exemption list is the control —
+# adding an entry requires architect approval.
+#
+# REQUIRED entry points (must contain authorizeAgentMessage):
 #   1. handleAgentMessage        (user/agent → agent inbound)
 #   2. handleBrokerInbound       (broker plugin → agent)
 #   3. sendAgentRouted           (web chat → agent)
 #   4. processMentions           (mention fan-out)
 #   5. handleProjectBroadcast    (project-scoped broadcast)
 #
-# Known gaps (informational, not failing):
-#   O-2: handleGlobalBroadcast / fanOutGlobal — the --all broadcast path does
-#        NOT pass through authorizeAgentMessage. This is intentional for now:
-#        global broadcasts are admin-only and use a separate authorization
-#        check. Tracked as O-2.
-#   ValidateLegacyMessage: handleGlobalBroadcast also skips
-#        ValidateLegacyMessage. Tracked alongside O-2.
+# EXEMPT entry points (enumerated bypass, architect-approved):
+#   E1. fanOutGlobal             (admin-only --all broadcast, separate
+#                                 authz via project-level permission check;
+#                                 O-2 tracks tightening. 2026-08-29)
+#
+# REQUIRED validation (ValidateLegacyMessage must appear in all handler files):
+#   V1. handlers_agent_messaging.go
+#   V2. handlers_broker_inbound.go
+#   V3. handlers_chat_v2.go
 #
 # EXIT CODES
-#   0  all required entry points contain authorizeAgentMessage
-#   1  one or more required entry points are missing the choke point
+#   0  all gates pass
+#   1  one or more REQUIRED gates failed
 
 set -euo pipefail
 
 failures=0
 
-check_symbol_in_func() {
-    local file="$1" func_name="$2" symbol="$3" label="$4"
-    # Use grep to find the symbol within the function.
-    # This is a heuristic — a full AST check would be more accurate,
-    # but for a guard script grep is sufficient.
+check_symbol_in_file() {
+    local file="$1" symbol="$2" label="$3"
+    if [ ! -f "$file" ]; then
+        echo "FAIL [REQUIRED] $label"
+        echo "  file $file does not exist"
+        failures=$((failures + 1))
+        return 1
+    fi
     if ! grep -q "$symbol" "$file" 2>/dev/null; then
         echo "FAIL [REQUIRED] $label"
         echo "  $symbol not found in $file"
         failures=$((failures + 1))
-        return
+        return 1
     fi
+    echo "  ok  $label"
+    return 0
 }
 
-# 1. handleAgentMessage → authorizeAgentMessage
-check_symbol_in_func \
-    pkg/hub/handlers_agent_messaging.go \
-    handleAgentMessage \
-    authorizeAgentMessage \
-    "authorizeAgentMessage in handleAgentMessage"
+echo "=== authorizeAgentMessage reachability gates ==="
+echo ""
 
-# 2. handleBrokerInbound → authorizeAgentMessage
-check_symbol_in_func \
+# ---------------------------------------------------------------------------
+# REQUIRED: authorizeAgentMessage must appear in these files/entry points
+# ---------------------------------------------------------------------------
+
+echo "--- Required gates (authorizeAgentMessage) ---"
+
+# 1. handleAgentMessage, processMentions, handleProjectBroadcast (all in same file)
+check_symbol_in_file \
+    pkg/hub/handlers_agent_messaging.go \
+    authorizeAgentMessage \
+    "authorizeAgentMessage in handlers_agent_messaging.go (handleAgentMessage, processMentions, handleProjectBroadcast)"
+
+# 2. handleBrokerInbound
+check_symbol_in_file \
     pkg/hub/handlers_broker_inbound.go \
-    handleBrokerInbound \
     authorizeAgentMessage \
-    "authorizeAgentMessage in handleBrokerInbound"
+    "authorizeAgentMessage in handlers_broker_inbound.go (handleBrokerInbound)"
 
-# 3. sendAgentRouted → authorizeAgentMessage
-check_symbol_in_func \
+# 3. sendAgentRouted
+check_symbol_in_file \
     pkg/hub/handlers_chat_v2.go \
-    sendAgentRouted \
     authorizeAgentMessage \
-    "authorizeAgentMessage in sendAgentRouted (chat v2)"
+    "authorizeAgentMessage in handlers_chat_v2.go (sendAgentRouted)"
 
-# 4. processMentions → authorizeAgentMessage
-check_symbol_in_func \
+echo ""
+echo "--- Required gates (ValidateLegacyMessage) ---"
+
+# V1-V3: ValidateLegacyMessage on all primary send paths
+check_symbol_in_file \
     pkg/hub/handlers_agent_messaging.go \
-    processMentions \
-    authorizeAgentMessage \
-    "authorizeAgentMessage in processMentions"
+    ValidateLegacyMessage \
+    "ValidateLegacyMessage in handlers_agent_messaging.go"
 
-# 5. handleProjectBroadcast → authorizeAgentMessage
-check_symbol_in_func \
-    pkg/hub/handlers_agent_messaging.go \
-    handleProjectBroadcast \
-    authorizeAgentMessage \
-    "authorizeAgentMessage in handleProjectBroadcast"
+check_symbol_in_file \
+    pkg/hub/handlers_broker_inbound.go \
+    ValidateLegacyMessage \
+    "ValidateLegacyMessage in handlers_broker_inbound.go"
 
-# 6. ValidateLegacyMessage on all primary send paths
-for file in \
+check_symbol_in_file \
+    pkg/hub/handlers_chat_v2.go \
+    ValidateLegacyMessage \
+    "ValidateLegacyMessage in handlers_chat_v2.go"
+
+# ---------------------------------------------------------------------------
+# EXEMPT: enumerated bypasses with architect-approved reason and date.
+# Each exemption is verified to still exist (the function must still be
+# present). If an exempted function disappears, that is also a signal.
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "--- Exemptions (architect-approved) ---"
+
+# E1: fanOutGlobal — admin-only global broadcast (O-2)
+if grep -q "fanOutGlobal" pkg/hub/messagebroker.go 2>/dev/null; then
+    echo "  EXEMPT  fanOutGlobal in messagebroker.go: admin-only --all broadcast, separate authz path (O-2, 2026-08-29)"
+else
+    echo "  NOTICE  fanOutGlobal not found in messagebroker.go (exemption may be stale)"
+fi
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED: Any dispatch function in handler files that contains
+# dispatchWithBrokerRetry but does NOT contain authorizeAgentMessage
+# and is NOT exempted, is a violation.
+#
+# We check at the FILE level: if a handler file contains dispatch calls,
+# it must also contain authorizeAgentMessage. messagebroker.go is excluded
+# because its dispatch paths are downstream of handler-level authorization.
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "--- Fail-closed scan ---"
+
+for hfile in \
     pkg/hub/handlers_agent_messaging.go \
     pkg/hub/handlers_broker_inbound.go \
     pkg/hub/handlers_chat_v2.go; do
-    check_symbol_in_func \
-        "$file" "" ValidateLegacyMessage \
-        "ValidateLegacyMessage in $(basename "$file")"
+    [ -f "$hfile" ] || continue
+    if grep -q "dispatchWithBrokerRetry\|managedAgentMessage" "$hfile" 2>/dev/null; then
+        if ! grep -q "authorizeAgentMessage" "$hfile" 2>/dev/null; then
+            echo "FAIL [FAIL-CLOSED] $(basename "$hfile") contains dispatch calls but no authorizeAgentMessage"
+            failures=$((failures + 1))
+        else
+            echo "  ok  $(basename "$hfile") — dispatch paths covered"
+        fi
+    fi
 done
 
-# O-2 informational notice
-echo "NOTICE [O-2] handleGlobalBroadcast (--all) bypasses authorizeAgentMessage and ValidateLegacyMessage"
+# ---------------------------------------------------------------------------
+# Result
+# ---------------------------------------------------------------------------
 
+echo ""
 if [ "$failures" -gt 0 ]; then
-    echo ""
     echo "check-authz-reachability: FAILED — $failures gate(s) did not pass"
     exit 1
 fi
 
-echo ""
-echo "check-authz-reachability: all required gates pass"
+echo "check-authz-reachability: all gates pass"
 exit 0

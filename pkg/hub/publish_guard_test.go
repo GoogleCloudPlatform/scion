@@ -213,10 +213,9 @@ func TestHandleAgentMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, agent.ID)
 
-	// After C3 dual-write changes, SSE publish fires regardless of
-	// persistence outcome to ensure browser clients see the message.
-	if msgs := spy.getUserMessages(); len(msgs) != 1 {
-		t.Errorf("expected 1 PublishUserMessage call even on persist failure, got %d", len(msgs))
+	// The handler should still return 200 (B10: non-fatal) but publish must not fire.
+	if msgs := spy.getUserMessages(); len(msgs) != 0 {
+		t.Errorf("expected no PublishUserMessage calls when persistence fails, got %d", len(msgs))
 	}
 }
 
@@ -423,10 +422,9 @@ func TestHandleGroupMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 
 	t.Logf("group response: %d %s", rr.Code, rr.Body.String())
 
-	// After C3 dual-write changes, SSE publish fires regardless of
-	// persistence outcome — both agent and user recipients get published.
-	if msgs := spy.getUserMessages(); len(msgs) < 1 {
-		t.Errorf("expected at least 1 PublishUserMessage call even on persist failure, got %d", len(msgs))
+	// Neither agent nor user recipient should have had PublishUserMessage called.
+	if msgs := spy.getUserMessages(); len(msgs) != 0 {
+		t.Errorf("expected no PublishUserMessage calls when persistence fails for group message, got %d", len(msgs))
 	}
 }
 
@@ -582,9 +580,9 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 	t.Logf("mention results: %+v", results)
 
 	// After C3 dual-write changes, SSE publish fires regardless of
-	// persistence outcome.
-	if msgs := spy.getUserMessages(); len(msgs) != 1 {
-		t.Errorf("expected 1 PublishUserMessage call even on persist failure for mention, got %d", len(msgs))
+	// The publish must NOT have fired because CreateMessage failed.
+	if msgs := spy.getUserMessages(); len(msgs) != 0 {
+		t.Errorf("expected no PublishUserMessage calls when persistence fails for mention, got %d", len(msgs))
 	}
 }
 

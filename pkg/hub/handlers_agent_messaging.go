@@ -652,8 +652,32 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// TODO(DEF-40): Wire ValidateCrossProjectAddressees here once the
-	// empty-string sentinel bug is fixed. See messaging/validate.go.
+	// AC-33: Cross-project mention check. Verify that all mentioned agents
+	// belong to the same project as the primary recipient before any dispatch.
+	if len(req.Mentions) > 0 {
+		primaryAgent, agentErr := s.store.GetAgent(ctx, id)
+		if agentErr == nil {
+			mentionAddrs := make([]messaging.Addressee, 0, len(req.Mentions)+1)
+			// Include the primary recipient agent.
+			mentionAddrs = append(mentionAddrs, messaging.Addressee{
+				PrincipalKind: "agent",
+				PrincipalID:   primaryAgent.ID,
+			})
+			// Resolve mention slugs to agent IDs for the cross-project check.
+			for _, slug := range req.Mentions {
+				if mentionAgent, lookupErr := s.store.GetAgentBySlug(ctx, primaryAgent.ProjectID, slug); lookupErr == nil {
+					mentionAddrs = append(mentionAddrs, messaging.Addressee{
+						PrincipalKind: "agent",
+						PrincipalID:   mentionAgent.ID,
+					})
+				}
+			}
+			if crossErr := messaging.ValidateCrossProjectAddressees(ctx, s.store, mentionAddrs); crossErr != nil {
+				ValidationError(w, crossErr.Error(), nil)
+				return
+			}
+		}
+	}
 
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
@@ -949,10 +973,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 		}
-		// Publish SSE event so connected browser clients can update the
-		// per-agent conversation view in real time — mirrors the agent→user
-		// publish path in handleAgentOutboundMessage.
-		s.events.PublishUserMessage(ctx, storeMsg)
+		// B11/B13: only publish when persistence succeeded — publishing an
+		// unpersisted message is not legal.
+		if persistedMsgID != "" {
+			// Publish SSE event so connected browser clients can update the
+			// per-agent conversation view in real time — mirrors the agent→user
+			// publish path in handleAgentOutboundMessage.
+			s.events.PublishUserMessage(ctx, storeMsg)
+		}
 	}
 
 	// Managed agent path: deliver message directly via backend, bypass broker.
@@ -1218,8 +1246,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog)
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+			} else {
+				// B11/B13: only publish when persistence succeeded.
+				s.events.PublishUserMessage(ctx, storeMsg)
 			}
-			s.events.PublishUserMessage(ctx, storeMsg)
 
 			if dispatcher == nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
@@ -1341,8 +1371,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog)
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+			} else {
+				// B11/B13: only publish when persistence succeeded.
+				s.events.PublishUserMessage(ctx, storeMsg)
 			}
-			s.events.PublishUserMessage(ctx, storeMsg)
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
 			delivered++
@@ -1756,7 +1788,10 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		} else {
 			persisted = true
 		}
-		s.events.PublishUserMessage(ctx, storeMsg)
+		// B11/B13: only publish when persistence succeeded.
+		if persisted {
+			s.events.PublishUserMessage(ctx, storeMsg)
+		}
 
 		// Dispatch to the mentioned agent's runtime.
 		dispatcher := s.GetDispatcher()
