@@ -559,13 +559,16 @@ func TestTemplateResource_UATConfinement(t *testing.T) {
 			"confinement must not fire on the token's own project")
 	})
 
-	// Global templates remain parentless and so remain outside UAT project
-	// confinement. That is unchanged by this commit and is called out here so
-	// the gap is recorded rather than assumed fixed: a project-pinned UAT can
-	// still reach global templates, subject to policy.
-	t.Run("global template is still not confined (unchanged)", func(t *testing.T) {
+	// Global templates are hub-level resources (no project parent). Since
+	// 943241adb (#1327, P2-A2), enforceUATConstraints denies project-scoped
+	// UATs access to hub-level resources. This test asserts the denial is
+	// applied.
+	t.Run("global template is denied as hub-level resource", func(t *testing.T) {
 		r := templateResource(&store.Template{ID: "tmpl-global", Scope: store.TemplateScopeGlobal})
-		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead))
+		decision := authz.enforceUATConstraints(scoped, r, ActionRead)
+		require.NotNil(t, decision, "project-scoped UAT must be denied access to hub-level global template")
+		assert.False(t, decision.Allowed)
+		assert.Equal(t, "token not scoped for hub-level resources", decision.Reason)
 	})
 }
 
