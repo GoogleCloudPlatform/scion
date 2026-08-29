@@ -33,6 +33,18 @@ type MessageChannel struct {
 	Observer bool   `json:"observer,omitempty"`
 }
 
+// ConversationResolveRequest is the request body for resolving a conversation reference.
+type ConversationResolveRequest struct {
+	Reference string `json:"reference"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// ConversationResolveResponse is the response from resolving a conversation reference.
+type ConversationResolveResponse struct {
+	ConversationID string `json:"conversation_id"`
+	Created        bool   `json:"created"`
+}
+
 // MessageService provides operations on the user's message inbox.
 type MessageService interface {
 	// List returns messages for the authenticated user.
@@ -49,6 +61,11 @@ type MessageService interface {
 
 	// ListChannels returns the registered message broker channels.
 	ListChannels(ctx context.Context) ([]MessageChannel, error)
+
+	// ResolveConversation resolves a conversation reference string (conv:<id>,
+	// @<agent>, @<email>, #<thread>) to a conversation ID. Creates the
+	// conversation if needed (resolve-or-create for @ references).
+	ResolveConversation(ctx context.Context, req *ConversationResolveRequest) (*ConversationResolveResponse, error)
 }
 
 // messageService is the implementation of MessageService.
@@ -201,4 +218,13 @@ func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, er
 		return nil, fmt.Errorf("decoding message channels: %w", err)
 	}
 	return result.Channels, nil
+}
+
+// ResolveConversation resolves a conversation reference string to a conversation ID.
+func (s *messageService) ResolveConversation(ctx context.Context, req *ConversationResolveRequest) (*ConversationResolveResponse, error) {
+	resp, err := s.c.post(ctx, "/api/v1/conversations/resolve", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ConversationResolveResponse](resp)
 }
