@@ -48,6 +48,17 @@
 #     REQUIRED: sendAgentRouted x2 (s.authorize + CheckAccess)
 #     AUDIT: sendAgentRouted x1 (logAuthzDenial — silent-denial path, no 403)
 #
+#   SenderID in messagebroker.go:
+#     REQUIRED: fanOutToProject x3 (B5/R1 — broadcast self-skip by canonical ID)
+#     REQUIRED: fanOutGlobal x3 (B5/R1 — global broadcast self-skip by canonical ID)
+#
+#   handlers_broker_inbound.go (parallel entry point to handlers_agent_messaging):
+#     REQUIRED: ActionAttach x1 in handleBrokerInbound (#1347 — broker inbound authz)
+#     REQUIRED: CheckAccess x1 in handleBrokerInbound (#1347 — policy check)
+#     REQUIRED: SenderID x4 in handleBrokerInbound (B5 — canonical sender identity)
+#     REQUIRED: NewAuthenticatedUser x1 in handleBrokerInbound (B5 — server-derived identity)
+#     REQUIRED: parseDMKeyIDs x1 in handleBrokerInbound (B5 — DM key ownership)
+#
 #   COMPOSITE: handleProjectBroadcast in handlers_agent_messaging.go must
 #   contain BOTH authenticatedSender AND ActionAttach.
 #

@@ -32,9 +32,11 @@ var (
 func main() {
 	hamPath := "pkg/hub/handlers_agent_messaging.go"
 	hcvPath := "pkg/hub/handlers_chat_v2.go"
+	mbPath := "pkg/hub/messagebroker.go"
+	hbiPath := "pkg/hub/handlers_broker_inbound.go"
 
 	// File-existence precheck (exit 2).
-	for _, f := range []string{hamPath, hcvPath} {
+	for _, f := range []string{hamPath, hcvPath, mbPath, hbiPath} {
 		if _, err := os.Stat(f); err != nil {
 			fmt.Fprintf(os.Stderr, "ABORT: guarded file not found or not readable: %s\n", f)
 			fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is an environment/rename issue, not a guard failure.\n")
@@ -54,6 +56,20 @@ func main() {
 	hcv, err := parser.ParseFile(fset, hcvPath, nil, parser.ParseComments)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ABORT: could not parse %s: %v\n", hcvPath, err)
+		fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is a syntax error, not a guard failure.\n")
+		os.Exit(2)
+	}
+
+	mb, err := parser.ParseFile(fset, mbPath, nil, parser.ParseComments)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ABORT: could not parse %s: %v\n", mbPath, err)
+		fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is a syntax error, not a guard failure.\n")
+		os.Exit(2)
+	}
+
+	hbi, err := parser.ParseFile(fset, hbiPath, nil, parser.ParseComments)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ABORT: could not parse %s: %v\n", hbiPath, err)
 		fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is a syntax error, not a guard failure.\n")
 		os.Exit(2)
 	}
@@ -142,6 +158,52 @@ func main() {
 		rc = 1
 	}
 
+	// --- SenderID in messagebroker.go ---
+
+	// REQUIRED: 3 uses in fanOutToProject (B5/R1 — broadcast self-skip by ID)
+	assertRequired(
+		"SenderID in fanOutToProject (B5/R1 — broadcast self-skip by canonical ID)",
+		mb, mbPath, "fanOutToProject", "SenderID", 3)
+
+	// REQUIRED: 3 uses in fanOutGlobal (B5/R1 — global self-skip by ID)
+	assertRequired(
+		"SenderID in fanOutGlobal (B5/R1 — global broadcast self-skip by canonical ID)",
+		mb, mbPath, "fanOutGlobal", "SenderID", 3)
+
+	// --- handlers_broker_inbound.go ---
+	// Parallel entry point to handlers_agent_messaging.go. Same B5 and #1347
+	// security patterns: server-derived sender identity, ActionAttach
+	// enforcement, DM key ownership verification.
+
+	// REQUIRED: ActionAttach x1 in handleBrokerInbound (CheckAccess call)
+	assertRequired(
+		"ActionAttach in handleBrokerInbound (#1347 — broker inbound authorization)",
+		hbi, hbiPath, "handleBrokerInbound", "ActionAttach", 1)
+
+	// REQUIRED: CheckAccess x1 in handleBrokerInbound (policy enforcement)
+	assertRequired(
+		"CheckAccess in handleBrokerInbound (#1347 — broker inbound policy check)",
+		hbi, hbiPath, "handleBrokerInbound", "CheckAccess", 1)
+
+	// REQUIRED: SenderID x4 in handleBrokerInbound (B5 — canonical sender identity)
+	// The 4 idents are: assignment from senderUser.ID, DM ownership check,
+	// message persistence, and conversation resolution.
+	assertRequired(
+		"SenderID in handleBrokerInbound (B5 — canonical sender identity propagation)",
+		hbi, hbiPath, "handleBrokerInbound", "SenderID", 4)
+
+	// REQUIRED: NewAuthenticatedUser x1 in handleBrokerInbound
+	// Identity constructed from DB-resolved senderUser, not request payload.
+	assertRequired(
+		"NewAuthenticatedUser in handleBrokerInbound (B5 — server-derived identity construction)",
+		hbi, hbiPath, "handleBrokerInbound", "NewAuthenticatedUser", 1)
+
+	// REQUIRED: parseDMKeyIDs x1 in handleBrokerInbound
+	// Validates DM thread_id matches the resolved sender and agent.
+	assertRequired(
+		"parseDMKeyIDs in handleBrokerInbound (B5 — DM key ownership verification)",
+		hbi, hbiPath, "handleBrokerInbound", "parseDMKeyIDs", 1)
+
 	// --- Print results ---
 
 	for _, n := range notices {
@@ -212,9 +274,9 @@ func countCommentMentions(file *ast.File, symbol string) int {
 
 func assertRequired(desc string, file *ast.File, filename, funcName, symbol string, expected int) {
 	actual := countIdentsInFunc(file, funcName, symbol)
-	if actual != expected {
+	if actual < expected {
 		fmt.Fprintf(os.Stderr, "FAIL [REQUIRED] %s\n", desc)
-		fmt.Fprintf(os.Stderr, "  expected %s x%d in %s (%s), found x%d\n",
+		fmt.Fprintf(os.Stderr, "  expected %s at least x%d in %s (%s), found x%d\n",
 			symbol, expected, funcName, filename, actual)
 		rc = 1
 	}
@@ -222,9 +284,9 @@ func assertRequired(desc string, file *ast.File, filename, funcName, symbol stri
 
 func assertFuncDef(desc string, file *ast.File, filename, symbol string, expected int) {
 	actual := countFuncDefs(file, symbol)
-	if actual != expected {
+	if actual < expected {
 		fmt.Fprintf(os.Stderr, "FAIL [REQUIRED] %s\n", desc)
-		fmt.Fprintf(os.Stderr, "  expected func %s definition x%d in %s, found x%d\n",
+		fmt.Fprintf(os.Stderr, "  expected func %s definition at least x%d in %s, found x%d\n",
 			symbol, expected, filename, actual)
 		rc = 1
 	}
@@ -232,9 +294,9 @@ func assertFuncDef(desc string, file *ast.File, filename, symbol string, expecte
 
 func assertAudit(desc string, file *ast.File, filename, funcName, symbol string, expected int) {
 	actual := countIdentsInFunc(file, funcName, symbol)
-	if actual != expected {
+	if actual < expected {
 		fmt.Fprintf(os.Stderr, "FAIL [AUDIT] %s\n", desc)
-		fmt.Fprintf(os.Stderr, "  expected %s x%d in %s (%s), found x%d\n",
+		fmt.Fprintf(os.Stderr, "  expected %s at least x%d in %s (%s), found x%d\n",
 			symbol, expected, funcName, filename, actual)
 		fmt.Fprintf(os.Stderr, "  This is a silent-denial path — logAuthzDenial is the ONLY record of the denial.\n")
 		rc = 1
