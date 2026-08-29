@@ -3706,6 +3706,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/validate", s.guarded("/api/v1/auth/validate", s.handleAuthValidate))
 	s.mux.HandleFunc("/api/v1/auth/logout", s.guarded("/api/v1/auth/logout", s.handleAuthLogout))
 	s.mux.HandleFunc("/api/v1/auth/me", s.guarded("/api/v1/auth/me", s.handleAuthMe))
+	s.mux.HandleFunc("/api/v1/auth/admin-status", s.guarded("/api/v1/auth/admin-status", s.handleAuthAdminStatus))
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))

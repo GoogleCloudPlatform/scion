@@ -37,6 +37,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/token":                        "public:auth",
 	"/api/v1/auth/refresh":                      "public:auth",
 	"/api/v1/auth/validate":                     "public:auth",
+	"/api/v1/auth/admin-status":                 "authenticated:user",
 	"/api/v1/auth/logout":                       "authenticated:user",
 	"/api/v1/auth/me":                           "authenticated:user",
 	"/api/v1/auth/tokens":                       "authenticated:user-token",

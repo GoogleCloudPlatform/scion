@@ -129,13 +129,14 @@ export class ScionNav extends LitElement {
   }
 
   /**
-   * Detect whether the current user has admin capabilities by probing
-   * the admin roles endpoint. A 200 response indicates admin access
-   * (the route guard passes); any other status means no admin access.
+   * Detect whether the current user has admin capabilities by calling
+   * the dedicated admin-status endpoint, which returns explicit boolean
+   * flags for hub-admin and super-admin status.
    *
    * Super-admin users are detected directly via `user.role === 'admin'`
-   * and skip this probe. For hub-admin users (who have admin role bindings
-   * but not the super-admin role), the probe determines nav visibility.
+   * and skip the API call. For hub-admin users (who have admin role
+   * bindings but not the super-admin role), the endpoint determines
+   * nav visibility.
    */
   private async checkAdminCapabilities(): Promise<void> {
     const userId = this.user?.id ?? null;
@@ -156,13 +157,17 @@ export class ScionNav extends LitElement {
       return;
     }
 
-    // Probe an admin-guarded endpoint to detect hub-admin status.
-    // The backend enforces authorization — a 200 means the user is permitted.
+    // Call the dedicated admin-status endpoint to detect hub-admin status.
     try {
-      const res = await apiFetch('/api/v1/admin/roles');
+      const res = await apiFetch('/api/v1/auth/admin-status');
       // Only apply result if user hasn't changed during the fetch
       if (this.adminCheckUserId === userId) {
-        this.hasAdminCapabilities = res.ok;
+        if (res.ok) {
+          const data = await res.json();
+          this.hasAdminCapabilities = data.isAdmin === true;
+        } else {
+          this.hasAdminCapabilities = false;
+        }
       }
     } catch {
       if (this.adminCheckUserId === userId) {

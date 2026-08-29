@@ -126,6 +126,28 @@ let currentUser: User | null = null;
 let ssrPageData: PageData | null = null;
 
 /**
+ * Cached admin-status flags, fetched once on init from
+ * GET /api/v1/auth/admin-status. Used by the route guard to allow
+ * hub-admin users (not just super-admins) to access admin pages.
+ */
+let cachedAdminStatus: { isAdmin: boolean; isSuperAdmin: boolean } | null = null;
+
+/**
+ * Fetch the current user's admin status from the backend.
+ * Returns null when the user is not authenticated or the fetch fails.
+ */
+async function fetchAdminStatus(): Promise<{ isAdmin: boolean; isSuperAdmin: boolean } | null> {
+  try {
+    const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return { isAdmin: data.isAdmin === true, isSuperAdmin: data.isSuperAdmin === true };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch the current authenticated user from the backend session.
  * Returns null if not authenticated.
  */
@@ -620,6 +642,12 @@ async function init(): Promise<void> {
     currentUser = await fetchCurrentUser();
   }
 
+  // Fetch admin status early so the route guard can use the cached result
+  // instead of blocking on a network call during navigation.
+  if (currentUser) {
+    cachedAdminStatus = await fetchAdminStatus();
+  }
+
   // Chat notifications are published on user.<id>.notification, so the state
   // manager must know who we are before it opens the first SSE connection.
   if (currentUser?.id) {
@@ -770,10 +798,21 @@ async function renderRoute(path: string): Promise<void> {
     ssrPageData = null;
   }
 
-  // Block non-admin users from admin-only routes
-  if (ADMIN_ROUTES.has(tag) && currentUser?.role !== 'admin') {
-    navigateTo('/');
-    return;
+  // Block non-admin users from admin-only routes.
+  // Hub-admin users (who have admin role bindings but not super-admin role)
+  // are allowed through, alongside super-admins.
+  //
+  // Re-fetch admin status on every admin-route navigation so that role
+  // grants or revocations made mid-session take effect immediately rather
+  // than being cached for the entire SPA lifetime. The init-time fetch
+  // remains for nav.ts's initial render; this call replaces the cache so
+  // the route guard always uses a fresh result.
+  if (ADMIN_ROUTES.has(tag)) {
+    cachedAdminStatus = await fetchAdminStatus();
+    if (!(cachedAdminStatus?.isAdmin)) {
+      navigateTo('/');
+      return;
+    }
   }
 
   // Block /chat routes when the native_chat feature flag is disabled (O2).

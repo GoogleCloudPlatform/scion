@@ -1134,6 +1134,34 @@ func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
 	return false
 }
 
+// IsHubAdmin checks whether the given user has a system-scoped hub-admin
+// role binding. A user with the super-admin role binding is NOT implicitly
+// a hub-admin by this check — the caller must combine the results of
+// IsHubAdmin and IsSystemAdmin (or IsUnscopedLocalPlatformAdmin) to get
+// the full picture.
+func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return false
+	}
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			continue
+		}
+		if rd.Name == store.SystemRoleHubAdmin {
+			return true
+		}
+	}
+	return false
+}
+
 // hubMembersSlug is the slug of the seeded hub-members group. It is the same
 // value seed.go uses when creating the group; kept as a constant so tests and
 // production code agree on the lookup key.

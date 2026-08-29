@@ -607,6 +607,41 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// AdminStatusResponse is the response for GET /api/v1/auth/admin-status.
+type AdminStatusResponse struct {
+	IsAdmin      bool `json:"isAdmin"`
+	IsSuperAdmin bool `json:"isSuperAdmin"`
+}
+
+// handleAuthAdminStatus handles GET /api/v1/auth/admin-status.
+// Returns whether the current user has hub-admin or super-admin capabilities.
+// This is used by the frontend to decide whether to show admin navigation
+// and allow access to admin routes.
+func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+
+	isSuperAdmin := IsUnscopedLocalPlatformAdmin(user)
+	isHubAdmin := false
+	if s.authzService != nil {
+		isHubAdmin = s.authzService.IsHubAdmin(r.Context(), user.ID())
+	}
+
+	writeJSON(w, http.StatusOK, AdminStatusResponse{
+		IsAdmin:      isSuperAdmin || isHubAdmin,
+		IsSuperAdmin: isSuperAdmin,
+	})
+}
+
 // handleTokens routes user access token requests.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
