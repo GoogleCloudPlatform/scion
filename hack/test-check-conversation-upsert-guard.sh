@@ -8,6 +8,10 @@
 #   4. Rejects AddParticipant calls in webchannel_store.go (fully barred surface)
 #   5. Exempts INSERT INTO conversations with kind='group' in webchannel_store_postgres.go
 #   6. Rejects INSERT INTO conversations with kind='group' in a non-exempted pkg/hub file
+#   7. Exempts single-line kind='group' INSERT (Case A regression)
+#   8. Rejects single-line kind='direct' INSERT
+#   9. Rejects kind='direct' INSERT with decoy 'group' after statement (Case C regression)
+#  10. Rejects decoy 'group' after closing backtick
 #
 # Each test injects a synthetic pattern, runs the guard, and checks the exit code.
 # Originals are always restored via trap.
@@ -46,7 +50,7 @@ run_test() {
   local expected_exit="$2"
 
   set +e
-  "$GUARD" >/dev/null 2>&1
+  guard_output=$("$GUARD" 2>&1)
   actual_exit=$?
   set -e
 
@@ -55,6 +59,10 @@ run_test() {
     ((pass++)) || true
   else
     echo "FAIL: $desc (expected exit $expected_exit, got exit $actual_exit)" >&2
+    if [[ -n "$guard_output" ]]; then
+      echo "  Guard output:" >&2
+      printf '  %s\n' "$guard_output" >&2
+    fi
     ((fail++)) || true
   fi
 
@@ -117,6 +125,56 @@ func c1TestGroupInsertOther() {
 }
 INJECT
 run_test "kind='group' INSERT in non-exempted hub file is rejected" 1
+
+# --- Test 7: Single-line kind='group' INSERT — EXEMPTED (exit 0) ---
+# Regression test for Case A: the INSERT and 'group' are on the same line.
+# The old 3-line-window logic looked only AFTER the INSERT line and missed this.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestSingleLineGroupInsert() {
+	db.Exec(`INSERT INTO conversations (id, project_id, kind) VALUES (?, ?, 'group')`, id, pid)
+}
+INJECT
+run_test "single-line kind='group' INSERT is exempted (Case A fix)" 0
+
+# --- Test 8: Single-line kind='direct' INSERT — NOT EXEMPTED (exit 1) ---
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestSingleLineDirectInsert() {
+	db.Exec(`INSERT INTO conversations (id, project_id, kind) VALUES (?, ?, 'direct')`, id, pid)
+}
+INJECT
+run_test "single-line kind='direct' INSERT is rejected" 1
+
+# --- Test 9: Multi-line kind='direct' INSERT with decoy 'group' — NOT EXEMPTED (exit 1) ---
+# Regression test for Case C (SECURITY): a kind='direct' INSERT followed by
+# a comment containing 'group' within the next 3 lines. The old window-based
+# logic would wrongly exempt this because it saw 'group' in the window.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestDirectWithDecoyGroup() {
+	db.Exec(`INSERT INTO conversations (id, project_id, kind, surface)
+		VALUES (?, ?, 'direct', 'native')`, id, pid)
+	// This creates a 'group' sidebar later
+}
+INJECT
+run_test "kind='direct' INSERT with decoy 'group' after statement is rejected (Case C fix)" 1
+
+# --- Test 10: Decoy 'group' after closing backtick — NOT EXEMPTED (exit 1) ---
+# The 'group' literal appears in a Go comment after the raw string ends.
+# The statement itself has kind='direct'.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestDecoyGroupAfterBacktick() {
+	db.Exec(`INSERT INTO conversations (id, project_id, kind, surface)
+		VALUES (?, ?, 'direct', 'native')` + "/* 'group' */", id, pid)
+}
+INJECT
+run_test "decoy 'group' after closing backtick is rejected" 1
 
 # --- Summary ---
 echo

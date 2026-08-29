@@ -53,12 +53,15 @@
 # site constructs the table name dynamically. But a green gate from this
 # script guarantees only that the enumerated textual patterns are absent
 # outside the allowed packages — it is not a proof that no mint path exists.
-#   - The Option C exemption is textual: it checks for the literal string
-#     'group' in a 3-line window after the INSERT line. A kind value supplied
-#     through a variable (e.g., kindVar instead of 'group') defeats the
-#     exemption check and will be rejected by the guard even if the variable
-#     always holds "group" at runtime. This is deliberate — the guard cannot
-#     verify runtime values, so it requires the literal.
+#   - The Option C exemption is textual: it extracts the SQL statement
+#     (from the INSERT line through the closing backtick of the Go raw
+#     string literal) and requires 'group' to appear in that text while
+#     rejecting any other kind literal ('direct', 'channel', 'support').
+#     A kind value supplied through a variable (e.g., kindVar instead of
+#     'group') defeats the exemption check and will be rejected by the
+#     guard even if the variable always holds "group" at runtime. This is
+#     deliberate — the guard cannot verify runtime values, so it requires
+#     the literal.
 #
 # Note: the default fallback for unknown conversation kinds uses
 # requireParticipant, making the participant table an ACL for any future
@@ -134,8 +137,8 @@ fi
 # case-insensitive to catch any casing variant.
 # Allowed in pkg/store/ unconditionally.
 # Allowed in pkg/hub/webchannel_store{,_postgres}.go ONLY when the INSERT
-# mints kind='group' (Option C). The kind literal is on the VALUES line
-# (the line after the INSERT line), not on the INSERT line itself.
+# mints kind='group' (Option C). The kind literal must appear in the
+# same SQL statement (bounded by the Go raw string backtick delimiter).
 # Pattern uses POSIX ERE (-E flag). Do not rewrite with BRE alternation (\|)
 # or word-boundary (\b) — those are GNU extensions that silently match nothing
 # on BSD/macOS grep, causing the guard to report false-clean.
@@ -150,24 +153,54 @@ grep -rEni 'INSERT[[:space:]]+(OR[[:space:]]+[A-Z]+[[:space:]]+)?INTO[[:space:]]
 
 if [[ -s "$tmp" ]]; then
   # Option C exemption: for matches in the two webchannel_store files,
-  # read a window of 3 lines after the INSERT line and check for 'group'
-  # literal. If found, the site is exempted. If not (e.g., kind='direct'
-  # or a variable), the site is still a violation.
+  # extract the SQL statement that contains the INSERT and verify that
+  # 'group' appears in it (and NO other kind literal such as 'direct').
+  #
+  # Statement extraction: all exempted INSERT sites live inside Go raw
+  # string literals (backtick-delimited). From the INSERT line, we
+  # collect text through the first line that contains a closing backtick,
+  # or up to 20 lines (safety cap). The INSERT line itself is included
+  # so single-line statements are correctly handled.
   violations=""
   while IFS= read -r match; do
     file="${match%%:*}"
     rest="${match#*:}"
     lineno="${rest%%:*}"
 
+    # Normalise the path: strip leading "./" if present, so the
+    # comparison works regardless of how grep formats the prefix.
+    # The normalised value is compared against a fixed allowlist —
+    # any format change causes the exemption to NOT apply (fail-closed).
+    norm_file="${file#./}"
+
     # Exemption applies ONLY to these two files in pkg/hub/
-    if [[ "$file" = ./pkg/hub/webchannel_store.go || "$file" = ./pkg/hub/webchannel_store_postgres.go ]]; then
-      # Read 3 lines after the INSERT line. House style: column list on
-      # the INSERT line, VALUES (including kind) on the next line. A 3-line
-      # window covers multi-line value lists and indentation variants.
-      window=$(sed -n "$((lineno+1)),$((lineno+3))p" "$file")
-      if printf '%s\n' "$window" | grep -q "'group'"; then
-        continue  # Exempted: kind='group' literal found
+    if [[ "$norm_file" = "pkg/hub/webchannel_store.go" || "$norm_file" = "pkg/hub/webchannel_store_postgres.go" ]]; then
+      # Extract the SQL statement: from the INSERT keyword through the
+      # closing backtick (end of Go raw string literal), cap at 20 lines.
+      # On the first line, strip everything before INSERT so the opening
+      # backtick of the Go raw string is removed — otherwise a single-line
+      # INSERT (where both backticks are on the same line) would be
+      # truncated at the opening backtick instead of the closing one.
+      end=$((lineno + 20))
+      stmt=$(sed -n "${lineno},${end}p" "$file")
+      # Strip prefix before INSERT on the first line (removes opening `)
+      stmt=$(printf '%s\n' "$stmt" | sed '1s/^[^Ii]*INSERT/INSERT/I')
+      # Truncate at the first closing backtick (`) to bound the statement.
+      # This prevents text after the statement (comments, next func) from
+      # influencing the kind check.
+      stmt=$(printf '%s\n' "$stmt" | sed '/`/{ s/`.*//; p; d; }' | head -21)
+
+      # Check 1: 'group' must appear in the statement text.
+      if ! printf '%s\n' "$stmt" | grep -q "'group'"; then
+        violations="${violations}${match}"$'\n'
+        continue
       fi
+      # Check 2: no OTHER kind literal (e.g., 'direct') in the statement.
+      if printf '%s\n' "$stmt" | grep -qE "'(direct|channel|support)'"; then
+        violations="${violations}${match}"$'\n'
+        continue
+      fi
+      continue  # Exempted: kind='group' confirmed, no conflicting kinds
     fi
     violations="${violations}${match}"$'\n'
   done <"$tmp"
