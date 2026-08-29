@@ -34,7 +34,6 @@ import (
 var (
 	bcastAll        bool
 	bcastInterrupt  bool
-	bcastWake       bool
 	bcastVisibility string
 )
 
@@ -54,6 +53,16 @@ Examples:
   scion broadcast --interrupt "Stop immediately and report status"`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Validate --visibility if provided.
+		if bcastVisibility != "" {
+			switch bcastVisibility {
+			case "normal", "verbose", "full":
+				// valid
+			default:
+				return fmt.Errorf("invalid --visibility value %q: must be one of: normal, verbose, full", bcastVisibility)
+			}
+		}
+
 		message := strings.Join(args, " ")
 
 		// Check Hub availability
@@ -220,7 +229,6 @@ func buildBroadcastMessage(sender, message string) *messages.StructuredMessage {
 func init() {
 	broadcastCmd.Flags().BoolVarP(&bcastAll, "all", "a", false, "Send to all running agents across all projects (global broadcast)")
 	broadcastCmd.Flags().BoolVarP(&bcastInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
-	broadcastCmd.Flags().BoolVarP(&bcastWake, "wake", "w", false, "Resume suspended agents before delivering the message")
 	broadcastCmd.Flags().StringVar(&bcastVisibility, "visibility", "", "Message visibility: normal, verbose, or full")
 	rootCmd.AddCommand(broadcastCmd)
 }

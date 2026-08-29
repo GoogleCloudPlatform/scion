@@ -113,6 +113,16 @@ Examples:
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Validate --visibility if provided.
+		if msgVisibility != "" {
+			switch msgVisibility {
+			case "normal", "verbose", "full":
+				// valid
+			default:
+				return fmt.Errorf("invalid --visibility value %q: must be one of: normal, verbose, full", msgVisibility)
+			}
+		}
+
 		// Emit deprecation warnings for any deprecated flags in use.
 		// Deprecated flags still work — they warn AND succeed.
 		emitDeprecationWarnings(cmd)
