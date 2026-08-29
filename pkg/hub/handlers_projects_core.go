@@ -862,6 +862,18 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 			policy.Actions = append(policy.Actions, "stop_all")
 			needsUpdate = true
 		}
+		// Backfill: ensure message action is present for existing projects
+		hasMessage := false
+		for _, a := range policy.Actions {
+			if a == "message" {
+				hasMessage = true
+				break
+			}
+		}
+		if !hasMessage {
+			policy.Actions = append(policy.Actions, "message")
+			needsUpdate = true
+		}
 		if needsUpdate {
 			if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
 				s.projectsLogger().Warn("failed to update existing project member policy",
