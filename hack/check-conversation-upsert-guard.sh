@@ -197,6 +197,7 @@ if [[ -s "$tmp" ]]; then
       # Truncate at the first closing backtick (`) and stop processing
       # (q quits sed). This prevents text after the statement (comments,
       # next func, subsequent lines) from influencing the kind check.
+      # shellcheck disable=SC2016  # backtick is a literal match target (Go raw string delimiter)
       stmt=$(printf '%s\n' "$stmt" | sed '/`/{ s/`.*//; q; }' | head -21)
 
       # Check 1: 'group' must appear in the statement text.

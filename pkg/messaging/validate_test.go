@@ -664,6 +664,31 @@ func TestValidateCrossProjectAddressees_MultipleUnplaceableAgents(t *testing.T) 
 	}
 }
 
+// ---------- Nil agent guard test (DEF-40 adjacent) ----------
+
+// nilAgentStore is a pathological store that returns (nil, nil) — no agent, no
+// error. This models a buggy or incomplete AgentProjectLookup implementation.
+type nilAgentStore struct{}
+
+func (s *nilAgentStore) GetAgent(_ context.Context, _ string) (*store.Agent, error) {
+	return nil, nil // pathological: no agent, no error
+}
+
+func TestValidateCrossProjectAddressees_NilAgentDenied(t *testing.T) {
+	// A store that returns (nil, nil) must produce an error, not a panic.
+	s := &nilAgentStore{}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "ghost-agent"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("nil agent with nil error must be denied, not silently passed")
+	}
+	if !strings.Contains(err.Error(), "ghost-agent") {
+		t.Fatalf("error should name the agent, got: %v", err)
+	}
+}
+
 // ---------- ValidateMessageAddressees tests ----------
 
 func TestValidateMessageAddressees_Valid(t *testing.T) {

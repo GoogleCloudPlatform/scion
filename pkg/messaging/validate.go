@@ -128,6 +128,9 @@ func ValidateCrossProjectAddressees(
 		if err != nil {
 			return fmt.Errorf("failed to look up agent %q: %w", a.PrincipalID, err)
 		}
+		if agent == nil {
+			return fmt.Errorf("failed to look up agent %q: store returned no agent", a.PrincipalID)
+		}
 
 		// An agent without a project identity cannot be placed.
 		// A single unplaceable agent alone is fine, but alongside any
