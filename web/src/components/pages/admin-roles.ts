@@ -398,9 +398,9 @@ export class ScionPageAdminRoles extends LitElement {
   // ---------------------------------------------------------------------------
 
   /** Group permissions by resource for the multi-select UI. */
-  private groupPermissions(): Map<string, Permission[]> {
+  private groupPermissions(perms: Permission[] = this.permissions): Map<string, Permission[]> {
     const groups = new Map<string, Permission[]>();
-    for (const perm of this.permissions) {
+    for (const perm of perms) {
       const resource = perm.Resource || 'other';
       if (!groups.has(resource)) {
         groups.set(resource, []);
@@ -953,15 +953,8 @@ export class ScionPageAdminRoles extends LitElement {
     const rolePermIds = new Set(this.viewingRole.permissions ?? []);
     const rolePerms = this.permissions.filter((p) => rolePermIds.has(p.ID));
 
-    // Group the filtered permissions by resource
-    const groups = new Map<string, Permission[]>();
-    for (const perm of rolePerms) {
-      const resource = perm.Resource || 'other';
-      if (!groups.has(resource)) {
-        groups.set(resource, []);
-      }
-      groups.get(resource)!.push(perm);
-    }
+    // Group the filtered permissions by resource (reuses shared helper)
+    const groups = this.groupPermissions(rolePerms);
 
     const permCount = rolePerms.length;
     const resourceCount = groups.size;
