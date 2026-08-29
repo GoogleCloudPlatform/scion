@@ -38,6 +38,7 @@ const (
 	AgentActionHasPrompt         = "has-prompt"
 	AgentActionResetAuth         = "reset-auth"
 	AgentActionMetrics           = "metrics"
+	AgentActionSetMessageMode    = "set_message_mode"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed

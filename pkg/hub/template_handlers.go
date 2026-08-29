@@ -296,6 +296,14 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate MessageMode in template config if specified.
+	if req.Config != nil && req.Config.MessageMode != "" {
+		if !store.IsValidMessageMode(req.Config.MessageMode) {
+			ValidationError(w, "invalid template message mode: "+req.Config.MessageMode, nil)
+			return
+		}
+	}
+
 	// Create template record
 	template := &store.Template{
 		ID:           api.NewUUID(),
@@ -472,6 +480,14 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	if err := readJSON(r, &template); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	// Validate MessageMode in template config if specified.
+	if template.Config != nil && template.Config.MessageMode != "" {
+		if !store.IsValidMessageMode(template.Config.MessageMode) {
+			ValidationError(w, "invalid template message mode: "+template.Config.MessageMode, nil)
+			return
+		}
 	}
 
 	// Preserve immutable fields

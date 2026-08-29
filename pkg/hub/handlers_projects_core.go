@@ -2401,6 +2401,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// set_message_mode action: own permission model (D7).
+	if action == api.AgentActionSetMessageMode {
+		s.handleSetMessageMode(w, r, agent.ID)
+		return
+	}
+
 	// Message action: route through authorizeAgentMessage (D1/D8).
 	if action == api.AgentActionMessage {
 		identity := GetIdentityFromContext(r.Context())

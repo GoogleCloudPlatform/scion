@@ -782,6 +782,16 @@ const (
 	MessageModeProject = "project" // Bidirectional with all agents and users in project
 )
 
+// IsValidMessageMode returns true if mode is one of the four valid message modes.
+func IsValidMessageMode(mode string) bool {
+	switch mode {
+	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject:
+		return true
+	default:
+		return false
+	}
+}
+
 // =============================================================================
 // Allow List (User Access Control)
 // =============================================================================

@@ -1013,6 +1013,10 @@ func (s *Server) createAgentInProject(
 	//   2. Parent agent exists → inherit parent's message_mode.
 	//   3. Otherwise → default to "project" (handled by Ent schema default).
 	if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
+		if !store.IsValidMessageMode(resolvedTemplate.Config.MessageMode) {
+			ValidationError(w, "invalid template message mode: "+resolvedTemplate.Config.MessageMode, nil)
+			return
+		}
 		agent.MessageMode = resolvedTemplate.Config.MessageMode
 	} else if parentMessageMode != "" {
 		agent.MessageMode = parentMessageMode
@@ -2555,6 +2559,14 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		action == api.AgentActionTokenRefresh ||
 		action == api.AgentActionRefreshToken ||
 		action == api.AgentActionOutboundMessage
+
+	// --- set_message_mode action: own permission model (D7) ---
+	// Mode changes are human-only and use agent.set_message_mode permission,
+	// not lifecycle authorization. Must be routed before the generic authz block.
+	if action == api.AgentActionSetMessageMode {
+		s.handleSetMessageMode(w, r, id)
+		return
+	}
 
 	// --- Message action: routed through authorizeAgentMessage (D1) ---
 	// Messaging is a first-class axis, split from lifecycle/attach. The choke
