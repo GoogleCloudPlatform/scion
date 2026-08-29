@@ -944,16 +944,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// DEF-41: no ValidateAttributed here. Both paths that set
-		// storeMsg.ConversationID produce a non-empty value by
-		// construction: the CLI-pre-resolved path (:897) copies a
-		// caller-supplied non-empty string, and the server-side
-		// resolution path (:943) copies from convResult which holds a
-		// uuid.UUID. A guard of `if x != "" { reject when x == "" }`
-		// is tautological and would mislead a reader into thinking the
-		// check is live. The file-level gate sees ValidateAttributed
-		// from site 1 (handleAgentOutboundMessage).
-		//
+		if convResult != nil {
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return
+			}
+		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
 		convID := ""
