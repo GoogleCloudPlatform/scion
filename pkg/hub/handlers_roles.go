@@ -489,7 +489,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 
 	// Resolve email to UUID for user principals (mirrors addGroupMember pattern).
 	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {
-		user, err := s.store.GetUserByEmail(r.Context(), req.PrincipalID)
+		resolvedUser, err := s.store.GetUserByEmail(r.Context(), req.PrincipalID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				BadRequest(w, "user not found with email: "+req.PrincipalID)
@@ -498,7 +498,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		req.PrincipalID = user.ID
+		req.PrincipalID = resolvedUser.ID
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {

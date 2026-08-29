@@ -62,6 +62,8 @@ export class ScionPrincipalPicker extends LitElement {
   @state() private searchLoading = false;
   @state() private searchOpen = false;
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True after selectUser(); reset on new typed input. Prevents blur from overwriting a resolved selection. */
+  private selectedViaDropdown = false;
 
   static override styles = css`
     :host {
@@ -150,6 +152,7 @@ export class ScionPrincipalPicker extends LitElement {
   private handleSearchInput(e: Event): void {
     const value = (e.target as HTMLInputElement).value;
     this.searchQuery = value;
+    this.selectedViaDropdown = false;
 
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
@@ -165,6 +168,10 @@ export class ScionPrincipalPicker extends LitElement {
 
     this.searchDebounceTimer = setTimeout(() => {
       void this.searchUsers(value.trim());
+      // Also emit the raw typed value so the parent's bound value is never stale.
+      // If the user later clicks a dropdown result, selectUser() will overwrite
+      // this with the resolved UUID.
+      this.emitChange(value.trim(), '');
     }, 250);
   }
 
@@ -192,6 +199,7 @@ export class ScionPrincipalPicker extends LitElement {
     this.searchQuery = user.displayName ? `${user.displayName} (${user.email})` : user.email;
     this.searchOpen = false;
     this.searchResults = [];
+    this.selectedViaDropdown = true;
     // Emit the user's UUID as principalId (not email).
     this.emitChange(user.id, user.displayName || user.email);
   }
@@ -244,6 +252,13 @@ export class ScionPrincipalPicker extends LitElement {
             // Delay to allow click on dropdown.
             setTimeout(() => {
               this.searchOpen = false;
+              // Emit the raw typed value on blur if no dropdown selection was
+              // made, so the parent has the latest value even when the
+              // debounce timer hasn't fired yet (e.g. user typed and
+              // immediately tabbed away or clicked submit).
+              if (!this.selectedViaDropdown && this.searchQuery.trim()) {
+                this.emitChange(this.searchQuery.trim(), '');
+              }
             }, 200);
           }}
         ></sl-input>
