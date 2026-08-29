@@ -45,6 +45,13 @@ type startContext struct {
 	Opts         api.StartOptions
 	TemplateSlug string
 	Manager      agent.Manager
+
+	// EnvClassifications is the merged provenance map: what the hub sent,
+	// plus the broker-written keys classified in buildStartContext. Nil means
+	// the hub sent none — see api.EnvKind's three-state contract. No consumer
+	// yet (GoogleCloudPlatform/scion#127 P3b); this exists so the broker's
+	// own classifications survive the function that computes them.
+	EnvClassifications map[string]api.EnvKind
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -698,9 +705,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	mgr := s.resolveManagerForOpts(opts)
 
 	return &startContext{
-		Opts:         opts,
-		TemplateSlug: templateSlug,
-		Manager:      mgr,
+		Opts:               opts,
+		TemplateSlug:       templateSlug,
+		Manager:            mgr,
+		EnvClassifications: envCls,
 	}, nil
 }
 
