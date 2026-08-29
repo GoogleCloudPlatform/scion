@@ -380,7 +380,7 @@ func TestScopedAdmin_ProjectAdminDeniedUnboundProject(t *testing.T) {
 
 	// A project-admin for X should not have admin access to project Y.
 	// The user can read project Y only if policies allow it (default deny for non-members).
-	rec := doRequestAsUser(t, srv, projectAdmin, http.MethodPut, "/api/v1/projects/"+projectY.ID, map[string]interface{}{
+	rec := doRequestAsUser(t, srv, projectAdmin, http.MethodPatch, "/api/v1/projects/"+projectY.ID, map[string]interface{}{
 		"name": "Renamed",
 	})
 	// Project admin for X should not be able to modify project Y
