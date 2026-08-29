@@ -250,16 +250,7 @@ func processHookData(data []byte) error {
 	// Dialects that don't declare a responses section (e.g. claude) produce
 	// no output, preserving backward compatibility.
 	if mappingDialect != nil {
-		rawEventName := ""
-		for _, field := range mappingDialect.EventNameFields() {
-			if v, ok := rawData[field]; ok {
-				if s, ok := v.(string); ok && s != "" {
-					rawEventName = s
-					break
-				}
-			}
-		}
-		if rawEventName != "" {
+		if rawEventName := mappingDialect.EventName(rawData); rawEventName != "" {
 			if resp := mappingDialect.Response(rawEventName); resp != nil {
 				if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 					return fmt.Errorf("writing hook response: %w", err)

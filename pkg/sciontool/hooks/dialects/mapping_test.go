@@ -562,28 +562,28 @@ func TestMappingDialect_Response(t *testing.T) {
 	})
 }
 
-func TestMappingDialect_EventNameFields(t *testing.T) {
-	t.Run("returns event_name_fields when set", func(t *testing.T) {
+func TestMappingDialect_EventName(t *testing.T) {
+	t.Run("returns event name when event_name_fields is set", func(t *testing.T) {
 		md := NewMappingDialect(MappingDialectSpec{
 			Dialect:         "test",
 			EventNameFields: []string{"type", "event"},
 		})
-		assert.Equal(t, []string{"type", "event"}, md.EventNameFields())
+		assert.Equal(t, "my-event", md.EventName(map[string]interface{}{"event": "my-event"}))
 	})
 
-	t.Run("returns single event_name_field as slice", func(t *testing.T) {
+	t.Run("returns event name when single event_name_field is set", func(t *testing.T) {
 		md := NewMappingDialect(MappingDialectSpec{
 			Dialect:        "test",
 			EventNameField: "hook_event_name",
 		})
-		assert.Equal(t, []string{"hook_event_name"}, md.EventNameFields())
+		assert.Equal(t, "my-event", md.EventName(map[string]interface{}{"hook_event_name": "my-event"}))
 	})
 
-	t.Run("returns nil when neither is set", func(t *testing.T) {
+	t.Run("returns empty string when neither is set", func(t *testing.T) {
 		md := NewMappingDialect(MappingDialectSpec{
 			Dialect: "test",
 		})
-		assert.Nil(t, md.EventNameFields())
+		assert.Empty(t, md.EventName(map[string]interface{}{"event": "my-event"}))
 	})
 }
 

@@ -56,11 +56,9 @@ func (d *MappingDialect) Response(rawEventName string) map[string]interface{} {
 	return d.spec.Responses[rawEventName]
 }
 
-// EventNameFields returns the ordered list of field names used to discover the
-// raw event name in incoming data. Callers that need to extract the event name
-// outside of Parse (e.g. for response lookup) can use this accessor.
-func (d *MappingDialect) EventNameFields() []string {
-	return d.eventNameFields()
+// EventName extracts the raw event name from the incoming data map.
+func (d *MappingDialect) EventName(data map[string]interface{}) string {
+	return d.eventName(data)
 }
 
 // Parse converts a harness event payload into a normalized Event using the
