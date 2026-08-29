@@ -631,7 +631,11 @@ export class ScionPageAgentConfigure extends LitElement {
       const body: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) body.gcp_identity = gcpIdentity;
-      if (this.messageMode) body.messageMode = this.messageMode;
+      // Always include messageMode for created-phase agents so "Default" can
+      // clear a previously set mode. Use null to signal "unset" to the backend.
+      if (this.agent?.phase === 'created') {
+        body.messageMode = this.messageMode || null;
+      }
       const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -679,7 +683,11 @@ export class ScionPageAgentConfigure extends LitElement {
       const saveBody: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) saveBody.gcp_identity = gcpIdentity;
-      if (this.messageMode) saveBody.messageMode = this.messageMode;
+      // Always include messageMode for created-phase agents so "Default" can
+      // clear a previously set mode. Use null to signal "unset" to the backend.
+      if (this.agent?.phase === 'created') {
+        saveBody.messageMode = this.messageMode || null;
+      }
       const saveRes = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1064,7 +1072,7 @@ export class ScionPageAgentConfigure extends LitElement {
               </sl-select>
               ${this.messageMode === 'none'
                 ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-                    This agent will be created in sealed mode. It will not be able to send or receive messages.
+                    This agent is configured in sealed mode. It will not be able to send or receive messages.
                   </div>`
                 : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
             </div>

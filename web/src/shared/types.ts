@@ -526,7 +526,7 @@ export interface Agent {
 
 /**
  * Template configuration embedded in template detail responses.
- * Mirrors the Go `store.TemplateConfig` struct.
+ * Partial subset of the Go `store.TemplateConfig` struct, covering fields used by the frontend.
  */
 export interface TemplateConfig {
   harness?: string;
