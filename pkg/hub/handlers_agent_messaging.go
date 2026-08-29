@@ -303,6 +303,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if convResult != nil {
 		storeMsg.ConversationID = convResult.ConversationID
+		// DEF-41: structural pre-placement. This check is inert while B10
+		// holds: convResult is non-nil only when attribution succeeded, and
+		// ent.Conversation.ID is a uuid.UUID that always renders non-empty.
+		// It becomes load-bearing at Tranche G, when derivation failure
+		// becomes fatal and this call moves outside the nil guard.
+		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
 	}
 	// Always log divergence — even when convResult is nil, that is a divergence signal.
 	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
@@ -934,6 +943,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
+		}
+		if convResult != nil {
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return
+			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)

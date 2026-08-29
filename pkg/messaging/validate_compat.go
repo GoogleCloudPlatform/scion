@@ -88,15 +88,10 @@ func ValidateLegacyMessage(msg *messages.StructuredMessage) error {
 		return fmt.Errorf("legacy envelope conversion failed: %w", err)
 	}
 
-	// The legacy StructuredMessage does not have a ConversationID; set a
-	// synthetic value so that ValidateMessage's required-field check passes.
-	// The real ConversationID is resolved by the conversation attribution
-	// layer (Phase 4/5), which runs after validation.
-	if newMsg.ConversationID == "" {
-		newMsg.ConversationID = "legacy-pending"
-	}
-
-	if err := ValidateMessage(newMsg); err != nil {
+	// Shape/content validation only — ConversationID is checked later by
+	// ValidateAttributed, after the conversation attribution layer has had
+	// the chance to set a real one. See DEF-41.
+	if err := validateMessageContent(newMsg); err != nil {
 		return err
 	}
 

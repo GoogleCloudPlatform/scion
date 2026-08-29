@@ -454,3 +454,24 @@ func TestValidateLegacyMessage_ChatType(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// ---------- DEF-41: sentinel removal (AC-D-2 dual) ----------
+
+// TestValidateLegacyMessage_AcceptsEmptyConversationID confirms that after
+// the DEF-41 fix, ValidateLegacyMessage no longer checks ConversationID.
+// The check has moved to ValidateAttributed, which runs after attribution.
+//
+// On upstream/main, this test would also pass (the sentinel masked the
+// check, so empty ConversationID was accepted anyway). The behavioral
+// change is in the sentinel removal itself: ValidateLegacyMessage no
+// longer fabricates a synthetic ConversationID, so validateMessageContent
+// runs on the real (empty) value rather than a sentinel.
+func TestValidateLegacyMessage_AcceptsEmptyConversationID(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.ConversationID = "" // intentionally empty — attribution hasn't run yet
+	err := ValidateLegacyMessage(msg)
+	if err != nil {
+		t.Fatalf("ValidateLegacyMessage must not check ConversationID "+
+			"(that is ValidateAttributed's job after attribution), got: %v", err)
+	}
+}

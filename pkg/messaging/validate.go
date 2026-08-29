@@ -28,12 +28,11 @@ type AgentProjectLookup interface {
 	GetAgent(ctx context.Context, id string) (*store.Agent, error)
 }
 
-// ValidateMessage checks that a Message is internally consistent.
-// It delegates to msg.Validate() for structural checks (ID, From, Kind,
-// Visibility, kind/intent/event mutual-exclusivity), then adds domain-level
-// checks that only the standalone validator knows about.
-// Every rule has a corresponding test that fails when the rule is removed.
-func ValidateMessage(msg *Message) error {
+// validateMessageContent checks every Message invariant that does not depend
+// on conversation attribution. It is the shared core of both ValidateMessage
+// (native callers that already have a ConversationID) and ValidateLegacyMessage
+// (legacy callers where attribution runs after validation).
+func validateMessageContent(msg *Message) error {
 	if msg == nil {
 		return fmt.Errorf("message must not be nil")
 	}
@@ -41,12 +40,7 @@ func ValidateMessage(msg *Message) error {
 	if err := msg.Validate(); err != nil {
 		return err
 	}
-	// Domain-level checks not on the type itself:
-	// 1. ConversationID is required.
-	if msg.ConversationID == "" {
-		return fmt.Errorf("conversation_id is required")
-	}
-	// 2. Body size limits (reuse constants from messages package).
+	// Body size limits (reuse constants from messages package).
 	if len([]rune(msg.Body)) > messages.MaxMessageLength {
 		return fmt.Errorf("body exceeds %d character limit (current: %d chars)",
 			messages.MaxMessageLength, len([]rune(msg.Body)))
@@ -54,14 +48,55 @@ func ValidateMessage(msg *Message) error {
 	if len(msg.Body) > messages.MaxMsgSize {
 		return fmt.Errorf("body exceeds maximum size of %d bytes", messages.MaxMsgSize)
 	}
-	// 3. Attachment count limit.
+	// Attachment count limit.
 	if len(msg.Attachments) > messages.MaxAttachments {
 		return fmt.Errorf("too many attachments: %d (max %d)",
 			len(msg.Attachments), messages.MaxAttachments)
 	}
-	// 4. ReplyToID, if present, must not be empty string.
+	// ReplyToID, if present, must not be empty string.
 	if msg.ReplyToID != nil && *msg.ReplyToID == "" {
 		return fmt.Errorf("reply_to_id must not be empty when set")
+	}
+	return nil
+}
+
+// ValidateMessage checks that a Message is internally consistent.
+// It delegates to msg.Validate() for structural checks (ID, From, Kind,
+// Visibility, kind/intent/event mutual-exclusivity), then adds domain-level
+// checks that only the standalone validator knows about.
+// Every rule has a corresponding test that fails when the rule is removed.
+func ValidateMessage(msg *Message) error {
+	if err := validateMessageContent(msg); err != nil {
+		return err
+	}
+	// ConversationID is required for native-type callers, which always have
+	// one by construction. Legacy callers use ValidateLegacyMessage (which
+	// skips this check) followed by ValidateAttributed (which performs it
+	// after conversation attribution has set a real ConversationID).
+	if msg.ConversationID == "" {
+		return fmt.Errorf("conversation_id is required")
+	}
+	return nil
+}
+
+// ValidateAttributed checks that a ConversationID was set by the conversation
+// attribution layer. This is the second half of the legacy validation split:
+// ValidateLegacyMessage runs shape/content checks before attribution;
+// ValidateAttributed runs after attribution has had the chance to set a real
+// ConversationID.
+//
+// INERTNESS UNDER B10: while derivation failures remain non-fatal (B10),
+// every call site guards this behind `if convResult != nil`, and every
+// non-nil convResult carries a uuid.UUID ConversationID that is never empty.
+// The check is therefore structural pre-placement: it cannot fire today, and
+// it becomes load-bearing at Tranche G when derivation failure becomes fatal
+// and the nil guard is removed.
+//
+// The sentinel that previously masked this check in ValidateLegacyMessage is
+// deleted (DEF-41). The check is correctly positioned; it is not yet reachable.
+func ValidateAttributed(conversationID string) error {
+	if conversationID == "" {
+		return fmt.Errorf("conversation_id is required after attribution")
 	}
 	return nil
 }

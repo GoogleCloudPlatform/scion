@@ -1177,6 +1177,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
+			// DEF-41: structural pre-placement. This check is inert
+			// while B10 holds: convResult is non-nil only when
+			// attribution succeeded, and ent.Conversation.ID is a
+			// uuid.UUID that always renders non-empty. It becomes
+			// load-bearing at Tranche G, when derivation failure
+			// becomes fatal and this call moves outside the nil guard.
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return ""
+			}
 		}
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {

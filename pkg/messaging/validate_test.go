@@ -761,3 +761,83 @@ func TestValidateCrossProjectAddressees_CheckIsLoadBearing(t *testing.T) {
 			"agents in different projects must be rejected")
 	}
 }
+
+// ---------- ValidateAttributed (DEF-41 — function correctness) ----------
+
+// TestValidateAttributed_RejectsEmptyConversationID proves that
+// ValidateAttributed rejects an empty ConversationID.
+//
+// This tests the function body, not production reachability. While B10
+// holds, every production call site guards ValidateAttributed behind
+// `if convResult != nil`, and every non-nil convResult carries a
+// uuid.UUID ConversationID that is never empty. The check is therefore
+// structural pre-placement: it cannot fire today, and it becomes
+// load-bearing at Tranche G when derivation failure becomes fatal and
+// the nil guard is removed.
+//
+// See the commit message for the proof-by-enumeration that no
+// production path can deliver "" to ValidateAttributed under B10.
+func TestValidateAttributed_RejectsEmptyConversationID(t *testing.T) {
+	err := ValidateAttributed("")
+	if err == nil {
+		t.Fatal("ValidateAttributed must reject an empty conversation_id")
+	}
+	if !strings.Contains(err.Error(), "conversation_id") {
+		t.Fatalf("error should mention conversation_id, got: %v", err)
+	}
+}
+
+// TestValidateAttributed_AcceptsNonEmptyConversationID confirms that
+// ValidateAttributed passes when a real ConversationID is present.
+func TestValidateAttributed_AcceptsNonEmptyConversationID(t *testing.T) {
+	err := ValidateAttributed("conv-12345")
+	if err != nil {
+		t.Fatalf("ValidateAttributed should accept a non-empty conversation_id, got: %v", err)
+	}
+}
+
+// TestValidateAttributed_CheckIsLoadBearing proves that the ValidateAttributed
+// check is load-bearing per Rule 10. If the function body were replaced with
+// `return nil`, this test would fail because an empty ConversationID would
+// incorrectly pass. The function is correctly implemented; it is the
+// production call sites that are currently inert (see above).
+func TestValidateAttributed_CheckIsLoadBearing(t *testing.T) {
+	err := ValidateAttributed("")
+	// If the check is removed, err would be nil and this assertion would fail.
+	if err == nil {
+		t.Fatal("RULE 10 VIOLATION: ValidateAttributed check was removed or " +
+			"bypassed — an empty conversation_id after attribution must be rejected")
+	}
+}
+
+// ---------- validateMessageContent (internal, shared core) ----------
+
+// TestValidateMessageContent_SkipsConversationIDCheck confirms that the shared
+// core validator (used by ValidateLegacyMessage) does not check ConversationID.
+// ConversationID is checked by ValidateMessage (native path) or
+// ValidateAttributed (legacy path after attribution).
+func TestValidateMessageContent_SkipsConversationIDCheck(t *testing.T) {
+	msg := validTextMessage()
+	msg.ConversationID = "" // intentionally empty
+	err := validateMessageContent(msg)
+	if err != nil {
+		t.Fatalf("validateMessageContent must not check ConversationID "+
+			"(that is ValidateAttributed's job), got: %v", err)
+	}
+}
+
+// TestValidateMessage_StillRejectsEmptyConversationID confirms that the
+// refactoring of ValidateMessage into validateMessageContent + ConversationID
+// check did not break the native-path check. Coverage successor for the
+// original TestValidateMessage_MissingConversationID.
+func TestValidateMessage_StillRejectsEmptyConversationID(t *testing.T) {
+	msg := validTextMessage()
+	msg.ConversationID = ""
+	err := ValidateMessage(msg)
+	if err == nil {
+		t.Fatal("ValidateMessage must still reject an empty ConversationID on the native path")
+	}
+	if !strings.Contains(err.Error(), "conversation_id") {
+		t.Fatalf("error should mention conversation_id, got: %v", err)
+	}
+}
