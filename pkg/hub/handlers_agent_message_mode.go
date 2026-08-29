@@ -42,10 +42,19 @@ type SetMessageModeResponse struct {
 	Cascade  *CascadeResult `json:"cascade,omitempty"`
 }
 
-// CascadeResult describes which descendants were updated in a cascade operation.
+// CascadeAgentDetail describes a single agent's mode transition in a cascade operation.
+type CascadeAgentDetail struct {
+	AgentID     string `json:"agent_id"`
+	AgentName   string `json:"agent_name"`
+	CurrentMode string `json:"current_mode"`
+	NewMode     string `json:"new_mode"`
+}
+
+// CascadeResult describes which descendants were updated (or would be updated) in a cascade operation.
 type CascadeResult struct {
-	Count    int      `json:"count"`     // Number of descendants updated
-	AgentIDs []string `json:"agent_ids"` // IDs of updated descendants
+	Count    int                  `json:"count"`              // Number of descendants updated
+	AgentIDs []string             `json:"agent_ids"`          // IDs of updated descendants
+	Details  []CascadeAgentDetail `json:"details,omitempty"`  // Per-agent transition details (populated for dryRun and cascade)
 }
 
 // ---------------------------------------------------------------------------
@@ -70,12 +79,21 @@ type CascadeResult struct {
 func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
+	// 0. Check for dryRun query parameter.
+	dryRun := r.URL.Query().Get("dryRun") == "true"
+
 	// 1. Parse request body.
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // 64KB limit
 	var req SetMessageModeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ValidationError(w, "invalid request body", nil)
 		return
+	}
+
+	// When dryRun=true, treat as implicit cascade — the purpose of dry-run
+	// is to preview cascade effects.
+	if dryRun && !req.Cascade {
+		req.Cascade = true
 	}
 
 	// 2. Validate mode value.
@@ -153,6 +171,38 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 	// 7. Record previous mode.
 	previousMode := agent.MessageMode
 
+	// --- Dry-run path: preview cascade effects without applying changes ---
+	if dryRun {
+		cascadeResult, err := s.cascadeMessageMode(ctx, agent, req.Mode, true)
+		if err != nil {
+			slog.Error("dry-run cascade message mode failed", "agent_id", agent.ID, "error", err)
+			RuntimeError(w, "Failed to preview cascade")
+			return
+		}
+		// Include the root agent in the preview details.
+		rootDetail := CascadeAgentDetail{
+			AgentID:     agent.ID,
+			AgentName:   agentDisplayName(agent),
+			CurrentMode: previousMode,
+			NewMode:     req.Mode,
+		}
+		cascadeResult.Details = append([]CascadeAgentDetail{rootDetail}, cascadeResult.Details...)
+		// Root is counted only if its mode would actually change.
+		if previousMode != req.Mode {
+			cascadeResult.Count++
+			cascadeResult.AgentIDs = append([]string{agent.ID}, cascadeResult.AgentIDs...)
+		}
+
+		resp := SetMessageModeResponse{
+			AgentID:  agent.ID,
+			Mode:     req.Mode,
+			Previous: previousMode,
+			Cascade:  cascadeResult,
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	// 8. No-op check: same mode, no cascade.
 	if previousMode == req.Mode && !req.Cascade {
 		writeJSON(w, http.StatusOK, SetMessageModeResponse{
@@ -186,7 +236,7 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 	// 11. Cascade (if requested).
 	var cascadeResult *CascadeResult
 	if req.Cascade {
-		cascadeResult, err = s.cascadeMessageMode(ctx, agent, req.Mode)
+		cascadeResult, err = s.cascadeMessageMode(ctx, agent, req.Mode, false)
 		if err != nil {
 			// Primary agent was updated, but cascade failed — log and return partial.
 			slog.Error("cascade message mode failed", "agent_id", agent.ID, "error", err)
@@ -209,8 +259,11 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 // ---------------------------------------------------------------------------
 
 // cascadeMessageMode applies a message mode to all descendants of the root agent.
+// When dryRun is true, it computes which agents would be affected but does not
+// modify any records — this uses the same code path so the preview cannot
+// disagree with what a real apply would do.
 // Best-effort per agent: a failure to update one descendant does not stop the rest.
-func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode string) (*CascadeResult, error) {
+func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode string, dryRun bool) (*CascadeResult, error) {
 	descendants, err := s.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID:  root.ProjectID,
 		AncestorID: root.ID,
@@ -221,17 +274,33 @@ func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode
 
 	result := &CascadeResult{
 		AgentIDs: make([]string, 0, len(descendants.Items)),
+		Details:  make([]CascadeAgentDetail, 0, len(descendants.Items)),
 	}
 
 	for i := range descendants.Items {
 		desc := &descendants.Items[i]
 		if desc.ID == root.ID {
-			continue // root already updated
+			continue // root handled separately
 		}
 		oldMode := desc.MessageMode
 		if oldMode == mode {
 			continue // already at target mode
 		}
+
+		if dryRun {
+			// Preview only — record what would change without modifying.
+			result.Count++
+			result.AgentIDs = append(result.AgentIDs, desc.ID)
+			result.Details = append(result.Details, CascadeAgentDetail{
+				AgentID:     desc.ID,
+				AgentName:   agentDisplayName(desc),
+				CurrentMode: oldMode,
+				NewMode:     mode,
+			})
+			continue
+		}
+
+		// Apply the change.
 		desc.MessageMode = mode
 		if err := s.store.UpdateAgent(ctx, desc); err != nil {
 			slog.Error("cascade message mode update failed",
@@ -240,6 +309,12 @@ func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode
 		}
 		result.Count++
 		result.AgentIDs = append(result.AgentIDs, desc.ID)
+		result.Details = append(result.Details, CascadeAgentDetail{
+			AgentID:     desc.ID,
+			AgentName:   agentDisplayName(desc),
+			CurrentMode: oldMode,
+			NewMode:     mode,
+		})
 
 		// Audit each descendant update.
 		s.emitMutationAudit(ctx, &store.MutationAuditRecord{
@@ -252,4 +327,16 @@ func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode
 	}
 
 	return result, nil
+}
+
+// agentDisplayName returns the best available display name for an agent.
+// Prefers Name, falls back to Slug, then ID.
+func agentDisplayName(a *store.Agent) string {
+	if a.Name != "" {
+		return a.Name
+	}
+	if a.Slug != "" {
+		return a.Slug
+	}
+	return a.ID
 }
