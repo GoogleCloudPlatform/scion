@@ -672,6 +672,18 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
+	// @email precondition: SCION_AGENT_NAME depends only on the environment
+	// and nothing computed by this function. Evaluate it before any I/O
+	// (resolveSenderIdentity makes a network call) so a guaranteed failure
+	// does not waste a round trip.
+	var emailSenderAgent string
+	if ref.Kind == messaging.RefEmail {
+		emailSenderAgent = os.Getenv("SCION_AGENT_NAME")
+		if emailSenderAgent == "" {
+			return fmt.Errorf("sending messages to users via @<email> is only supported from within an agent container (SCION_AGENT_NAME not set)")
+		}
+	}
+
 	sender := resolveSenderIdentity(hubCtx)
 
 	projectID, err := GetProjectID(hubCtx)
@@ -690,17 +702,6 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		agentMsg = buildStructuredMessage(sender, "agent:"+ref.Value, message)
 		if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 			return fmt.Errorf("message validation failed: %w", err)
-		}
-	}
-
-	// DEF-48 (same pattern): for @email references, the agent-context
-	// precondition (SCION_AGENT_NAME) depends on nothing from the resolve.
-	// Failing after resolve orphans the row identically to the validation case.
-	var emailSenderAgent string
-	if ref.Kind == messaging.RefEmail {
-		emailSenderAgent = os.Getenv("SCION_AGENT_NAME")
-		if emailSenderAgent == "" {
-			return fmt.Errorf("sending messages to users via @<email> is only supported from within an agent container (SCION_AGENT_NAME not set)")
 		}
 	}
 
