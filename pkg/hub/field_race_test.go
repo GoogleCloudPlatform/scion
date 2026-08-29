@@ -40,9 +40,9 @@ import (
 // It exists to populate a ChannelRegistry for race testing.
 type noopChannel struct{}
 
-func (noopChannel) Name() string                                                    { return "noop" }
-func (noopChannel) Deliver(_ context.Context, _ *messages.StructuredMessage) error   { return nil }
-func (noopChannel) Validate() error                                                 { return nil }
+func (noopChannel) Name() string                                                   { return "noop" }
+func (noopChannel) Deliver(_ context.Context, _ *messages.StructuredMessage) error { return nil }
+func (noopChannel) Validate() error                                                { return nil }
 
 // TestChannelRegistryRace verifies that concurrent SetChannelRegistry(nil)
 // calls do not race with the handler read path in handleAgentOutboundMessage.
@@ -335,26 +335,26 @@ func TestPluginManagerRace(t *testing.T) {
 // noopPluginManager satisfies IntegrationManager with zero-value returns.
 type noopPluginManager struct{}
 
-func (*noopPluginManager) ListPlugins() []string                        { return nil }
-func (*noopPluginManager) HasPlugin(_, _ string) bool                   { return false }
+func (*noopPluginManager) ListPlugins() []string                         { return nil }
+func (*noopPluginManager) HasPlugin(_, _ string) bool                    { return false }
 func (*noopPluginManager) GetPluginConfig(_, _ string) map[string]string { return nil }
-func (*noopPluginManager) GetPluginConfigFile(_, _ string) string       { return "" }
-func (*noopPluginManager) IsSelfManaged(_, _ string) bool               { return false }
+func (*noopPluginManager) GetPluginConfigFile(_, _ string) string        { return "" }
+func (*noopPluginManager) IsSelfManaged(_, _ string) bool                { return false }
 func (*noopPluginManager) GetDeploymentMode(_, _ string) plugin.DeploymentMode {
 	return plugin.DeploymentModePlugin
 }
-func (*noopPluginManager) ConfigureBroker(_ string, _ map[string]string) error   { return nil }
+func (*noopPluginManager) ConfigureBroker(_ string, _ map[string]string) error     { return nil }
 func (*noopPluginManager) ReplaceBrokerConfig(_ string, _ map[string]string) error { return nil }
 func (*noopPluginManager) RestartBrokerPlugin(_ string, _ map[string]string) error { return nil }
-func (*noopPluginManager) Reconnect(_, _ string) error                           { return nil }
+func (*noopPluginManager) Reconnect(_, _ string) error                             { return nil }
 func (*noopPluginManager) BrokerHealthCheck(_ string) (string, string, map[string]string, error) {
 	return "", "", nil, nil
 }
 func (*noopPluginManager) BrokerInfo(_ string) (string, string, []string, error) {
 	return "", "", nil, nil
 }
-func (*noopPluginManager) UpdatePlugin(_, _ string) error                    { return nil }
-func (*noopPluginManager) InstallPlugin(_, _, _, _ string) error             { return nil }
+func (*noopPluginManager) UpdatePlugin(_, _ string) error                            { return nil }
+func (*noopPluginManager) InstallPlugin(_, _, _, _ string) error                     { return nil }
 func (*noopPluginManager) LoadOne(_, _ string, _ plugin.PluginEntry, _ string) error { return nil }
-func (*noopPluginManager) GetBroker(_ string) (eventbus.EventBus, error)     { return nil, nil }
-func (*noopPluginManager) GetGRPCBrokerAdapter(_ string) plugin.GRPCBrokerClient { return nil }
+func (*noopPluginManager) GetBroker(_ string) (eventbus.EventBus, error)             { return nil, nil }
+func (*noopPluginManager) GetGRPCBrokerAdapter(_ string) plugin.GRPCBrokerClient     { return nil }
