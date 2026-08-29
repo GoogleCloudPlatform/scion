@@ -759,22 +759,34 @@ authDone:
 	// rather than relying on an environment variable that goes stale after
 	// token refresh.
 	if token, ok := opts.Env["SCION_AUTH_TOKEN"]; ok && token != "" {
-		scionDir := filepath.Join(agentHome, ".scion")
-		if err := os.MkdirAll(scionDir, 0700); err != nil {
-			util.Debugf("Start: failed to create .scion dir for token file: %v", err)
-		} else {
-			tokenPath := filepath.Join(scionDir, "scion-token")
-			tmp := tokenPath + ".tmp"
-			if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-				util.Debugf("Start: failed to write token file: %v", err)
-			} else if err := os.Rename(tmp, tokenPath); err != nil {
-				util.Debugf("Start: failed to rename token file: %v", err)
-				_ = os.Remove(tmp)
-			} else {
-				util.Debugf("Start: wrote agent token to %s", tokenPath)
-			}
-		}
+		// THE DELETE IS FIRST, AND UNCONDITIONAL, ON PURPOSE. #1348.
+		//
+		// opts.Env becomes `--env KEY=VALUE` in the runtime's argv, and that
+		// argv is written to Cloud Logging on every start (#127). The token
+		// must therefore leave opts.Env on EVERY path out of this block,
+		// including the failure paths below -- opts.Env is the caller's map,
+		// and the broker still holds it after Start returns an error.
+		//
+		// Deleting before the write, rather than after it, is what makes that
+		// property structural: there is no path through the rest of this block
+		// that can skip it, so a later edit cannot reintroduce the leak by
+		// adding an early return. Nothing between here and buildAgentEnv reads
+		// the key back -- the only other reference is the resolver at :721,
+		// which is above this block and never runs again in this call.
 		delete(opts.Env, "SCION_AUTH_TOKEN")
+
+		// Refusing to start is deliberate, and it is a choice of an
+		// availability failure over a security one. The tempting fix for a
+		// failed token write is to leave the token in opts.Env as a fallback;
+		// that would put a live credential into the argv above and turn a rare,
+		// loud failure into a silent credential disclosure on a path nobody
+		// watches. All three failure modes mean the agent home is not writable,
+		// which is not a condition an agent can usefully run under anyway: it
+		// would report started and be able to authenticate to nothing, because
+		// NewClient() finds no token in either place and returns nil.
+		if err := writeAgentTokenFile(agentHome, token); err != nil {
+			return nil, fmt.Errorf("cannot start agent %q without a hub credential: %w", opts.Name, err)
+		}
 	}
 
 	// Resolve host networking: when the hub endpoint is localhost or was
@@ -1166,6 +1178,43 @@ authDone:
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 	}, nil
+}
+
+// writeAgentTokenFile writes the agent's hub credential to the canonical token
+// file in the agent home, atomically, via a temp file plus rename. Processes
+// inside the container read the file rather than an environment variable, which
+// would go stale after a token refresh.
+//
+// EVERY ERROR NAMES THE OPERATION THAT FAILED AND THE PATH IT FAILED ON, and
+// wraps the underlying *os.PathError. There are three distinct failure modes
+// here with three distinct causes -- an unwritable agent home, a full or
+// read-only filesystem, and a token path occupied by something that is not a
+// regular file -- and a single "failed to prepare agent credentials" would
+// leave an operator with no way to tell them apart. See #1348 and PROTOCOLS.md
+// §5. util.Debugf is deliberately not used for the failures: per #1339, debug
+// output from this subsystem may not emit at all, so a Debugf here is a failure
+// report that can vanish.
+func writeAgentTokenFile(agentHome, token string) error {
+	scionDir := filepath.Join(agentHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
+	}
+
+	tokenPath := filepath.Join(scionDir, "scion-token")
+	tmp := tokenPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write agent token file %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, tokenPath); err != nil {
+		// Best effort: the temp file holds the credential, so leaving it behind
+		// on a path we are about to abort on is worse than a lost error here.
+		_ = os.Remove(tmp)
+		return fmt.Errorf("install agent token file %s from %s: %w", tokenPath, tmp, err)
+	}
+
+	util.Debugf("Start: wrote agent token to %s", tokenPath)
+	return nil
 }
 
 // detectRepoRoot resolves the git repo root to bind-mount for an agent, or ""
