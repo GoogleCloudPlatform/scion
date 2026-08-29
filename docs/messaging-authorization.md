@@ -5,15 +5,16 @@ messages to an agent. It covers mode definitions, the decision table, piercing
 rules, the API for changing modes, and the permissions that underpin the system.
 
 For the full design rationale and decision record, see the
-[design notes](/scion-volumes/scratchpad/projects/auth-refactor/reports/msg-authz-design-notes.md).
+design notes (internal: `msg-authz-design-notes.md`).
 
 ---
 
 ## Overview
 
 Every agent has a **message mode** that governs its conversational reach.
-The mode restricts who can **deliver** messages to the agent, not who the
-agent can send to. There are four modes:
+The mode governs an agent's conversational reach — both who can deliver
+messages to the agent and who the agent can deliver messages to. There are
+four modes:
 
 | Mode | Default | Description |
 |------|---------|-------------|
@@ -95,10 +96,11 @@ All messaging falls into one of two planes:
   completion, state changes), and scheduled event fires. System-plane
   messages bypass all mode checks (D8).
 
-The system-plane flag is derived from validated JWT claims and hub-internal
-state. It is **never** settable from any external ingress. Without this
-exemption, `none`/`lineage`/`branch` agents would break scheduling and
-sub-agent workflows.
+The system-plane flag is set exclusively by hub-internal code paths. It is
+**never** derived from external request data — including JWT claims — and
+is **never** settable from any external ingress. Without this exemption,
+`none`/`lineage`/`branch` agents would break scheduling and sub-agent
+workflows.
 
 ---
 
@@ -257,9 +259,9 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
   change applies to the next message; there is no grandfathering.
 - **Every transition is legal.** No preconditions, no cascade requirement.
   Mixed modes are allowed everywhere.
-- **Cascade is atomic.** A cascade operation produces one audit event per
-  affected agent. Best-effort per descendant: a failure to update one
-  descendant does not stop the rest.
+- **Cascade is best-effort.** Each descendant is updated independently; a
+  failure to update one descendant does not stop the rest. One audit event
+  is emitted per affected agent.
 - **Spawn defaults.** When a child agent is created, its mode defaults to the
   parent's mode. Templates may override to any mode.
 - **Audit.** Every mode change emits an audit record: actor, agent,
@@ -331,7 +333,7 @@ The messaging authorization system is governed by ten design decisions
 | D10 | Modes are mutable; mutation is foundational to the design |
 
 For the full decision record with rationale, see the
-[design notes](/scion-volumes/scratchpad/projects/auth-refactor/reports/msg-authz-design-notes.md).
+design notes (internal: `msg-authz-design-notes.md`).
 
 ---
 
