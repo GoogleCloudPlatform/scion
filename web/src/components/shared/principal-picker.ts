@@ -62,8 +62,16 @@ export class ScionPrincipalPicker extends LitElement {
   @state() private searchLoading = false;
   @state() private searchOpen = false;
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private blurTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private searchRequestId = 0;
   /** True after selectUser(); reset on new typed input. Prevents blur from overwriting a resolved selection. */
   private selectedViaDropdown = false;
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.searchDebounceTimer) clearTimeout(this.searchDebounceTimer);
+    if (this.blurTimeoutId) clearTimeout(this.blurTimeoutId);
+  }
 
   static override styles = css`
     :host {
@@ -176,10 +184,12 @@ export class ScionPrincipalPicker extends LitElement {
   }
 
   private async searchUsers(query: string): Promise<void> {
+    const requestId = ++this.searchRequestId;
     this.searchLoading = true;
     this.searchOpen = true;
     try {
       const response = await apiFetch(`/api/v1/users?search=${encodeURIComponent(query)}&limit=10`);
+      if (requestId !== this.searchRequestId) return; // stale response, a newer request has superseded this one
       if (response.ok) {
         const data = (await response.json()) as {
           users?: Array<{ id: string; email: string; displayName: string }>;
@@ -187,10 +197,13 @@ export class ScionPrincipalPicker extends LitElement {
         this.searchResults = data.users || [];
       }
     } catch (err) {
+      if (requestId !== this.searchRequestId) return;
       console.error('Failed to search users:', err);
       this.searchResults = [];
     } finally {
-      this.searchLoading = false;
+      if (requestId === this.searchRequestId) {
+        this.searchLoading = false;
+      }
     }
   }
 
@@ -250,7 +263,7 @@ export class ScionPrincipalPicker extends LitElement {
           }}
           @sl-blur=${() => {
             // Delay to allow click on dropdown.
-            setTimeout(() => {
+            this.blurTimeoutId = setTimeout(() => {
               this.searchOpen = false;
               // Emit the raw typed value on blur if no dropdown selection was
               // made, so the parent has the latest value even when the

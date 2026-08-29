@@ -428,17 +428,22 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enrich bindings with human-friendly display names.
-	enriched := make([]RoleBindingInfo, len(bindings))
+	enriched := make([]RoleBindingInfo, 0, len(bindings))
 	for i, b := range bindings {
-		enriched[i] = RoleBindingInfo{RoleBinding: *b}
-		enriched[i].PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
-		enriched[i].CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		if b == nil {
+			slog.Warn("nil role binding in list result, skipping", "index", i)
+			continue
+		}
+		info := RoleBindingInfo{RoleBinding: *b}
+		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
+		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
 			project, err := s.store.GetProject(ctx, b.ScopeID)
-			if err == nil {
-				enriched[i].ScopeDisplayName = project.Name
+			if err == nil && project != nil {
+				info.ScopeDisplayName = project.Name
 			}
 		}
+		enriched = append(enriched, info)
 	}
 
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
@@ -496,6 +501,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 				return
 			}
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if resolvedUser == nil {
+			BadRequest(w, "user not found with email: "+req.PrincipalID)
 			return
 		}
 		req.PrincipalID = resolvedUser.ID
@@ -598,17 +607,22 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 	}
 
 	// Enrich bindings with human-friendly display names.
-	enriched := make([]RoleBindingInfo, len(bindings))
+	enriched := make([]RoleBindingInfo, 0, len(bindings))
 	for i, b := range bindings {
-		enriched[i] = RoleBindingInfo{RoleBinding: *b}
-		enriched[i].PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
-		enriched[i].CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		if b == nil {
+			slog.Warn("nil role binding in list result, skipping", "index", i)
+			continue
+		}
+		info := RoleBindingInfo{RoleBinding: *b}
+		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
+		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
 			project, err := s.store.GetProject(ctx, b.ScopeID)
-			if err == nil {
-				enriched[i].ScopeDisplayName = project.Name
+			if err == nil && project != nil {
+				info.ScopeDisplayName = project.Name
 			}
 		}
+		enriched = append(enriched, info)
 	}
 
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
