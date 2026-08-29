@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -627,5 +628,250 @@ func TestResolveThreadConversationForRead_DMKeyWithEmptyProjectID(t *testing.T) 
 	if readResult.ConversationID != writeResult.ConversationID {
 		t.Errorf("ConversationID mismatch: write=%q, read=%q",
 			writeResult.ConversationID, readResult.ConversationID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mockTopicLookup — test double for TopicConversationLookup
+// ---------------------------------------------------------------------------
+
+type mockTopicLookup struct {
+	// topics maps topicID -> conversationID. Empty string means topic exists
+	// but has no conversation_id. Missing key means topic not found.
+	topics map[string]string
+
+	// deleted is the set of topicIDs that are soft-deleted. A topic in
+	// deleted must also have an entry in topics (it still exists, just
+	// tombstoned). GetTopicConversationID returns ErrNotFound for these;
+	// GetTopicConversationIDIncludingDeleted returns the conversation_id.
+	deleted map[string]bool
+
+	// calledMethod records which method was last called, so tests can
+	// verify the sink calls the correct accessor.
+	calledMethod string
+}
+
+func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
+	m.calledMethod = "GetTopicConversationID"
+	// User-facing: hides soft-deleted topics.
+	if m.deleted[topicID] {
+		return "", fmt.Errorf("topic not found (deleted) %s: %w", topicID, store.ErrNotFound)
+	}
+	convID, ok := m.topics[topicID]
+	if !ok {
+		return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+	}
+	return convID, nil
+}
+
+func (m *mockTopicLookup) GetTopicConversationIDIncludingDeleted(_ context.Context, topicID string) (string, error) {
+	m.calledMethod = "GetTopicConversationIDIncludingDeleted"
+	// Mint guard: sees soft-deleted topics.
+	convID, ok := m.topics[topicID]
+	if !ok {
+		return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+	}
+	return convID, nil
+}
+
+// mockTopicLookupWithError returns a configurable error for any topicID.
+type mockTopicLookupWithError struct {
+	err error
+}
+
+func (m *mockTopicLookupWithError) GetTopicConversationID(_ context.Context, _ string) (string, error) {
+	return "", m.err
+}
+
+func (m *mockTopicLookupWithError) GetTopicConversationIDIncludingDeleted(_ context.Context, _ string) (string, error) {
+	return "", m.err
+}
+
+// ---------------------------------------------------------------------------
+// AC-U-3: The message path NEVER mints a surface=native conversation for a
+// thread ID that has no topic row (with topic lookup enabled).
+// ---------------------------------------------------------------------------
+
+func TestAC_U3_NoMintForNativeTopicWithoutRow(t *testing.T) {
+	// Scenario: threadID is a topic UUID that does NOT exist in webchat_topic.
+	// With the sink-level guard (DEF-20 unify), store.ErrNotFound means "not a
+	// native topic" and falls through to upsert. This is correct because the
+	// lookup is now injected unconditionally (not just for web channels), so
+	// non-native surface threads (Discord, Telegram) will naturally get
+	// ErrNotFound and should proceed to upsert.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-minted",
+			ExternalRef: "thread:proj-1:topic-uuid-nonexistent",
+		},
+	}
+	lookup := &mockTopicLookup{topics: map[string]string{}} // empty = no topics
+
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Thread ID that looks like a topic UUID but doesn't exist.
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		"topic-uuid-nonexistent", "proj-1",
+		WithTopicLookup(lookup))
+
+	// When topic lookup returns store.ErrNotFound, the sink falls through to
+	// upsert — this is the expected behavior for non-native surface threads.
+	if got == nil {
+		t.Fatal("expected non-nil result — ErrNotFound should fall through to upsert")
+	}
+	if got.ConversationID != "conv-minted" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-minted")
+	}
+	if mock.lastConv == nil {
+		t.Error("upsert must be called when topic is not found (ErrNotFound)")
+	}
+}
+
+func TestAC_U3_NoMintForTopicWithoutConversationID(t *testing.T) {
+	// Scenario: threadID is a webchat topic UUID that EXISTS but has no
+	// conversation_id yet (not yet backfilled). The function must return nil
+	// (unresolved) and MUST NOT mint a new conversation row.
+	mock := &mockConversationUpserter{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"topic-no-conv": "", // exists but no conversation_id
+		},
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		"topic-no-conv", "proj-1",
+		WithTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("expected nil for topic without conversation_id, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert MUST NOT be called — no conversation row should be minted")
+	}
+	output := buf.String()
+	if !strings.Contains(output, "topic has no conversation_id") {
+		t.Errorf("expected log about missing conversation_id, got: %s", output)
+	}
+}
+
+func TestAC_U3_ResolveViaTopicLookup(t *testing.T) {
+	// Scenario: threadID is a webchat topic UUID that EXISTS and HAS a
+	// conversation_id. The function must return the linked conversation_id
+	// without calling the upserter.
+	mock := &mockConversationUpserter{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"topic-with-conv": "conv-linked-123",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		"topic-with-conv", "proj-1",
+		WithTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result for topic with conversation_id")
+	}
+	if got.ConversationID != "conv-linked-123" {
+		t.Errorf("expected conversation_id conv-linked-123, got %q", got.ConversationID)
+	}
+	if mock.lastConv != nil {
+		t.Error("upsert MUST NOT be called when topic lookup succeeds")
+	}
+}
+
+func TestAC_U3_DMPrefixFallsThrough(t *testing.T) {
+	// Scenario: threadID is a dm:-prefixed key. Even with topic lookup enabled,
+	// dm: keys should fall through to the existing DeriveConversationKey path
+	// because they are not native topics.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-dm-fallthrough",
+			ExternalRef: "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000",
+		},
+	}
+	lookup := &mockTopicLookup{topics: map[string]string{}} // no topics
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		dmKey, "",
+		WithTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result — dm: keys must fall through to upsert")
+	}
+	if got.ConversationID != "conv-dm-fallthrough" {
+		t.Errorf("expected conv-dm-fallthrough, got %q", got.ConversationID)
+	}
+}
+
+func TestAC_U3_WithoutTopicLookup_StillMints(t *testing.T) {
+	// Backwards compatibility: without the WithTopicLookup option,
+	// the function must still mint conversations as before.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-minted",
+			ExternalRef: "thread:proj-1:topic-uuid",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		"topic-uuid", "proj-1") // no WithTopicLookup
+
+	if got == nil {
+		t.Fatal("expected non-nil result — without lookup, must mint as before")
+	}
+	if got.ConversationID != "conv-minted" {
+		t.Errorf("expected conv-minted, got %q", got.ConversationID)
+	}
+	if mock.lastConv == nil {
+		t.Error("upsert must have been called (backwards compat)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-21 regression: infrastructure error must NOT fall through to upsert
+// ---------------------------------------------------------------------------
+
+func TestDEF21_InfraErrorMustNotMint(t *testing.T) {
+	// DEF-21: When GetTopicConversationID returns an infrastructure error
+	// (e.g. DB connection lost — NOT store.ErrNotFound), the function must
+	// NOT fall through to the upsert path and mint a spurious conversation.
+	// It must return nil (non-fatal contract) without calling the upserter.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{
+			ID:          "conv-spurious",
+			ExternalRef: "thread:proj-1:some-topic",
+		},
+	}
+	lookup := &mockTopicLookupWithError{
+		err: errors.New("connection refused"), // infra error, NOT ErrNotFound
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger,
+		"some-topic", "proj-1",
+		WithTopicLookup(lookup))
+
+	// After the DEF-21 fix:
+	// - got must be nil (no spurious conversation minted)
+	// - mock.lastConv must be nil (upserter must NOT be called)
+	if got != nil {
+		t.Errorf("DEF-21: expected nil on infra error, got %+v (spurious mint!)", got)
+	}
+	if mock.lastConv != nil {
+		t.Errorf("DEF-21: upserter was called on infra error — spurious conversation minted")
 	}
 }
