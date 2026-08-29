@@ -175,8 +175,10 @@ func processHookData(data []byte) error {
 	// Register built-in dialects first, then let a harness-bundled dialect.yaml
 	// override the requested dialect by name if one is present.
 	dialects.RegisterBuiltins(processor)
+	var mappingDialect *dialects.MappingDialect
 	if md, err := dialects.DiscoverMappingDialect(hookDialect); err == nil {
 		processor.RegisterDialect(md)
+		mappingDialect = md
 	}
 
 	// Register handlers
@@ -240,7 +242,24 @@ func processHookData(data []byte) error {
 		processor.AddHandler(telemetryHandler.Handle)
 	}
 
-	return processor.ProcessRaw(rawData, hookDialect)
+	if err := processor.ProcessRaw(rawData, hookDialect); err != nil {
+		return err
+	}
+
+	// Emit the response JSON that the harness expects on stdout.
+	// Dialects that don't declare a responses section (e.g. claude) produce
+	// no output, preserving backward compatibility.
+	if mappingDialect != nil {
+		if rawEventName := mappingDialect.EventName(rawData); rawEventName != "" {
+			if resp := mappingDialect.Response(rawEventName); resp != nil {
+				if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+					return fmt.Errorf("writing hook response: %w", err)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // runAskUser updates status to waiting for input.

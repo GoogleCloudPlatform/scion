@@ -19,10 +19,11 @@ import (
 // It maps harness-specific event names to normalized Scion event names and
 // optionally extracts fields from the event payload using dotted paths.
 type MappingDialectSpec struct {
-	Dialect         string                      `yaml:"dialect"`
-	EventNameField  string                      `yaml:"event_name_field"`
-	EventNameFields []string                    `yaml:"event_name_fields"`
-	Mappings        map[string]MappingEntrySpec `yaml:"mappings"`
+	Dialect         string                            `yaml:"dialect"`
+	EventNameField  string                            `yaml:"event_name_field"`
+	EventNameFields []string                          `yaml:"event_name_fields"`
+	Mappings        map[string]MappingEntrySpec       `yaml:"mappings"`
+	Responses       map[string]map[string]interface{} `yaml:"responses,omitempty"`
 }
 
 // MappingEntrySpec defines how a single harness event maps to a normalized event.
@@ -44,6 +45,20 @@ func NewMappingDialect(spec MappingDialectSpec) *MappingDialect {
 // Name returns the dialect name as declared in the spec.
 func (d *MappingDialect) Name() string {
 	return d.spec.Dialect
+}
+
+// Response returns the response object declared for the given raw event name,
+// or nil if no response is declared for that event.
+func (d *MappingDialect) Response(rawEventName string) map[string]interface{} {
+	if d.spec.Responses == nil {
+		return nil
+	}
+	return d.spec.Responses[rawEventName]
+}
+
+// EventName extracts the raw event name from the incoming data map.
+func (d *MappingDialect) EventName(data map[string]interface{}) string {
+	return d.eventName(data)
 }
 
 // Parse converts a harness event payload into a normalized Event using the
