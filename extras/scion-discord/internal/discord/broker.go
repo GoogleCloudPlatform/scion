@@ -51,6 +51,11 @@ const (
 	OriginMarkerValue = "hub"
 )
 
+// legacyProjectsRoot is the base path for legacy download directories
+// when no explicit downloads_path is configured. Extracted to a package-level
+// var so tests can point it at a temp dir without skipping.
+var legacyProjectsRoot = "/home/scion/.scion/projects"
+
 // outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
 var outboundEmailRe = regexp.MustCompile(`(?:user:)?[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 
@@ -2063,7 +2068,7 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	}
 	if hostDir == "" {
 		// Fallback to legacy path when shared dir resolution fails.
-		hostDir = filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+		hostDir = filepath.Join(legacyProjectsRoot, projectSlug, "downloads")
 	}
 	if err := os.MkdirAll(hostDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create downloads dir: %w", err)

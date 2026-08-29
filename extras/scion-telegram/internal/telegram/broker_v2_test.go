@@ -269,11 +269,12 @@ func newTestBrokerV2(t *testing.T, tgSrv *fakeTGServerV2) *TelegramBrokerV2 {
 	t.Cleanup(func() { b.Close() })
 
 	err := b.Configure(map[string]string{
-		"bot_token":    "test-token",
-		"api_base_url": tgSrv.srv.URL,
-		"hub_url":      "http://hub.test",
-		"broker_id":    "broker-test",
-		"db_path":      dbPath,
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"hub_url":        "http://hub.test",
+		"broker_id":      "broker-test",
+		"db_path":        dbPath,
+		"downloads_path": filepath.Join(t.TempDir(), "downloads"),
 	})
 	require.NoError(t, err)
 
@@ -2068,9 +2069,11 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 		RefreshedAt: time.Now(),
 	}))
 
-	// Override the project path to use temp dir.
-	origHome := os.Getenv("HOME")
-	_ = origHome // keep for reference
+	// Clear downloads_path override from the helper so the shared dir path
+	// is exercised. Point HOME to a temp dir so SharedDirHostPath resolves
+	// to a writable location on CI runners.
+	b.downloadsPath = ""
+	t.Setenv("HOME", tmpDir)
 
 	var deliveredMsg *messages.StructuredMessage
 	done := make(chan struct{}, 1)
@@ -2220,7 +2223,8 @@ func TestV2_DownloadTelegramFile_PhotoPicksLargest(t *testing.T) {
 
 	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
-	assert.Contains(t, agentPath, "/workspace/downloads/")
+	// With downloads_path set via the test helper, agentPath uses that dir
+	// rather than the legacy /workspace/downloads/ prefix.
 	assert.Contains(t, agentPath, "photo_u3.jpg")
 	assert.Contains(t, placeholder, "Photo attached")
 	assert.Contains(t, placeholder, "photo_u3.jpg")
@@ -3014,6 +3018,7 @@ func TestV2_DownloadTelegramFile_SharedDirPath(t *testing.T) {
 	// should route through the shared dir infrastructure.
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
+	b.downloadsPath = "" // clear the downloads_path override from the helper
 
 	// Point HOME to a temp dir so SharedDirHostPath resolves there.
 	fakeHome := t.TempDir()
@@ -3050,8 +3055,16 @@ func TestV2_DownloadTelegramFile_SharedDirPath(t *testing.T) {
 func TestV2_DownloadTelegramFile_EmptyProjectID_LegacyPath(t *testing.T) {
 	// When projectID is empty and downloadsPath is empty, the function should
 	// fall back to the legacy /workspace/downloads/ agent path.
+
+	// Redirect the legacy fallback path to a writable temp dir so this test
+	// works on CI runners where /home/scion does not exist.
+	origRoot := legacyProjectsRoot
+	legacyProjectsRoot = filepath.Join(t.TempDir(), ".scion/projects")
+	t.Cleanup(func() { legacyProjectsRoot = origRoot })
+
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
+	b.downloadsPath = "" // clear the downloads_path override from the helper
 
 	ctx := context.Background()
 	slug := filepath.Base(t.TempDir())

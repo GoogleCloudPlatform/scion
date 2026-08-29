@@ -26,6 +26,8 @@ require (
 	cloud.google.com/go/longrunning v1.0.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
 	cloud.google.com/go/policytroubleshooter v1.11.7 // indirect
+	cloud.google.com/go/resourcemanager v1.15.0 // indirect
+	cloud.google.com/go/run v1.21.0 // indirect
 	cloud.google.com/go/secretmanager v1.16.0 // indirect
 	cloud.google.com/go/storage v1.59.1 // indirect
 	entgo.io/ent v0.14.5 // indirect

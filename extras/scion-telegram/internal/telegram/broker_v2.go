@@ -48,6 +48,11 @@ const (
 	askUserExpiry        = 30 * time.Minute
 )
 
+// legacyProjectsRoot is the base path for legacy download directories
+// when no downloads_path override or shared-dir config is available.
+// Extracted as a var to allow tests to redirect to a temp directory.
+var legacyProjectsRoot = "/home/scion/.scion/projects"
+
 // TelegramBrokerV2 implements plugin.MessageBrokerPluginInterface with
 // dynamic group-link routing, inline keyboard support, and persistent
 // SQLite state. It wires together the v2 component handlers (commands,
@@ -2340,7 +2345,7 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 		}
 	}
 	if hostDir == "" {
-		hostDir = filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+		hostDir = filepath.Join(legacyProjectsRoot, projectSlug, "downloads")
 	}
 	if err := os.MkdirAll(hostDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create downloads dir: %w", err)

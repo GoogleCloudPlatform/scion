@@ -13,16 +13,16 @@ All schedules are **project-scoped**. An agent can only create, list, and manage
 
 There are two primary ways to schedule future activities in Scion. They solve different problems:
 
-| | `scion message --in/--at` | `scion schedule create / create-recurring` |
+| | `scion schedule create --in/--at` (one-shot) | `scion schedule create-recurring` |
 |---|---|---|
-| **Nature** | Fire-and-forget delayed message | Durable, project-scoped event |
-| **Manageable** | ❌ No handle once sent | ✅ List, inspect, cancel, pause, resume, delete, history |
-| **Visibility** | Only sender knows it exists | ✅ Any agent in the project can see it via `list` |
+| **Nature** | Fire-once scheduled event | Durable, recurring event |
+| **Manageable** | ✅ List, inspect, cancel | ✅ List, inspect, pause, resume, delete, history |
+| **Visibility** | ✅ Any agent in the project can see it via `list` | ✅ Any agent in the project can see it via `list` |
 | **Recurrence** | ❌ No | ✅ Yes (`--cron`) |
 
 ### When to use which:
-* **Use `scion message --in`** for simple self-callbacks or quick, one-off delays within an agent's session (e.g., "ping me in 5 minutes to check CI status").
-* **Use `scion schedule`** when the event is recurring, when other agents may need to inspect or modify the schedule, when the wait outlives the current agent session, or when you need execution history and failure tracking.
+* **Use a one-shot `scion schedule create --in`** for simple self-callbacks or quick, one-off delays within an agent's session (e.g., "ping me in 5 minutes to check CI status").
+* **Use `scion schedule create-recurring`** when the event is recurring, when other agents may need to inspect or modify the schedule, when the wait outlives the current agent session, or when you need execution history and failure tracking.
 
 ---
 
@@ -88,7 +88,10 @@ When an agent needs to wait on an external, non-agent process (such as a CI/CD b
 
 ```bash
 # 1. Schedule a self-callback message in 5 minutes
-scion message --in 5m agent:$(scion whoami --non-interactive --format json | jq -r .name) "Recheck CI build status"
+scion schedule create --non-interactive --type message \
+  --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
+  --message "Recheck CI build status" \
+  --in 5m
 
 # 2. Set your status to blocked to avoid the stall detector
 sciontool status blocked "Waiting for CI run 9428 to complete"

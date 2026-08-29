@@ -1,0 +1,209 @@
+# extras/ Modules CI
+#
+# PURPOSE: Build and test the Go modules under extras/. These modules
+# are each separate go.mod files with `replace` directives onto the root
+# tree. They are NOT reached by root `go build ./...` or `make test-fast`,
+# and until this job nothing in CI guarded them.
+#
+# HONEST COST: When this job blocks, the fix is `make tidy-extras` — a
+# target that runs `go mod tidy` in every extras/ module. Someone
+# unfamiliar with the layout will not know this; the failure message
+# names the remedy explicitly. The alternative — a non-blocking job —
+# was rejected: this tranche produced two jobs that reported green
+# because they could not express failure (rules 386/387).
+#
+# EXCLUSIONS: agent-viz is explicitly excluded. It requires a Vite web
+# build (Node.js + npm) to populate internal/server/dist/ for its
+# go:embed directive. That makes it a full-stack build, not a Go-only
+# concern. The correct fix is a separate CI job for agent-viz, or a
+# non-dot-prefixed placeholder in dist/ (go:embed skips dot-prefixed
+# and underscore-prefixed files, so .gitkeep does not work).
+#
+# The exclusion is visible: printed in the discover step, counted in
+# the coverage assertion (tested + excluded == total at unlimited
+# depth). A silent skip would be indistinguishable from coverage.
+#
+# DISCOVERY: The module list is derived by `find`, not hand-listed.
+# If someone adds a new module under extras/, this job picks it up
+# automatically. If the discovered count is zero, the job fails.
+#
+# TRIGGER: extras/** + root go.mod/go.sum on pull_request. The root
+# go.mod/go.sum paths cover the causal edge — root dep changes can
+# stale broker go.sum without touching any file under extras/.
+
+name: Extras Modules CI
+
+on:
+  pull_request:
+    paths:
+      - 'extras/**'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Discover extras modules
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+      tested_count: ${{ steps.find.outputs.tested_count }}
+      excluded_count: ${{ steps.find.outputs.excluded_count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Find all extras modules
+        id: find
+        run: |
+          # Explicit exclusions — modules that cannot build with `go build`
+          # alone because they depend on non-Go build steps. Each must be
+          # justified here and accounted for in the coverage assertion.
+          #
+          # extras/agent-viz: requires `npm install && vite build` to
+          #   populate internal/server/dist/ (go:embed dist/*). Without
+          #   the web build, the Go compiler fails on the embed glob.
+          EXCLUDED_MODULES="extras/agent-viz"
+
+          ALL_MODULES=$(find extras -maxdepth 2 -name go.mod -printf '%h\n' | sort)
+          ALL_COUNT=$(printf '%s' "$ALL_MODULES" | grep -c . || true)
+
+          # Filter out excluded modules. -x for exact line match (no prefix
+          # over-matching), -F -f for multi-entry support (one per line).
+          TESTED_MODULES=$(printf '%s\n' "$ALL_MODULES" | grep -v -x -F -f <(printf '%s\n' $EXCLUDED_MODULES) || true)
+          TESTED_JSON=$(echo "$TESTED_MODULES" | jq -c -R -s 'split("\n") | map(select(. != ""))')
+          TESTED_COUNT=$(echo "$TESTED_JSON" | jq 'length')
+
+          EXCLUDED_COUNT=0
+          echo ""
+          echo "=== EXPLICITLY EXCLUDED MODULES ==="
+          for excl in $EXCLUDED_MODULES; do
+            if echo "$ALL_MODULES" | grep -qxF "$excl"; then
+              echo "  EXCLUDED: $excl (requires non-Go build step)"
+              EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
+            else
+              echo "  WARNING: exclusion '$excl' not found in discovered modules"
+            fi
+          done
+          echo ""
+          echo "=== MODULES TO BE TESTED ==="
+          echo "$TESTED_MODULES" | while read -r mod; do
+            [ -n "$mod" ] && echo "  $mod"
+          done
+          echo ""
+          echo "Discovered: $ALL_COUNT total, $TESTED_COUNT to test, $EXCLUDED_COUNT explicitly excluded"
+
+          # Fail fast if discovery found nothing — broken find, not empty extras.
+          if [ "$ALL_COUNT" -eq 0 ]; then
+            echo "::error::No extras modules discovered. The find command matched nothing — this is a broken discovery, not an empty result."
+            exit 1
+          fi
+          if [ "$TESTED_COUNT" -eq 0 ]; then
+            echo "::error::All $ALL_COUNT discovered modules are excluded. At least one module must be testable."
+            exit 1
+          fi
+
+          echo "matrix={\"module\":$TESTED_JSON}" >> "$GITHUB_OUTPUT"
+          echo "tested_count=$TESTED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "excluded_count=$EXCLUDED_COUNT" >> "$GITHUB_OUTPUT"
+
+  build-and-test:
+    name: ${{ matrix.module }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: '${{ matrix.module }}/go.mod'
+          cache: true
+
+      - name: Build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: Test
+        working-directory: ${{ matrix.module }}
+        run: |
+          # Use -count=1 to defeat caching. -v to prove execution.
+          set -o pipefail
+          go test -v -count=1 ./... 2>&1 | tee test-output.txt
+          RUN_COUNT=$(grep -cF '=== RUN' test-output.txt || true)
+          TEST_FILES=$(find . -name '*_test.go' | wc -l)
+          echo "Test files found: $TEST_FILES"
+          echo "Tests executed: $RUN_COUNT"
+
+          # Guard against build-tag exclusion or empty packages: if test
+          # files exist but nothing ran, the build layout is silently
+          # hiding tests. Modules with genuinely zero test files (e.g.
+          # scion-broker-log) are not penalized.
+          if [ "$TEST_FILES" -gt 0 ] && [ "$RUN_COUNT" -eq 0 ]; then
+            echo "::error::$TEST_FILES test files present but zero tests ran — build tags or package layout are excluding them"
+            exit 1
+          fi
+
+      - name: Check go.mod/go.sum freshness
+        working-directory: ${{ matrix.module }}
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo ""
+            echo "::error title=Stale go.mod/go.sum in ${MODULE}::go.mod or go.sum is not tidy. Run 'make tidy-extras' to fix all extras modules at once."
+            exit 1
+          fi
+
+  coverage:
+    name: Verify all modules were tested
+    needs: [discover, build-and-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Assert coverage
+        env:
+          TESTED: ${{ needs.discover.outputs.tested_count }}
+          EXCLUDED: ${{ needs.discover.outputs.excluded_count }}
+        run: |
+
+          # TOTAL is re-derived here from an INDEPENDENT find at unlimited
+          # depth, not from the discover job's -maxdepth 2. This makes the
+          # assertion non-tautological: a module at depth 3+ would be missed
+          # by the matrix but caught here. If the two counts diverge, a
+          # module exists that the matrix cannot see.
+          TOTAL=$(find extras -name go.mod -not -path '*/vendor/*' -printf '%h\n' | wc -l)
+
+          echo "=== Coverage Summary ==="
+          echo "  Total (unlimited depth): $TOTAL"
+          echo "  Tested (matrix):         $TESTED"
+          echo "  Excluded:                $EXCLUDED"
+          echo ""
+
+          ACCOUNTED=$((TESTED + EXCLUDED))
+          if [ "$ACCOUNTED" -ne "$TOTAL" ]; then
+            echo "::error::Coverage gap: found $TOTAL modules (unlimited depth) but matrix accounted for $ACCOUNTED (tested=$TESTED + excluded=$EXCLUDED). A module exists outside -maxdepth 2 or was neither tested nor excluded."
+            exit 1
+          fi
+
+          if [ "$TESTED" -lt 1 ]; then
+            echo "::error::Expected at least 1 tested module, got $TESTED"
+            exit 1
+          fi
+
+          echo "All $TOTAL extras modules accounted for: $TESTED tested, $EXCLUDED explicitly excluded."

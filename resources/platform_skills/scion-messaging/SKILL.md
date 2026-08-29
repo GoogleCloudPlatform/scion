@@ -14,8 +14,8 @@ In a multi-agent orchestration environment, communication is the primary failure
 - When starting a task that requires coordination with other agents.
 - When you need to provide a status update or ask a question to a user.
 - When forwarding feedback or unblocking another agent.
-- When you need to send literal keystrokes to an agent's terminal.
-- When scheduling messages for the future.
+- When you need to send literal keystrokes to an agent's terminal (via `scion keys`).
+- When scheduling messages for the future (via `scion schedule create`).
 
 **When NOT to use:** For internal cognitive work or logging that doesn't need to be seen by others. Never use messaging for banter or repetitive, low-signal status updates.
 
@@ -23,12 +23,17 @@ In a multi-agent orchestration environment, communication is the primary failure
 
 Choosing the right recipient is critical to avoid spam and ensure the message reaches the intended target.
 
-- **`agent:<name>`**: Use this to message a specific agent by its name (e.g., `agent:tech-lead`).
-- **`user:<email>`**: Use this to message a human user directly (e.g., `user:preston@example.com`).
-- **`group[a,b,...]`**: Use this for group messaging to a specific list of agents/users (e.g., `group[tech-lead, editor]`).
+- **`@<agent-name>`** (preferred): The preferred way to message a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
+- **`@<email>`**: Send a global DM to a user by email address (e.g., `scion message @preston@example.com "..."`).
+- **`agent:<name>`** (legacy): Explicit agent addressing by name. Still works but `@<agent-name>` is preferred.
+- **`<agent-name>`** (legacy): Bare agent name, equivalent to `agent:<name>`. Still works but `@<agent-name>` is preferred.
+- **`user:<name>`**: Send to a user's inbox (Hub mode only).
+- **`group[a,b,...]`**: Group messaging to a specific list of recipients (Hub mode only).
+- **`conv:<uuid>`**: Address a conversation by ID. **Not yet supported — currently errors.**
+- **`#<thread>`**: Address a named thread. **Not yet supported — currently errors.**
 - **`coordinator`**: (Convention) Usually refers to the agent managing the project.
 
-**Anti-Pattern:** NEVER use `--broadcast`. It spams every agent in the project, wastes context windows, and is often ignored or causes confusion.
+**Anti-Pattern:** Do not use `scion broadcast` for routine communication. It sends to every agent in the project, wastes context windows, and is often ignored or causes confusion. Broadcasting is now a separate command (`scion broadcast`); the old `--broadcast` flag on `scion message` has been removed.
 
 ## Message Timing and Cadence
 
@@ -54,26 +59,34 @@ Every message should move work forward. High-signal messages are functional and 
 
 ## Channel and Thread Targeting
 
-- **`--channel <name>`**: Use this to target a specific delivery channel (e.g., `telegram`, `discord`, `web`).
-- **`--thread-id <id>`**: Use this to reply within a specific project thread, ensuring continuity for the user.
+- **`--channel <name>`** (deprecated): Targets a specific delivery channel. This flag triggers a deprecation warning if used; prefer `@` conversation addressing instead.
+- **`--thread-id <id>`** (deprecated): Replies within a specific project thread. This flag triggers a deprecation warning if used; prefer `@` conversation addressing instead.
 
 ## Special Message Flags
 
-The `scion message` command provides powerful flags for advanced orchestration:
+The `scion message` command provides the following flags:
 
-- **`--raw`**: Sends literal keystrokes to an agent's tmux terminal (e.g., `scion message agent:editor --raw "ENTER"`). Useful for unblocking interactive prompts.
-- **`--wake`**: Resumes a suspended agent and delivers the message.
-- **`--interrupt`**: Interrupts the target agent's current process before delivering the message (use with caution).
-- **`--notify`**: Subscribes you to state-change notifications (e.g., completion, stall) for the target agent. Note: `--notify` on `scion start` is **deprecated** — agents that create other agents are automatically subscribed via creation ancestry. Use `--notify` on `scion message` only when subscribing to an agent you did not create.
-- **`--attach <file>`**: Attaches one or more files to the message.
-- **`--in <delay>`**: Schedules a message for a relative delay (e.g., `--in 5m`).
-- **`--at <time>`**: Schedules a message for an absolute time (e.g., `--at "2026-06-10 14:00"`).
+- **`--wake`**: Resumes a suspended agent before delivering the message.
+- **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
+- **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
+- **`--visibility <level>`**: Sets message visibility: `normal`, `verbose`, or `full`. Controls how the message appears in conversation views with different density filters.
+
+**Capabilities that moved to separate commands:**
+- **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal (replaces the old `--raw` flag).
+- **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery (replaces the old `--in` and `--at` flags). See the `scion-scheduler` skill.
+- **Broadcasting**: Use `scion broadcast` to send to all agents in a project, or `scion broadcast --all` for global broadcast (replaces the old `--broadcast` flag).
+- **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes (replaces the old `--notify` flag).
+
+**Deprecated flags still accepted (with warnings):**
+- `--cc`: Carbon-copy additional agents. Use `group[...]` addressing or body `@mentions` instead.
+- `--plain`: Mark for plain-text delivery. Will be removed in a future release.
+- `--channel` and `--thread-id`: See "Channel and Thread Targeting" above.
 
 ## Agent-to-Agent Coordination Patterns
 
 - **Coordinator Relay**: Workers generally communicate through the coordinator rather than directly with each other. This guidance may be set by the coordinator.
 - **Avoid being a relay.** If an agent needs to communicate something to a user, have them message the user directly rather than relaying through you. Relay adds latency, risks reframing the message in transit, and wastes context.
-- **Self-Callback Heartbeat**: For very long external tasks, use `scion message --in` to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
+- **Self-Callback Heartbeat**: For very long external tasks, use `scion schedule create` to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
 
 ## Multi-User Communication
 
@@ -114,6 +127,8 @@ is addressed to you or is a notification about another agent.
 - **`group-set`** — a user @-mentioned multiple agents (not `@all`). Read and act on it like an `instruction`.
 - **`system`** — a hub-generated operational notice (e.g. scheduled event fired, port auto-exposed, message delivery failed). Read for situational awareness; no reply needed. Check `metadata.system_category` for the specific category.
 
+**Note:** The messaging system is transitioning to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. During this transition, inbound messages continue to arrive with the type fields described above, and agents should continue to discriminate on the `type` field as documented. New fields such as `conversation_id` may appear in message metadata but are not yet required for correct agent behavior.
+
 ### Handling `input-needed`
 
 When an agent calls `sciontool status ask_user`, the question text is embedded
@@ -140,7 +155,7 @@ is a broadcast to subscribers, not a delivery to an addressee.
 
 ## Anti-Patterns and Red Flags
 
-- **Red Flag**: Using `--broadcast`.
+- **Red Flag**: Using `scion broadcast` for routine communication (the old `--broadcast` flag on `scion message` has been removed).
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
@@ -148,9 +163,9 @@ is a broadcast to subscribers, not a delivery to an addressee.
 
 ## Verification Checklist
 
-- [ ] Does the message have a clear recipient (`agent:`, `user:`, or `group[]`)?
+- [ ] Does the message have a clear recipient (`@<agent>`, `@<email>`, `agent:`, `user:`, or `group[]`)?
+- [ ] Is the preferred `@<agent-name>` form used (rather than legacy `agent:<name>`)?
 - [ ] Is the message functional and free of filler/banter?
 - [ ] Does it include concrete references (paths, IDs, errors)?
 - [ ] If a decision is needed, are concrete options and a recommendation provided?
-- [ ] Is the message targeted to the correct channel or thread if applicable?
 - [ ] For long tasks, has a milestone reporting cadence been established?

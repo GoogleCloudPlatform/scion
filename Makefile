@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -167,6 +167,20 @@ fmt-check:
 		exit 1; \
 	fi
 	@echo "Go formatting OK."
+
+## tidy-extras: Run go mod tidy in every extras/ module (fixes stale go.sum after root dep changes)
+tidy-extras:
+	@echo "Tidying extras modules..."
+	@failed=0; \
+	for moddir in $$(find extras -maxdepth 2 -name go.mod -printf '%h\n' | sort); do \
+		echo "  $$moddir"; \
+		(cd "$$moddir" && go mod tidy) || { echo "  FAILED: $$moddir"; failed=$$((failed + 1)); }; \
+	done; \
+	if [ "$$failed" -gt 0 ]; then \
+		echo "$$failed module(s) failed to tidy."; \
+		exit 1; \
+	fi; \
+	echo "All extras modules tidied."
 
 ## ci: Run fast CI checks (format check, vet, compatibility guardrails, authz guards, tests, build)
 ci: fmt-check lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates test-fast build

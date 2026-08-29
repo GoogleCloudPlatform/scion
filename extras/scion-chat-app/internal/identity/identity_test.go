@@ -44,8 +44,16 @@ func newTestMapper(t *testing.T, users []hubclient.User) *Mapper {
 	}
 	t.Cleanup(func() { store.Close() })
 
+	// Use a real TokenMinter with a dummy 32-byte key so the fixture is valid
+	// for every code path through Mapper, including ClientFor which calls
+	// MintToken. A nil minter would compile but panic on the impersonation path.
+	minter, err := NewTokenMinter(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("failed to create test minter: %v", err)
+	}
+
 	client := &fakeHubClient{users: users}
-	return NewMapper(store, client, "http://hub.test", slog.Default())
+	return NewMapper(store, client, "http://hub.test", minter, slog.Default())
 }
 
 func TestAutoRegister_EmailMatch(t *testing.T) {

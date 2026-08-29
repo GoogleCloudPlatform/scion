@@ -24,6 +24,9 @@ require (
 	cloud.google.com/go/logging v1.13.2 // indirect
 	cloud.google.com/go/longrunning v1.0.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
+	cloud.google.com/go/policytroubleshooter v1.11.7 // indirect
+	cloud.google.com/go/resourcemanager v1.15.0 // indirect
+	cloud.google.com/go/run v1.21.0 // indirect
 	cloud.google.com/go/secretmanager v1.16.0 // indirect
 	cloud.google.com/go/storage v1.59.1 // indirect
 	entgo.io/ent v0.14.5 // indirect
@@ -65,7 +68,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
-	github.com/go-test/deep v1.1.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
