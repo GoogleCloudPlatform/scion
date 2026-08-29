@@ -21,22 +21,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// contractFixturePath returns the absolute path to the contract fixture.
+// contractFixturePath returns the absolute path to the contract fixture
+// at pkg/sciontool/hub/testdata/agent_secret_fetch_response.json.
 func contractFixturePath(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	// This file is at pkg/sciontool/hub/secret_fetch_test.go.
-	// The fixture is at testdata/contracts/agent_secret_fetch_response.json.
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
-	return filepath.Join(repoRoot, "testdata", "contracts", "agent_secret_fetch_response.json")
+	return filepath.Join("testdata", "agent_secret_fetch_response.json")
 }
 
 // TestSecretFetchContract_FixtureUnmarshal verifies that the client-side
@@ -47,7 +42,7 @@ func contractFixturePath(t *testing.T) string {
 // as a separate issue until the #127 stack lands on main.
 func TestSecretFetchContract_FixtureUnmarshal(t *testing.T) {
 	data, err := os.ReadFile(contractFixturePath(t))
-	require.NoError(t, err, "contract fixture must exist at testdata/contracts/agent_secret_fetch_response.json")
+	require.NoError(t, err, "contract fixture must exist at pkg/sciontool/hub/testdata/agent_secret_fetch_response.json")
 
 	var resp SecretFetchResponse
 	require.NoError(t, json.Unmarshal(data, &resp))

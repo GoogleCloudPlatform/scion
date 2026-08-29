@@ -1808,7 +1808,7 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 // Per-key status constants returned by POST /api/v1/agent/secrets.
 // These are the wire values; the client defines its own constants to
 // decouple from pkg/hub. The contract fixture at
-// testdata/contracts/agent_secret_fetch_response.json pins both sides.
+// pkg/sciontool/hub/testdata/agent_secret_fetch_response.json pins both sides.
 const (
 	SecretStatusOK              = "ok"
 	SecretStatusUnavailable     = "entitled_but_unavailable"
