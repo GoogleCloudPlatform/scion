@@ -85,8 +85,25 @@ func TestRedactEnvValues(t *testing.T) {
 	}
 }
 
-// THIS TEST IS THE JUSTIFICATION FOR SCOPING REDACTION BY PROVENANCE, and it is
-// the measurement behind that design choice rather than an argument for it.
+// DIAGNOSTIC GUARD -- NOT A LEAK TEST. DO NOT DELETE THIS AS REDUNDANT.
+//
+// It looks like a weaker duplicate of the leak tests and it is the opposite: it
+// is the only test here that fails when redaction OVER-reaches. Mutate the
+// scope to the naive "redact every value the runtime passed" reading and every
+// leak test in this package stays GREEN -- the blind version is perfectly
+// secure -- while this test goes red on both mount destinations. Measured, not
+// predicted.
+//
+// The general form, because it is not specific to #1342: a security fix needs a
+// test that fails when the fix over-reaches, not only one that fails when it
+// under-reaches. Over-redaction is not a milder failure of the same kind; it is
+// invisible to the entire class of test one naturally writes for a security
+// fix, so a suite of leak tests alone would certify the blind version and ship
+// a #22/#46 regression under a security banner.
+//
+// THIS TEST IS ALSO THE JUSTIFICATION FOR SCOPING REDACTION BY PROVENANCE, and
+// it is the measurement behind that design choice rather than an argument for
+// it.
 //
 // The obvious reading of "redact the values the runtime put in argv" is: every
 // value. envFor synthesises HOME=/home/scion (11 chars), SCION_WORKSPACE_PATH=
