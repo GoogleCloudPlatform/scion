@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/require"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1205,5 +1206,128 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	// Key assertion: IsSystemAdmin must be false AFTER login.
 	if srv.authzService.IsSystemAdmin(ctx, userID) {
 		t.Fatal("IsSystemAdmin must return false after login-time demotion (binding should be deleted)")
+	}
+}
+
+// =============================================================================
+// handleAuthAdminStatus Tests
+// =============================================================================
+
+func TestHandleAuthAdminStatus_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/auth/admin-status", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401 for unauthenticated request, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAuthAdminStatus_SuperAdmin(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// The dev user is created with Role="admin", so IsUnscopedLocalPlatformAdmin
+	// returns true. Use the dev auth token to authenticate as a super-admin.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/auth/admin-status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp AdminStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.IsAdmin {
+		t.Error("expected isAdmin=true for super-admin")
+	}
+	if !resp.IsSuperAdmin {
+		t.Error("expected isSuperAdmin=true for super-admin")
+	}
+}
+
+func TestHandleAuthAdminStatus_HubAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a non-super-admin user with a hub-admin role binding.
+	userID := tid("hub-admin-handler")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "hubadmin-handler@test.com", DisplayName: "HubAdmin", Role: "member", Status: "active",
+	}))
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "hub-admin role definition must exist")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, "hubadmin-handler@test.com", "HubAdmin", "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if !resp.IsAdmin {
+		t.Error("expected isAdmin=true for hub-admin user")
+	}
+	if resp.IsSuperAdmin {
+		t.Error("expected isSuperAdmin=false for hub-admin (non-super-admin) user")
+	}
+}
+
+func TestHandleAuthAdminStatus_PlainMember(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("plain-member-handler")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "member-handler@test.com", DisplayName: "Member", Role: "member", Status: "active",
+	}))
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, "member-handler@test.com", "Member", "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if resp.IsAdmin {
+		t.Error("expected isAdmin=false for plain member")
+	}
+	if resp.IsSuperAdmin {
+		t.Error("expected isSuperAdmin=false for plain member")
+	}
+}
+
+func TestHandleAuthAdminStatus_WrongMethod(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/admin-status", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 for POST, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

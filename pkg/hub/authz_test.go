@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -701,4 +702,87 @@ func TestAuthz_AncestryAccess_NotInChain(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.False(t, decision.Allowed)
+}
+
+// =============================================================================
+// IsHubAdmin Tests
+// =============================================================================
+
+func TestIsHubAdmin_SystemScopedHubAdminBinding(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("hub-admin-user")
+	createTestUserWithRole(t, s, userID, "hubadmin@test.com", "member", store.SystemRoleHubAdmin)
+
+	result := authz.IsHubAdmin(ctx, userID)
+	assert.True(t, result, "should return true for user with system-scoped hub-admin binding")
+}
+
+func TestIsHubAdmin_ProjectScopedBindingReturnsFalse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("hub-admin-proj-scope")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "projscope@test.com", DisplayName: "ProjScope", Role: "member", Status: "active",
+	}))
+
+	// Create a project-scoped role binding using the hub-admin role definition.
+	// IsHubAdmin must reject non-system-scoped bindings.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "hub-admin role definition must exist")
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          tid("some-project"),
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	result := authz.IsHubAdmin(ctx, userID)
+	assert.False(t, result, "should return false for project-scoped hub-admin binding (must be system-scoped)")
+}
+
+func TestIsHubAdmin_SuperAdminOnlyReturnsFalse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("super-admin-only")
+	createTestUserWithRole(t, s, userID, "superonly@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	result := authz.IsHubAdmin(ctx, userID)
+	assert.False(t, result, "should return false for user with super-admin only (IsHubAdmin and IsSystemAdmin are independent)")
+}
+
+func TestIsHubAdmin_EmptyUserID(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	ctx := context.Background()
+
+	result := authz.IsHubAdmin(ctx, "")
+	assert.False(t, result, "should return false for empty userID")
+}
+
+func TestIsHubAdmin_StoreErrorReturnsFalse(t *testing.T) {
+	// IsHubAdmin calls ListRoleBindingsForPrincipal; if the store returns
+	// an error, IsHubAdmin must fail closed (return false).
+	authz := NewAuthzService(&failingRoleBindingStore{}, slog.Default())
+	ctx := context.Background()
+
+	result := authz.IsHubAdmin(ctx, "any-user-id")
+	assert.False(t, result, "should return false when store returns an error (fail closed)")
+}
+
+// failingRoleBindingStore is a minimal store.Store stub that makes
+// ListRoleBindingsForPrincipal return an error. Only the methods called by
+// IsHubAdmin need to be implemented; the rest panic if called.
+type failingRoleBindingStore struct {
+	store.Store
+}
+
+func (f *failingRoleBindingStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
+	return nil, errors.New("store unavailable")
 }

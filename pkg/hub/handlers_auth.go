@@ -619,6 +619,7 @@ type AdminStatusResponse struct {
 // and allow access to admin routes.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		MethodNotAllowed(w)
 		return
 	}

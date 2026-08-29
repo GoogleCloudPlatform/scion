@@ -801,9 +801,18 @@ async function renderRoute(path: string): Promise<void> {
   // Block non-admin users from admin-only routes.
   // Hub-admin users (who have admin role bindings but not super-admin role)
   // are allowed through, alongside super-admins.
-  if (ADMIN_ROUTES.has(tag) && !(cachedAdminStatus?.isAdmin)) {
-    navigateTo('/');
-    return;
+  //
+  // Re-fetch admin status on every admin-route navigation so that role
+  // grants or revocations made mid-session take effect immediately rather
+  // than being cached for the entire SPA lifetime. The init-time fetch
+  // remains for nav.ts's initial render; this call replaces the cache so
+  // the route guard always uses a fresh result.
+  if (ADMIN_ROUTES.has(tag)) {
+    cachedAdminStatus = await fetchAdminStatus();
+    if (!(cachedAdminStatus?.isAdmin)) {
+      navigateTo('/');
+      return;
+    }
   }
 
   // Block /chat routes when the native_chat feature flag is disabled (O2).
