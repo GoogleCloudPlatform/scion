@@ -85,7 +85,7 @@ func (s *Server) authorizeAgentMessage(
 
 	// Branch by sender type.
 	switch senderIdentity.Type() {
-	case "user", "dev":
+	case "user", "dev", "federated_user":
 		return s.authorizeUserToAgent(ctx, senderIdentity, targetAgent)
 	case "agent":
 		return s.authorizeAgentToAgent(ctx, senderIdentity, targetAgent)
