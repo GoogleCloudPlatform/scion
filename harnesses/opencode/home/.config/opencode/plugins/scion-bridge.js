@@ -29,12 +29,23 @@ function emitHookEvent(eventName, data) {
       stdio: ['pipe', 'ignore', 'ignore'],
       timeout: 5000,
     });
-  } catch {
+  } catch (err) {
     // Best-effort — never crash the plugin
+    if (process.env.SCION_HOOK_DEBUG) {
+      console.error(`[scion-bridge] ${eventName}: ${err.message}`);
+    }
   }
 }
 
+// Field name assumptions below are based on the opencode plugin API as of v0.x.
+// Exact shapes are defensive (optional chaining + fallbacks) because the
+// @opencode-ai/plugin type definitions do not comprehensively document all
+// event payloads. If field names are wrong, values will be empty/defaults,
+// not errors.
+
 export const ScionBridge = async (ctx) => {
+  let lastMessageEmit = 0;
+
   return {
     "session.created": async (input) => {
       emitHookEvent("session.created", { session_id: input?.id });
@@ -56,6 +67,9 @@ export const ScionBridge = async (ctx) => {
       emitHookEvent("session.idle");
     },
     "message.updated": async (input) => {
+      const now = Date.now();
+      if (now - lastMessageEmit < 500) return;
+      lastMessageEmit = now;
       emitHookEvent("message.updated", {
         assistant_text: input?.content || input?.text || "",
       });
