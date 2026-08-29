@@ -155,15 +155,15 @@ These operate on `RunConfig.Env []string` which already contains the broker's ou
 
 ---
 
-## Summary of secret-bootstrap keys (must stay in argv)
+## Summary of secret-bootstrap keys (bootstrap the delivery channel)
 
-These credentials bootstrap the delivery channel itself. Exposure is managed by
-lifetime, not concealment. P3b must NOT attempt alternative delivery.
+These credentials bootstrap the delivery channel itself, so they cannot be
+delivered through that channel. P3b performs no routing for these keys.
 
-| Key | Origin | Lifetime control |
-|-----|--------|-----------------|
-| `SCION_AUTH_TOKEN` | `GenerateAgentToken` (JWT) | Single-use (§3.4) |
-| `SCION_TRANSPORT_TOKEN` | `MintIDToken` (IAP/Cloud Run) | Short-lived OIDC (§3.4.1) |
+| Key | Origin | Delivery | Notes |
+|-----|--------|----------|-------|
+| `SCION_AUTH_TOKEN` | `GenerateAgentToken` (JWT) | **NOT in argv**: diverted to `~/.scion/scion-token` by `pkg/agent/run.go:761-777` (temp+rename, 0600), deleted from `opts.Env` at :777. Read by `pkg/hubsync/sync.go:1329`. | Single-use (§3.4) |
+| `SCION_TRANSPORT_TOKEN` | `MintIDToken` (IAP/Cloud Run) | **IN argv**: no diversion exists. Accepted exposure. | Google-signed OIDC, 1h, lifetime NOT boundable (`GenerateIdTokenRequest` has no `Lifetime` field, unlike `GenerateAccessTokenRequest` which sets 300s). See §3.4.1. |
 
 ## Summary of secret-injected keys (the P3b problem set)
 

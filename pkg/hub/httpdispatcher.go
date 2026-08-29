@@ -858,6 +858,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				req.ResolvedEnv = make(map[string]string)
 			}
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			req.ResolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
@@ -2014,6 +2016,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
 			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
 	}
@@ -2027,6 +2031,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			}
 		} else if tToken != "" {
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
@@ -2299,6 +2305,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
 			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
 	}
@@ -2312,6 +2320,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if tToken != "" {
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)

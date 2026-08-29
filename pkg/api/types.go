@@ -791,19 +791,26 @@ const (
 	// SCION_GIT_CLONE_URL.
 	EnvKindSecretInjected EnvKind = "secret-injected"
 
-	// EnvKindSecretBootstrap is a credential that MUST stay in argv
-	// because it bootstraps the delivery channel itself. P3b must NOT
-	// attempt alternative delivery — there is none by construction.
-	// Exposure is managed by lifetime (single-use JWT, short-lived OIDC),
-	// not by concealment.
+	// EnvKindSecretBootstrap is a credential that bootstraps the secret
+	// delivery channel itself, so it cannot be delivered through that
+	// channel. P3b performs no routing for these keys — they are already
+	// handled by their own delivery mechanism. This kind says nothing
+	// about whether the value reaches argv; see the per-key notes at
+	// each classification site.
 	//
 	// Exactly two values today:
-	//   SCION_AUTH_TOKEN      — authorises the secret fetch (X-Scion-Agent-Token).
-	//                           Removing it from argv makes SCION_SECRET_KEYS unfetchable.
-	//   SCION_TRANSPORT_TOKEN — Google-signed OIDC token that authenticates to the hub
-	//                           via IAP. Removing it from argv makes the hub unreachable.
 	//
-	// See design doc §3.4 (auth token) and §3.4.1 (transport token).
+	//   SCION_AUTH_TOKEN — authorises the secret fetch (X-Scion-Agent-Token).
+	//     NOT in argv: diverted to ~/.scion/scion-token by
+	//     pkg/agent/run.go:761-777 (temp+rename, 0600), then deleted from
+	//     opts.Env at :777 before buildAgentEnv at :870. Read by
+	//     pkg/hubsync/sync.go:1329. See §3.4.
+	//
+	//   SCION_TRANSPORT_TOKEN — Google-signed OIDC token for IAP transport.
+	//     IN argv: no diversion exists. Accepted exposure. 1h lifetime,
+	//     NOT boundable (GenerateIdTokenRequest has no Lifetime field,
+	//     unlike GenerateAccessTokenRequest which sets 300s). See §3.4.1.
+	//
 	EnvKindSecretBootstrap EnvKind = "secret-bootstrap"
 )
 

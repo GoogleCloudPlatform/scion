@@ -266,6 +266,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// broker's dev token caused 401s ("compact JWS format must have three parts").
 	if in.AgentToken != "" {
 		env["SCION_AUTH_TOKEN"] = in.AgentToken
+		// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+		// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
 		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
@@ -277,6 +279,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
 		env["SCION_AUTH_TOKEN"] = devToken
+		// Bootstrap: NOT in argv (same diversion as AgentToken path above).
 		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from broker env", "agent_id", in.AgentID, "length", len(devToken))

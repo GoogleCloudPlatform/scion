@@ -111,14 +111,21 @@ func TestGitHubToken_StoreOnly_StaysSecretFetchable(t *testing.T) {
 
 // TestBootstrapTokens_ClassifiedAsBootstrap verifies that the two channel-
 // bootstrapping credentials are classified as secret-bootstrap, not
-// secret-injected. These tokens open the delivery channel itself:
+// secret-injected. Both bootstrap the delivery channel:
+//
 //   - SCION_AUTH_TOKEN authorises the secret fetch (X-Scion-Agent-Token).
+//     Delivery: NOT in argv — diverted to ~/.scion/scion-token by
+//     pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
+//
 //   - SCION_TRANSPORT_TOKEN authenticates to the hub via IAP (OIDC).
+//     Delivery: IN argv — no diversion exists. Google-signed OIDC, 1h,
+//     lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
 //
 // Classifying them as secret-injected would tell P3b to route them through
-// an alternative delivery channel — which is impossible by construction,
-// since they ARE what makes the channel work. secret-bootstrap tells P3b:
-// leave in argv, manage exposure by lifetime.
+// a delivery channel — impossible by construction, since they ARE what
+// opens the channel. secret-bootstrap tells P3b: perform no routing.
+// The kind says nothing about whether the value reaches argv; that is
+// per-key, documented at each classification site.
 func TestBootstrapTokens_ClassifiedAsBootstrap(t *testing.T) {
 	var cls map[string]api.EnvKind
 
