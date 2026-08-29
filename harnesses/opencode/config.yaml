@@ -44,7 +44,11 @@ command:
   # task_position is before_base_args because the compiled OpenCode harness
   # emits `opencode --prompt <task> <base_args...>` — flipping this to
   # after_base_args breaks parity for any caller that passes harness args.
-  base: ["opencode"]
+  # env -u GITHUB_TOKEN prevents opencode from auto-detecting scion's git
+  # PAT as a GitHub Copilot credential (priority #1 in opencode's provider
+  # selection). Without this, GITHUB_TOKEN always wins over VertexAI (#10)
+  # and Anthropic API (#2), causing a PAT auth error on the Copilot endpoint.
+  base: ["env", "-u", "GITHUB_TOKEN", "opencode"]
   resume_flag: "--continue"
   task_flag: "--prompt"
   task_position: before_base_args
