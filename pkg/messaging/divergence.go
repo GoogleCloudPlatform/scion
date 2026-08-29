@@ -34,11 +34,11 @@ import (
 // UpsertConversationByExternalRef).
 type DivergenceEntry struct {
 	MessageID  string `json:"message_id"`
-	OldRouting string `json:"old_routing"`          // e.g. "thread:dm:abc123" or "sender:X->recipient:Y"
-	NewRouting string `json:"new_routing"`          // e.g. "conv:uuid-of-conversation"
-	Match      bool   `json:"match"`                // true when old and new agree
-	Reason     string `json:"reason"`               // human-readable explanation
-	Fallback   bool   `json:"fallback,omitempty"`   // true when this is a fallback (e.g. conv-lookup-failed)
+	OldRouting string `json:"old_routing"`        // e.g. "thread:dm:abc123" or "sender:X->recipient:Y"
+	NewRouting string `json:"new_routing"`        // e.g. "conv:uuid-of-conversation"
+	Match      bool   `json:"match"`              // true when old and new agree
+	Reason     string `json:"reason"`             // human-readable explanation
+	Fallback   bool   `json:"fallback,omitempty"` // true when this is a fallback (e.g. conv-lookup-failed)
 }
 
 // DivergenceCounter tracks the total number of divergence entries logged,

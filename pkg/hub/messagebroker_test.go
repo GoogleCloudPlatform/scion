@@ -1180,4 +1180,3 @@ func TestResolveDMConversation_BroadcastSkipped(t *testing.T) {
 		t.Fatalf("expected empty ConversationID for broadcast, got %q", result.Items[0].ConversationID)
 	}
 }
-
