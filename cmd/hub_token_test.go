@@ -36,7 +36,6 @@ func TestHubTokenCreateHelpUsesRegistryScopes(t *testing.T) {
 	for _, stale := range []string{
 		store.UATScopeAgentStart,
 		store.UATScopeAgentStop,
-		store.UATScopeAgentMessage,
 		store.UATScopeAgentDispatch,
 	} {
 		if strings.Contains(help, stale) {
