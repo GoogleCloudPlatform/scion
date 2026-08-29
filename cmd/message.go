@@ -694,6 +694,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to resolve conversation reference %q: %w", ref.Raw, err))
 	}
+	if resolveResp == nil {
+		return fmt.Errorf("failed to resolve conversation reference %q: server returned empty response", ref.Raw)
+	}
 
 	if !isJSONOutput() {
 		action := "Resolved"

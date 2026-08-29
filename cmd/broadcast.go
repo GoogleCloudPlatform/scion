@@ -129,6 +129,9 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
+	if resp == nil {
+		return fmt.Errorf("failed to list agents via Hub: server returned empty response")
+	}
 
 	if len(resp.Agents) == 0 {
 		fmt.Println("No running agents found to broadcast to.")
@@ -162,9 +165,14 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	return nil
 }
 
-func broadcastLocal(message string) error {
-	ctx := context.Background()
+// Timeouts for local broadcast operations. Separate deadlines so that when
+// a timeout fires it names exactly one operation, not "something was slow."
+const (
+	broadcastListTimeout    = 15 * time.Second
+	broadcastMessageTimeout = 30 * time.Second // generous: --interrupt makes Message do more work
+)
 
+func broadcastLocal(message string) error {
 	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 	defer mgr.Close()
@@ -181,7 +189,10 @@ func broadcastLocal(message string) error {
 		}
 	}
 
-	agents, err := mgr.List(ctx, filters)
+	listCtx, listCancel := context.WithTimeout(context.Background(), broadcastListTimeout)
+	defer listCancel()
+
+	agents, err := mgr.List(listCtx, filters)
 	if err != nil {
 		return err
 	}
@@ -204,7 +215,9 @@ func broadcastLocal(message string) error {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			if err := mgr.Message(ctx, name, "", message, bcastInterrupt); err != nil {
+			sendCtx, sendCancel := context.WithTimeout(context.Background(), broadcastMessageTimeout)
+			defer sendCancel()
+			if err := mgr.Message(sendCtx, name, "", message, bcastInterrupt); err != nil {
 				fmt.Printf("Warning: failed to send message to agent '%s': %s\n", name, err)
 				return
 			}
