@@ -740,3 +740,81 @@ func TestAuthorizeAgentMessage_SelfMessage(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Test: Ingress parity — all ingresses produce identical decisions for the
+// same principal/target pair, because they all call authorizeAgentMessage.
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
+	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	// Create agents with different message modes.
+	projectAgent := msgAuthzAgent(t, s, "parity-project", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	lineageAgent := msgAuthzAgent(t, s, "parity-lineage", projectID, store.MessageModeLineage,
+		[]string{owner.ID})
+	branchAgent := msgAuthzAgent(t, s, "parity-branch", projectID, store.MessageModeBranch,
+		[]string{owner.ID})
+	noneAgent := msgAuthzAgent(t, s, "parity-none", projectID, store.MessageModeNone,
+		[]string{owner.ID})
+
+	// Identities: owner, member, and a project-mode agent.
+	ownerIdent := msgAuthzUserIdentity(owner.ID)
+	memberIdent := msgAuthzUserIdentity(member.ID)
+	agentSender := msgAuthzAgent(t, s, "parity-sender-agent", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	agentIdent := msgAuthzAgentIdentity(agentSender.ID, projectID, agentSender.Ancestry)
+
+	// Define test cases: each case runs authorizeAgentMessage with the same
+	// sender/target pair. All four ingresses (direct API, chat v2, broadcast,
+	// broker inbound) call this same function, so parity is guaranteed by
+	// construction. This test verifies the decision matrix is consistent.
+	tests := []struct {
+		name    string
+		sender  Identity
+		target  *store.Agent
+		system  bool
+		allowed bool
+	}{
+		// Owner → project mode agent: allowed (ancestry)
+		{"owner→project", ownerIdent, projectAgent, false, true},
+		// Owner → lineage mode agent: allowed (ancestry / project owner piercing)
+		{"owner→lineage", ownerIdent, lineageAgent, false, true},
+		// Owner → branch mode agent: allowed (ancestry / project owner piercing)
+		{"owner→branch", ownerIdent, branchAgent, false, true},
+		// Owner → none mode agent: denied (none sealed to non-super-admin)
+		{"owner→none", ownerIdent, noneAgent, false, false},
+
+		// Member → project mode agent: allowed (agent.message permission)
+		{"member→project", memberIdent, projectAgent, false, true},
+		// Member → lineage mode agent: denied (not in ancestry, not project owner)
+		{"member→lineage", memberIdent, lineageAgent, false, false},
+		// Member → branch mode agent: denied (not in ancestry, not project owner)
+		{"member→branch", memberIdent, branchAgent, false, false},
+		// Member → none mode agent: denied (none is sealed)
+		{"member→none", memberIdent, noneAgent, false, false},
+
+		// Agent → project mode agent: allowed (both project mode, same project)
+		{"agent→project", agentIdent, projectAgent, false, true},
+		// Agent → lineage mode agent: denied (lineage has no agent edges)
+		{"agent→lineage", agentIdent, lineageAgent, false, false},
+		// Agent → none mode agent: denied (none is sealed)
+		{"agent→none", agentIdent, noneAgent, false, false},
+
+		// System plane → none mode agent: allowed (D8 bypass)
+		{"system→none", ownerIdent, noneAgent, true, true},
+		// System plane → lineage mode agent: allowed (D8 bypass)
+		{"system→lineage", ownerIdent, lineageAgent, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, reason := srv.authorizeAgentMessage(ctx, tt.sender, tt.target, tt.system)
+			if allowed != tt.allowed {
+				t.Fatalf("expected allowed=%v, got allowed=%v (reason: %s)", tt.allowed, allowed, reason)
+			}
+		})
+	}
+}
