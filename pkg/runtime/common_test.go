@@ -15,8 +15,11 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -824,7 +827,7 @@ func TestGcloudMountPreCreatesDirectory(t *testing.T) {
 }
 
 func TestWriteRuntimeDebugFile(t *testing.T) {
-	t.Run("writes file when debug is true", func(t *testing.T) {
+	t.Run("writes redacted file when debug is true", func(t *testing.T) {
 		agentDir := t.TempDir()
 		homeDir := filepath.Join(agentDir, "home")
 		_ = os.MkdirAll(homeDir, 0755)
@@ -834,13 +837,14 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 			HomeDir: homeDir,
 		}
 
-		WriteRuntimeDebugFile(config, "docker", []string{
+		args := []string{
 			"run", "-t", "--name", "my-agent",
-			"-e", "FOO=bar",
+			"--env", "FOO=bar",
 			"-v", "/host:/container",
 			"my-image:latest",
 			"tmux", "new-session", "-s", "scion",
-		})
+		}
+		WriteRuntimeDebugFile(config, "docker", args)
 
 		debugPath := filepath.Join(agentDir, "runtime-exec-debug")
 		content, err := os.ReadFile(debugPath)
@@ -850,29 +854,25 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 
 		text := string(content)
 
-		// Should start with the command
+		// Should start with the command name.
 		if !strings.HasPrefix(text, "docker") {
 			t.Errorf("expected file to start with 'docker', got: %s", text)
 		}
 
-		// Should have continuation characters
-		if !strings.Contains(text, " \\\n  ") {
-			t.Errorf("expected backslash continuation characters, got: %s", text)
+		// Should contain the arg count.
+		if !strings.Contains(text, fmt.Sprintf("%d args", len(args))) {
+			t.Errorf("expected file to mention arg count %d, got: %s", len(args), text)
 		}
 
-		// Should contain each arg on its own line
-		lines := strings.Split(text, "\n")
-		// First line is "docker \", remaining are "  arg \" (last arg has no \)
-		if len(lines) < 10 {
-			t.Errorf("expected at least 10 lines (one per arg), got %d: %s", len(lines), text)
+		// Must NOT contain actual argument values — they may carry secrets.
+		if strings.Contains(text, "--name") {
+			t.Errorf("file contains arg values that should be redacted: %s", text)
 		}
-
-		// Should contain specific args
-		if !strings.Contains(text, "--name") {
-			t.Errorf("expected --name in debug file, got: %s", text)
+		if strings.Contains(text, "my-image:latest") {
+			t.Errorf("file contains arg values that should be redacted: %s", text)
 		}
-		if !strings.Contains(text, "my-image:latest") {
-			t.Errorf("expected image in debug file, got: %s", text)
+		if strings.Contains(text, "FOO=bar") {
+			t.Errorf("file contains env value that should be redacted: %s", text)
 		}
 	})
 
@@ -903,6 +903,134 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 		// Should not panic
 		WriteRuntimeDebugFile(config, "docker", []string{"run", "test"})
 	})
+}
+
+// TestRunSimpleCommand_NoSecretsInDebugLog is the mutation test for Site 1
+// of #127/P5. It verifies that secret values carried in command arguments do
+// NOT appear in debug log output.
+//
+// Mutation proof: reverting the fix in runSimpleCommand (logging the full
+// cmdStr instead of command+argc) causes this test to fail, because the
+// sentinel value then appears in the captured log output.
+func TestRunSimpleCommand_NoSecretsInDebugLog(t *testing.T) {
+	const sentinel = "FAKE-KEY-SENTINEL-not-a-real-credential"
+
+	// runtimeLog captured slog.Default() at package init, before any custom
+	// handler was installed (#1339). Its handler bridges to the stdlib log
+	// package. We capture that output here and lower the level gate so Debug
+	// lines reach the buffer.
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0) // drop date/time prefix for simpler assertions
+	t.Cleanup(func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+	})
+	origLevel := slog.SetLogLoggerLevel(slog.LevelDebug)
+	t.Cleanup(func() { slog.SetLogLoggerLevel(origLevel) })
+
+	// --- Success path ---
+	// "echo" succeeds; its args include the sentinel via --env.
+	buf.Reset()
+	_, _ = runSimpleCommand(context.Background(), "echo", "--env", "SECRET_KEY="+sentinel)
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, sentinel) {
+		t.Errorf("SECURITY: debug log (success path) contains secret sentinel %q\nLog: %s",
+			sentinel, logOutput)
+	}
+	// The command name must still be logged — we redacted args, not everything.
+	if !strings.Contains(logOutput, "echo") {
+		t.Errorf("debug log should contain the command name 'echo'\nLog: %s", logOutput)
+	}
+
+	// --- Failure path ---
+	// Use "false" so the command fails with no output (the sentinel can only
+	// appear if it leaks from the argument list, not from command stdout).
+	buf.Reset()
+	_, err := runSimpleCommand(context.Background(), "false", "--env", "SECRET_KEY="+sentinel)
+	if err == nil {
+		t.Fatal("expected error from 'false', got nil")
+	}
+
+	logOutput = buf.String()
+	if strings.Contains(logOutput, sentinel) {
+		t.Errorf("SECURITY: debug log (failure path) contains secret sentinel %q\nLog: %s",
+			sentinel, logOutput)
+	}
+
+	// The error message returned to callers must also not contain the sentinel,
+	// because callers may log it at non-debug levels.
+	if strings.Contains(err.Error(), sentinel) {
+		t.Errorf("SECURITY: error message contains secret sentinel %q\nError: %s",
+			sentinel, err.Error())
+	}
+}
+
+// TestWriteRuntimeDebugFile_NoSecretsInFile is the mutation test for Site 2
+// of #127/P5. It verifies that secret values carried in command arguments do
+// NOT appear in the debug file written by WriteRuntimeDebugFile.
+//
+// Mutation proof: reverting the fix in WriteRuntimeDebugFile (writing the full
+// args instead of the redacted summary) causes this test to fail, because the
+// sentinel value then appears in the file contents.
+func TestWriteRuntimeDebugFile_NoSecretsInFile(t *testing.T) {
+	const sentinel = "FAKE-AUTH-SENTINEL-not-a-real-credential"
+
+	agentDir := t.TempDir()
+	homeDir := filepath.Join(agentDir, "home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatalf("failed to create home dir: %v", err)
+	}
+
+	config := RunConfig{
+		Debug:   true,
+		HomeDir: homeDir,
+	}
+
+	// Build an arg list that mimics a sandbox start command with secrets in
+	// --env flags — the exact shape that leaks on this tier.
+	args := []string{
+		"run", "--detach", "--rootfs", "/",
+		"--env", "SAFE_VAR=safe-value",
+		"--env", "GEMINI_API_KEY=" + sentinel,
+		"--env", "SCION_AUTH_TOKEN=" + sentinel,
+		"--", "/usr/bin/sciontool", "init",
+	}
+	WriteRuntimeDebugFile(config, "/usr/local/gcp/bin/sandbox", args)
+
+	debugPath := filepath.Join(agentDir, "runtime-exec-debug")
+	content, err := os.ReadFile(debugPath)
+	if err != nil {
+		t.Fatalf("expected debug file to exist: %v", err)
+	}
+
+	text := string(content)
+
+	// The sentinel must NOT appear in the file.
+	if strings.Contains(text, sentinel) {
+		t.Errorf("SECURITY: debug file contains secret sentinel %q\nFile contents:\n%s",
+			sentinel, text)
+	}
+
+	// The command name must still appear — we redacted args, not the command.
+	if !strings.Contains(text, "sandbox") {
+		t.Errorf("debug file should contain the command name\nFile contents:\n%s", text)
+	}
+
+	// The arg count must appear for diagnostic value.
+	if !strings.Contains(text, fmt.Sprintf("%d args", len(args))) {
+		t.Errorf("debug file should mention arg count %d\nFile contents:\n%s",
+			len(args), text)
+	}
+
+	// Env values must not appear even for "safe" values — we redact all args,
+	// because classification is exactly what #127 showed we get wrong.
+	if strings.Contains(text, "safe-value") {
+		t.Errorf("debug file contains non-secret arg value — all args should be redacted\nFile contents:\n%s", text)
+	}
 }
 
 func TestScionDirShadowedWhenFullRepoMounted(t *testing.T) {

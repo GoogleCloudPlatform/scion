@@ -552,22 +552,26 @@ func isImageNotFoundOutput(output string) bool {
 }
 
 func runSimpleCommand(ctx context.Context, command string, args ...string) (string, error) {
-	cmdStr := command + " " + strings.Join(args, " ")
-	runtimeLog.Debug("Executing command", "cmd", cmdStr)
+	// Log the command name and argument count only — never the argument values.
+	// On this tier, secrets travel in argv (--env KEY=VALUE), so logging the
+	// full command string would write credentials to logs.  See #127 / P5.
+	runtimeLog.Debug("Executing command", "cmd", command, "argc", len(args))
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if err != nil {
-		runtimeLog.Debug("Command failed", "cmd", cmdStr, "duration", elapsed, "output", strings.TrimSpace(string(out)))
-		return string(out), fmt.Errorf("%s %s failed: %w", command, strings.Join(args, " "), err)
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
-	runtimeLog.Debug("Command completed", "cmd", cmdStr, "duration", elapsed)
+	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
 }
 
 func runInteractiveCommand(command string, args ...string) error {
-	runtimeLog.Debug("Executing interactive command", "cmd", command+" "+strings.Join(args, " "))
+	// Log command name and argument count only — see runSimpleCommand comment
+	// and #127 / P5 for rationale.
+	runtimeLog.Debug("Executing interactive command", "cmd", command, "argc", len(args))
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -611,10 +615,13 @@ func insertVolumeFlags(args []string, image string, mountSpecs []string) []strin
 	return result
 }
 
-// WriteRuntimeDebugFile writes the full runtime execution command to a debug
-// file inside the agent directory for diagnostic purposes. The command is
-// formatted with one argument per line using backslash continuation characters
-// for readability. The file is written to <agentDir>/runtime-exec-debug.
+// WriteRuntimeDebugFile writes a redacted summary of the runtime execution
+// command to a debug file inside the agent directory. The file records the
+// command name and argument count but NOT the argument values, because on the
+// sandbox tier secrets travel in argv (--env KEY=VALUE) and writing them to a
+// host-filesystem file creates an uncontrolled secret-at-rest.  See #127 / P5.
+//
+// The file is written to <agentDir>/runtime-exec-debug.
 // This is a no-op if config.Debug is false or HomeDir is empty.
 func WriteRuntimeDebugFile(config RunConfig, command string, args []string) {
 	if !config.Debug || config.HomeDir == "" {
@@ -625,11 +632,7 @@ func WriteRuntimeDebugFile(config RunConfig, command string, args []string) {
 
 	var buf strings.Builder
 	buf.WriteString(command)
-	for _, arg := range args {
-		buf.WriteString(" \\\n  ")
-		buf.WriteString(arg)
-	}
-	buf.WriteString("\n")
+	fmt.Fprintf(&buf, " [%d args redacted — may contain credentials, see #127]\n", len(args))
 
 	if err := os.WriteFile(debugPath, []byte(buf.String()), 0644); err != nil {
 		runtimeLog.Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
