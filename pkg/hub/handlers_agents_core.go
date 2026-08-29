@@ -2556,15 +2556,43 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		action == api.AgentActionRefreshToken ||
 		action == api.AgentActionOutboundMessage
 
-	// Self-message: allow an agent to deliver a message to itself using its
-	// own token, without requiring the ScopeAgentLifecycle scope. This mirrors
-	// the outbound-message self-access pattern and is used by sciontool to
-	// send system notifications (e.g. port auto-expose) to the agent's own
-	// harness input.
+	// --- Message action: routed through authorizeAgentMessage (D1) ---
+	// Messaging is a first-class axis, split from lifecycle/attach. The choke
+	// point handles user senders, agent senders, mode checks, and piercing.
 	if action == api.AgentActionMessage {
-		if claims := GetAgentFromContext(r.Context()); claims != nil && claims.Subject == id {
-			selfAccess = true
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
+			return
 		}
+
+		// Self-message: an agent delivering to itself (sciontool system
+		// notifications). This is the system-plane path (D8).
+		isSystemPlane := false
+		if claims := GetAgentFromContext(r.Context()); claims != nil && claims.Subject == id {
+			isSystemPlane = true
+		}
+
+		targetAgent, err := s.store.GetAgent(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		allowed, reason := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
+		if !allowed {
+			slog.Warn("message authorization denied",
+				"sender_type", identity.Type(),
+				"sender_id", identity.ID(),
+				"target_agent", id,
+				"reason", reason,
+			)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Message delivery denied: "+reason, nil)
+			return
+		}
+		// Authorization passed — fall through to action dispatch below.
+		goto actionDispatch
 	}
 
 	if !selfAccess {
@@ -2606,6 +2634,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			}
 		}
 	}
+
+actionDispatch:
 
 	switch action {
 	case api.AgentActionStatus:

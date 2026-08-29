@@ -815,16 +815,18 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}
 	}
 
-	// Create project-level policy for member agent creation and stop-all
+	// Create project-level policy for member agent creation, stop-all, and messaging.
+	// The "message" action was added in Phase 2 (msg-authz D1/D2): project members
+	// hold agent.message by default so basic project usage never requires owner/admin.
 	policyName := "project:" + project.Slug + ":member-create-agents"
 	policy := &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         policyName,
-		Description:  "Allow project members to create and stop agents",
+		Description:  "Allow project members to create, stop, and message agents",
 		ScopeType:    "project",
 		ScopeID:      project.ID,
 		ResourceType: "agent",
-		Actions:      []string{"create", "stop_all"},
+		Actions:      []string{"create", "stop_all", "message"},
 		Effect:       "allow",
 	}
 	if err := s.store.CreatePolicy(ctx, policy); err != nil {
