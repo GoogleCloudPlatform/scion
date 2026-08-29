@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
@@ -49,6 +50,41 @@ var msgWake bool
 var msgChannel string
 var msgThreadID string
 var msgCC []string
+var msgVisibility string
+
+// emitDeprecationWarning prints a deprecation notice to stderr.
+func emitDeprecationWarning(flag, replacement string) {
+	fmt.Fprintf(os.Stderr, "Warning: --%s is deprecated: %s\n", flag, replacement)
+}
+
+// deprecationReplacements maps deprecated message-command flags to their
+// replacement guidance. Tests assert that every replacement mentioning a
+// conversation-reference form (@<, conv:, #<) is documented in Long.
+var deprecationReplacements = []struct {
+	Flag    string
+	Message string
+}{
+	{"broadcast", "use 'scion broadcast' instead"},
+	{"all", "use 'scion broadcast --all' instead"},
+	{"raw", "use 'scion keys' instead"},
+	{"plain", "--plain is deprecated and will be removed"},
+	{"notify", "use 'scion notifications subscribe' instead"},
+	{"in", "use 'scion schedule create --in' instead"},
+	{"at", "use 'scion schedule create --at' instead"},
+	{"channel", "use @<agent-name> to message an agent directly"},
+	{"thread-id", "use @<agent-name> to message an agent directly"},
+	{"cc", "--cc is deprecated and will be removed"},
+}
+
+// emitDeprecationWarnings checks all deprecated flags and emits warnings
+// for any that were explicitly set.
+func emitDeprecationWarnings(cmd *cobra.Command) {
+	for _, d := range deprecationReplacements {
+		if cmd.Flags().Changed(d.Flag) {
+			emitDeprecationWarning(d.Flag, d.Message)
+		}
+	}
+}
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -62,19 +98,39 @@ Recipients:
   agent:<name>       Send to an agent explicitly
   user:<name>        Send to a user's inbox (Hub mode only)
   group[a,b,...]     Send to multiple recipients (Hub mode only)
+  @<agent-name>      Send to an agent's conversation (preferred)
+  @<email>           Send to a user by email (global DM)
+  conv:<uuid>        Send to a conversation by ID (not yet supported — errors)
+  #<thread>          Send to a named thread (not yet supported — errors)
 
 If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
 
 Examples:
   scion message my-agent "Please review the PR"
+  scion message @my-agent "Please review the PR"
   scion message user:alice "I need clarification on the auth module"
   scion message "group[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Validate --visibility if provided.
+		if msgVisibility != "" {
+			switch msgVisibility {
+			case "normal", "verbose", "full":
+				// valid
+			default:
+				return fmt.Errorf("invalid --visibility value %q: must be one of: normal, verbose, full", msgVisibility)
+			}
+		}
+
+		// Emit deprecation warnings for any deprecated flags in use.
+		// Deprecated flags still work — they warn AND succeed.
+		emitDeprecationWarnings(cmd)
+
 		var agentName string
 		var userRecipient string
 		var groupRecipients []messages.GroupRecipient
+		var convRef *messaging.Reference // S4 conversation reference (conv:, @, #)
 		var message string
 
 		if msgBroadcast || msgAll {
@@ -89,7 +145,25 @@ Examples:
 			recipient := args[0]
 			message = strings.Join(args[1:], " ")
 
-			if messages.IsGroupRecipient(recipient) {
+			// Try parsing as an S4 conversation reference first.
+			// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
+			if ref, err := messaging.ParseReference(recipient); err == nil {
+				// Only @<agent> conversation references are fully supported in the CLI today.
+				// conv:<id> and #<thread> resolve correctly but delivery routing is not yet
+				// implemented -- accepting them would silently drop the message.
+				if ref.Kind == messaging.RefConversation || ref.Kind == messaging.RefThread {
+					return fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
+				}
+				convRef = ref
+			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
+				// Looks like a conversation reference but failed to parse.
+				// Parse-failure-denies: fail loudly, do not fall through to legacy paths.
+				return fmt.Errorf("invalid conversation reference: %w", err)
+			} else if strings.HasPrefix(recipient, "@") {
+				// @ prefix is exclusively a conversation reference in the new grammar.
+				// A bare email without leading @ falls through to the legacy path below.
+				return fmt.Errorf("invalid conversation reference: %w", err)
+			} else if messages.IsGroupRecipient(recipient) {
 				parsed, err := messages.ParseGroupRecipient(recipient)
 				if err != nil {
 					return fmt.Errorf("invalid group recipient: %w", err)
@@ -98,6 +172,7 @@ Examples:
 			} else if strings.HasPrefix(recipient, "user:") {
 				userRecipient = recipient
 			} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
+				// Legacy bare email — treat as user recipient for backward compat.
 				userRecipient = "user:" + recipient
 			} else {
 				// Strip optional "agent:" prefix for backwards compatibility
@@ -232,7 +307,10 @@ Examples:
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		var err error
-		if len(groupRecipients) > 0 {
+		if convRef != nil {
+			// Conversation references require Hub mode for resolution
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+		} else if len(groupRecipients) > 0 {
 			// Group recipients: skip sync (multiple recipients, no single agent)
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if userRecipient != "" {
@@ -250,6 +328,11 @@ Examples:
 		}
 		if err != nil {
 			return err
+		}
+
+		// Conversation references require Hub mode
+		if convRef != nil && hubCtx == nil {
+			return fmt.Errorf("conversation references require Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Group recipients require Hub mode
@@ -287,6 +370,11 @@ Examples:
 				return fmt.Errorf("attachment staging failed: %w", err)
 			}
 			msgAttach = staged
+		}
+
+		// Conversation-reference messages: resolve and send via Hub
+		if convRef != nil {
+			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake)
 		}
 
 		// Group-targeted messages: fan out to each recipient
@@ -435,6 +523,9 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
+	if msgVisibility != "" {
+		msg.Visibility = msgVisibility
+	}
 	return msg
 }
 
@@ -466,6 +557,10 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 
 		msg := buildStructuredMessage(sender, "", message)
 		msg.Broadcasted = true
+		// Validate through the new envelope choke point (Phase 7, AC-8).
+		if err := messaging.ValidateLegacyMessage(msg); err != nil {
+			return fmt.Errorf("message validation failed: %w", err)
+		}
 		bcastResp, err := agentSvc.BroadcastMessage(ctx, msg, interrupt)
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to broadcast message via Hub: %w", err))
@@ -539,6 +634,10 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
+	// Validate through the new envelope choke point (Phase 7, AC-8).
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
 	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
@@ -561,6 +660,103 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	}
 
 	return nil
+}
+
+// sendMessageViaConversation resolves a conversation reference through the Hub
+// and sends the message with the resolved conversation_id. This is the F-1 fix:
+// conversation references (conv:<uuid>, @<agent>, @<email>, #<thread>) are now
+// resolved through the Hub's Resolve function instead of being misinterpreted
+// by the legacy recipient parsing heuristics.
+func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	sender := resolveSenderIdentity(hubCtx)
+
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Resolving conversation reference %q...\n", ref.Raw)
+	}
+
+	// Resolve the conversation reference via Hub.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resolveResp, err := hubCtx.Client.Messages().ResolveConversation(ctx, &hubclient.ConversationResolveRequest{
+		Reference: ref.Raw,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to resolve conversation reference %q: %w", ref.Raw, err))
+	}
+	if resolveResp == nil {
+		return fmt.Errorf("failed to resolve conversation reference %q: server returned empty response", ref.Raw)
+	}
+
+	if !isJSONOutput() {
+		action := "Resolved"
+		if resolveResp.Created {
+			action = "Created"
+		}
+		fmt.Printf("%s conversation %s.\n", action, resolveResp.ConversationID)
+	}
+
+	// For @ agent references, we know the target agent slug and can send
+	// the message directly through the standard agent message path with
+	// the conversation_id set.
+	if ref.Kind == messaging.RefAgent {
+		agentSvc := hubCtx.Client.ProjectAgents(projectID)
+		msg := buildStructuredMessage(sender, "agent:"+ref.Value, message)
+		msg.ConversationID = resolveResp.ConversationID
+		if err := messaging.ValidateLegacyMessage(msg); err != nil {
+			return fmt.Errorf("message validation failed: %w", err)
+		}
+		if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, msg, interrupt, false, wake); err != nil {
+			return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+		}
+		if !isJSONOutput() {
+			fmt.Printf("Message delivered to agent '%s' (conversation %s).\n", ref.Value, resolveResp.ConversationID)
+		}
+		return nil
+	}
+
+	// For conv:<uuid> and #<thread> references, the conversation is resolved
+	// but we don't know which agent to deliver to. The message is persisted
+	// with the conversation_id. For threads, delivery depends on the
+	// conversation's default agent (if any).
+	//
+	// For @<email> references, route as outbound user message with conversation_id.
+	if ref.Kind == messaging.RefEmail {
+		senderAgent := os.Getenv("SCION_AGENT_NAME")
+		if senderAgent == "" {
+			return fmt.Errorf("sending messages to users via @<email> is only supported from within an agent container (SCION_AGENT_NAME not set)")
+		}
+		agentSvc := hubCtx.Client.ProjectAgents(projectID)
+		outMsg := &hubclient.OutboundMessageRequest{
+			Recipient: "user:" + ref.Value,
+			Msg:       message,
+			Type:      "instruction",
+			Urgent:    interrupt,
+			Metadata:  map[string]string{"conversation_id": resolveResp.ConversationID},
+		}
+		if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
+		}
+		if !isJSONOutput() {
+			fmt.Printf("Message sent to %s (conversation %s).\n", ref.Raw, resolveResp.ConversationID)
+		}
+		return nil
+	}
+
+	// conv:<uuid> and #<thread> are gated at the CLI entry point and never
+	// reach this function. @<agent> and @<email> are handled above and return.
+	// This point is unreachable.
+	return fmt.Errorf("unsupported conversation reference kind: %s", ref.Raw)
 }
 
 func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
@@ -1007,19 +1203,38 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 }
 
 func init() {
+	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
-	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current project")
-	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Send the message to all running agents across all projects")
-	messageCmd.Flags().StringVar(&msgIn, "in", "", "Schedule message delivery after a duration (e.g. 30m, 1h)")
-	messageCmd.Flags().StringVar(&msgAt, "at", "", "Schedule message delivery at an absolute time (ISO 8601, e.g. 2026-02-28T14:00:00Z)")
-	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Mark for plain-text delivery (message still flows as structured JSON internally)")
-	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape)")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Subscribe to notifications for the target agent (completed, waiting for input, etc.)")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
-	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Target a specific message channel (e.g. telegram, gchat, web)")
-	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
-	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "CC an additional agent (repeatable; also accepts a comma-separated list); each receives a mention notification")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
+	messageCmd.Flags().StringVar(&msgVisibility, "visibility", "", "Message visibility: normal, verbose, or full")
+
+	// Deprecated flags — still functional, emit warnings when used.
+	// These flags are hidden from help output to guide users toward
+	// the new subcommands, but they continue to work identically.
+	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Deprecated: use 'scion broadcast' instead")
+	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Deprecated: use 'scion broadcast --all' instead")
+	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule create --in' instead")
+	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule create --at' instead")
+	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")
+	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Deprecated: use 'scion keys' instead")
+	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Deprecated: use 'scion notifications subscribe' instead")
+	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Deprecated: use conversation references instead")
+	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Deprecated: use conversation references instead")
+	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "Deprecated: --cc is deprecated and will be removed")
+
+	// Hide deprecated flags from help
+	_ = messageCmd.Flags().MarkHidden("broadcast")
+	_ = messageCmd.Flags().MarkHidden("all")
+	_ = messageCmd.Flags().MarkHidden("in")
+	_ = messageCmd.Flags().MarkHidden("at")
+	_ = messageCmd.Flags().MarkHidden("plain")
+	_ = messageCmd.Flags().MarkHidden("raw")
+	_ = messageCmd.Flags().MarkHidden("notify")
+	_ = messageCmd.Flags().MarkHidden("channel")
+	_ = messageCmd.Flags().MarkHidden("thread-id")
+	_ = messageCmd.Flags().MarkHidden("cc")
+
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
 }
