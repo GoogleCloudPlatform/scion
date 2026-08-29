@@ -303,10 +303,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if convResult != nil {
 		storeMsg.ConversationID = convResult.ConversationID
-		// DEF-41: post-attribution validation. The ConversationID check was
-		// previously dead on this path because the legacy adapter fabricated
-		// a sentinel. Now it is live: if attribution produced a result, the
-		// ConversationID must be well-formed.
+		// DEF-41: structural pre-placement. This check is inert while B10
+		// holds: convResult is non-nil only when attribution succeeded, and
+		// ent.Conversation.ID is a uuid.UUID that always renders non-empty.
+		// It becomes load-bearing at Tranche G, when derivation failure
+		// becomes fatal and this call moves outside the nil guard.
 		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
@@ -943,15 +944,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// DEF-41: post-attribution validation. Runs after both the
-		// CLI-pre-resolved path (:889) and the server-side resolution path
-		// (:932) have had their chance to set ConversationID.
-		if storeMsg.ConversationID != "" {
-			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				ValidationError(w, err.Error(), nil)
-				return
-			}
-		}
+		// DEF-41: no ValidateAttributed here. Both paths that set
+		// storeMsg.ConversationID produce a non-empty value by
+		// construction: the CLI-pre-resolved path (:897) copies a
+		// caller-supplied non-empty string, and the server-side
+		// resolution path (:943) copies from convResult which holds a
+		// uuid.UUID. A guard of `if x != "" { reject when x == "" }`
+		// is tautological and would mislead a reader into thinking the
+		// check is live. The file-level gate sees ValidateAttributed
+		// from site 1 (handleAgentOutboundMessage).
+		//
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
 		convID := ""

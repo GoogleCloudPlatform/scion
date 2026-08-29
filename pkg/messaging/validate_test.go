@@ -762,28 +762,25 @@ func TestValidateCrossProjectAddressees_CheckIsLoadBearing(t *testing.T) {
 	}
 }
 
-// ---------- ValidateAttributed (DEF-41 positive control — AC-D-2) ----------
+// ---------- ValidateAttributed (DEF-41 — function correctness) ----------
 
-// TestValidateAttributed_RejectsEmptyConversationID is the AC-D-2 positive
-// control. It proves that ValidateAttributed rejects an empty ConversationID.
+// TestValidateAttributed_RejectsEmptyConversationID proves that
+// ValidateAttributed rejects an empty ConversationID.
 //
-// POSITIVE CONTROL EVIDENCE (AC-D-2):
-// On upstream/main before this fix, the equivalent check in ValidateMessage
-// was unreachable on all 7 legacy call sites because ValidateLegacyMessage
-// fabricated ConversationID = "legacy-pending" before calling ValidateMessage.
-// The sentinel made the "conversation_id is required" check dead — it could
-// never fire on a real legacy send. This test exercises the check that was
-// previously unreachable and asserts it now fires.
+// This tests the function body, not production reachability. While B10
+// holds, every production call site guards ValidateAttributed behind
+// `if convResult != nil`, and every non-nil convResult carries a
+// uuid.UUID ConversationID that is never empty. The check is therefore
+// structural pre-placement: it cannot fire today, and it becomes
+// load-bearing at Tranche G when derivation failure becomes fatal and
+// the nil guard is removed.
 //
-// To verify the positive control: run this test against upstream/main (where
-// ValidateAttributed does not exist) and confirm it fails to compile. Then
-// run it on this branch and confirm it passes.
+// See the commit message for the proof-by-enumeration that no
+// production path can deliver "" to ValidateAttributed under B10.
 func TestValidateAttributed_RejectsEmptyConversationID(t *testing.T) {
 	err := ValidateAttributed("")
 	if err == nil {
-		t.Fatal("AC-D-2 VIOLATION: ValidateAttributed must reject an empty " +
-			"conversation_id — this check was previously dead on all legacy " +
-			"paths and must now be live")
+		t.Fatal("ValidateAttributed must reject an empty conversation_id")
 	}
 	if !strings.Contains(err.Error(), "conversation_id") {
 		t.Fatalf("error should mention conversation_id, got: %v", err)
@@ -802,7 +799,8 @@ func TestValidateAttributed_AcceptsNonEmptyConversationID(t *testing.T) {
 // TestValidateAttributed_CheckIsLoadBearing proves that the ValidateAttributed
 // check is load-bearing per Rule 10. If the function body were replaced with
 // `return nil`, this test would fail because an empty ConversationID would
-// incorrectly pass.
+// incorrectly pass. The function is correctly implemented; it is the
+// production call sites that are currently inert (see above).
 func TestValidateAttributed_CheckIsLoadBearing(t *testing.T) {
 	err := ValidateAttributed("")
 	// If the check is removed, err would be nil and this assertion would fail.

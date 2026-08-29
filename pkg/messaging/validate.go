@@ -85,10 +85,15 @@ func ValidateMessage(msg *Message) error {
 // ValidateAttributed runs after attribution has had the chance to set a real
 // ConversationID.
 //
-// On 7 of 8 legacy call sites, validation historically ran before attribution,
-// so the adapter fabricated a synthetic ConversationID to satisfy
-// ValidateMessage's required-field check. That sentinel made the check dead.
-// The split removes the sentinel and makes this check live (DEF-41).
+// INERTNESS UNDER B10: while derivation failures remain non-fatal (B10),
+// every call site guards this behind `if convResult != nil`, and every
+// non-nil convResult carries a uuid.UUID ConversationID that is never empty.
+// The check is therefore structural pre-placement: it cannot fire today, and
+// it becomes load-bearing at Tranche G when derivation failure becomes fatal
+// and the nil guard is removed.
+//
+// The sentinel that previously masked this check in ValidateLegacyMessage is
+// deleted (DEF-41). The check is correctly positioned; it is not yet reachable.
 func ValidateAttributed(conversationID string) error {
 	if conversationID == "" {
 		return fmt.Errorf("conversation_id is required after attribution")
