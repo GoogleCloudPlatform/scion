@@ -75,7 +75,7 @@ jobs:
           # Filter out excluded modules. -x for exact line match (no prefix
           # over-matching), -F -f for multi-entry support (one per line).
           TESTED_MODULES=$(printf '%s\n' "$ALL_MODULES" | grep -v -x -F -f <(printf '%s\n' $EXCLUDED_MODULES) || true)
-          TESTED_JSON=$(echo "$TESTED_MODULES" | jq -R -s 'split("\n") | map(select(. != ""))')
+          TESTED_JSON=$(echo "$TESTED_MODULES" | jq -c -R -s 'split("\n") | map(select(. != ""))')
           TESTED_COUNT=$(echo "$TESTED_JSON" | jq 'length')
 
           EXCLUDED_COUNT=0
@@ -156,11 +156,13 @@ jobs:
 
       - name: Check go.mod/go.sum freshness
         working-directory: ${{ matrix.module }}
+        env:
+          MODULE: ${{ matrix.module }}
         run: |
           go mod tidy
           if ! git diff --exit-code go.mod go.sum; then
             echo ""
-            echo "::error title=Stale go.mod/go.sum in ${{ matrix.module }}::go.mod or go.sum is not tidy. Run 'make tidy-extras' to fix all extras modules at once."
+            echo "::error title=Stale go.mod/go.sum in ${MODULE}::go.mod or go.sum is not tidy. Run 'make tidy-extras' to fix all extras modules at once."
             exit 1
           fi
 
@@ -175,9 +177,10 @@ jobs:
           persist-credentials: false
 
       - name: Assert coverage
+        env:
+          TESTED: ${{ needs.discover.outputs.tested_count }}
+          EXCLUDED: ${{ needs.discover.outputs.excluded_count }}
         run: |
-          TESTED=${{ needs.discover.outputs.tested_count }}
-          EXCLUDED=${{ needs.discover.outputs.excluded_count }}
 
           # TOTAL is re-derived here from an INDEPENDENT find at unlimited
           # depth, not from the discover job's -maxdepth 2. This makes the
