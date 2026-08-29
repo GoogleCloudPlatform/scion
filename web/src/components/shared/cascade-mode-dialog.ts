@@ -370,7 +370,9 @@ export class ScionCascadeModeDialog extends LitElement {
     const details = this.preview.cascade.details;
     // Only count agents whose mode actually changes for the header and summary.
     // The scrollable list shows all agents (including "no change" rows) for context.
-    const changingDetails = details.filter((d) => d.current_mode !== d.new_mode);
+    const changingDetails = details.filter(
+      (d) => (d.current_mode || 'project') !== (d.new_mode || 'project')
+    );
     const sealCount = changingDetails.filter(
       (d) => d.new_mode === 'none'
     ).length;
@@ -393,11 +395,13 @@ export class ScionCascadeModeDialog extends LitElement {
   }
 
   private renderAffectedAgent(detail: CascadeAgentDetail) {
-    const currentDisplay = getMessageModeDisplay(detail.current_mode);
-    const newDisplay = getMessageModeDisplay(detail.new_mode);
-    const noChange = detail.current_mode === detail.new_mode;
-    const isUnseal = detail.current_mode === 'none' && detail.new_mode !== 'none';
-    const isSeal = detail.new_mode === 'none' && detail.current_mode !== 'none';
+    const currentMode = detail.current_mode || 'project';
+    const newMode = detail.new_mode || 'project';
+    const currentDisplay = getMessageModeDisplay(currentMode);
+    const newDisplay = getMessageModeDisplay(newMode);
+    const noChange = currentMode === newMode;
+    const isUnseal = currentMode === 'none' && newMode !== 'none';
+    const isSeal = newMode === 'none' && currentMode !== 'none';
 
     return html`
       <div class="affected-item">

@@ -116,7 +116,11 @@ func computeCanReachViewer(viewerIdentity Identity, targetAgent *store.Agent) bo
 		return false
 	}
 
-	switch targetAgent.MessageMode {
+	mode := targetAgent.MessageMode
+	if mode == "" {
+		mode = store.MessageModeProject
+	}
+	switch mode {
 	case store.MessageModeNone:
 		return false
 	case store.MessageModeProject:
@@ -198,7 +202,11 @@ func agentIdentityFromAgent(a *store.Agent) AgentIdentity {
 //   - "project" → we don't have the full member list here; return the ancestry
 //     count + 1 as a lower bound to signal "at least some users reachable"
 func countReachableUsers(targetAgent *store.Agent) int {
-	switch targetAgent.MessageMode {
+	mode := targetAgent.MessageMode
+	if mode == "" {
+		mode = store.MessageModeProject
+	}
+	switch mode {
 	case store.MessageModeNone:
 		return 0
 	case store.MessageModeLineage, store.MessageModeBranch:
@@ -240,6 +248,9 @@ func (s *Server) getSenderMode(ctx context.Context, identity Identity) string {
 		agent, err := s.store.GetAgent(ctx, identity.ID())
 		if err != nil {
 			return "unknown"
+		}
+		if agent.MessageMode == "" {
+			return string(store.MessageModeProject)
 		}
 		return agent.MessageMode
 	default:
