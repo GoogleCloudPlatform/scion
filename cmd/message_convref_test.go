@@ -414,3 +414,81 @@ func TestBackwardCompat_BareAgentName(t *testing.T) {
 	assert.Equal(t, "old-agent-name", (*sent)[0].AgentName)
 	assert.Equal(t, "hello world", (*sent)[0].Message)
 }
+
+// TestSendMessageViaConversation_ValidationBeforeResolve verifies DEF-48:
+// a message that fails validation must NOT trigger ResolveConversation.
+// Before this fix, validation ran after resolve, orphaning the row on failure.
+func TestSendMessageViaConversation_ValidationBeforeResolve(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "proj-convref-val-before-resolve"
+	server, sent, resolves, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefAgent,
+		Value: "builder",
+		Raw:   "@builder",
+	}
+
+	// Send an empty message body — ValidateLegacyMessage rejects this because
+	// "msg field is required" when there are no attachments.
+	err = sendMessageViaConversation(hubCtx, ref, "", false, false)
+	require.Error(t, err, "empty message must fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+
+	// DEF-48 AC-D-4: ResolveConversation must NOT have been called.
+	// Before this fix, resolve ran first (potentially creating a row),
+	// and validation failure afterward orphaned it.
+	assert.Len(t, *resolves, 0, "ResolveConversation must not be called when validation fails (DEF-48)")
+	assert.Len(t, *sent, 0, "no messages should be sent when validation fails")
+}
+
+// TestSendMessageViaConversation_EmailPreconditionBeforeResolve verifies DEF-48
+// for the @email path: when SCION_AGENT_NAME is unset (human CLI context),
+// the precondition must fail before ResolveConversation runs.
+func TestSendMessageViaConversation_EmailPreconditionBeforeResolve(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	// Explicitly unset SCION_AGENT_NAME to simulate human CLI context.
+	t.Setenv("SCION_AGENT_NAME", "")
+
+	projectID := "proj-convref-email-precond"
+	server, sent, resolves, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefEmail,
+		Value: "user@example.com",
+		Raw:   "@user@example.com",
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "should fail before resolve", false, false)
+	require.Error(t, err, "email ref without agent context must fail")
+	assert.Contains(t, err.Error(), "only supported from within an agent container")
+
+	// DEF-48: ResolveConversation must NOT have been called.
+	assert.Len(t, *resolves, 0, "ResolveConversation must not be called when email precondition fails (DEF-48)")
+	assert.Len(t, *sent, 0, "no agent messages should be sent")
+	assert.Len(t, *outbound, 0, "no outbound messages should be sent")
+}
