@@ -447,7 +447,7 @@ func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	customSettings := `{"custom": true}`
-	settingsPath := filepath.Join(opencodeDir, "home", ".config", "opencode", "opencode.json")
+	settingsPath := filepath.Join(opencodeDir, "home", ".config", "opencode", ".opencode.json")
 	if err := os.WriteFile(settingsPath, []byte(customSettings), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(data) != customSettings {
-		t.Errorf("opencode opencode.json was modified; got: %s", data)
+		t.Errorf("opencode .opencode.json was modified; got: %s", data)
 	}
 	data, err = os.ReadFile(filepath.Join(opencodeDir, "provision.py"))
 	if err != nil {
