@@ -617,9 +617,15 @@ func projectPermissionIDsExcluding(excludeAction string) []string {
 		permissions.ResourceHarnessConfig: true,
 		permissions.ResourceSkill:         true,
 	}
+	// Explicit permission IDs excluded from this role regardless of action.
+	// agent.set_message_mode must NOT be held by project admins — only project
+	// owners may unseal none-mode agents (D7).
+	excludeIDs := map[string]bool{
+		"agent.set_message_mode": true,
+	}
 	var ids []string
 	for _, p := range permissions.Registry {
-		if projectResources[p.Resource] && p.Action != excludeAction {
+		if projectResources[p.Resource] && p.Action != excludeAction && !excludeIDs[p.ID] {
 			ids = append(ids, p.ID)
 		}
 	}
@@ -630,9 +636,10 @@ func projectPermissionIDsExcluding(excludeAction string) []string {
 // project member gets: create agents, read/list most things.
 func projectMemberPermissionIDs() []string {
 	memberActions := map[string]bool{
-		"create": true,
-		"read":   true,
-		"list":   true,
+		"create":  true,
+		"read":    true,
+		"list":    true,
+		"message": true,
 	}
 	projectResources := map[string]bool{
 		permissions.ResourceAgent:         true,

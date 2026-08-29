@@ -43,6 +43,15 @@ Additionally, message history is only available via Cloud Logging (`scion-messag
 - Replacing Cloud Logging message audit (the dedicated message log remains for observability)
 - Changing the notification system (notifications remain status-change alerts; messages are a separate concept)
 
+## Related: Message Mode Authorization
+
+Message delivery is subject to the per-agent **message mode** system, which
+controls who can deliver messages to each agent. All ingresses described in
+this document (direct API, chat v2, broadcast, broker inbound) pass through
+the `authorizeAgentMessage` choke point before delivery. See
+[docs/messaging-authorization.md](../docs/messaging-authorization.md) for the
+mode definitions, decision table, and piercing rules.
+
 ---
 
 ## Design

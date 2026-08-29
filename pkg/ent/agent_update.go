@@ -178,6 +178,20 @@ func (_u *AgentUpdate) SetNillableVisibility(v *string) *AgentUpdate {
 	return _u
 }
 
+// SetMessageMode sets the "message_mode" field.
+func (_u *AgentUpdate) SetMessageMode(v agent.MessageMode) *AgentUpdate {
+	_u.mutation.SetMessageMode(v)
+	return _u
+}
+
+// SetNillableMessageMode sets the "message_mode" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableMessageMode(v *agent.MessageMode) *AgentUpdate {
+	if v != nil {
+		_u.SetMessageMode(*v)
+	}
+	return _u
+}
+
 // SetLabels sets the "labels" field.
 func (_u *AgentUpdate) SetLabels(v map[string]string) *AgentUpdate {
 	_u.mutation.SetLabels(v)
@@ -863,6 +877,11 @@ func (_u *AgentUpdate) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Agent.status": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.MessageMode(); ok {
+		if err := agent.MessageModeValidator(v); err != nil {
+			return &ValidationError{Name: "message_mode", err: fmt.Errorf(`ent: validator failed for field "Agent.message_mode": %w`, err)}
+		}
+	}
 	if _u.mutation.ProjectCleared() && len(_u.mutation.ProjectIDs()) > 0 {
 		return errors.New(`ent: clearing a required unique edge "Agent.project"`)
 	}
@@ -913,6 +932,9 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MessageMode(); ok {
+		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
@@ -1371,6 +1393,20 @@ func (_u *AgentUpdateOne) SetVisibility(v string) *AgentUpdateOne {
 func (_u *AgentUpdateOne) SetNillableVisibility(v *string) *AgentUpdateOne {
 	if v != nil {
 		_u.SetVisibility(*v)
+	}
+	return _u
+}
+
+// SetMessageMode sets the "message_mode" field.
+func (_u *AgentUpdateOne) SetMessageMode(v agent.MessageMode) *AgentUpdateOne {
+	_u.mutation.SetMessageMode(v)
+	return _u
+}
+
+// SetNillableMessageMode sets the "message_mode" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableMessageMode(v *agent.MessageMode) *AgentUpdateOne {
+	if v != nil {
+		_u.SetMessageMode(*v)
 	}
 	return _u
 }
@@ -2073,6 +2109,11 @@ func (_u *AgentUpdateOne) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Agent.status": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.MessageMode(); ok {
+		if err := agent.MessageModeValidator(v); err != nil {
+			return &ValidationError{Name: "message_mode", err: fmt.Errorf(`ent: validator failed for field "Agent.message_mode": %w`, err)}
+		}
+	}
 	if _u.mutation.ProjectCleared() && len(_u.mutation.ProjectIDs()) > 0 {
 		return errors.New(`ent: clearing a required unique edge "Agent.project"`)
 	}
@@ -2140,6 +2181,9 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MessageMode(); ok {
+		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)

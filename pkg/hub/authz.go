@@ -55,8 +55,9 @@ const (
 	ActionInvite  Action = "invite"
 	ActionSuspend Action = "suspend"
 	ActionPromote Action = "promote"
-	ActionClone   Action = "clone"
-	ActionExecute Action = "execute"
+	ActionClone          Action = "clone"
+	ActionExecute        Action = "execute"
+	ActionSetMessageMode Action = "set_message_mode"
 )
 
 // Resource represents the target of an authorization check.

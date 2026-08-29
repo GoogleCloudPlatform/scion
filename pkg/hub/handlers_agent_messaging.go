@@ -1013,6 +1013,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 
 	dispatcher := s.GetDispatcher()
 
+	// Phase 3 msg-authz: extract sender identity once for per-recipient checks.
+	senderIdentity := GetIdentityFromContext(ctx)
+
 	// Note: retries are sequential — large groups with unreachable members
 	// may block for up to N × 30s. Future work: parallel dispatch.
 	for i, recip := range recipients {
@@ -1023,6 +1026,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			agent, err := s.store.GetAgentBySlug(ctx, projectID, api.Slugify(recip.Name))
 			if err != nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent not found: " + recip.Name}
+				continue
+			}
+
+			// Phase 3 msg-authz: Check message authorization per group recipient.
+			allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, agent, false)
+			if !allowed {
+				results[i] = GroupMessageRecipientResult{
+					Recipient: recipStr,
+					Status:    "unauthorized",
+					Error:     "message delivery denied",
+				}
 				continue
 			}
 
@@ -1250,19 +1264,21 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Agent callers must have message scope and be in the same project
+	// Phase 3 msg-authz: Agent callers must be in the same project.
+	// ScopeAgentLifecycle no longer required — messaging is a first-class axis (D1).
+	// Per-recipient authorization happens below via authorizeAgentMessage.
 	if agentIdent != nil && userIdent == nil {
-		if !agentIdent.HasScope(ScopeAgentLifecycle) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:lifecycle", nil)
-			return
-		}
 		if agentIdent.ProjectID() != projectID {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only broadcast within their own project", nil)
 			return
 		}
 	}
 
-	// User callers must have attach access in the target project.
+	// Phase 3 msg-authz: User callers — verify project exists and user has
+	// basic project read access. This prevents outsiders from broadcasting.
+	// The actual per-agent authorization happens per-recipient below via
+	// authorizeAgentMessage. The project-level ActionAttach check is replaced
+	// with ActionRead as a fast-fail gate (D1: messaging separated from attach).
 	if userIdent != nil {
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
@@ -1273,7 +1289,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 			}
 			return
 		}
-		if !s.authorize(w, r, projectResource(project), ActionAttach) {
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
 			return // authorize writes 403
 		}
 	}
@@ -1360,24 +1376,52 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	proxy := s.GetMessageBrokerProxy()
-	if proxy == nil {
-		// Fallback: no broker configured, do direct fan-out
-		if !s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt, runningAgents) {
-			return
+	// Phase 3 msg-authz: Pre-filter recipients through authorizeAgentMessage.
+	// A project owner's broadcast reaches lineage/branch agents; a member's
+	// reaches only project-mode agents; none-mode agents never reached
+	// (except by super-admin). Per D4 constraint in the design doc.
+	senderIdentity := GetIdentityFromContext(ctx)
+	var authorizedAgents []store.Agent
+	for i := range runningAgents {
+		a := &runningAgents[i]
+		allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, a, false)
+		if allowed {
+			authorizedAgents = append(authorizedAgents, runningAgents[i])
 		}
-		s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
-		return
 	}
+	// Update targeted count to reflect filtering.
+	filtered := len(runningAgents) - len(authorizedAgents)
+	targeted = len(authorizedAgents)
+	if filtered > 0 {
+		skipped += filtered
+		// Don't expose unauthorized count in response — information leakage (MEDIUM-1).
+	}
+	runningAgents = authorizedAgents
 
 	// Log the broadcast
 	logAttrs := []any{"project_id", projectID}
 	logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
 	s.logMessage("broadcast message published", logAttrs...)
 
-	if err := proxy.PublishBroadcast(ctx, projectID, req.StructuredMessage); err != nil {
-		RuntimeError(w, "Failed to publish broadcast message: "+err.Error())
-		return
+	proxy := s.GetMessageBrokerProxy()
+	if proxy == nil {
+		// No broker configured — use direct fan-out with pre-filtered list.
+		if !s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt, runningAgents) {
+			return
+		}
+	} else {
+		// Phase 3 msg-authz: Broker is available. PublishBroadcast fans out to
+		// ALL subscribed agents, which bypasses our per-recipient filter. Instead,
+		// publish per-agent messages through the broker for each authorized agent.
+		for _, agent := range runningAgents {
+			agentMsg := *req.StructuredMessage
+			agentMsg.Recipient = "agent:" + agent.Slug
+			agentMsg.RecipientID = agent.ID
+			if err := proxy.PublishMessage(ctx, projectID, &agentMsg); err != nil {
+				s.messageLog.Error("Failed to publish filtered broadcast to agent",
+					"agent_id", agent.ID, "agent_slug", agent.Slug, "error", err)
+			}
+		}
 	}
 
 	s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
@@ -1519,6 +1563,9 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
 
+	// Phase 3 msg-authz: extract sender identity once for per-mention checks.
+	senderIdentity := GetIdentityFromContext(ctx)
+
 	// Aggregate timeout for all mention dispatches (O1): 30s total to avoid
 	// blocking the HTTP response for up to N × 10s in the worst case.
 	aggregateCtx, aggregateCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1541,6 +1588,14 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		if !ok {
 			results[i].Status = "error"
 			results[i].Error = "agent resolved but not found for dispatch"
+			continue
+		}
+
+		// Phase 3 msg-authz: Check message authorization per mention recipient.
+		mentionAllowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
+		if !mentionAllowed {
+			results[i].Status = "unauthorized"
+			results[i].Error = "message delivery denied"
 			continue
 		}
 

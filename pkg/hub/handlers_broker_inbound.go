@@ -120,9 +120,14 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce ActionAttach permission for user-identity senders. Agent-identity
-	// and system senders (scheduled events, internal) skip this check — they
-	// use broker HMAC trust which is infrastructure-level authorization.
+	// Phase 3 msg-authz: Enforce authorizeAgentMessage for user-identity senders.
+	// System/infrastructure senders (not user: or agent:) are system-plane
+	// messages (D8) — scheduled events, internal hub triggers relayed through
+	// broker transport. These bypass mode checks unconditionally; broker HMAC
+	// trust covers the infrastructure transport layer.
+	// Agent-to-agent via broker: documented as a known gap for follow-up — the
+	// broker path for agent-to-agent is less common than the direct API, and
+	// constructing an AgentIdentity from the broker request is non-trivial.
 	if strings.HasPrefix(req.Message.Sender, "user:") {
 		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
 		senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
@@ -145,18 +150,21 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		req.Message.SenderID = senderUser.ID
 
 		userIdent := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
-		decision := s.authzService.CheckAccess(r.Context(), userIdent, agentResource(agent), ActionAttach)
-		if !decision.Allowed {
-			log.Warn("User lacks permission to message agent via integration",
-				"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", decision.Reason)
+		allowed, reason := s.authorizeAgentMessage(r.Context(), userIdent, agent, false)
+		if !allowed {
+			log.Warn("broker inbound message authorization denied",
+				"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", reason)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"user does not have permission to message this agent", map[string]interface{}{
+				"Message delivery denied", map[string]interface{}{
 					"sender":     req.Message.Sender,
 					"agent_slug": agentSlug,
 				})
 			return
 		}
 	}
+	// else: system-plane (D8) or agent-sender — no authorizeAgentMessage check.
+	// System messages are unconditionally exempt. Agent-to-agent via broker
+	// relies on broker HMAC trust (known gap documented above).
 
 	// Ownership check: verify the DM key IDs match the actual participants.
 	// The agent in the DM key must match the resolved agent; the user must

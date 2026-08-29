@@ -570,7 +570,8 @@ func (s *Server) createAgentInProject(
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.
 	var effectiveRole AgentRole
-	var parentRole AgentRole // empty for user-created agents; set in agent-caller branch
+	var parentRole AgentRole  // empty for user-created agents; set in agent-caller branch
+	var parentMessageMode string // parent's message_mode for inheritance (D10)
 	requestedRole := AgentRole(req.AgentRole)
 
 	// Read project max agent role from annotations (default: full)
@@ -615,6 +616,7 @@ func (s *Server) createAgentInProject(
 				"parent_agent_id", agentIdent.ID(), "error", err)
 		} else {
 			parentRole, _ = agentRoleAndScopes(creatorAgent)
+			parentMessageMode = creatorAgent.MessageMode
 		}
 
 		// Validate stored parentRole to guard against corrupted data.
@@ -1005,6 +1007,22 @@ func (s *Server) createAgentInProject(
 	}
 
 	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName, effectiveRole)
+
+	// Resolve message_mode (D10 spawn defaults):
+	//   1. Template specifies message_mode → use it.
+	//   2. Parent agent exists → inherit parent's message_mode.
+	//   3. Otherwise → default to "project" (handled by Ent schema default).
+	if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
+		if !store.IsValidMessageMode(resolvedTemplate.Config.MessageMode) {
+			ValidationError(w, "invalid template message mode: "+resolvedTemplate.Config.MessageMode, nil)
+			return
+		}
+		agent.MessageMode = resolvedTemplate.Config.MessageMode
+	} else if parentMessageMode != "" {
+		agent.MessageMode = parentMessageMode
+	} else {
+		agent.MessageMode = store.MessageModeProject
+	}
 
 	// Populate GCP identity in applied config.
 	// Default to "block" mode when no GCP identity is specified, so agents
@@ -2542,15 +2560,48 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		action == api.AgentActionRefreshToken ||
 		action == api.AgentActionOutboundMessage
 
-	// Self-message: allow an agent to deliver a message to itself using its
-	// own token, without requiring the ScopeAgentLifecycle scope. This mirrors
-	// the outbound-message self-access pattern and is used by sciontool to
-	// send system notifications (e.g. port auto-expose) to the agent's own
-	// harness input.
+	// --- set_message_mode action: own permission model (D7) ---
+	// Mode changes are human-only and use agent.set_message_mode permission,
+	// not lifecycle authorization. Must be routed before the generic authz block.
+	if action == api.AgentActionSetMessageMode {
+		s.handleSetMessageMode(w, r, id)
+		return
+	}
+
+	// --- Message action: routed through authorizeAgentMessage (D1) ---
+	// Messaging is a first-class axis, split from lifecycle/attach. The choke
+	// point handles user senders, agent senders, mode checks, and piercing.
 	if action == api.AgentActionMessage {
-		if claims := GetAgentFromContext(r.Context()); claims != nil && claims.Subject == id {
-			selfAccess = true
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
+			return
 		}
+
+		// Self-message is handled inside authorizeAgentMessage as a
+		// self-access exemption, separate from system-plane (D8).
+		isSystemPlane := false
+
+		targetAgent, err := s.store.GetAgent(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		allowed, reason := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
+		if !allowed {
+			slog.Warn("message authorization denied",
+				"sender_type", identity.Type(),
+				"sender_id", identity.ID(),
+				"target_agent", id,
+				"reason", reason,
+			)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Message delivery denied", nil)
+			return
+		}
+		// Authorization passed — fall through to action dispatch below.
+		goto actionDispatch
 	}
 
 	if !selfAccess {
@@ -2592,6 +2643,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			}
 		}
 	}
+
+actionDispatch:
 
 	switch action {
 	case api.AgentActionStatus:

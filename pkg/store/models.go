@@ -87,7 +87,8 @@ type Agent struct {
 	// Ownership
 	CreatedBy  string `json:"createdBy,omitempty"`
 	OwnerID    string `json:"ownerId,omitempty"`
-	Visibility string `json:"visibility"` // private, team, public
+	Visibility  string `json:"visibility"`  // private, team, public
+	MessageMode string `json:"messageMode"` // none, lineage, branch, project
 
 	// Ancestry chain for transitive access control.
 	// Ordered list of ancestor IDs: [root, ..., parent].
@@ -699,6 +700,7 @@ type TemplateConfig struct {
 	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
 	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
 	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
+	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project
 }
 
 // HubAccessConfig defines what Hub API scopes an agent created from this template receives.
@@ -771,6 +773,30 @@ const (
 	VisibilityTeam    = api.VisibilityTeam
 	VisibilityPublic  = api.VisibilityPublic
 )
+
+// MessageMode constants define the per-agent message mode that controls who
+// can deliver messages to the agent. The mode is orthogonal to agent role
+// (D5) and is read live from the agent record at delivery time (D10).
+//
+// See docs/messaging-authorization.md for the full decision table and
+// piercing rules. See pkg/hub/authorize_message.go for the enforcement
+// choke point.
+const (
+	MessageModeNone    = "none"    // Sealed: no message-plane delivery except super-admin (D6)
+	MessageModeLineage = "lineage" // Ancestry users + project owners only; zero agent-to-agent edges (D4)
+	MessageModeBranch  = "branch"  // Ancestry users + project owners + direct parent/child agents (both must be branch mode)
+	MessageModeProject = "project" // Bidirectional with all agents and users in project (default; matches pre-mode behavior)
+)
+
+// IsValidMessageMode returns true if mode is one of the four valid message modes.
+func IsValidMessageMode(mode string) bool {
+	switch mode {
+	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject:
+		return true
+	default:
+		return false
+	}
+}
 
 // =============================================================================
 // Allow List (User Access Control)
@@ -1541,7 +1567,7 @@ const (
 	UATScopeAgentList       = permissions.ResourceAgent + ":" + permissions.ActionList
 	UATScopeAgentStart      = "agent:start"    // legacy stale scope; not valid for new tokens
 	UATScopeAgentStop       = "agent:stop"     // legacy stale scope; not valid for new tokens
-	UATScopeAgentMessage    = "agent:message"  // legacy stale scope; not valid for new tokens
+	UATScopeAgentMessage    = "agent:message"  // registry-backed scope (D2); valid for new tokens
 	UATScopeAgentDispatch   = "agent:dispatch" // legacy stale scope; not valid for new tokens
 	UATScopeAgentDelete     = permissions.ResourceAgent + ":" + permissions.ActionDelete
 	UATScopeAgentAttach     = permissions.ResourceAgent + ":" + permissions.ActionAttach

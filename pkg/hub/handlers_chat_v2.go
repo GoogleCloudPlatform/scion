@@ -1116,9 +1116,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
-	// Check user has attach permission on the primary agent.
-	if !s.authorize(w, r, agentResource(primaryAgent), ActionAttach) {
-		return "" // authorize writes 403
+	// Phase 3 msg-authz: Check message authorization on the primary agent.
+	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
+	allowed, reason := s.authorizeAgentMessage(ctx, user, primaryAgent, false)
+	if !allowed {
+		slog.Warn("chat v2 message authorization denied",
+			"user", user.ID(),
+			"target_agent", primaryAgent.ID,
+			"reason", reason,
+		)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Message delivery denied", nil)
+		return ""
 	}
 
 	// Persist the message.
@@ -1207,14 +1215,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Handle additional mentioned agents (fan-out).
 	if len(agents) > 1 {
 		for _, mentionAgent := range agents[1:] {
-			// Check attach permission on each mentioned agent — skip silently
-			// rather than returning 403 since the user may have attach on some
-			// mentioned agents but not others. The primary agent check above
-			// already hard-fails for the main recipient.
-			decision := s.authzService.CheckAccess(ctx, user, agentResource(mentionAgent), ActionAttach)
-			if !decision.Allowed {
-				logAuthzDenial(r, user, agentResource(mentionAgent), ActionAttach, decision.Reason)
-				s.messageLog.Warn("User lacks attach permission for mentioned agent",
+			// Phase 3 msg-authz: Check message authorization on each mentioned agent.
+			// Replaces the ActionAttach check — chat v2 mention fan-out is messaging.
+			mentionAllowed, _ := s.authorizeAgentMessage(ctx, user, mentionAgent, false)
+			if !mentionAllowed {
+				s.messageLog.Warn("User lacks message authorization for mentioned agent",
 					"user", user.ID(), "agent", mentionAgent.Slug)
 				// Update the MentionResult so the client sees the skip.
 				for i, mr := range mentionResults {

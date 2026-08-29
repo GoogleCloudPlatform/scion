@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -815,16 +816,18 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}
 	}
 
-	// Create project-level policy for member agent creation and stop-all
+	// Create project-level policy for member agent creation, stop-all, and messaging.
+	// The "message" action was added in Phase 2 (msg-authz D1/D2): project members
+	// hold agent.message by default so basic project usage never requires owner/admin.
 	policyName := "project:" + project.Slug + ":member-create-agents"
 	policy := &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         policyName,
-		Description:  "Allow project members to create and stop agents",
+		Description:  "Allow project members to create, stop, and message agents",
 		ScopeType:    "project",
 		ScopeID:      project.ID,
 		ResourceType: "agent",
-		Actions:      []string{"create", "stop_all"},
+		Actions:      []string{"create", "stop_all", "message"},
 		Effect:       "allow",
 	}
 	if err := s.store.CreatePolicy(ctx, policy); err != nil {
@@ -2398,11 +2401,43 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// set_message_mode action: own permission model (D7).
+	if action == api.AgentActionSetMessageMode {
+		s.handleSetMessageMode(w, r, agent.ID)
+		return
+	}
+
+	// Message action: route through authorizeAgentMessage (D1/D8).
+	if action == api.AgentActionMessage {
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"This action requires user or agent authentication", nil)
+			return
+		}
+		isSystemPlane := false
+		allowed, reason := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
+		if !allowed {
+			slog.Warn("message authorization denied",
+				"sender_type", identity.Type(),
+				"sender_id", identity.ID(),
+				"target_agent", agent.ID,
+				"reason", reason,
+			)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Message delivery denied", nil)
+			return
+		}
+		// Skip lifecycle authorization for messages — dispatch directly.
+		s.handleAgentMessage(w, r, agent.ID)
+		return
+	}
+
 	// For interactive actions, enforce lifecycle authorization for every caller
 	// kind: users via policy, agents via ScopeAgentLifecycle within their own
 	// project, everything else denied. authorizeAgentLifecycle logs the denial.
 	switch action {
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionExec:
 		if !s.authorizeAgentLifecycle(w, r, agent) {
 			return
 		}
@@ -2413,8 +2448,6 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		s.updateAgentStatus(w, r, agent.ID)
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, agent.ID, action)
-	case api.AgentActionMessage:
-		s.handleAgentMessage(w, r, agent.ID)
 	case api.AgentActionExec:
 		s.handleAgentExec(w, r, agent.ID)
 	case api.AgentActionEnv:
