@@ -273,3 +273,257 @@ func TestResolveOrCreateConversationByKey_UpsertError(t *testing.T) {
 		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sink-level topic lookup tests (DEF-20 unify)
+// ---------------------------------------------------------------------------
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_Resolves(t *testing.T) {
+	// When WithKeyTopicLookup is provided and extRef is "thread:proj:topicID",
+	// and the lookup returns a conversation_id, the function returns it
+	// WITHOUT calling UpsertConversationByExternalRef.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"topicID": "conv-from-topic",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result from topic lookup")
+	}
+	if got.ConversationID != "conv-from-topic" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-from-topic")
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called when topic lookup succeeds")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_ErrNotFound_FallsThrough(t *testing.T) {
+	// When the lookup returns store.ErrNotFound, it falls through to upsert.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "conv-upserted", ExternalRef: "thread:proj:nonTopic"},
+	}
+	lookup := &mockTopicLookup{topics: map[string]string{}} // empty = not found
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:nonTopic", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result from upsert fallthrough")
+	}
+	if got.ConversationID != "conv-upserted" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-upserted")
+	}
+	if mock.lastConv == nil {
+		t.Error("UpsertConversationByExternalRef must be called when topic not found")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_InfraError_ReturnsNil(t *testing.T) {
+	// When the lookup returns an infra error (not ErrNotFound), return nil.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookupWithError{err: errors.New("connection refused")}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("expected nil on infra error, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called on infra error")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_NoConvID_ReturnsNil(t *testing.T) {
+	// Topic exists but has no conversation_id (not yet backfilled) — return nil.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"topicID": "", // exists but empty conversation_id
+		},
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("expected nil for topic without conversation_id, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called for unbackfilled topic")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_MalformedThreadRef_Refuses(t *testing.T) {
+	// F2: "thread:abc" (2 parts) has the thread: prefix but is malformed.
+	// Must refuse (return nil), not fall through to upsert.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookup{topics: map[string]string{}}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:abc", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("expected nil for malformed thread: ref, got %+v", got)
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called for malformed thread: ref")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("malformed thread: ref")) {
+		t.Error("expected warning log for malformed thread: ref")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_WellFormedRef_Resolves(t *testing.T) {
+	// Paired positive for F2: a well-formed 3-part thread:proj:topicID still
+	// resolves via topic lookup as before.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "should-not-be-used"},
+	}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{"topicID": "conv-from-topic"},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result from well-formed thread ref")
+	}
+	if got.ConversationID != "conv-from-topic" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-from-topic")
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called when topic lookup succeeds")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_SkipsNonGroupKind(t *testing.T) {
+	// Topic lookup should only intercept kind=="group" with "thread:" prefix.
+	// For "direct" kind, it should fall through to upsert even with a lookup.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "conv-direct", ExternalRef: "dm:agent:x:user:y"},
+	}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"some-id": "should-not-be-used",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"dm:agent:x:user:y", "direct", nil, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result for direct kind")
+	}
+	if got.ConversationID != "conv-direct" {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "conv-direct")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_SinkTopicLookup_SoftDeletedTopic_DoesNotMint(t *testing.T) {
+	// DEF-27 unit-level: a soft-deleted topic must resolve via the
+	// including-deleted accessor, NOT the user-facing one. The sink must
+	// call GetTopicConversationIDIncludingDeleted, which sees tombstoned
+	// topics, and return the existing conversation_id without minting.
+	mock := &mockConversationUpserter{
+		returnConv: &store.Conversation{ID: "shadow-should-not-appear"},
+	}
+	lookup := &mockTopicLookup{
+		topics:  map[string]string{"deletedTopic": "conv-existing"},
+		deleted: map[string]bool{"deletedTopic": true},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:deletedTopic", "group", &pid, WithKeyTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result for soft-deleted topic with linked conversation")
+	}
+	if got.ConversationID != "conv-existing" {
+		t.Errorf("ConversationID: got %q, want %q — sink minted instead of resolving via tombstoned topic",
+			got.ConversationID, "conv-existing")
+	}
+	if mock.lastConv != nil {
+		t.Error("UpsertConversationByExternalRef must NOT be called for soft-deleted native topic — would mint a shadow conversation")
+	}
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
+		t.Errorf("sink must call GetTopicConversationIDIncludingDeleted, called %q", lookup.calledMethod)
+	}
+}
+
+func TestResolveOrCreateConversationByKey_WithSurfaceAndParentRef(t *testing.T) {
+	// Verify WithSurface and WithParentRef are applied to the conversation.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+	agentID := "agent-123"
+
+	ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"ext-ref-1", "group", &pid,
+		WithSurface("discord"),
+		WithParentRef("parent-ref-1"),
+		WithDefaultAgentID(&agentID))
+
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "discord" {
+		t.Errorf("Surface: got %q, want %q", mock.lastConv.Surface, "discord")
+	}
+	if mock.lastConv.ParentRef != "parent-ref-1" {
+		t.Errorf("ParentRef: got %q, want %q", mock.lastConv.ParentRef, "parent-ref-1")
+	}
+	if mock.lastConv.DefaultAgentID == nil || *mock.lastConv.DefaultAgentID != "agent-123" {
+		t.Errorf("DefaultAgentID: got %v, want %q", mock.lastConv.DefaultAgentID, "agent-123")
+	}
+}
+
+func TestResolveOrCreateConversationByKey_DefaultSurfaceIsNative(t *testing.T) {
+	// Without WithSurface, surface should default to "native".
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pid := "proj"
+
+	ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+		"thread:proj:t1", "group", &pid)
+
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "native" {
+		t.Errorf("Surface: got %q, want %q", mock.lastConv.Surface, "native")
+	}
+}
