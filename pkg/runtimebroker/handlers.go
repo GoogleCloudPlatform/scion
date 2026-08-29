@@ -674,24 +674,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(createStart).String())
 	buildCtxStart := time.Now()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:            req.Name,
-		AgentID:         req.ID,
-		Slug:            req.Slug,
-		ProjectPath:     req.ProjectPath,
-		ProjectSlug:     req.ProjectSlug,
-		ProjectID:       req.ProjectID,
-		Config:          req.Config,
-		InlineConfig:    req.InlineConfig,
-		SharedDirs:      req.SharedDirs,
-		HubEndpoint:     req.HubEndpoint,
-		AgentToken:      req.AgentToken,
-		CreatorName:     req.CreatorName,
-		ResolvedEnv:     req.ResolvedEnv,
-		ResolvedSecrets: req.ResolvedSecrets,
-		NoAuth:          req.NoAuth,
-		Attach:          req.Attach,
-		WorkspaceMode:   req.WorkspaceMode,
-		HTTPRequest:     r,
+		Name:               req.Name,
+		AgentID:            req.ID,
+		Slug:               req.Slug,
+		ProjectPath:        req.ProjectPath,
+		ProjectSlug:        req.ProjectSlug,
+		ProjectID:          req.ProjectID,
+		Config:             req.Config,
+		InlineConfig:       req.InlineConfig,
+		SharedDirs:         req.SharedDirs,
+		HubEndpoint:        req.HubEndpoint,
+		AgentToken:         req.AgentToken,
+		CreatorName:        req.CreatorName,
+		ResolvedEnv:        req.ResolvedEnv,
+		EnvClassifications: req.EnvClassifications,
+		ResolvedSecrets:    req.ResolvedSecrets,
+		NoAuth:             req.NoAuth,
+		Attach:             req.Attach,
+		WorkspaceMode:      req.WorkspaceMode,
+		HTTPRequest:        r,
 	})
 	if err != nil {
 		markAttemptFailed(http.StatusInternalServerError, err.Error())
@@ -1301,16 +1302,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
-		Task            string               `json:"task"`
-		ProjectPath     string               `json:"projectPath"`
-		ProjectSlug     string               `json:"projectSlug"`
-		GrovePath       string               `json:"grovePath"`
-		GroveSlug       string               `json:"groveSlug"`
-		HarnessConfig   string               `json:"harnessConfig"`
-		ResolvedEnv     map[string]string    `json:"resolvedEnv"`
-		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
-		InlineConfig    *api.ScionConfig     `json:"inlineConfig,omitempty"`
-		SharedDirs      []api.SharedDir      `json:"sharedDirs,omitempty"`
+		Task               string                 `json:"task"`
+		ProjectPath        string                 `json:"projectPath"`
+		ProjectSlug        string                 `json:"projectSlug"`
+		GrovePath          string                 `json:"grovePath"`
+		GroveSlug          string                 `json:"groveSlug"`
+		HarnessConfig      string                 `json:"harnessConfig"`
+		ResolvedEnv        map[string]string      `json:"resolvedEnv"`
+		EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
+		ResolvedSecrets    []api.ResolvedSecret   `json:"resolvedSecrets,omitempty"`
+		InlineConfig       *api.ScionConfig       `json:"inlineConfig,omitempty"`
+		SharedDirs         []api.SharedDir        `json:"sharedDirs,omitempty"`
 		// SharedWorkspace must be re-sent on every start: hub-project agents
 		// share a single git checkout instead of being given a worktree, and
 		// without this flag the broker would create a worktree on restart.
@@ -1353,16 +1355,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:            id,
-		ProjectPath:     startReq.ProjectPath,
-		ProjectSlug:     startReq.ProjectSlug,
-		Config:          cfg,
-		InlineConfig:    startReq.InlineConfig,
-		ResolvedEnv:     startReq.ResolvedEnv,
-		ResolvedSecrets: startReq.ResolvedSecrets,
-		SharedDirs:      startReq.SharedDirs,
-		AgentToken:      startContextAgentToken,
-		HTTPRequest:     r,
+		Name:               id,
+		ProjectPath:        startReq.ProjectPath,
+		ProjectSlug:        startReq.ProjectSlug,
+		Config:             cfg,
+		InlineConfig:       startReq.InlineConfig,
+		ResolvedEnv:        startReq.ResolvedEnv,
+		EnvClassifications: startReq.EnvClassifications,
+		ResolvedSecrets:    startReq.ResolvedSecrets,
+		SharedDirs:         startReq.SharedDirs,
+		AgentToken:         startContextAgentToken,
+		HTTPRequest:        r,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -1600,7 +1603,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
 	var restartReq struct {
-		ResolvedEnv map[string]string `json:"resolvedEnv"`
+		ResolvedEnv        map[string]string      `json:"resolvedEnv"`
+		EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -1623,10 +1627,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:        agentName,
-		ProjectPath: projectPath,
-		ResolvedEnv: restartReq.ResolvedEnv,
-		HTTPRequest: r,
+		Name:               agentName,
+		ProjectPath:        projectPath,
+		ResolvedEnv:        restartReq.ResolvedEnv,
+		EnvClassifications: restartReq.EnvClassifications,
+		HTTPRequest:        r,
 	})
 	if err != nil {
 		RuntimeError(w, err.Error())

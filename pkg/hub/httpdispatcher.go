@@ -519,6 +519,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
+		// Classify config-level env vars as plain. Env-type secrets that
+		// were pre-merged into AppliedConfig.Env will be reclassified as
+		// secret-fetchable when resolveSecrets injects them below.
+		classifyEnvKeys(&req.EnvClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
 
 		// Thread through the full inline ScionConfig for broker-side provisioning
 		req.InlineConfig = agent.AppliedConfig.InlineConfig
@@ -545,12 +549,19 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		req.ResolvedEnv = make(map[string]string)
 	}
 	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
+	if _, ok := req.ResolvedEnv["SCION_MODEL"]; ok {
+		classifyEnv(&req.EnvClassifications, "SCION_MODEL", api.EnvKindPlain)
+	}
 	injectThinkingLevelEnv(req.ResolvedEnv, agent.AppliedConfig)
+	if _, ok := req.ResolvedEnv["SCION_THINKING_LEVEL"]; ok {
+		classifyEnv(&req.EnvClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
+	}
 
 	// Inject hub name so agents can label their Cloud Logging entries with the
 	// hub identity, matching the hub-scoped log query filter (labels.hub).
 	if d.hubName != "" {
 		req.ResolvedEnv["SCION_HUB_NAME"] = d.hubName
+		classifyEnv(&req.EnvClassifications, "SCION_HUB_NAME", api.EnvKindPlain)
 	}
 
 	// Resolve env vars from Hub storage (user/project/broker scopes) and merge.
@@ -569,6 +580,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
+				classifyEnv(&req.EnvClassifications, k, api.EnvKindSecretFetchable)
 			}
 		}
 	}
@@ -615,6 +627,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				}
 			} else if ghSecret != nil && ghSecret.Value != "" {
 				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+				// From secret store → secret-fetchable.
+				classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
 				if d.debug {
 					d.log.Debug("NoAuth: resolved GITHUB_TOKEN from project secrets for git operations",
 						"agent_id", agent.ID, "project_id", agent.ProjectID)
@@ -634,6 +648,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 					}
 				} else if ghSecret != nil && ghSecret.Value != "" {
 					req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+					// From secret store → secret-fetchable.
+					classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
 					if d.debug {
 						d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
 							"agent_id", agent.ID, "owner_id", agent.OwnerID)
@@ -670,6 +686,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				if (s.Type == "environment" || s.Type == "") && s.Target != "" {
 					if existing, exists := req.ResolvedEnv[s.Target]; !exists || existing == "" {
 						req.ResolvedEnv[s.Target] = s.Value
+						// From secret store → secret-fetchable.
+						classifyEnv(&req.EnvClassifications, s.Target, api.EnvKindSecretFetchable)
 					}
 				}
 			}
@@ -708,9 +726,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 					d.log.Warn("buildCreateRequest: user has GITHUB_TOKEN from secrets; skipping GitHub App token injection — user token takes precedence for gh CLI, GitHub App will still be used for git credential helper",
 						"project_id", agent.ProjectID)
 					req.ResolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
+					classifyEnv(&req.EnvClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
 					// Still enable the GitHub App machinery so the credential
 					// helper can mint tokens for git push/pull operations.
 					req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+					classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 				} else {
 					token, expiry, mintErr := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
 					if mintErr != nil {
@@ -723,10 +743,19 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 						if req.ResolvedEnv == nil {
 							req.ResolvedEnv = make(map[string]string)
 						}
+						// GitHub App minted token — ephemeral, not in secret store.
+						// This MUST run AFTER the secret-store GITHUB_TOKEN injection
+						// (H6/H7/H8 above) so the classification overwrites
+						// secret-fetchable → secret-injected when the App token wins.
+						// A test pins this ordering dependency.
 						req.ResolvedEnv["GITHUB_TOKEN"] = token
+						classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
 						req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
+						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
+						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
 						if d.debug {
 							d.log.Debug("buildCreateRequest: injected GitHub App token",
 								"project_id", agent.ProjectID,
@@ -814,6 +843,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			req.ResolvedEnv = make(map[string]string)
 		}
 		req.ResolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
+		classifyEnv(&req.EnvClassifications, "SCION_DEV_TOKEN", api.EnvKindSecretInjected)
 	}
 
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
@@ -828,10 +858,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				req.ResolvedEnv = make(map[string]string)
 			}
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			req.ResolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
 			if d.transportMode != "" {
 				req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+				classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 			}
 		}
 	}
@@ -1212,6 +1248,8 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	for k, v := range env {
 		req.ResolvedEnv[k] = v
 	}
+	// Classify the caller-provided env as plain config vars.
+	classifyEnvKeys(&req.EnvClassifications, env, api.EnvKindPlain)
 
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 
@@ -1236,6 +1274,8 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
+			// as_needed env comes from storage — classify as secret-fetchable.
+			classifyEnvKeys(&req.EnvClassifications, asNeededEnv, api.EnvKindSecretFetchable)
 			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(
 				ctx, agent.RuntimeBrokerID, endpoint, req,
 			)
@@ -1829,16 +1869,24 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Resolve env vars from Hub storage (user/project/broker scopes) so that
 	// API keys and other secrets are available when restarting an agent.
 	resolvedEnv := make(map[string]string)
+	var envClassifications map[string]api.EnvKind
 
 	// Start with agent's applied config env (template/config-level vars)
 	if agent.AppliedConfig != nil {
 		for k, v := range agent.AppliedConfig.Env {
 			resolvedEnv[k] = v
 		}
+		classifyEnvKeys(&envClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	if _, ok := resolvedEnv["SCION_MODEL"]; ok {
+		classifyEnv(&envClassifications, "SCION_MODEL", api.EnvKindPlain)
+	}
 	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
+	if _, ok := resolvedEnv["SCION_THINKING_LEVEL"]; ok {
+		classifyEnv(&envClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
+	}
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) by explicit config env vars.
@@ -1854,6 +1902,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
+				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
 			}
 		}
 	}
@@ -1869,6 +1918,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
 				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
 					resolvedEnv[s.Target] = s.Value
+					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
 				}
 			}
 		}
@@ -1880,13 +1930,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// we inject them here as resolved env vars.
 	if agent.ID != "" {
 		resolvedEnv["SCION_AGENT_ID"] = agent.ID
+		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if agent.ProjectID != "" {
 		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
+		classifyEnv(&envClassifications, "SCION_GROVE_ID", api.EnvKindPlain)
+		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
+		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
 	}
 	// Include hub endpoint so the broker can inject it into the container.
 	// The createAgent path sends this as req.HubEndpoint, but the startAgent
@@ -1894,11 +1948,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// brokers. Including it here ensures the broker always has the endpoint.
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
 	}
 	// Include hub name so agents can label their Cloud Logging entries with
 	// the hub identity, matching the hub-scoped log query filter (labels.hub).
 	if d.hubName != "" {
 		resolvedEnv["SCION_HUB_NAME"] = d.hubName
+		classifyEnv(&envClassifications, "SCION_HUB_NAME", api.EnvKindPlain)
 	}
 
 	// Inject canonical workspace sharing mode and git-ness so the broker can
@@ -1912,10 +1968,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
 	if projectInfo.workspaceMode != "" {
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
+		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	case store.SharingModeSharedPlain:
 		// For shared-plain, git-ness is detected from the applied GitClone config.
 		// Note: broker-local linked projects where the workspace is already a
@@ -1926,6 +1984,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// acknowledged limitation noted in the design doc.
 		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
 			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
 		}
 	}
 
@@ -1937,9 +1996,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	if agent.AppliedConfig != nil {
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
+			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
 			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
 				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
+				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
 				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
+				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
 			}
 		}
 	}
@@ -1954,6 +2016,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
+			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
 	}
 
@@ -1966,10 +2031,16 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			}
 		} else if tToken != "" {
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
 			if d.transportMode != "" {
 				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 			}
 		}
 	}
@@ -1996,15 +2067,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 						}
 					} else if token != "" {
 						resolvedEnv["GITHUB_TOKEN"] = token
+						classifyEnv(&envClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
 						resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+						classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
+						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 						resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
+						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
 					}
 				} else {
 					d.log.Warn("DispatchAgentStart: user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
 						"project_id", agent.ProjectID)
 					resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
+					classifyEnv(&envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
 					resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+					classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 				}
 			}
 		}
@@ -2035,6 +2112,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	if agent.AppliedConfig != nil {
 		inlineConfig = agent.AppliedConfig.InlineConfig
 	}
+
+	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
+	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
+	// "classification unavailable") on the start path. P3b must not land
+	// until #1350 is done — otherwise fail-closed + nil map = total outage.
+	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
 	if isHashMismatchError(err) {
@@ -2095,6 +2178,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
 	resolvedEnv := make(map[string]string)
+	var envClassifications map[string]api.EnvKind
 
 	// Start with agent's applied config env (template/config-level vars) —
 	// same as DispatchAgentStart.
@@ -2102,10 +2186,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		for k, v := range agent.AppliedConfig.Env {
 			resolvedEnv[k] = v
 		}
+		classifyEnvKeys(&envClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	if _, ok := resolvedEnv["SCION_MODEL"]; ok {
+		classifyEnv(&envClassifications, "SCION_MODEL", api.EnvKindPlain)
+	}
 	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
+	if _, ok := resolvedEnv["SCION_THINKING_LEVEL"]; ok {
+		classifyEnv(&envClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
+	}
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) — same precedence as DispatchAgentStart.
@@ -2118,6 +2209,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		for k, v := range envFromStorage {
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
+				classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
 			}
 		}
 	}
@@ -2134,6 +2226,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
 				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
 					resolvedEnv[s.Target] = s.Value
+					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
 				}
 			}
 		}
@@ -2142,21 +2235,27 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// Identity vars at highest precedence (set after storage/secrets merge).
 	if agent.ID != "" {
 		resolvedEnv["SCION_AGENT_ID"] = agent.ID
+		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if agent.ProjectID != "" {
 		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
+		classifyEnv(&envClassifications, "SCION_GROVE_ID", api.EnvKindPlain)
+		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
+		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
 	}
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
 	}
 	// Include hub name so agents can label their Cloud Logging entries with
 	// the hub identity, matching the hub-scoped log query filter (labels.hub).
 	if d.hubName != "" {
 		resolvedEnv["SCION_HUB_NAME"] = d.hubName
+		classifyEnv(&envClassifications, "SCION_HUB_NAME", api.EnvKindPlain)
 	}
 
 	// Inject canonical workspace sharing mode and git-ness so the broker can
@@ -2166,16 +2265,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
 	if projectInfo.workspaceMode != "" {
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
+		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	case store.SharingModeSharedPlain:
 		// See DispatchAgentStart for the acknowledged limitation: broker-local
 		// linked projects without a GitClone config cannot be detected as
 		// git-backed here.
 		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
 			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
 		}
 	}
 
@@ -2184,9 +2286,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if agent.AppliedConfig != nil {
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
+			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
 			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
 				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
+				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
 				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
+				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
 			}
 		}
 	}
@@ -2200,6 +2305,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
+			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
 	}
 
@@ -2212,10 +2320,16 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if tToken != "" {
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
 			if d.transportMode != "" {
 				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 			}
 		}
 	}
@@ -2242,19 +2356,31 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 						}
 					} else if token != "" {
 						resolvedEnv["GITHUB_TOKEN"] = token
+						classifyEnv(&envClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
 						resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+						classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
+						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 						resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
+						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
 					}
 				} else {
 					d.log.Warn("DispatchAgentRestart: user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
 						"project_id", agent.ProjectID)
 					resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
+					classifyEnv(&envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
 					resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+					classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 				}
 			}
 		}
 	}
+
+	// TODO(#1350): Thread envClassifications to broker via client.RestartAgent.
+	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
+	// "classification unavailable") on the restart path. P3b must not land
+	// until #1350 is done — otherwise fail-closed + nil map = total outage.
+	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
 	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -2671,4 +2797,29 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		d.log.Debug("resolveSecrets: resolved secrets", "count", len(result), "names", names)
 	}
 	return result, nil
+}
+
+// classifyEnv sets the classification for an env key in the given map,
+// initialising the map on the pointer if nil. This is the write-side helper
+// for the parallel classification map (#127, P3a). Every site that writes
+// a key into ResolvedEnv must also call classifyEnv (or classifyEnvKeys for
+// bulk operations) so that no key is unclassified when P3a lands.
+func classifyEnv(m *map[string]api.EnvKind, key string, kind api.EnvKind) {
+	if *m == nil {
+		*m = make(map[string]api.EnvKind)
+	}
+	(*m)[key] = kind
+}
+
+// classifyEnvKeys sets the classification for every key in a map.
+func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api.EnvKind) {
+	if len(keys) == 0 {
+		return
+	}
+	if *m == nil {
+		*m = make(map[string]api.EnvKind)
+	}
+	for k := range keys {
+		(*m)[k] = kind
+	}
 }

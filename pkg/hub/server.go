@@ -485,6 +485,18 @@ type RemoteCreateAgentRequest struct {
 	UserID      string             `json:"userId,omitempty"`
 	Config      *RemoteAgentConfig `json:"config,omitempty"`
 	ResolvedEnv map[string]string  `json:"resolvedEnv,omitempty"`
+	// EnvClassifications records the classification (plain, secret-fetchable,
+	// secret-injected) for each key in ResolvedEnv. Parallel structure:
+	// same key names, independent lifecycle (#127, P3a).
+	//
+	// Three-state semantics:
+	//   - Non-nil map, key present: classified as that kind.
+	//   - Non-nil map, key absent: unclassified → default secret + loud error.
+	//   - Nil map: classification unavailable (old hub). Distinct from "all unclassified".
+	//
+	// Additive wire field: old brokers ignore it (omitempty), new brokers
+	// receiving from old hubs see nil and must not treat it as "all secret".
+	EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
 	// ResolvedSecrets contains type-aware secrets resolved by the Hub.
 	// These are projected into the agent container based on their type.
 	ResolvedSecrets []ResolvedSecret `json:"resolvedSecrets,omitempty"`

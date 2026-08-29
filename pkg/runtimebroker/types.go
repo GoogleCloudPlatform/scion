@@ -278,6 +278,11 @@ type CreateAgentRequest struct {
 	// taking precedence over ResolvedEnv.
 	ResolvedEnv map[string]string `json:"resolvedEnv,omitempty"`
 
+	// EnvClassifications records the classification (plain, secret-fetchable,
+	// secret-injected) for each key in ResolvedEnv (#127, P3a). See
+	// api.EnvKind for three-state semantics (present, absent, nil).
+	EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
+
 	// ResolvedSecrets contains type-aware secrets resolved by the Hub.
 	// These are projected into the agent container based on their type
 	// (environment variable, file, or variable).

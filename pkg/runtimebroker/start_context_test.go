@@ -1731,3 +1731,85 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildStartContext_EnvClassificationsCarried verifies that the merged
+// env classification map (hub-sent + broker-written keys) survives
+// buildStartContext on the returned startContext. Two cases:
+//
+//  1. Hub sends a non-nil EnvClassifications → the returned field is non-nil,
+//     contains hub keys, AND additionally contains broker-written keys.
+//  2. Hub sends nil (old hub / version skew) → the returned field is nil,
+//     NOT an empty map. This preserves the three-state contract described on
+//     api.EnvKind: nil means "classification unavailable", distinct from
+//     "all classified" (non-nil empty map).
+//
+// Pinning these invariants prevents a regression where buildStartContext
+// computes the classification map but drops it on return, making the
+// broker's ~35 classification sites unrecoverable downstream.
+func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
+	t.Run("non-nil hub classifications merged with broker keys", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		hubCls := map[string]api.EnvKind{
+			"HUB_VAR": api.EnvKindPlain,
+		}
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:               "agent-cls",
+			EnvClassifications: hubCls,
+			HTTPRequest:        r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if sc.EnvClassifications == nil {
+			t.Fatal("EnvClassifications is nil; expected non-nil map carrying hub + broker keys")
+		}
+
+		// Hub key must survive.
+		if kind, ok := sc.EnvClassifications["HUB_VAR"]; !ok {
+			t.Error("hub key HUB_VAR missing from EnvClassifications")
+		} else if kind != api.EnvKindPlain {
+			t.Errorf("HUB_VAR: got kind %q, want %q", kind, api.EnvKindPlain)
+		}
+
+		// Broker-written key: SCION_WORKSPACE_MODE is always classified by the
+		// broker (it falls through to the shared-plain default when no
+		// WorkspaceMode is provided). Assert the specific key and kind, not
+		// just len() > 0, so this test cannot pass on the wrong map.
+		if kind, ok := sc.EnvClassifications["SCION_WORKSPACE_MODE"]; !ok {
+			t.Error("broker key SCION_WORKSPACE_MODE missing from EnvClassifications")
+		} else if kind != api.EnvKindPlain {
+			t.Errorf("SCION_WORKSPACE_MODE: got kind %q, want %q", kind, api.EnvKindPlain)
+		}
+	})
+
+	t.Run("nil hub classifications stays nil", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name: "agent-nil-cls",
+			// EnvClassifications intentionally nil — simulates an old hub
+			// that does not send classification data.
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Must be nil, NOT an empty non-nil map. assert.Empty would pass
+		// for both; this explicit nil check is the point of this test case.
+		if sc.EnvClassifications != nil {
+			t.Errorf("EnvClassifications: got %v (len %d), want nil — "+
+				"nil hub classifications must propagate as nil to preserve "+
+				"the three-state contract", sc.EnvClassifications, len(sc.EnvClassifications))
+		}
+	})
+}

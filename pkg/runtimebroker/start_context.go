@@ -45,6 +45,13 @@ type startContext struct {
 	Opts         api.StartOptions
 	TemplateSlug string
 	Manager      agent.Manager
+
+	// EnvClassifications is the merged provenance map: what the hub sent,
+	// plus the broker-written keys classified in buildStartContext. Nil means
+	// the hub sent none — see api.EnvKind's three-state contract. No consumer
+	// yet (GoogleCloudPlatform/scion#127 P3b); this exists so the broker's
+	// own classifications survive the function that computes them.
+	EnvClassifications map[string]api.EnvKind
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -76,8 +83,9 @@ type startContextInputs struct {
 	CreatorName string
 
 	// Env
-	ResolvedEnv     map[string]string
-	ResolvedSecrets []api.ResolvedSecret
+	ResolvedEnv        map[string]string
+	EnvClassifications map[string]api.EnvKind
+	ResolvedSecrets    []api.ResolvedSecret
 
 	// Behavior
 	NoAuth bool
@@ -213,6 +221,31 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Build merged environment ---
 	env := make(map[string]string)
 
+	// Inherit hub-side classifications (nil-safe: old hubs send nothing).
+	// Broker-set keys are classified below. The three-state semantics of
+	// the nil map are preserved: if in.EnvClassifications is nil (old hub),
+	// envCls stays nil and the caller can distinguish "unavailable" from
+	// "all classified" (#127, P3a).
+	var envCls map[string]api.EnvKind
+	if in.EnvClassifications != nil {
+		envCls = make(map[string]api.EnvKind, len(in.EnvClassifications))
+		for k, v := range in.EnvClassifications {
+			envCls[k] = v
+		}
+	}
+
+	// classifyBrokerEnv sets a classification for a broker-written key.
+	// If the hub didn't send classifications (nil map), the broker must
+	// also leave them nil — creating a non-nil map here would collapse
+	// state 3 (unavailable) into state 2 (all classified), producing the
+	// version-skew outage the three-state design prevents.
+	classifyBrokerEnv := func(key string, kind api.EnvKind) {
+		if envCls == nil {
+			return
+		}
+		envCls[key] = kind
+	}
+
 	// 1. Resolved env from Hub
 	for k, v := range in.ResolvedEnv {
 		env[k] = v
@@ -224,6 +257,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			parts := strings.SplitN(e, "=", 2)
 			if len(parts) == 2 {
 				env[parts[0]] = parts[1]
+				classifyBrokerEnv(parts[0], api.EnvKindPlain)
 			}
 		}
 	}
@@ -239,6 +273,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// broker's dev token caused 401s ("compact JWS format must have three parts").
 	if in.AgentToken != "" {
 		env["SCION_AUTH_TOKEN"] = in.AgentToken
+		// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+		// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
+		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
 		}
@@ -249,6 +286,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
 		env["SCION_AUTH_TOKEN"] = devToken
+		// Bootstrap: NOT in argv (same diversion as AgentToken path above).
+		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from broker env", "agent_id", in.AgentID, "length", len(devToken))
 		}
@@ -306,7 +345,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if hubEndpoint != "" {
 		env["SCION_HUB_ENDPOINT"] = hubEndpoint
+		classifyBrokerEnv("SCION_HUB_ENDPOINT", api.EnvKindPlain)
 		env["SCION_HUB_URL"] = hubEndpoint // legacy compat
+		classifyBrokerEnv("SCION_HUB_URL", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_HUB_ENDPOINT set", "agent_id", in.AgentID, "endpoint", hubEndpoint)
 		}
@@ -322,17 +363,23 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// 5. Agent identity env
 	if in.Slug != "" {
 		env["SCION_AGENT_SLUG"] = in.Slug
+		classifyBrokerEnv("SCION_AGENT_SLUG", api.EnvKindPlain)
 	}
 	if in.AgentID != "" {
 		env["SCION_AGENT_ID"] = in.AgentID
+		classifyBrokerEnv("SCION_AGENT_ID", api.EnvKindPlain)
 	}
 	if in.ProjectID != "" {
 		env["SCION_GROVE_ID"] = in.ProjectID
+		classifyBrokerEnv("SCION_GROVE_ID", api.EnvKindPlain)
 		env["SCION_PROJECT_ID"] = in.ProjectID
+		classifyBrokerEnv("SCION_PROJECT_ID", api.EnvKindPlain)
 	}
 	if in.ProjectPath != "" {
 		env["SCION_GROVE_PATH"] = in.ProjectPath
+		classifyBrokerEnv("SCION_GROVE_PATH", api.EnvKindPlain)
 		env["SCION_PROJECT_PATH"] = in.ProjectPath
+		classifyBrokerEnv("SCION_PROJECT_PATH", api.EnvKindPlain)
 	}
 
 	// Emit canonical workspace sharing mode.
@@ -344,26 +391,32 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Either way, we ensure a guaranteed non-empty value with a safe default.
 	if in.WorkspaceMode != "" {
 		env["SCION_WORKSPACE_MODE"] = string(store.ResolveWorkspaceSharingMode(in.WorkspaceMode))
+		classifyBrokerEnv("SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
 	if env["SCION_WORKSPACE_MODE"] == "" {
 		// Empty or unrecognized — default to shared-plain for backward compatibility.
 		env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+		classifyBrokerEnv("SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
 
 	// 6. Broker identity
 	if s.config.BrokerName != "" {
 		env["SCION_BROKER_NAME"] = s.config.BrokerName
+		classifyBrokerEnv("SCION_BROKER_NAME", api.EnvKindPlain)
 	}
 	if s.config.BrokerID != "" {
 		env["SCION_BROKER_ID"] = s.config.BrokerID
+		classifyBrokerEnv("SCION_BROKER_ID", api.EnvKindPlain)
 	}
 	if in.CreatorName != "" {
 		env["SCION_CREATOR"] = in.CreatorName
+		classifyBrokerEnv("SCION_CREATOR", api.EnvKindPlain)
 	}
 
 	// 7. Debug
 	if s.config.Debug {
 		env["SCION_DEBUG"] = "1"
+		classifyBrokerEnv("SCION_DEBUG", api.EnvKindPlain)
 	}
 
 	// 8. GCP identity metadata server configuration.
@@ -391,19 +444,25 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	switch gcpMetadataMode {
 	case store.GCPMetadataModeAssign, store.GCPMetadataModeBlock:
 		env["SCION_METADATA_MODE"] = gcpMetadataMode
+		classifyBrokerEnv("SCION_METADATA_MODE", api.EnvKindPlain)
 		env["SCION_METADATA_PORT"] = "18380"
+		classifyBrokerEnv("SCION_METADATA_PORT", api.EnvKindPlain)
 		if gcpMetadataMode == store.GCPMetadataModeAssign && in.Config != nil && in.Config.GCPIdentity != nil {
 			env["SCION_METADATA_SA_EMAIL"] = in.Config.GCPIdentity.SAEmail
+			classifyBrokerEnv("SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
 			env["SCION_METADATA_PROJECT_ID"] = in.Config.GCPIdentity.ProjectID
+			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
 		}
 		// The metadata emulator runs inside the sandbox (started by
 		// sciontool init), so localhost is correct — the emulator and the
 		// harness share the same network namespace.
 		env["GCE_METADATA_HOST"] = "localhost:18380"
+		classifyBrokerEnv("GCE_METADATA_HOST", api.EnvKindPlain)
 		// gcloud CLI uses GCE_METADATA_ROOT (not GCE_METADATA_HOST) to locate
 		// the metadata server during its initial configuration detection.
 		// Both must point at the same address.
 		env["GCE_METADATA_ROOT"] = "localhost:18380"
+		classifyBrokerEnv("GCE_METADATA_ROOT", api.EnvKindPlain)
 	case store.GCPMetadataModePassthrough:
 		// Deliberately no redirect: passthrough means the agent is meant to
 		// reach the real GCE metadata server. Listed explicitly so it is a
@@ -523,6 +582,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Removal is tracked in https://github.com/ptone/scion/issues/575.
 	if in.Config != nil && in.Config.SharedWorkspace {
 		env["SCION_SHARED_WORKSPACE"] = "true"
+		classifyBrokerEnv("SCION_SHARED_WORKSPACE", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
 		}
@@ -543,14 +603,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if !worktreeProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
+		// Clone URL may embed credentials — the original #127 bug.
+		classifyBrokerEnv("SCION_GIT_CLONE_URL", api.EnvKindSecretInjected)
 		if gc.Branch != "" {
 			env["SCION_GIT_BRANCH"] = gc.Branch
+			classifyBrokerEnv("SCION_GIT_BRANCH", api.EnvKindPlain)
 		}
 		if gc.Depth > 0 {
 			env["SCION_GIT_DEPTH"] = strconv.Itoa(gc.Depth)
+			classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
 		}
 		if in.Config.Branch != "" {
 			env["SCION_AGENT_BRANCH"] = in.Config.Branch
+			classifyBrokerEnv("SCION_AGENT_BRANCH", api.EnvKindPlain)
 		}
 		opts.Workspace = ""
 		// Keep opts.ProjectPath so that ProvisionAgent can resolve the correct
@@ -583,6 +648,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if isGitWorkspace {
 		env["SCION_WORKSPACE_GIT"] = "true"
+		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	}
 	// Absent when false — avoids encoding a "false" string agents must parse.
 
@@ -639,9 +705,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	mgr := s.resolveManagerForOpts(opts)
 
 	return &startContext{
-		Opts:         opts,
-		TemplateSlug: templateSlug,
-		Manager:      mgr,
+		Opts:               opts,
+		TemplateSlug:       templateSlug,
+		Manager:            mgr,
+		EnvClassifications: envCls,
 	}, nil
 }
 
