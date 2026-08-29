@@ -21,7 +21,7 @@
  * color-coded pill badge with icon, label, and tooltip.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { getMessageModeDisplay } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
@@ -119,7 +119,10 @@ export class ScionMessageModeBadge extends LitElement {
     const display = getMessageModeDisplay(effectiveMode);
 
     const badge = html`
-      <span class="badge ${display.color} ${this.size}">
+      <span
+        class="badge ${display.color} ${this.size}"
+        aria-label=${!this.showLabel ? display.label : nothing}
+      >
         <sl-icon name="${display.icon}"></sl-icon>
         ${this.showLabel ? display.label : ''}
       </span>

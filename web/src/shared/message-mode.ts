@@ -87,8 +87,12 @@ export const MODE_SORT_ORDER: Record<MessageMode, number> = {
 
 /**
  * Get the display config for a message mode.
- * Falls back to 'project' for undefined/unknown values (migration edge case).
+ * Falls back to 'project' for undefined/unknown values (migration edge case)
+ * or if the API returns a mode string not yet in the frontend vocabulary.
  */
-export function getMessageModeDisplay(mode?: MessageMode): MessageModeDisplay {
-  return MESSAGE_MODE_DISPLAY[mode || 'project'];
+export function getMessageModeDisplay(mode?: string): MessageModeDisplay {
+  if (mode && mode in MESSAGE_MODE_DISPLAY) {
+    return MESSAGE_MODE_DISPLAY[mode as MessageMode];
+  }
+  return MESSAGE_MODE_DISPLAY.project;
 }

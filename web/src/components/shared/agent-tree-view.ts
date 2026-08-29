@@ -58,7 +58,6 @@ import {
 import type { StatusType } from './status-badge.js';
 import './status-badge.js';
 import { getMessageModeDisplay } from '../../shared/message-mode.js';
-import './message-mode-badge.js';
 import './quick-message-dialog.js';
 
 const VARIANT_COLOR: Record<StatusVariant, string> = {
@@ -311,6 +310,7 @@ export class ScionAgentTreeView extends LitElement {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      padding-right: 20px; /* clearance for mode icon */
     }
 
     .node:hover .name {
@@ -936,6 +936,7 @@ export class ScionAgentTreeView extends LitElement {
     const agent = n.agent;
     const status = getAgentDisplayStatus(agent);
     const color = VARIANT_COLOR[getStateDisplay(status).variant];
+    const modeDisplay = getMessageModeDisplay(agent.messageMode);
     const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
     const isRoot = !parentId || !this.agents.some((a) => a.id === parentId);
@@ -967,8 +968,8 @@ export class ScionAgentTreeView extends LitElement {
             size="small"
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
-          <span class="mode-icon" style="position: absolute; top: 4px; right: 6px; font-size: 14px; color: var(--sl-color-${getMessageModeDisplay(agent.messageMode).color}-600);">
-            <sl-icon name=${getMessageModeDisplay(agent.messageMode).icon}></sl-icon>
+          <span class="mode-icon" style="position: absolute; top: 4px; right: 6px; font-size: 14px; color: var(--sl-color-${modeDisplay.color}-600);">
+            <sl-icon name=${modeDisplay.icon}></sl-icon>
           </span>
         </a>
         ${can(agent._capabilities, 'attach')
