@@ -348,7 +348,7 @@ func main() {
 		"handleAgentOutboundMessage": "self-auth gate (Section 3): GetAgentIdentityFromContext",
 		"handleAgentMessage":         "caller-side gate (Section 5): all callers must contain authorizeAgentMessage",
 		"broadcastDirect":            "caller-side gate (Section 5): all callers must contain authorizeAgentMessage",
-		"sendHumanToHuman":           "caller-side gate (Section 5): user-to-user path, callers must contain GetUserIdentityFromContext",
+		"sendHumanToHuman":           "caller-side gate (Section 5): user-to-user path, callers must contain isDMParticipant",
 	}
 
 	handlerFiles := parseGlob(fset, "pkg/hub/handlers_*.go")
@@ -396,7 +396,7 @@ func main() {
 	// broadcastDirect: called from handleProjectBroadcast, which pre-filters
 	//   recipients through authorizeAgentMessage.
 	// sendHumanToHuman: user-to-user path (no target agent), called from
-	//   handleConversationSend which verifies GetUserIdentityFromContext.
+	//   handleConversationSend which verifies isDMParticipant.
 	//
 	// SCOPE LIMITATION: caller discovery scans only pkg/hub/handlers_*.go.
 	// A caller added outside that glob (e.g. in a new top-level file) would
@@ -427,8 +427,8 @@ func main() {
 		},
 		{
 			callee:         "sendHumanToHuman",
-			requiredSymbol: "GetUserIdentityFromContext",
-			desc:           "user identity verification (user-to-user path, no target agent)",
+			requiredSymbol: "isDMParticipant",
+			desc:           "DM participant authorization (user-to-user path, no target agent)",
 			minCallers:     1,
 		},
 	}
