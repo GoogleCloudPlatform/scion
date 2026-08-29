@@ -403,15 +403,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// Record reply-affinity context so that the agent's next untagged reply
 	// can be routed back to the channel the user last spoke from (AC22).
 	// Only record for user-identity senders with a known channel.
-	if s.webChatStore != nil && req.Message.Channel != "" && strings.HasPrefix(req.Message.Sender, "user:") {
+	s.mu.RLock()
+	wcsAffinity := s.webChatStore
+	s.mu.RUnlock()
+	if wcsAffinity != nil && req.Message.Channel != "" && strings.HasPrefix(req.Message.Sender, "user:") {
 		if senderUserID != "" {
-			if err := s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now); err != nil {
+			if err := wcsAffinity.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now); err != nil {
 				log.Error("Failed to record conversation context for broker inbound",
 					"user_id", senderUserID, "agent_id", agent.ID, "channel", req.Message.Channel, "error", err)
 			}
 			// Update the thread watermark so the Phase 5 thread rail reflects
 			// inbound broker messages (last_activity_at / last_message_id).
-			if err := s.webChatStore.TouchThread(r.Context(), senderUserID, agent.ProjectID, agent.ID, storeMsg.ID, now); err != nil {
+			if err := wcsAffinity.TouchThread(r.Context(), senderUserID, agent.ProjectID, agent.ID, storeMsg.ID, now); err != nil {
 				log.Error("Failed to update thread watermark for broker inbound",
 					"user_id", senderUserID, "agent_id", agent.ID, "error", err)
 			}
