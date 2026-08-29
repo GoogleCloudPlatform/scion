@@ -1802,3 +1802,84 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 
 	return &result, nil
 }
+
+// --- Agent secret fetch (P2d, #127) ---
+
+// Per-key status constants returned by POST /api/v1/agent/secrets.
+// These are the wire values; the client defines its own constants to
+// decouple from pkg/hub. The contract fixture at
+// pkg/sciontool/hub/testdata/agent_secret_fetch_response.json pins both sides.
+const (
+	SecretStatusOK              = "ok"
+	SecretStatusUnavailable     = "entitled_but_unavailable"
+	SecretStatusAccessWithdrawn = "access_withdrawn"
+	SecretStatusNotFound        = "not_found"
+)
+
+// SecretFetchRequest is the client-side request body for POST /api/v1/agent/secrets.
+type SecretFetchRequest struct {
+	Keys []string `json:"keys"`
+}
+
+// SecretFetchResponse is the client-side response body from POST /api/v1/agent/secrets.
+type SecretFetchResponse struct {
+	Secrets []SecretFetchResult `json:"secrets"`
+}
+
+// SecretFetchResult is the per-key result in a secret fetch response.
+type SecretFetchResult struct {
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// FetchSecrets calls POST /api/v1/agent/secrets to retrieve secret values
+// by key name. Returns per-key results with distinct statuses; the caller
+// must inspect each result's Status field. Non-ok statuses are not errors
+// at the HTTP level — they arrive as 200 with per-key status information.
+//
+// HTTP-level errors (403 for pre-existing tokens, 500 for backend failures)
+// are returned as Go errors.
+func (c *Client) FetchSecrets(ctx context.Context, keys []string) (*SecretFetchResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agent/secrets",
+		strings.TrimSuffix(c.hubURL, "/"))
+
+	body, err := json.Marshal(SecretFetchRequest{Keys: keys})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hub request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result SecretFetchResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}

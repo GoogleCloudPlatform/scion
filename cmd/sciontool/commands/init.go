@@ -514,14 +514,27 @@ func runInit(args []string) int {
 		}
 	}
 
+	// Fetch secrets from the hub if SCION_SECRET_KEYS is set (#127, P2d).
+	// Absent or empty is the normal case today and is a clean no-op.
+	var secretOverrides map[string]string
+	if secretKeysRaw := os.Getenv("SCION_SECRET_KEYS"); secretKeysRaw != "" {
+		keys := splitSecretKeys(secretKeysRaw)
+		if len(keys) > 0 && hubClient != nil && hubClient.IsConfigured() {
+			secretOverrides = fetchSecretOverrides(hubClient, keys)
+		} else if len(keys) > 0 {
+			log.Error("SCION_SECRET_KEYS is set but hub client is not configured — cannot fetch secrets")
+		}
+	}
+
 	// Create supervisor with configuration
 	config := supervisor.Config{
-		GracePeriod: gracePeriod,
-		UID:         targetUID,
-		GID:         targetGID,
-		Username:    "scion",
-		Rootless:    rootless,
-		EnvOverlay:  harnessEnvOverlay,
+		GracePeriod:     gracePeriod,
+		UID:             targetUID,
+		GID:             targetGID,
+		Username:        "scion",
+		Rootless:        rootless,
+		EnvOverlay:      harnessEnvOverlay,
+		SecretOverrides: secretOverrides,
 	}
 	sup := supervisor.New(config)
 
@@ -2056,6 +2069,64 @@ func (a *hubMessageAdapter) SendSelfMessage(ctx context.Context, msg string, met
 	}
 	recipient := "agent:" + a.client.AgentID()
 	return a.client.SendSelfMessage(ctx, messages.NewSystemMessage("system", recipient, msg, metadata["system_category"]))
+}
+
+// splitSecretKeys parses the SCION_SECRET_KEYS comma-separated value into
+// individual key names. Empty segments are silently dropped.
+func splitSecretKeys(raw string) []string {
+	parts := strings.Split(raw, ",")
+	keys := make([]string, 0, len(parts))
+	for _, p := range parts {
+		k := strings.TrimSpace(p)
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// fetchSecretOverrides calls the hub's POST /api/v1/agent/secrets endpoint
+// and returns the successfully fetched values as a key→value map suitable
+// for supervisor.Config.SecretOverrides.
+//
+// Per-key statuses are logged but non-ok keys do NOT abort the agent. P4
+// is the phase that decides failure policy for missing keys; P2d records
+// the outcome and continues. Never logs a secret value — only key names
+// and statuses. (#127, P2d)
+func fetchSecretOverrides(client *hub.Client, keys []string) map[string]string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := client.FetchSecrets(ctx, keys)
+	if err != nil {
+		log.Error("Failed to fetch secrets from hub: %v", err)
+		return nil
+	}
+
+	overrides := make(map[string]string, len(resp.Secrets))
+	for _, s := range resp.Secrets {
+		switch s.Status {
+		case hub.SecretStatusOK:
+			overrides[s.Key] = s.Value
+			log.Info("Fetched secret %s: ok", s.Key)
+		case hub.SecretStatusUnavailable:
+			log.Error("Secret %s: entitled but unavailable — %s", s.Key, s.Error)
+		case hub.SecretStatusAccessWithdrawn:
+			log.Error("Secret %s: access withdrawn — %s", s.Key, s.Error)
+		case hub.SecretStatusNotFound:
+			log.Error("Secret %s: not found", s.Key)
+		default:
+			log.Error("Secret %s: unknown status %q — %s", s.Key, s.Status, s.Error)
+		}
+	}
+
+	if len(overrides) > 0 {
+		log.Info("Fetched %d of %d requested secret(s)", len(overrides), len(keys))
+	} else if len(keys) > 0 {
+		log.Error("No secrets were successfully fetched (%d requested)", len(keys))
+	}
+
+	return overrides
 }
 
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from
