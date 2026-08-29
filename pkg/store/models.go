@@ -85,8 +85,8 @@ type Agent struct {
 	DeletedAt         time.Time `json:"deletedAt,omitempty"`
 
 	// Ownership
-	CreatedBy  string `json:"createdBy,omitempty"`
-	OwnerID    string `json:"ownerId,omitempty"`
+	CreatedBy   string `json:"createdBy,omitempty"`
+	OwnerID     string `json:"ownerId,omitempty"`
 	Visibility  string `json:"visibility"`  // private, team, public
 	MessageMode string `json:"messageMode"` // none, lineage, branch, project
 
