@@ -7,7 +7,7 @@
 # every code path that can INSERT a row into the conversations table or modify
 # the participant listing index.
 #
-# Conversation-minting surface (enumerated 2026-08-27):
+# Conversation-minting surface (enumerated 2026-08-27, Option C added 2026-08-29):
 #
 #   Go method calls (must only appear in pkg/messaging/ and pkg/store/):
 #     1.  UpsertConversationByExternalRef — the primary resolve-or-create path
@@ -29,6 +29,13 @@
 #                                         for idempotent inserts; Postgres uses
 #                                         ON CONFLICT ... DO NOTHING (same line).
 #
+#   EXEMPTION (Option C, tranche C): pkg/hub/webchannel_store.go and
+#   pkg/hub/webchannel_store_postgres.go may contain raw INSERT INTO
+#   conversations when the statement mints kind='group'. These files perform
+#   an atomic topic+conversation dual-write inside an explicit tx; the store
+#   methods take ctx, not tx, so they cannot participate in the webchat
+#   transaction. Surfaces 1, 2a, 2b, and 3 remain fully barred in pkg/hub.
+#
 # Test files (*_test.go) are excluded: test fixtures legitimately call store
 # methods to set up state. The guard protects production code paths.
 #
@@ -46,6 +53,15 @@
 # site constructs the table name dynamically. But a green gate from this
 # script guarantees only that the enumerated textual patterns are absent
 # outside the allowed packages — it is not a proof that no mint path exists.
+#   - The Option C exemption is textual: it extracts the SQL statement
+#     (from the INSERT line through the closing backtick of the Go raw
+#     string literal) and requires 'group' to appear in that text while
+#     rejecting any other kind literal ('direct', 'channel', 'support').
+#     A kind value supplied through a variable (e.g., kindVar instead of
+#     'group') defeats the exemption check and will be rejected by the
+#     guard even if the variable always holds "group" at runtime. This is
+#     deliberate — the guard cannot verify runtime values, so it requires
+#     the literal.
 #
 # Note: the default fallback for unknown conversation kinds uses
 # requireParticipant, making the participant table an ACL for any future
@@ -119,7 +135,10 @@ fi
 # Matches the full INSERT family: INSERT INTO, INSERT OR IGNORE INTO,
 # INSERT OR REPLACE INTO, with optional quoting on the table name, and
 # case-insensitive to catch any casing variant.
-# Allowed only in pkg/store/.
+# Allowed in pkg/store/ unconditionally.
+# Allowed in pkg/hub/webchannel_store{,_postgres}.go ONLY when the INSERT
+# mints kind='group' (Option C). The kind literal must appear in the
+# same SQL statement (bounded by the Go raw string backtick delimiter).
 # Pattern uses POSIX ERE (-E flag). Do not rewrite with BRE alternation (\|)
 # or word-boundary (\b) — those are GNU extensions that silently match nothing
 # on BSD/macOS grep, causing the guard to report false-clean.
@@ -133,11 +152,68 @@ grep -rEni 'INSERT[[:space:]]+(OR[[:space:]]+[A-Z]+[[:space:]]+)?INTO[[:space:]]
   >"$tmp" || true
 
 if [[ -s "$tmp" ]]; then
-  echo "Raw SQL INSERT INTO conversations outside allowed packages:" >&2
-  cat "$tmp" >&2
-  echo >&2
-  echo "Raw SQL conversation inserts are only allowed in pkg/store/." >&2
-  rc=1
+  # Option C exemption: for matches in the two webchannel_store files,
+  # extract the SQL statement that contains the INSERT and verify that
+  # 'group' appears in it (and NO other kind literal such as 'direct').
+  #
+  # Statement extraction: all exempted INSERT sites live inside Go raw
+  # string literals (backtick-delimited). From the INSERT line, we
+  # collect text through the first line that contains a closing backtick,
+  # or up to 20 lines (safety cap). The INSERT line itself is included
+  # so single-line statements are correctly handled.
+  violations=""
+  while IFS= read -r match; do
+    file="${match%%:*}"
+    rest="${match#*:}"
+    lineno="${rest%%:*}"
+
+    # Normalise the path: strip leading "./" if present, so the
+    # comparison works regardless of how grep formats the prefix.
+    # The normalised value is compared against a fixed allowlist —
+    # any format change causes the exemption to NOT apply (fail-closed).
+    norm_file="${file#./}"
+
+    # Exemption applies ONLY to these two files in pkg/hub/
+    if [[ "$norm_file" = "pkg/hub/webchannel_store.go" || "$norm_file" = "pkg/hub/webchannel_store_postgres.go" ]]; then
+      # Extract the SQL statement: from the INSERT keyword through the
+      # closing backtick (end of Go raw string literal), cap at 20 lines.
+      # On the first line, strip everything before INSERT so the opening
+      # backtick of the Go raw string is removed — otherwise a single-line
+      # INSERT (where both backticks are on the same line) would be
+      # truncated at the opening backtick instead of the closing one.
+      end=$((lineno + 20))
+      stmt=$(sed -n "${lineno},${end}p" "$file")
+      # Strip prefix before INSERT on the first line (removes opening `)
+      stmt=$(printf '%s\n' "$stmt" | sed '1s/^[^Ii]*INSERT/INSERT/I')
+      # Truncate at the first closing backtick (`) to bound the statement.
+      # This prevents text after the statement (comments, next func) from
+      # influencing the kind check.
+      stmt=$(printf '%s\n' "$stmt" | sed '/`/{ s/`.*//; p; d; }' | head -21)
+
+      # Check 1: 'group' must appear in the statement text.
+      if ! printf '%s\n' "$stmt" | grep -q "'group'"; then
+        violations="${violations}${match}"$'\n'
+        continue
+      fi
+      # Check 2: no OTHER kind literal (e.g., 'direct') in the statement.
+      if printf '%s\n' "$stmt" | grep -qE "'(direct|channel|support)'"; then
+        violations="${violations}${match}"$'\n'
+        continue
+      fi
+      continue  # Exempted: kind='group' confirmed, no conflicting kinds
+    fi
+    violations="${violations}${match}"$'\n'
+  done <"$tmp"
+
+  if [[ -n "$violations" ]]; then
+    printf 'Raw SQL INSERT INTO conversations outside allowed packages:\n' >&2
+    printf '%s' "$violations" >&2
+    echo >&2
+    printf 'Raw SQL conversation inserts are only allowed in pkg/store/.\n' >&2
+    printf "Exception: pkg/hub/webchannel_store{,_postgres}.go may INSERT\n" >&2
+    printf "with kind='group' (Option C — see script header).\n" >&2
+    rc=1
+  fi
 fi
 
 if [[ "$rc" -ne 0 ]]; then
