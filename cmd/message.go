@@ -145,6 +145,14 @@ Examples:
 					return fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
 				}
 				convRef = ref
+			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
+				// Looks like a conversation reference but failed to parse.
+				// Parse-failure-denies: fail loudly, do not fall through to legacy paths.
+				return fmt.Errorf("invalid conversation reference: %w", err)
+			} else if strings.HasPrefix(recipient, "@") {
+				// @ prefix is exclusively a conversation reference in the new grammar.
+				// A bare email without leading @ falls through to the legacy path below.
+				return fmt.Errorf("invalid conversation reference: %w", err)
 			} else if messages.IsGroupRecipient(recipient) {
 				parsed, err := messages.ParseGroupRecipient(recipient)
 				if err != nil {

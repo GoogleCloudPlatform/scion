@@ -357,6 +357,36 @@ func TestSendMessageViaConversation_EmailRef_NoAgentContext(t *testing.T) {
 	assert.Len(t, *outbound, 0, "no outbound messages should be sent")
 }
 
+// TestConvRef_MalformedConvIDDenied verifies that conv:not-a-uuid fails with
+// a clear error instead of falling through to legacy agent name parsing.
+func TestConvRef_MalformedConvIDDenied(t *testing.T) {
+	// conv:not-a-uuid must fail, not fall through to legacy agent name
+	resetMessageFlags()
+	err := messageCmd.RunE(messageCmd, []string{"conv:not-a-uuid", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid conversation reference")
+}
+
+// TestConvRef_MalformedThreadDenied verifies that #space/thread fails with
+// a clear error instead of falling through to legacy agent name parsing.
+func TestConvRef_MalformedThreadDenied(t *testing.T) {
+	// #space/thread must fail, not fall through to legacy agent name
+	resetMessageFlags()
+	err := messageCmd.RunE(messageCmd, []string{"#space/thread", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid conversation reference")
+}
+
+// TestConvRef_BareAtDenied verifies that @ alone fails with a clear error
+// instead of falling through to bare email detection.
+func TestConvRef_BareAtDenied(t *testing.T) {
+	// @ alone must fail, not fall through to bare email detection
+	resetMessageFlags()
+	err := messageCmd.RunE(messageCmd, []string{"@", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid conversation reference")
+}
+
 // TestBackwardCompat_BareAgentName verifies that scion message <agent-name> 'text'
 // still works with the legacy path (no ParseReference match).
 func TestBackwardCompat_BareAgentName(t *testing.T) {
