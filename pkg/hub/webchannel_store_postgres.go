@@ -1093,46 +1093,50 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 
 	// Backfill each topic atomically.
 	for _, t := range topics {
-		convID := uuid.New().String()
+		if err := func() error {
+			convID := uuid.New().String()
 
-		tx, err := s.db.Begin()
-		if err != nil {
-			return fmt.Errorf("begin backfill tx for topic %s: %w", t.id, err)
-		}
+			tx, err := s.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				return fmt.Errorf("begin backfill tx for topic %s: %w", t.id, err)
+			}
+			// Rollback after a successful Commit is a no-op in database/sql.
+			// The defer ensures cleanup on ALL exit paths, including commit failure,
+			// which previously leaked the transaction (deadlock at MaxOpenConns=1).
+			defer tx.Rollback() //nolint:errcheck
 
-		// DEF-36: group conversations do NOT populate the participant listing index.
-		// Group conversation participants are derived from project membership, not
-		// from an explicit participant table. The participant table is a listing
-		// index, NEVER the access authority (design doc §2.4.2.1).
-		_, err = tx.Exec(
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', NOW(), NOW())`,
-			convID, t.projectID, t.name)
-		if err != nil {
-			tx.Rollback() //nolint:errcheck
-			return fmt.Errorf("insert conversation for topic %s: %w", t.id, err)
-		}
+			// DEF-36: group conversations do NOT populate the participant listing index.
+			// Group conversation participants are derived from project membership, not
+			// from an explicit participant table. The participant table is a listing
+			// index, NEVER the access authority (design doc §2.4.2.1).
+			_, err = tx.Exec(
+				`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+				 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', NOW(), NOW())`,
+				convID, t.projectID, t.name)
+			if err != nil {
+				return fmt.Errorf("insert conversation for topic %s: %w", t.id, err)
+			}
 
-		// UPDATE the topic — WHERE conversation_id IS NULL makes this safe
-		// under concurrent runs.
-		res, err := tx.Exec(
-			`UPDATE webchat_topic SET conversation_id = $1 WHERE id = $2 AND conversation_id IS NULL`,
-			convID, t.id)
-		if err != nil {
-			tx.Rollback() //nolint:errcheck
-			return fmt.Errorf("update topic %s conversation_id: %w", t.id, err)
-		}
+			// UPDATE the topic — WHERE conversation_id IS NULL makes this safe
+			// under concurrent runs.
+			res, err := tx.Exec(
+				`UPDATE webchat_topic SET conversation_id = $1 WHERE id = $2 AND conversation_id IS NULL`,
+				convID, t.id)
+			if err != nil {
+				return fmt.Errorf("update topic %s conversation_id: %w", t.id, err)
+			}
 
-		// If another process already backfilled this topic, the UPDATE affected
-		// 0 rows. Roll back to avoid orphan conversation rows.
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			tx.Rollback() //nolint:errcheck
-			continue
-		}
+			// If another process already backfilled this topic, the UPDATE affected
+			// 0 rows. Return nil WITHOUT committing — the deferred Rollback will
+			// discard the orphan conversation row.
+			n, _ := res.RowsAffected()
+			if n == 0 {
+				return nil
+			}
 
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit backfill tx for topic %s: %w", t.id, err)
+			return tx.Commit()
+		}(); err != nil {
+			return fmt.Errorf("backfill topic %s: %w", t.id, err)
 		}
 	}
 

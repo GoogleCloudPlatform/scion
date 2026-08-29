@@ -738,3 +738,54 @@ func TestListTopics_ReturnsConversationID(t *testing.T) {
 	}
 	require.True(t, found, "topic-list-conv should appear in ListTopics")
 }
+
+// ---------------------------------------------------------------------------
+// TestMigration_UniqueIndexExists
+// ---------------------------------------------------------------------------
+
+// TestMigration_UniqueIndexExists verifies that the addTopicConversationID
+// migration creates the unique partial index on webchat_topic(conversation_id).
+// Without this index a concurrent backfill could silently assign the same
+// conversation to two topics — the constraint is the last line of defence.
+func TestMigration_UniqueIndexExists(t *testing.T) {
+	_, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_webchat_topic_conversation'`,
+	).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "unique index idx_webchat_topic_conversation must exist after migration")
+}
+
+// ---------------------------------------------------------------------------
+// TestMigration_UniqueIndexRejectsDuplicateConversationID
+// ---------------------------------------------------------------------------
+
+// TestMigration_UniqueIndexRejectsDuplicateConversationID proves the unique
+// index actually enforces one-topic-per-conversation by inserting two topics
+// with the same conversation_id and expecting a constraint violation on the
+// second insert.
+func TestMigration_UniqueIndexRejectsDuplicateConversationID(t *testing.T) {
+	_, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	sharedConvID := "conv-dup-test"
+
+	// First topic with conversation_id succeeds.
+	_, err := db.Exec(
+		`INSERT INTO webchat_topic (id, project_id, name, conversation_id, created_by, created_at, last_activity_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"topic-a", "proj-dup", "Topic A", sharedConvID, "user-1", now, now)
+	require.NoError(t, err, "first insert should succeed")
+
+	// Second topic with the SAME conversation_id must fail.
+	_, err = db.Exec(
+		`INSERT INTO webchat_topic (id, project_id, name, conversation_id, created_by, created_at, last_activity_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"topic-b", "proj-dup", "Topic B", sharedConvID, "user-1", now, now)
+	require.Error(t, err, "second insert with duplicate conversation_id must be rejected by unique index")
+	require.Contains(t, err.Error(), "UNIQUE constraint failed", "error should be a constraint violation")
+}
