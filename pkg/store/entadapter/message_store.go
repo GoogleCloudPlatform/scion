@@ -504,3 +504,22 @@ func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, 
 	}
 	return nil
 }
+
+// CountUnbackfilledMessages returns the number of messages with a NULL
+// conversation_id. When projectID is non-empty the count is scoped to that
+// project; otherwise it counts across all projects.
+func (s *MessageStore) CountUnbackfilledMessages(ctx context.Context, projectID string) (int, error) {
+	query := s.client.Message.Query().Where(message.ConversationIDIsNil())
+	if projectID != "" {
+		pid, err := parseUUID(projectID)
+		if err != nil {
+			return 0, err
+		}
+		query.Where(message.ProjectIDEQ(pid))
+	}
+	count, err := query.Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return count, nil
+}
