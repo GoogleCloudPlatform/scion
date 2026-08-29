@@ -60,7 +60,7 @@ assert sh.INTERFACE_VERSION >= 2, (
 )
 
 OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
-OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
+OPENCODE_CONFIG_FILE = "~/.config/opencode/.opencode.json"
 
 VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai")
 
@@ -130,6 +130,7 @@ def _vertex_env_overlay(ctx: sh.ProvisionContext) -> dict[str, str]:
         placeholder = f"${{{location_key}}}"
         env["VERTEX_LOCATION"] = placeholder
         env["GOOGLE_CLOUD_REGION"] = placeholder
+        env["VERTEXAI_LOCATION"] = placeholder
     return env
 
 
@@ -142,7 +143,7 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     """Translate a universal MCPServerConfig into OpenCode's native shape.
 
     OpenCode uses a different schema from Claude/Gemini:
-      - parent key is "mcp" (not "mcpServers")
+      - parent key is "mcpServers" (matching the Go config struct)
       - "type": "local" | "remote" instead of stdio/sse/streamable-http
       - local entries take a single "command" array (no separate args)
       - local env var key is "environment" (not "env")
@@ -202,7 +203,7 @@ def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
 
 
 def _write_mcp_config(servers: dict[str, Any]) -> None:
-    """Merge translated MCP servers into ~/.config/opencode/opencode.json."""
+    """Merge translated MCP servers into ~/.config/opencode/.opencode.json."""
     config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
     config_data: dict[str, Any] = {}
     if os.path.isfile(config_path):
@@ -213,17 +214,47 @@ def _write_mcp_config(servers: dict[str, Any]) -> None:
         if isinstance(existing, dict):
             config_data = existing
 
-    mcp_block = config_data.get("mcp")
+    mcp_block = config_data.get("mcpServers")
     if not isinstance(mcp_block, dict):
         mcp_block = {}
     for name, native in servers.items():
         mcp_block[name] = native
-    config_data["mcp"] = mcp_block
+    config_data["mcpServers"] = mcp_block
+    sh.atomic_write_json(config_path, config_data)
+
+
+def _write_vertex_provider_config() -> None:
+    """Write vertex-ai provider config into ~/.config/opencode/.opencode.json.
+
+    Sets providers.copilot.apiKey to empty string so viper config values
+    override defaults, preventing GITHUB_TOKEN from being used even if
+    the launch wrapper does not strip it.  Also sets vertex models for all agent
+    types so opencode defaults to Gemini via VertexAI.
+    """
+    config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
+    config_data: dict[str, Any] = {}
+    if os.path.isfile(config_path):
+        try:
+            existing = sh.load_json(config_path)
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if isinstance(existing, dict):
+            config_data = existing
+
+    providers = config_data.setdefault("providers", {})
+    providers["copilot"] = {"apiKey": ""}
+
+    agents = config_data.setdefault("agents", {})
+    agents["coder"] = {"model": "vertexai.gemini-2.5"}
+    agents["summarizer"] = {"model": "vertexai.gemini-2.5"}
+    agents["task"] = {"model": "vertexai.gemini-2.5-flash"}
+    agents["title"] = {"model": "vertexai.gemini-2.5-flash"}
+
     sh.atomic_write_json(config_path, config_data)
 
 
 def _write_model_config(model: str) -> None:
-    """Write the resolved model into ~/.config/opencode/opencode.json."""
+    """Write the resolved model into ~/.config/opencode/.opencode.json."""
     config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
     config_data: dict[str, Any] = {}
     if os.path.isfile(config_path):
@@ -274,8 +305,9 @@ def provision(ctx: sh.ProvisionContext) -> None:
 
     if resolved.method == "vertex-ai":
         extra["vertex_project_env"] = "VERTEXAI_PROJECT"
-        extra["vertex_location_env"] = "VERTEX_LOCATION"
+        extra["vertex_location_env"] = "VERTEXAI_LOCATION"
         env = _vertex_env_overlay(ctx)
+        _write_vertex_provider_config()
 
     ctx.write_outputs(resolved, env=env, extra=extra)
 

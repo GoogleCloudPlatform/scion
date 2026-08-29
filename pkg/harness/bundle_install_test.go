@@ -80,7 +80,7 @@ func TestBundleInstall_OpenCode(t *testing.T) {
 	// 3. Assert the home/ file layout — these are the golden paths that must
 	// match the implicit mapEmbedFileToHomePath placement.
 	wantHomeFiles := []string{
-		"home/.config/opencode/opencode.json",
+		"home/.config/opencode/.opencode.json",
 	}
 	for _, rel := range wantHomeFiles {
 		full := filepath.Join(installDir, filepath.FromSlash(rel))

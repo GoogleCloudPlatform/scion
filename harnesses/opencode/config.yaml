@@ -44,7 +44,11 @@ command:
   # task_position is before_base_args because the compiled OpenCode harness
   # emits `opencode --prompt <task> <base_args...>` — flipping this to
   # after_base_args breaks parity for any caller that passes harness args.
-  base: ["opencode"]
+  # opencode-launch.sh renames GITHUB_TOKEN to SCION_GIT_TOKEN and
+  # reconfigures the git credential helper before exec-ing opencode.
+  # This prevents opencode from auto-detecting scion's git PAT as a
+  # GitHub Copilot credential while preserving git clone/push/pull.
+  base: ["sh", "/home/scion/.local/bin/opencode-launch.sh"]
   resume_flag: "--continue"
   task_flag: "--prompt"
   task_position: before_base_args
