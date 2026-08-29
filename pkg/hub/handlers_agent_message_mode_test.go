@@ -415,7 +415,6 @@ func TestSetMessageMode_Cascade(t *testing.T) {
 	rr := smmDoRequest(t, srv, root.ID, SetMessageModeRequest{
 		Mode:    "branch",
 		Cascade: true,
-		Reason:  "expand to branch mode",
 	}, ownerIdent)
 
 	if rr.Code != http.StatusOK {

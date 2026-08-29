@@ -32,7 +32,6 @@ import (
 type SetMessageModeRequest struct {
 	Mode    string `json:"mode"`              // Required: "none", "lineage", "branch", "project"
 	Cascade bool   `json:"cascade,omitempty"` // Optional: apply to all descendants
-	Reason  string `json:"reason,omitempty"`  // Optional: audit trail context
 }
 
 // SetMessageModeResponse is the response for the set_message_mode action.
@@ -60,6 +59,7 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 	ctx := r.Context()
 
 	// 1. Parse request body.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // 64KB limit
 	var req SetMessageModeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ValidationError(w, "invalid request body", nil)
@@ -85,9 +85,14 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Authentication required", nil)
 		return
 	}
-	if identity.Type() == "agent" {
+	// D7: Human-only — DENY all non-user callers unconditionally.
+	// This catches "agent", "federated_agent", "federated_service", "broker", etc.
+	switch identity.Type() {
+	case "user", "dev", "federated_user":
+		// Allowed identity types — continue to further checks.
+	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Agent callers cannot change message mode (D7: human-only operation)", nil)
+			"Only human users can change message mode (D7: human-only operation)", nil)
 		return
 	}
 
@@ -104,7 +109,23 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 	// super-admins. Project admins who are NOT super-admins must be denied.
 	if userIdent, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(userIdent) {
 		membership, err := s.store.GetProjectMembership(ctx, agent.ProjectID, userIdent.ID())
-		if err == nil && membership != nil && membership.Role == store.ProjectRoleAdmin {
+		if err != nil {
+			// Fail closed: if we can't verify role, deny rather than skip the check.
+			slog.Error("failed to check project membership for set_message_mode",
+				"user_id", userIdent.ID(), "project_id", agent.ProjectID, "error", err)
+			RuntimeError(w, "Failed to verify project membership")
+			return
+		}
+		// Also check ancestry before denying admins — a user who is both admin
+		// AND lineage owner should be allowed via lineage ownership (LOW-3).
+		isLineageOwner := false
+		for _, ancestorID := range agent.Ancestry {
+			if ancestorID == userIdent.ID() {
+				isLineageOwner = true
+				break
+			}
+		}
+		if !isLineageOwner && membership != nil && membership.Role == store.ProjectRoleAdmin {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Project admins cannot change message mode (D7: owner-only operation)", nil)
 			return
@@ -134,7 +155,9 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 	if previousMode != req.Mode {
 		agent.MessageMode = req.Mode
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			RuntimeError(w, "Failed to update agent message mode: "+err.Error())
+			slog.Error("failed to update agent message mode",
+				"agent_id", agent.ID, "error", err)
+			RuntimeError(w, "Failed to update agent message mode")
 			return
 		}
 
@@ -151,7 +174,7 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 	// 11. Cascade (if requested).
 	var cascadeResult *CascadeResult
 	if req.Cascade {
-		cascadeResult, err = s.cascadeMessageMode(ctx, agent, req.Mode, req.Reason)
+		cascadeResult, err = s.cascadeMessageMode(ctx, agent, req.Mode)
 		if err != nil {
 			// Primary agent was updated, but cascade failed — log and return partial.
 			slog.Error("cascade message mode failed", "agent_id", agent.ID, "error", err)
@@ -175,7 +198,7 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 
 // cascadeMessageMode applies a message mode to all descendants of the root agent.
 // Best-effort per agent: a failure to update one descendant does not stop the rest.
-func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode, reason string) (*CascadeResult, error) {
+func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode string) (*CascadeResult, error) {
 	descendants, err := s.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID:  root.ProjectID,
 		AncestorID: root.ID,
