@@ -35,16 +35,15 @@ jobs:
         if: always()
         run: |
           echo "## Race Detection Results" >> $GITHUB_STEP_SUMMARY
-          RACES=$(grep -c "^WARNING: DATA RACE" race-detection-output.txt || true)
-          FAILS=$(grep -c "^--- FAIL:" race-detection-output.txt || true)
+          RACES=$(grep -c "^WARNING: DATA RACE" race-detection-output.txt 2>/dev/null || true)
+          FAILS=$(grep -c "^--- FAIL:" race-detection-output.txt 2>/dev/null || true)
+          RACES=${RACES:-0}
+          FAILS=${FAILS:-0}
           echo "- Data races found: ${RACES}" >> $GITHUB_STEP_SUMMARY
           echo "- Test failures: ${FAILS}" >> $GITHUB_STEP_SUMMARY
           if [ "$RACES" -gt 0 ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Race locations" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            grep -A2 "^WARNING: DATA RACE" race-detection-output.txt >> $GITHUB_STEP_SUMMARY || true
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "Race details are in the uploaded artifact." >> $GITHUB_STEP_SUMMARY
           fi
           if [ "$RACES" -eq 0 ] && [ "$FAILS" -eq 0 ]; then
             echo "All tests passed with race detector enabled." >> $GITHUB_STEP_SUMMARY
@@ -53,6 +52,7 @@ jobs:
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "_Scope: the Go race detector instruments shared-memory access in exercised code paths only." >> $GITHUB_STEP_SUMMARY
           echo "It does not detect file-level TOCTOU, database races, or cross-process concurrency issues." >> $GITHUB_STEP_SUMMARY
+          echo "This run covers the root module only (extras/ modules are separate and not included)." >> $GITHUB_STEP_SUMMARY
           echo "A clean report means no detected data races — not no concurrency bugs._" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload race detection results
