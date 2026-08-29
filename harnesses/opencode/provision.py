@@ -228,7 +228,7 @@ def _write_vertex_provider_config() -> None:
 
     Sets providers.copilot.apiKey to empty string so viper config values
     override defaults, preventing GITHUB_TOKEN from being used even if
-    ``env -u`` misses it somehow.  Also sets vertex models for all agent
+    the launch wrapper does not strip it.  Also sets vertex models for all agent
     types so opencode defaults to Gemini via VertexAI.
     """
     config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
