@@ -1350,6 +1350,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// would silently lose assign when the gate moves to ActionAssign.
 	backfillProjectAssignPolicies(ctx, s)
 
+	// Backfill the "message" action into existing project member-create-agents
+	// policies. Projects created before msg-authz (PR #1371) lack this action,
+	// causing non-owner/non-admin members to be denied agent messaging.
+	backfillProjectMessageAction(ctx, s)
+
 	// Seed role definitions for the role-binding authorization model (Phase 1E).
 	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
 	seedRoleDefinitions(ctx, s)

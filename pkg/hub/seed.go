@@ -290,6 +290,59 @@ func backfillProjectAssignPolicies(ctx context.Context, s store.Store) {
 	}
 }
 
+// backfillProjectMessageAction ensures every existing project's member-create-agents
+// policy includes the "message" action. Projects created before msg-authz (PR #1371)
+// only had "create" (and possibly "stop_all") — without "message", non-owner/non-admin
+// project members silently lose the ability to message agents. The inline backfill in
+// createProjectMembersGroupAndPolicy covers projects that are touched after the
+// upgrade, but a project nobody touches never runs that path. This startup backfill
+// closes the gap.
+func backfillProjectMessageAction(ctx context.Context, s store.Store) {
+	var cursor string
+	for {
+		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:  500,
+			Cursor: cursor,
+		})
+		if err != nil {
+			slog.Warn("failed to list projects for message-action backfill", "error", err)
+			return
+		}
+		for i := range res.Items {
+			project := &res.Items[i]
+			policyName := "project:" + project.Slug + ":member-create-agents"
+			policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+			if err != nil || len(policies.Items) == 0 {
+				slog.Debug("skipping message-action backfill, no member policy",
+					"project_id", project.ID, "slug", project.Slug)
+				continue
+			}
+			policy := &policies.Items[0]
+			hasMessage := false
+			for _, a := range policy.Actions {
+				if a == "message" {
+					hasMessage = true
+					break
+				}
+			}
+			if !hasMessage {
+				policy.Actions = append(policy.Actions, "message")
+				if err := s.UpdatePolicy(ctx, policy); err != nil {
+					slog.Warn("failed to backfill message action into project member policy",
+						"project_id", project.ID, "policy", policyName, "error", err)
+				} else {
+					slog.Info("backfilled message action into project member policy",
+						"project_id", project.ID, "policy", policyName)
+				}
+			}
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+}
+
 // seedPolicyTombstoneKey returns the hub-setting key used to record that a
 // seeded policy was intentionally deleted by an operator.
 func seedPolicyTombstoneKey(policyName string) string {
