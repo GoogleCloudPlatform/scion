@@ -138,10 +138,12 @@ for hfile in pkg/hub/handlers_*.go; do
     # dispatch helper but is always called from an authorized context is safe;
     # a file that CALLS a dispatch function is an ingress point.
     #
-    # Patterns: dispatchWithBrokerRetry, PublishUserMessage, PublishBroadcast
-    # are the three dispatch sinks. managedAgentMessage is excluded — it is an
-    # internal helper always called from handlers_agent_messaging.go (authorized).
-    if grep -q 'dispatchWithBrokerRetry\|\.PublishUserMessage\|\.PublishBroadcast' "$hfile" 2>/dev/null; then
+    # Patterns: dispatchWithBrokerRetry, PublishUserMessage, PublishBroadcast,
+    # managedAgentMessage are the four dispatch sinks. All use a leading dot
+    # (\.Symbol) so they match method CALLS (s.Symbol) not function DEFINITIONS
+    # (func ... Symbol). handlers_managed_agents.go defines managedAgentMessage
+    # but does not call it via method syntax, so it correctly shows 0 hits.
+    if grep -q 'dispatchWithBrokerRetry\|\.PublishUserMessage\|\.PublishBroadcast\|\.managedAgentMessage' "$hfile" 2>/dev/null; then
         if ! grep -q "authorizeAgentMessage" "$hfile" 2>/dev/null; then
             echo "FAIL [FAIL-CLOSED] $(basename "$hfile") contains dispatch calls but no authorizeAgentMessage"
             failures=$((failures + 1))
