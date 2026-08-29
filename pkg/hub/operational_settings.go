@@ -1165,6 +1165,29 @@ func (o *OperationalSettings) ProjectDefaultScratchpad() bool {
 	return true // field omitted in doc → compiled default
 }
 
+// ConversationReadSwitch returns whether the Phase 8 conversation read-switch
+// is enabled. Returns false (compiled default) when the messaging section is
+// absent from the DB. Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ConversationReadSwitch() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return false // compiled default: OFF
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return false // parse error → fall back to compiled default
+	}
+
+	if ms.ConversationReadSwitch != nil {
+		return *ms.ConversationReadSwitch
+	}
+	return false // field omitted in doc → compiled default
+}
+
 // applySnapshotLogLevel applies the log-level portion of the snapshot.
 // This is separated from applySnapshot because log level is a Layer-0 setting
 // (per design §3.1) and is only changed in file mode via reloadSettings.

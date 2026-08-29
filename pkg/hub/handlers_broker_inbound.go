@@ -35,6 +35,15 @@ import (
 type inboundMessageRequest struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+
+	// Conversation resolution fields (Phase 11).
+	// When Surface and ExternalRef are set, the hub resolves (or creates) a
+	// conversation before dispatching the message.  This moves conversation
+	// attribution to the broker edge so every inbound message carries a
+	// conversation_id.
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
 }
 
 // handleBrokerInbound handles POST /api/v1/broker/inbound.
@@ -212,6 +221,50 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		req.Message.Urgent = true
 	}
 
+	// Validate the inbound message through the new envelope choke point.
+	// This catches malformed payloads from external channels (e.g. the Teams
+	// adapter emitting channel="" with a non-empty ThreadID) before dispatch
+	// (Phase 7, AC-8).
+	if err := messaging.ValidateLegacyMessage(req.Message); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+		return
+	}
+
+	// Phase 11: Broker edge conversation resolution.
+	// If the plugin provided surface + external_ref, resolve or create a
+	// conversation before dispatch.  ExternalRef without Surface is rejected
+	// (AC-8 regression guard: a bare thread/ref with no surface is malformed).
+	if req.ExternalRef != "" && req.Surface == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"external_ref requires surface to be set", nil)
+		return
+	}
+	if req.Surface != "" && req.ExternalRef != "" {
+		var keyOpts []messaging.ConversationByKeyOption
+		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
+		if req.ParentRef != "" {
+			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
+		}
+		if agent.ID != "" {
+			agentID := agent.ID
+			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
+		}
+		if s.webChatStore != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		}
+		convResult := messaging.ResolveOrCreateConversationByKey(
+			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		if convResult != nil {
+			if req.Message.Metadata == nil {
+				req.Message.Metadata = make(map[string]string)
+			}
+			req.Message.Metadata["conversation_id"] = convResult.ConversationID
+			log.Info("Resolved conversation for broker inbound",
+				"conversation_id", convResult.ConversationID,
+				"surface", req.Surface, "external_ref", req.ExternalRef)
+		}
+	}
+
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -247,9 +300,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"type", req.Message.Type,
 	)
 
-	// The sender user ID was resolved and cached in req.Message.SenderID
-	// during the upstream permission check for "user:" senders.
+	// Resolve the sender's user ID before persisting the message. The
+	// upstream permission check already did a user lookup for "user:" senders,
+	// but req.Message.SenderID may still be empty if the originating plugin
+	// didn't populate it.  Resolving early guarantees that both the persisted
+	// storeMsg and the webChatStore calls below use a valid ID.
 	senderUserID := req.Message.SenderID
+	if senderUserID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
+		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
+			senderUserID = u.ID
+		}
+	}
 
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
 	// so that messages from external channels (Discord, Telegram) appear in
@@ -278,20 +340,40 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			storeMsg.GroupID = gid
 		}
 	}
-	// B15 dual-write: resolve-or-create conversation for broker inbound messages.
-	{
+	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound messages.
+	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	if !storeMsg.Broadcasted {
 		var convResult *messaging.ConversationResult
-		if req.Message.ThreadID != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, log, req.Message.ThreadID, agent.ProjectID)
-		} else if senderUserID != "" && agent.ID != "" {
-			senderKind, sOK := messages.PrincipalKindFromAddress(req.Message.Sender)
-			if sOK {
-				convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, log, senderKind, senderUserID, "agent", agent.ID)
+		if storeMsg.ThreadID != "" {
+			var threadOpts []messaging.ThreadConversationOption
+			if s.webChatStore != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(s.webChatStore))
 			}
+			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
+		} else if senderUserID != "" && agent.ID != "" {
+			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
+		// Always log divergence — even when convResult is nil, that is a divergence signal.
+		oldRouting := messaging.OldRoutingFromMessage(senderUserID, agent.ID, storeMsg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+		// DEF-3: Independent consistency check against prior messages.
+		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, s.messageLog)
 	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
 		log.Error("Failed to persist inbound broker message", "error", err)

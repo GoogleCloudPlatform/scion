@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -51,11 +52,24 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if projectID := q.Get("project"); projectID != "" {
 		filter.ProjectID = projectID
 	}
-	if agentID := q.Get("agent"); agentID != "" {
+	agentID := q.Get("agent")
+	if agentID != "" {
 		filter.AgentID = agentID
 	}
 	if msgType := q.Get("type"); msgType != "" {
 		filter.Type = msgType
+	}
+
+	// Phase 8 read-switch: when ConversationReadSwitch is ON and an agent
+	// filter is provided, resolve the DM conversation and add ConversationID
+	// to the filter so reads use the conversation model.
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() && agentID != "" {
+		convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", agentID, "user", user.ID())
+		if convResult != nil {
+			filter.ConversationID = convResult.ConversationID
+		} else {
+			messaging.DivergenceMetrics.IncFallback()
+		}
 	}
 
 	opts := store.ListOptions{}
@@ -216,7 +230,8 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	}
 
 	// Optional query params for chat filtering.
-	if channel := q.Get("channel"); channel != "" {
+	channel := q.Get("channel")
+	if channel != "" {
 		filter.Channel = channel
 	}
 	if visParams := q["visibility"]; len(visParams) > 0 {
@@ -228,6 +243,30 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	if beforeStr := q.Get("before"); beforeStr != "" {
 		if t, err := time.Parse(time.RFC3339, beforeStr); err == nil {
 			filter.Before = t
+		}
+	}
+
+	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
+	// conversation and add ConversationID to the filter. For agent messages
+	// with a web channel, the conversation is a DM between the agent and the
+	// requesting user. For thread-scoped queries, resolve via the thread key.
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+		threadID := q.Get("thread_id")
+		if threadID != "" && agent.ProjectID != "" {
+			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID)
+			if convResult != nil {
+				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
+			}
+		} else if channel == "web" || channel == "" {
+			// Default: DM conversation between agent and current user.
+			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agentID, "user", user.ID())
+			if convResult != nil {
+				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
+			}
 		}
 	}
 

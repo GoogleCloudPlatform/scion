@@ -15,11 +15,14 @@
 package messaging
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
 	"sync/atomic"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -31,10 +34,11 @@ import (
 // UpsertConversationByExternalRef).
 type DivergenceEntry struct {
 	MessageID  string `json:"message_id"`
-	OldRouting string `json:"old_routing"` // e.g. "thread:dm:abc123" or "sender:X->recipient:Y"
-	NewRouting string `json:"new_routing"` // e.g. "conv:uuid-of-conversation"
-	Match      bool   `json:"match"`       // true when old and new agree
-	Reason     string `json:"reason"`      // human-readable explanation
+	OldRouting string `json:"old_routing"`          // e.g. "thread:dm:abc123" or "sender:X->recipient:Y"
+	NewRouting string `json:"new_routing"`          // e.g. "conv:uuid-of-conversation"
+	Match      bool   `json:"match"`                // true when old and new agree
+	Reason     string `json:"reason"`               // human-readable explanation
+	Fallback   bool   `json:"fallback,omitempty"`   // true when this is a fallback (e.g. conv-lookup-failed)
 }
 
 // DivergenceCounter tracks the total number of divergence entries logged,
@@ -42,6 +46,7 @@ type DivergenceEntry struct {
 type DivergenceCounter struct {
 	matches    atomic.Int64
 	mismatches atomic.Int64
+	fallbacks  atomic.Int64
 }
 
 // Inc increments the appropriate counter.
@@ -62,15 +67,28 @@ func (c *DivergenceCounter) Mismatches() int64 { return c.mismatches.Load() }
 // Total returns the total number of divergence entries logged.
 func (c *DivergenceCounter) Total() int64 { return c.matches.Load() + c.mismatches.Load() }
 
+// IncFallback increments the fallback counter.
+// A fallback occurs when the read-switch flag is ON but conversation
+// resolution returns nil, causing the code to fall back to the old read path.
+func (c *DivergenceCounter) IncFallback() { c.fallbacks.Add(1) }
+
+// Fallbacks returns the total number of read-path fallbacks recorded.
+func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
+
 // DivergenceMetrics is the package-level counter for divergence events.
 // Exported so that metrics collectors can read it.
 var DivergenceMetrics = &DivergenceCounter{}
 
 // LogDivergence logs a DivergenceEntry to the provided logger and increments
-// the global divergence counter. Matching entries are logged at INFO;
-// mismatches are logged at WARN for easy grep.
+// the global divergence counter. Fallback entries increment only the fallback
+// counter; all others increment matches or mismatches. Matching entries are
+// logged at INFO; mismatches and fallbacks are logged at WARN for easy grep.
 func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
-	DivergenceMetrics.Inc(entry.Match)
+	if entry.Fallback {
+		DivergenceMetrics.IncFallback()
+	} else {
+		DivergenceMetrics.Inc(entry.Match)
+	}
 
 	attrs := []any{
 		"message_id", entry.MessageID,
@@ -83,7 +101,9 @@ func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
 		attrs = append(attrs, "reason", entry.Reason)
 	}
 
-	if entry.Match {
+	if entry.Fallback {
+		log.Warn("conversation routing check: fallback", attrs...)
+	} else if entry.Match {
 		log.Info("conversation routing check: match", attrs...)
 	} else {
 		log.Warn("conversation routing check: DIVERGENCE", attrs...)
@@ -198,4 +218,102 @@ func OldRoutingFromMessage(senderID, recipientID, threadID string) string {
 	parts := []string{senderID, recipientID}
 	sort.Strings(parts)
 	return fmt.Sprintf("sender-recipient:%s", strings.Join(parts, ":"))
+}
+
+// ---------------------------------------------------------------------------
+// Independent conversation consistency check (DEF-3)
+// ---------------------------------------------------------------------------
+
+// MessageQueryStore defines the subset of store methods needed by
+// CheckConversationConsistency. Decoupled from the full store.Store to allow
+// unit testing with mocks.
+type MessageQueryStore interface {
+	ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error)
+}
+
+// CheckConversationConsistency is an independent divergence check that verifies
+// the resolvedConvID is consistent with prior messages in the same logical
+// conversation. Unlike ComputeDivergenceMatch (which compares routing keys
+// derived from the same input fields), this function queries actual persisted
+// messages and compares their conversation_id — providing a truly independent
+// source of truth.
+//
+// It looks up prior messages by threadID (if non-empty) or by the
+// senderID+recipientID pair (for DMs), then checks whether any of those
+// messages have a conversation_id that differs from resolvedConvID.
+//
+// Returns true if all prior messages agree (or no prior messages exist),
+// false if a mismatch is detected.
+func CheckConversationConsistency(
+	ctx context.Context,
+	msgStore MessageQueryStore,
+	messageID string,
+	resolvedConvID string,
+	threadID string,
+	senderID string,
+	recipientID string,
+	log *slog.Logger,
+) bool {
+	if resolvedConvID == "" {
+		return true // nothing to compare against
+	}
+
+	var messages []store.Message
+
+	if threadID != "" {
+		// Look up prior messages with the same ThreadID.
+		result, err := msgStore.ListMessages(ctx, store.MessageFilter{
+			ThreadID: threadID,
+		}, store.ListOptions{Limit: 50})
+		if err != nil {
+			log.Warn("conversation consistency check: failed to query by thread_id",
+				"thread_id", threadID, "error", err)
+			return true // fail open on query errors
+		}
+		messages = result.Items
+	} else if senderID != "" && recipientID != "" {
+		// Look up prior DM messages between the same two principals.
+		// Query both directions: sender→recipient and recipient→sender.
+		result1, err := msgStore.ListMessages(ctx, store.MessageFilter{
+			SenderID:    senderID,
+			RecipientID: recipientID,
+		}, store.ListOptions{Limit: 25})
+		if err != nil {
+			log.Warn("conversation consistency check: failed to query by sender/recipient",
+				"sender_id", senderID, "recipient_id", recipientID, "error", err)
+			return true
+		}
+		result2, err := msgStore.ListMessages(ctx, store.MessageFilter{
+			SenderID:    recipientID,
+			RecipientID: senderID,
+		}, store.ListOptions{Limit: 25})
+		if err != nil {
+			log.Warn("conversation consistency check: failed to query reverse direction",
+				"sender_id", recipientID, "recipient_id", senderID, "error", err)
+			return true
+		}
+		messages = append(result1.Items, result2.Items...)
+	} else {
+		// Not enough info to look up prior messages.
+		return true
+	}
+
+	for _, msg := range messages {
+		if msg.ID == messageID {
+			continue // skip the current message
+		}
+		if msg.ConversationID != "" && msg.ConversationID != resolvedConvID {
+			log.Warn("conversation consistency check: MISMATCH",
+				"message_id", messageID,
+				"resolved_conv_id", resolvedConvID,
+				"prior_message_id", msg.ID,
+				"prior_conv_id", msg.ConversationID,
+				"thread_id", threadID,
+			)
+			DivergenceMetrics.Inc(false)
+			return false
+		}
+	}
+
+	return true
 }

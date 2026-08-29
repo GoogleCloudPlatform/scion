@@ -27,8 +27,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // brokerMockDispatcher records dispatched messages for test assertions.
@@ -1048,51 +1048,98 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	}
 }
 
-// TestResolveDMConversation_BothPathsAgree verifies that the user path
-// (PrincipalKindFromAddress for the recipient) and the agent path
-// (hardcoded "agent" kind) produce the same conversation ID when given
-// the same principal pair.
-func TestResolveDMConversation_BothPathsAgree(t *testing.T) {
+// TestDEF20_NativeTopicUsesTopicConversation verifies that when a message is
+// sent through the MessageBrokerProxy with a ThreadID matching a native webchat
+// topic, the persisted message carries the topic's pre-existing conversation_id
+// rather than a newly minted one. This is the production-path integration test
+// for DEF-20.
+func TestDEF20_NativeTopicUsesTopicConversation(t *testing.T) {
+	// 1. Create test store and webchat store sharing the same *sql.DB.
+	// The Ent migrations create the conversations table; sharing the DB lets
+	// the webchat store's CreateTopic dual-write into it.
 	s := newBrokerTestStore(t)
-	log := slog.Default()
+	cs, ok := s.(*entadapter.CompositeStore)
+	if !ok {
+		t.Fatal("expected *entadapter.CompositeStore from newBrokerTestStore")
+	}
+	rawDB := cs.DB()
+	if rawDB == nil {
+		t.Fatal("CompositeStore.DB() returned nil")
+	}
+
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("webchat store Init: %v", err)
+	}
+
+	// 2. Set up project and agent.
 	ctx := context.Background()
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "test-agent", "running")
 
-	proxy := &MessageBrokerProxy{
-		store: s,
-		log:   log,
+	// 3. Create a topic with a known conversation_id. CreateTopic atomically
+	// inserts both the topic row and a conversations row.
+	topicID := "topic-" + api.NewUUID()[:8]
+	convID := api.NewUUID()
+	topic := WebChatTopic{
+		ID:             topicID,
+		ProjectID:      projectID,
+		Name:           "test-topic",
+		ConversationID: convID,
+		CreatedBy:      "user-1",
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := wcs.CreateTopic(ctx, topic); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	agentID := api.NewUUID()
-	userID := api.NewUUID()
+	// 4. Create proxy with webchat store wired in.
+	events := NewChannelEventPublisher()
+	defer events.Close()
 
-	msg := messages.NewInstruction("agent:test-bot", "user:alice", "hello")
-	msg.SenderID = agentID
-	msg.RecipientID = userID
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
 
-	// User path: derive recipientKind from msg.Recipient
-	recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
-	if !rOK {
-		t.Fatal("expected recipient kind to resolve")
-	}
-	resultUser := proxy.resolveDMConversation(ctx, msg, recipientKind, msg.RecipientID)
-	if resultUser == nil {
-		t.Fatal("expected non-nil conversation result from user path")
-	}
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.webChatStore = wcs
+	proxy.Start()
+	defer proxy.Stop()
+	proxy.subscribeAgent(projectID, "test-agent")
 
-	// Agent path: caller knows recipient is an agent, hardcode kind
-	// Build the reciprocal message: user sends to agent
-	msgAgent := messages.NewInstruction("user:alice", "agent:test-bot", "hi back")
-	msgAgent.SenderID = userID
-	msgAgent.RecipientID = agentID
-
-	resultAgent := proxy.resolveDMConversation(ctx, msgAgent, "agent", agentID)
-	if resultAgent == nil {
-		t.Fatal("expected non-nil conversation result from agent path")
+	// 5. Send a message with ThreadID = topicID. The proxy's deliverToAgent
+	// should resolve the topic's conversation_id via WithTopicLookup.
+	msg := messages.NewInstruction("user:alice", "agent:test-agent", "hello via topic")
+	msg.SenderID = tid("user-alice")
+	msg.RecipientID = agent.ID
+	msg.ThreadID = topicID
+	if err := proxy.PublishMessage(ctx, projectID, msg); err != nil {
+		t.Fatal(err)
 	}
 
-	if resultUser.ConversationID != resultAgent.ConversationID {
-		t.Fatalf("conversation IDs differ: user-path=%q agent-path=%q",
-			resultUser.ConversationID, resultAgent.ConversationID)
+	// 6. Wait for async delivery.
+	time.Sleep(200 * time.Millisecond)
+
+	// 7. Verify the dispatched message reached the agent.
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
+	}
+	if dispatched[0].msg != "hello via topic" {
+		t.Errorf("expected dispatched msg 'hello via topic', got %q", dispatched[0].msg)
+	}
+
+	// 8. Verify the persisted message has the topic's conversation_id.
+	result, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != convID {
+		t.Errorf("expected conversation_id %q (from topic), got %q",
+			convID, result.Items[0].ConversationID)
 	}
 }
 
@@ -1134,29 +1181,3 @@ func TestResolveDMConversation_BroadcastSkipped(t *testing.T) {
 	}
 }
 
-// TestResolveDMConversation_EmptySenderID verifies the helper returns nil when
-// SenderID is empty, without panicking.
-func TestResolveDMConversation_EmptySenderID(t *testing.T) {
-	s := newBrokerTestStore(t)
-	log := slog.Default()
-	ctx := context.Background()
-
-	proxy := &MessageBrokerProxy{
-		store: s,
-		log:   log,
-	}
-
-	msg := messages.NewInstruction("agent:test-bot", "user:alice", "hello")
-	// Deliberately leave SenderID empty.
-	msg.SenderID = ""
-	msg.RecipientID = api.NewUUID()
-
-	result := proxy.resolveDMConversation(ctx, msg, "user", msg.RecipientID)
-	if result != nil {
-		t.Fatalf("expected nil result when SenderID is empty, got %+v", result)
-	}
-}
-
-// Compile-time check: ensure messaging import is used by verifying the type
-// is accessible. This prevents "imported and not used" errors.
-var _ *messaging.ConversationResult

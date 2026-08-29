@@ -120,3 +120,10 @@ type ProfilesSettings = map[string]config.V1ProfileConfig
 // HarnessConfigsSettings holds the Layer-1 harness_configs map.
 // The entire map is stored as a single JSONB document in hub_settings.
 type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
+
+// MessagingSettings holds Layer-1 messaging configuration.
+// DB-only (runtime state), no settings.yaml representation.
+// The ConversationReadSwitch flag gates the Phase 8 read-switch migration.
+type MessagingSettings struct {
+	ConversationReadSwitch *bool `json:"conversation_read_switch,omitempty"`
+}
