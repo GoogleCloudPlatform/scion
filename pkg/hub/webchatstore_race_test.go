@@ -57,7 +57,7 @@ func (noopWebChatStore) GetTopic(context.Context, string) (*WebChatTopic, error)
 // exercises a concurrency window that only the race detector can observe.
 // To get a meaningful result, run:
 //
-//   go test ./pkg/hub/ -run TestWebChatStoreRace -race
+//	go test ./pkg/hub/ -run TestWebChatStoreRace -race
 //
 // CI does not currently pass -race, so this test does not gate merges.
 // It exists for local verification and will become load-bearing if/when
