@@ -56,3 +56,26 @@ future, it MUST be routed through the validation choke point at that time.
 set mechanically, so a future emitter cannot join it silently. This gate is
 not yet implemented. If it should be built, that decision belongs to the
 project's CI owners, not to the team changing the validation layer.
+
+## Unreachable branches in validateMessageContent
+
+After the removal of `ValidateMessage` (D3, Tranche D), `validateMessageContent`
+is called only by `ValidateLegacyMessage`. Two of its branches have no
+reachable caller and no test:
+
+1. **MaxMsgSize byte-length check** (`len(msg.Body) > messages.MaxMsgSize`).
+   Unreachable by arithmetic, independent of callers: `MaxMessageLength` is
+   16000 runes, and a UTF-8 rune is at most 4 bytes, so 16000 runes is at
+   most 64000 bytes -- always under `MaxMsgSize` (65536). The rune-count
+   check above it fires first, always. No input can reach this branch.
+
+2. **ReplyToID empty-string check** (`msg.ReplyToID != nil && *msg.ReplyToID == ""`).
+   Unreachable only because the legacy mapping is the sole caller.
+   `MapLegacyEnvelope` (envelope_compat.go) sets `ReplyToID` by taking the
+   address of a non-empty `ThreadID` inside a non-empty guard, so it can
+   never produce a pointer to `""`. This branch becomes reachable and
+   untested the moment Tranche G adds a native validation entry point;
+   whoever adds that entry point owes a test for this branch.
+
+Neither branch is deleted -- removing defensive checks is a behaviour change
+and out of scope for this cleanup.
