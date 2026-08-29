@@ -485,6 +485,141 @@ mappings: {}
 	})
 }
 
+func TestMappingDialect_Response(t *testing.T) {
+	t.Run("returns correct response for each event", func(t *testing.T) {
+		spec := MappingDialectSpec{
+			Dialect:        "test-harness",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"PreToolUse":     {Event: hooks.EventToolStart},
+				"PostToolUse":    {Event: hooks.EventToolEnd},
+				"PreInvocation":  {Event: hooks.EventModelStart},
+				"PostInvocation": {Event: hooks.EventModelEnd},
+				"Stop":           {Event: hooks.EventAgentEnd},
+			},
+			Responses: map[string]map[string]interface{}{
+				"PreToolUse":     {"decision": "allow"},
+				"PostToolUse":    {},
+				"PreInvocation":  {},
+				"PostInvocation": {},
+				"Stop":           {},
+			},
+		}
+		md := NewMappingDialect(spec)
+
+		resp := md.Response("PreToolUse")
+		require.NotNil(t, resp)
+		assert.Equal(t, "allow", resp["decision"])
+
+		resp = md.Response("PostToolUse")
+		require.NotNil(t, resp)
+		assert.Empty(t, resp)
+
+		resp = md.Response("PreInvocation")
+		require.NotNil(t, resp)
+		assert.Empty(t, resp)
+
+		resp = md.Response("PostInvocation")
+		require.NotNil(t, resp)
+		assert.Empty(t, resp)
+
+		resp = md.Response("Stop")
+		require.NotNil(t, resp)
+		assert.Empty(t, resp)
+	})
+
+	t.Run("returns nil for events without declared responses", func(t *testing.T) {
+		spec := MappingDialectSpec{
+			Dialect:        "test-harness",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"PreToolUse": {Event: hooks.EventToolStart},
+				"Stop":       {Event: hooks.EventAgentEnd},
+			},
+			Responses: map[string]map[string]interface{}{
+				"PreToolUse": {"decision": "allow"},
+			},
+		}
+		md := NewMappingDialect(spec)
+
+		assert.NotNil(t, md.Response("PreToolUse"))
+		assert.Nil(t, md.Response("Stop"))
+		assert.Nil(t, md.Response("UnknownEvent"))
+	})
+
+	t.Run("returns nil when no responses section exists", func(t *testing.T) {
+		spec := MappingDialectSpec{
+			Dialect:        "test-harness",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"PreToolUse": {Event: hooks.EventToolStart},
+			},
+		}
+		md := NewMappingDialect(spec)
+
+		assert.Nil(t, md.Response("PreToolUse"))
+		assert.Nil(t, md.Response("anything"))
+	})
+}
+
+func TestMappingDialect_EventNameFields(t *testing.T) {
+	t.Run("returns event_name_fields when set", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect:         "test",
+			EventNameFields: []string{"type", "event"},
+		})
+		assert.Equal(t, []string{"type", "event"}, md.EventNameFields())
+	})
+
+	t.Run("returns single event_name_field as slice", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect:        "test",
+			EventNameField: "hook_event_name",
+		})
+		assert.Equal(t, []string{"hook_event_name"}, md.EventNameFields())
+	})
+
+	t.Run("returns nil when neither is set", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect: "test",
+		})
+		assert.Nil(t, md.EventNameFields())
+	})
+}
+
+func TestLoadMappingDialect_WithResponses(t *testing.T) {
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "dialect.yaml")
+	err := os.WriteFile(specPath, []byte(`
+dialect: test-harness
+event_name_field: hook_event_name
+mappings:
+  PreToolUse:
+    event: tool-start
+  PostToolUse:
+    event: tool-end
+responses:
+  PreToolUse:
+    decision: allow
+  PostToolUse: {}
+`), 0644)
+	require.NoError(t, err)
+
+	md, err := LoadMappingDialect(specPath)
+	require.NoError(t, err)
+	assert.Equal(t, "test-harness", md.Name())
+
+	resp := md.Response("PreToolUse")
+	require.NotNil(t, resp)
+	assert.Equal(t, "allow", resp["decision"])
+
+	resp = md.Response("PostToolUse")
+	require.NotNil(t, resp)
+	assert.Empty(t, resp)
+
+	assert.Nil(t, md.Response("UnknownEvent"))
+}
+
 func TestMappingDialect_FullHarnessEvents(t *testing.T) {
 	spec := MappingDialectSpec{
 		Dialect:        "example-harness",

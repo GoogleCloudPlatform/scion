@@ -19,10 +19,11 @@ import (
 // It maps harness-specific event names to normalized Scion event names and
 // optionally extracts fields from the event payload using dotted paths.
 type MappingDialectSpec struct {
-	Dialect         string                      `yaml:"dialect"`
-	EventNameField  string                      `yaml:"event_name_field"`
-	EventNameFields []string                    `yaml:"event_name_fields"`
-	Mappings        map[string]MappingEntrySpec `yaml:"mappings"`
+	Dialect         string                                `yaml:"dialect"`
+	EventNameField  string                                `yaml:"event_name_field"`
+	EventNameFields []string                              `yaml:"event_name_fields"`
+	Mappings        map[string]MappingEntrySpec            `yaml:"mappings"`
+	Responses       map[string]map[string]interface{}      `yaml:"responses,omitempty"`
 }
 
 // MappingEntrySpec defines how a single harness event maps to a normalized event.
@@ -44,6 +45,22 @@ func NewMappingDialect(spec MappingDialectSpec) *MappingDialect {
 // Name returns the dialect name as declared in the spec.
 func (d *MappingDialect) Name() string {
 	return d.spec.Dialect
+}
+
+// Response returns the response object declared for the given raw event name,
+// or nil if no response is declared for that event.
+func (d *MappingDialect) Response(rawEventName string) map[string]interface{} {
+	if d.spec.Responses == nil {
+		return nil
+	}
+	return d.spec.Responses[rawEventName]
+}
+
+// EventNameFields returns the ordered list of field names used to discover the
+// raw event name in incoming data. Callers that need to extract the event name
+// outside of Parse (e.g. for response lookup) can use this accessor.
+func (d *MappingDialect) EventNameFields() []string {
+	return d.eventNameFields()
 }
 
 // Parse converts a harness event payload into a normalized Event using the
