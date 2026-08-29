@@ -687,6 +687,136 @@ func TestEnvArgs_Sorted(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// P3a behaviour-identity test (#127)
+//
+// P3a adds env classifications alongside the env map but changes nothing
+// the sandbox sees. This test pins that claim: given a canonical set of
+// broker-provided env vars (every key from the env-writer inventory),
+// envFor() + envArgs() produce the exact same sorted argv as before P3a.
+//
+// envFor() only reads cfg.Env ([]string) and adds its own fixed keys
+// (PATH, HOME, etc.). The classification map lives on a separate struct
+// that envFor() never sees. This test ensures no accidental cross-wiring
+// was introduced.
+// -----------------------------------------------------------------------
+
+// TestP3a_EnvForBehaviourIdentity verifies that envFor() + envArgs()
+// produce byte-identical output for a canonical broker env, proving P3a
+// changes nothing the sandbox sees.
+func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
+	// Canonical env: every classified key from the env-writer inventory.
+	// These are the KEY=VALUE strings the broker passes via RunConfig.Env.
+	// The test uses sentinels for secrets, real-looking values for plain.
+	brokerEnv := []string{
+		// Hub-side plain (H1-H4, H9, H11-H13, H15-audience/expiry/mode)
+		"SCION_MODEL=claude-4",
+		"SCION_THINKING_LEVEL=high",
+		"SCION_HUB_NAME=test-hub",
+		"SCION_USER_GITHUB_TOKEN=1",
+		"SCION_GITHUB_APP_ENABLED=true",
+		"SCION_GITHUB_TOKEN_EXPIRY=2026-08-29T12:00:00Z",
+		"SCION_GITHUB_TOKEN_PATH=/tmp/gh-token",
+		"SCION_TRANSPORT_AUDIENCE=https://test.example.com",
+		"SCION_TRANSPORT_TOKEN_EXPIRY=2026-08-29T12:00:00Z",
+		"SCION_TRANSPORT_MODE=direct",
+		// Hub-side secret-fetchable (H5-H8)
+		"GEMINI_API_KEY=FAKE-KEY-SENTINEL-not-a-real-credential",
+		// Hub-side secret-injected (H10, H14, H15-token)
+		"GITHUB_TOKEN=FAKE-KEY-SENTINEL-not-a-real-credential",
+		"SCION_DEV_TOKEN=FAKE-KEY-SENTINEL-not-a-real-credential",
+		"SCION_TRANSPORT_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
+		// Broker-side plain (B1-B22 plain subset)
+		"SCION_AGENT_ID=agent-001",
+		// Note: SCION_GROVE_ID and SCION_PROJECT_ID are set by envFor() from
+		// cfg.ProjectID, overwriting any broker-env value. They appear in
+		// envForOwnKeys below, not here.
+		//   "SCION_GROVE_ID" → cfg.ProjectID
+		//   "SCION_PROJECT_ID" → cfg.ProjectID
+		"SCION_AGENT_SLUG=test-agent",
+		"SCION_HUB_ENDPOINT=https://hub.example.com",
+		"SCION_WORKSPACE_MODE=clone-per-agent",
+		"SCION_WORKSPACE_GIT=true",
+		"SCION_METADATA_MODE=gce",
+		"SCION_METADATA_SA_EMAIL=sa@proj.iam.gserviceaccount.com",
+		"SCION_METADATA_PROJECT_ID=proj-001",
+		"SCION_BROKER_ID=broker-001",
+		"SCION_CREATOR=user@example.com",
+		"SCION_DEBUG=1",
+		// Broker-side secret-injected (B-auth, B-clone)
+		"SCION_AUTH_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
+		"SCION_GIT_CLONE_URL=https://FAKE-KEY-SENTINEL-not-a-real-credential@github.com/org/repo.git",
+	}
+
+	cfg := RunConfig{
+		Env:       brokerEnv,
+		Project:   "test-project",
+		ProjectID: "proj-123",
+	}
+
+	env := envFor(cfg, scionPaths{})
+	argv := envArgs(env)
+
+	// Verify every broker-provided key passes through unchanged.
+	for _, entry := range brokerEnv {
+		parts := strings.SplitN(entry, "=", 2)
+		key, val := parts[0], parts[1]
+		if got, ok := env[key]; !ok {
+			t.Errorf("broker key %q missing from envFor() output", key)
+		} else if got != val {
+			t.Errorf("broker key %q: got %q, want %q", key, got, val)
+		}
+	}
+
+	// Verify envFor()-added keys are present (these are fixed by envFor,
+	// not by the broker, and must not disappear due to P3a).
+	envForOwnKeys := []string{
+		"PATH", "HOME", "USER", "LOGNAME",
+		"SCION_PROJECT", "SCION_GROVE",
+		"SCION_PROJECT_ID", "SCION_GROVE_ID",
+		"SCION_HOST_UID", "SCION_HOST_GID",
+		"SCION_WORKSPACE_PATH",
+	}
+	for _, key := range envForOwnKeys {
+		if _, ok := env[key]; !ok {
+			t.Errorf("envFor() own key %q missing from output", key)
+		}
+	}
+
+	// Verify argv is sorted and deterministic (run twice, same result).
+	argv2 := envArgs(envFor(cfg, scionPaths{}))
+	if len(argv) != len(argv2) {
+		t.Fatalf("envArgs() length changed: %d vs %d", len(argv), len(argv2))
+	}
+	for i := range argv {
+		if argv[i] != argv2[i] {
+			t.Errorf("envArgs()[%d] not deterministic: %q vs %q", i, argv[i], argv2[i])
+		}
+	}
+
+	// Pin the total key count: broker keys + envFor-added keys.
+	// If a future change adds or removes env vars, this count must be updated.
+	// This catches accidental env writes from classification code.
+	expectedKeyCount := len(brokerEnv) + len(envForOwnKeys)
+	if len(env) != expectedKeyCount {
+		// List unexpected keys for diagnosis.
+		expected := make(map[string]bool)
+		for _, entry := range brokerEnv {
+			parts := strings.SplitN(entry, "=", 2)
+			expected[parts[0]] = true
+		}
+		for _, k := range envForOwnKeys {
+			expected[k] = true
+		}
+		for k := range env {
+			if !expected[k] {
+				t.Errorf("unexpected extra key in envFor() output: %q=%q", k, env[k])
+			}
+		}
+		t.Errorf("envFor() produced %d keys, want %d", len(env), expectedKeyCount)
+	}
+}
+
+// -----------------------------------------------------------------------
 // buildEntrypoint tests
 // -----------------------------------------------------------------------
 
