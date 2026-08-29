@@ -1116,21 +1116,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
-	// Attachment-only messages have empty content (allowed by the handler at
-	// line 795). Set a synthetic body so ValidateLegacyMessage's Msg=="" check
-	// does not reject them.
-	if msg.Msg == "" && len(msg.Attachments) > 0 {
-		msg.Msg = "[attachment]"
-	}
-
-	// Validate through the messaging choke point (AC-8).
-	if err := messaging.ValidateLegacyMessage(msg); err != nil {
-		ValidationError(w, err.Error(), nil)
-		return ""
-	}
-
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
 	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
+	// Authorization runs BEFORE validation (B-2): authorizeAgentMessage depends
+	// only on user and primaryAgent (both resolved above). An unauthorized user
+	// must receive the enriched 403 with {reason, senderMode, recipientMode}
+	// (#1382), not a 400 from the validator.
 	allowed, reason := s.authorizeAgentMessage(ctx, user, primaryAgent, false)
 	if !allowed {
 		slog.Warn("chat v2 message authorization denied",
@@ -1143,6 +1134,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			"senderMode":    "user",
 			"recipientMode": primaryAgent.MessageMode,
 		})
+		return ""
+	}
+
+	// Validate through the messaging choke point (AC-8).
+	// Runs after authorization so unauthorized users see 403, not 400.
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		ValidationError(w, err.Error(), nil)
 		return ""
 	}
 
@@ -1774,9 +1772,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
 		var convResult *messaging.ConversationResult
 		if isDM {
-			// DM key format: dm:<kind>:<id>:<kind>:<id>
+			// DM key format: dm:<kind>:<id>:<kind>:<id> — exactly 5 parts.
+			// Strict parse (B-3): never tolerate or normalise a DM key on the
+			// derivation path. A 7-part key silently deriving from the first 5
+			// would be an access path error after the S4 read-switch.
 			parts := strings.Split(key, ":")
-			if len(parts) >= 5 {
+			if len(parts) == 5 {
 				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
 			}
 		} else {

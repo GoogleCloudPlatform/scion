@@ -58,6 +58,38 @@ func TestValidateLegacyMessage_EmptyMsg(t *testing.T) {
 	}
 }
 
+// TestValidateLegacyMessage_AttachmentOnlyMessage verifies that an
+// attachment-only message (Msg="" with Attachments present) passes
+// validation. The validator must consult Attachments before rejecting
+// an empty Msg — otherwise every caller needs a forgery like
+// msg.Msg = "[attachment]" to get past the check (B-1).
+func TestValidateLegacyMessage_AttachmentOnlyMessage(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Msg = ""
+	msg.Attachments = []string{"/tmp/screenshot.png"}
+	if err := ValidateLegacyMessage(msg); err != nil {
+		t.Fatalf("attachment-only message should pass validation: %v", err)
+	}
+}
+
+// TestValidateLegacyMessage_EmptyMsgNoAttachments verifies that an empty
+// message with no attachments is still rejected. This is the complement
+// of TestValidateLegacyMessage_AttachmentOnlyMessage — relaxing the
+// empty-Msg check for attachments must NOT relax it for the zero-content
+// case. Without this test, narrowing the recogniser looks green (B-1 rule 367).
+func TestValidateLegacyMessage_EmptyMsgNoAttachments(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Msg = ""
+	msg.Attachments = nil
+	err := ValidateLegacyMessage(msg)
+	if err == nil {
+		t.Fatal("expected error for empty msg with no attachments")
+	}
+	if !strings.Contains(err.Error(), "msg field is required") {
+		t.Fatalf("expected 'msg field is required', got: %v", err)
+	}
+}
+
 func TestValidateLegacyMessage_EmptySender(t *testing.T) {
 	msg := validLegacyMessage()
 	msg.Sender = ""
