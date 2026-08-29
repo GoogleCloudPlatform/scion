@@ -777,7 +777,24 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 	out, err := runSimpleCommand(ctx, r.bin, args...)
 	if err != nil {
-		return "", fmt.Errorf("cloudrun-sandbox: run failed: %w (output: %s)", err, out)
+		// #1342: `out` is the sandbox binary's combined stdout+stderr, and a CLI
+		// that reports the offending invocation on an argument error will echo
+		// its own argv -- which carries every --env KEY=VALUE pair. This error
+		// reaches an HTTP response body via handlers.go RuntimeError(), so the
+		// values are redacted before they are spliced in. Measured, not assumed:
+		// see TestCloudRunSandboxRun_ErrorDoesNotLeakEnvValues.
+		//
+		// `err` itself is safe to wrap as-is on this base: #127 P5 reduced
+		// runSimpleCommand's error to `%s failed: %w` with no argv. The silent
+		// case of that test is the guard on it -- if P5 is ever reverted, the
+		// leak returns through THIS %w and that case goes red.
+		//
+		// %w is deliberately preserved. handlers.go calls errors.Is(err,
+		// agent.ErrContainerNameInUse) at :899 and :1422, and
+		// classifyLaunchRuntimeError calls errors.Is(err, exec.ErrNotFound);
+		// rebuilding this error from a string would sever that chain silently.
+		safeOut := redactEnvValues(out, externalEnvValues(cfg, env))
+		return "", fmt.Errorf("cloudrun-sandbox: run failed: %w (output: %s)", err, safeOut)
 	}
 
 	// Post-run liveness probe: `sandbox run --detach` returns rc=0 even for
