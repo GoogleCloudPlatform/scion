@@ -60,7 +60,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	}
 	type WrapperFields struct {
 		Cap                 *Capabilities                    `json:"_capabilities,omitempty"`
-		Messageability      *AgentMessageability             `json:"_messageability,omitempty"`
+		Messageability      *AgentMessageabilityDetail       `json:"_messageability,omitempty"`
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`

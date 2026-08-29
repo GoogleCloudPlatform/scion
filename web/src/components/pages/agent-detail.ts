@@ -1046,46 +1046,9 @@ export class ScionPageAgentDetail extends LitElement {
   // Messages Panel (Chat | Log toggle)
   // ---------------------------------------------------------------------------
 
-  private renderMessagesPanel() {
+  /** Render messaging authorization banners (denial warning / sealed notice). */
+  private renderMessagingBanners() {
     const agent = this.agent!;
-
-    // When the feature flag is off, render exactly the existing message viewer
-    // (AC9 — byte-for-byte current Messages tab behaviour).
-    if (!this.nativeChatEnabled) {
-      return html`
-        ${agent._messageability?.canMessage === false && agent.messageMode !== 'none'
-          ? html`
-              <div
-                class="alert alert-warning"
-                style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-warning-100); border: 1px solid var(--sl-color-warning-300);"
-              >
-                <sl-icon name="exclamation-triangle" style="margin-right: 0.5em;"></sl-icon>
-                ${getDenialMessage(agent._messageability.reason, agent.name)}
-              </div>
-            `
-          : nothing}
-        ${agent.messageMode === 'none'
-          ? html`
-              <div
-                class="alert alert-danger"
-                style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-danger-100); border: 1px solid var(--sl-color-danger-300);"
-              >
-                <sl-icon name="shield-lock" style="margin-right: 0.5em;"></sl-icon>
-                This agent is sealed (mode: none). Only super-admins can message it.
-              </div>
-            `
-          : nothing}
-        <scion-agent-message-viewer
-          agentId=${this.agentId}
-          agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'attach') &&
-          agent._messageability?.canMessage !== false}
-          ?cloudLogging=${agent.cloudLogging || false}
-        ></scion-agent-message-viewer>
-      `;
-    }
-
-    // Feature flag ON: show Chat|Log toggle, default to Chat
     return html`
       ${agent._messageability?.canMessage === false && agent.messageMode !== 'none'
         ? html`
@@ -1109,6 +1072,30 @@ export class ScionPageAgentDetail extends LitElement {
             </div>
           `
         : nothing}
+    `;
+  }
+
+  private renderMessagesPanel() {
+    const agent = this.agent!;
+
+    // When the feature flag is off, render exactly the existing message viewer
+    // (AC9 — byte-for-byte current Messages tab behaviour).
+    if (!this.nativeChatEnabled) {
+      return html`
+        ${this.renderMessagingBanners()}
+        <scion-agent-message-viewer
+          agentId=${this.agentId}
+          agentName=${agent.name || ''}
+          ?canSend=${can(agent._capabilities, 'attach') &&
+          agent._messageability?.canMessage !== false}
+          ?cloudLogging=${agent.cloudLogging || false}
+        ></scion-agent-message-viewer>
+      `;
+    }
+
+    // Feature flag ON: show Chat|Log toggle, default to Chat
+    return html`
+      ${this.renderMessagingBanners()}
       <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
         <sl-radio-group
           value=${this.chatViewActive ? 'chat' : 'log'}

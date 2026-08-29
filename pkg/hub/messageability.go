@@ -120,13 +120,10 @@ func computeCanReachViewer(viewerIdentity Identity, targetAgent *store.Agent) bo
 	case store.MessageModeNone:
 		return false
 	case store.MessageModeProject:
-		// Project-mode agents can message any user in the project.
+		// Project-mode agents can message any user/agent in the project.
 		// For user viewers, this is generally true (they are browsing the project).
-		// For agent viewers, both must be project mode.
-		if viewerIdentity.Type() == "agent" {
-			// Simplified: can't determine target agent's mode from viewer identity alone.
-			return true
-		}
+		// For agent viewers, the full check requires the viewer agent's mode — this
+		// is a simplified approximation (see design doc Section 3.2).
 		return true
 	case store.MessageModeLineage, store.MessageModeBranch:
 		// Lineage and branch modes allow messaging users in the agent's ancestry.
