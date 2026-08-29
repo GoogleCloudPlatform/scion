@@ -41,12 +41,11 @@
 #     REQUIRED: handleCreateThread x1, handleTopicPatch x1, func definition x1
 #     INFORMATIONAL: doc comments x3
 #
-#   ActionAttach in handlers_agent_messaging.go:
-#     REQUIRED: handleProjectBroadcast x1
+#   authorizeAgentMessage in handlers_agent_messaging.go:
+#     REQUIRED: handleProjectBroadcast x1 (per-recipient pre-filter)
 #
-#   ActionAttach in handlers_chat_v2.go:
-#     REQUIRED: sendAgentRouted x2 (s.authorize + CheckAccess)
-#     AUDIT: sendAgentRouted x1 (logAuthzDenial — silent-denial path, no 403)
+#   authorizeAgentMessage in handlers_chat_v2.go:
+#     REQUIRED: sendAgentRouted x2 (primary path + mention fan-out)
 #
 #   SenderID in messagebroker.go:
 #     REQUIRED: fanOutToProject x3 (B5/R1 — broadcast self-skip by canonical ID)
@@ -65,14 +64,13 @@
 #     REQUIRED: func definition x1 (#1322 — kind-label tightening, must exist)
 #
 #   handlers_broker_inbound.go (parallel entry point to handlers_agent_messaging):
-#     REQUIRED: ActionAttach x1 in handleBrokerInbound (#1347 — broker inbound authz)
-#     REQUIRED: CheckAccess x1 in handleBrokerInbound (#1347 — policy check)
+#     REQUIRED: authorizeAgentMessage x1 in handleBrokerInbound (#1371 — message authorization)
 #     REQUIRED: SenderID x4 in handleBrokerInbound (B5 — canonical sender identity)
 #     REQUIRED: NewAuthenticatedUser x1 in handleBrokerInbound (B5 — server-derived identity)
 #     REQUIRED: parseDMKeyIDs x1 in handleBrokerInbound (B5 — DM key ownership)
 #
 #   COMPOSITE: handleProjectBroadcast in handlers_agent_messaging.go must
-#   contain BOTH authenticatedSender AND ActionAttach.
+#   contain BOTH authenticatedSender AND authorizeAgentMessage.
 #
 # EXIT CODES
 #   0  all gates pass
