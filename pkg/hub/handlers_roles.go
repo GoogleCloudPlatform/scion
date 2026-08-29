@@ -59,10 +59,18 @@ type listRoleDefinitionsResponse struct {
 	TotalCount int                     `json:"totalCount"`
 }
 
+// RoleBindingInfo is a role binding enriched with human-friendly display info.
+type RoleBindingInfo struct {
+	store.RoleBinding
+	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
+	ScopeDisplayName     string `json:"scopeDisplayName,omitempty"`
+	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
+}
+
 // listRoleBindingsResponse wraps the list result for the API.
 type listRoleBindingsResponse struct {
-	Items      []*store.RoleBinding `json:"items"`
-	TotalCount int                  `json:"totalCount"`
+	Items      []RoleBindingInfo `json:"items"`
+	TotalCount int               `json:"totalCount"`
 }
 
 // listPermissionsResponse wraps the permissions registry for the API.
@@ -401,9 +409,10 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 // ---------------------------------------------------------------------------
 
 func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	limit, offset := parsePaginationParams(r)
 
-	bindings, err := s.store.ListAllRoleBindings(r.Context(), limit, offset)
+	bindings, err := s.store.ListAllRoleBindings(ctx, limit, offset)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -412,14 +421,28 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		bindings = []*store.RoleBinding{}
 	}
 
-	total, err := s.store.CountAllRoleBindings(r.Context())
+	total, err := s.store.CountAllRoleBindings(ctx)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
+	// Enrich bindings with human-friendly display names.
+	enriched := make([]RoleBindingInfo, len(bindings))
+	for i, b := range bindings {
+		enriched[i] = RoleBindingInfo{RoleBinding: *b}
+		enriched[i].PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
+		enriched[i].CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
+			project, err := s.store.GetProject(ctx, b.ScopeID)
+			if err == nil {
+				enriched[i].ScopeDisplayName = project.Name
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
-		Items:      bindings,
+		Items:      enriched,
 		TotalCount: total,
 	})
 }
@@ -463,6 +486,21 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalId is required")
 		return
 	}
+
+	// Resolve email to UUID for user principals (mirrors addGroupMember pattern).
+	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {
+		user, err := s.store.GetUserByEmail(r.Context(), req.PrincipalID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				BadRequest(w, "user not found with email: "+req.PrincipalID)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		req.PrincipalID = user.ID
+	}
+
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
 		BadRequest(w, "scopeType must be \"system\" or \"project\"")
 		return
@@ -549,7 +587,8 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 }
 
 func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, userID string) {
-	bindings, err := s.store.ListRoleBindingsForPrincipal(r.Context(), store.RoleBindingPrincipalUser, userID)
+	ctx := r.Context()
+	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -557,9 +596,24 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 	if bindings == nil {
 		bindings = []*store.RoleBinding{}
 	}
+
+	// Enrich bindings with human-friendly display names.
+	enriched := make([]RoleBindingInfo, len(bindings))
+	for i, b := range bindings {
+		enriched[i] = RoleBindingInfo{RoleBinding: *b}
+		enriched[i].PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
+		enriched[i].CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
+			project, err := s.store.GetProject(ctx, b.ScopeID)
+			if err == nil {
+				enriched[i].ScopeDisplayName = project.Name
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
-		Items:      bindings,
-		TotalCount: len(bindings),
+		Items:      enriched,
+		TotalCount: len(enriched),
 	})
 }
 
