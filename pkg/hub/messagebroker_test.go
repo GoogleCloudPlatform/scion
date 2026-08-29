@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1140,6 +1141,175 @@ func TestDEF20_NativeTopicUsesTopicConversation(t *testing.T) {
 	if result.Items[0].ConversationID != convID {
 		t.Errorf("expected conversation_id %q (from topic), got %q",
 			convID, result.Items[0].ConversationID)
+	}
+}
+
+// logSpy is a slog.Handler that captures log records for test assertions.
+// It passes all records through to a wrapped handler and records them.
+type logSpy struct {
+	slog.Handler
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func newLogSpy(inner slog.Handler) *logSpy {
+	return &logSpy{Handler: inner}
+}
+
+func (s *logSpy) Handle(ctx context.Context, r slog.Record) error {
+	s.mu.Lock()
+	s.records = append(s.records, r)
+	s.mu.Unlock()
+	return s.Handler.Handle(ctx, r)
+}
+
+// containsMessage returns true if any captured record contains the substring.
+func (s *logSpy) containsMessage(substr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.records {
+		if strings.Contains(r.Message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEmptySenderID_DeliverToUser_SkipsDMResolution verifies that an empty
+// SenderID prevents DM conversation resolution in the deliverToUser path.
+//
+// The DM key IS the ACL: a conversation resolved with an empty sender ID
+// produces a key that names the wrong participant set. The SenderID != ""
+// conjunct at messagebroker.go deliverToUser ensures this cannot happen.
+//
+// The test asserts TWO things:
+//  1. No conversation_id is stamped on the persisted message.
+//  2. ResolveOrCreateDMConversation is never CALLED — the messagebroker guard
+//     prevents the resolution path from being entered at all, rather than
+//     relying on the downstream function's own empty-ID check.
+//
+// POSITIVE CONTROL: remove the msg.SenderID != "" conjunct from deliverToUser's
+// else-if (the DM resolution branch), re-run this test, and verify it FAILS.
+// The downstream function logs "skipping conversation resolution: missing
+// sender or recipient ID" — that log appearing means the guard was bypassed.
+func TestEmptySenderID_DeliverToUser_SkipsDMResolution(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	ctx := context.Background()
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	spy := newLogSpy(slog.Default().Handler())
+	log := slog.New(spy)
+
+	b := eventbus.NewInProcessEventBus(log)
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, log)
+
+	// Message has a valid RecipientID but empty SenderID — the guard must
+	// prevent DM resolution despite having a non-empty recipient.
+	msg := messages.NewInstruction("agent:some-agent", "user:bob", "should not resolve DM")
+	msg.SenderID = "" // deliberately empty
+	msg.RecipientID = api.NewUUID()
+
+	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	// Assert 1: no conversation_id on the persisted message.
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: msg.RecipientID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != "" {
+		t.Fatalf("SECURITY: empty SenderID must not resolve a DM conversation, "+
+			"but got conversation_id %q — the SenderID guard is broken",
+			result.Items[0].ConversationID)
+	}
+
+	// Assert 2: the resolution function was never entered. If it was called,
+	// it logs "skipping conversation resolution: missing sender or recipient ID".
+	// That log appearing means the messagebroker guard was bypassed and we are
+	// relying on defense-in-depth rather than the gate itself.
+	if spy.containsMessage("skipping conversation resolution: missing sender or recipient ID") {
+		t.Fatal("SECURITY: ResolveOrCreateDMConversation was called with empty SenderID — " +
+			"the messagebroker guard (msg.SenderID != \"\") was bypassed. " +
+			"The downstream function rejected it, but the guard should have prevented the call entirely.")
+	}
+}
+
+// TestEmptySenderID_DeliverToAgent_SkipsDMResolution verifies that an empty
+// SenderID prevents DM conversation resolution in the deliverToAgent path.
+//
+// Same security property as the deliverToUser variant: the DM key names
+// participants, and an empty sender ID would produce a malformed key that
+// resolves to the wrong participant set.
+//
+// POSITIVE CONTROL: remove the msg.SenderID != "" conjunct from deliverToAgent's
+// else-if (the DM resolution branch), re-run this test, and verify it FAILS.
+// The downstream function logs "skipping conversation resolution: missing
+// sender or recipient ID" — that log appearing means the guard was bypassed.
+func TestEmptySenderID_DeliverToAgent_SkipsDMResolution(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "target-agent", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	spy := newLogSpy(slog.Default().Handler())
+	log := slog.New(spy)
+
+	b := eventbus.NewInProcessEventBus(log)
+	defer func() { _ = b.Close() }()
+
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, log)
+	proxy.Start()
+	defer proxy.Stop()
+
+	proxy.subscribeAgent(projectID, "target-agent")
+
+	// Message has a valid agent target but empty SenderID — the guard must
+	// prevent DM resolution despite having a known agent.ID.
+	msg := messages.NewInstruction("user:alice", "agent:target-agent", "should not resolve DM")
+	msg.SenderID = "" // deliberately empty
+	msg.RecipientID = agent.ID
+
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Assert 1: the message was dispatched (delivery works regardless).
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
+	}
+
+	// Assert 2: no conversation_id on the persisted message.
+	result, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != "" {
+		t.Fatalf("SECURITY: empty SenderID must not resolve a DM conversation, "+
+			"but got conversation_id %q — the SenderID guard is broken",
+			result.Items[0].ConversationID)
+	}
+
+	// Assert 3: the resolution function was never entered.
+	if spy.containsMessage("skipping conversation resolution: missing sender or recipient ID") {
+		t.Fatal("SECURITY: ResolveOrCreateDMConversation was called with empty SenderID — " +
+			"the messagebroker guard (msg.SenderID != \"\") was bypassed. " +
+			"The downstream function rejected it, but the guard should have prevented the call entirely.")
 	}
 }
 
