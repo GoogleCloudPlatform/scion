@@ -52,6 +52,14 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
+import '../shared/message-mode-badge.js';
+import '../shared/messageability-indicator.js';
+import {
+  getDenialMessage,
+  getMessageModeDisplay,
+  MESSAGE_MODE_DISPLAY,
+} from '../../shared/message-mode.js';
+import type { MessageMode, AgentMessageabilityDetail } from '../../shared/types.js';
 import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
@@ -61,6 +69,7 @@ import type { ScionChatThread } from '../shared/chat/chat-thread.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
+import '../shared/cascade-mode-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 
@@ -145,6 +154,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private quickMessageOpen = false;
+
+  @state()
+  private cascadeDialogOpen = false;
 
   /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
   @state()
@@ -1042,6 +1054,35 @@ export class ScionPageAgentDetail extends LitElement {
   // Messages Panel (Chat | Log toggle)
   // ---------------------------------------------------------------------------
 
+  /** Render messaging authorization banners (denial warning / sealed notice). */
+  private renderMessagingBanners() {
+    const agent = this.agent!;
+    return html`
+      ${agent._messageability?.canMessage === false && agent.messageMode !== 'none'
+        ? html`
+            <div
+              class="alert alert-warning"
+              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-warning-100); border: 1px solid var(--sl-color-warning-300);"
+            >
+              <sl-icon name="exclamation-triangle" style="margin-right: 0.5em;"></sl-icon>
+              ${getDenialMessage(agent._messageability.reason, agent.name)}
+            </div>
+          `
+        : nothing}
+      ${agent.messageMode === 'none'
+        ? html`
+            <div
+              class="alert alert-danger"
+              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-danger-100); border: 1px solid var(--sl-color-danger-300);"
+            >
+              <sl-icon name="shield-lock" style="margin-right: 0.5em;"></sl-icon>
+              This agent is sealed (mode: none). Only super-admins can message it.
+            </div>
+          `
+        : nothing}
+    `;
+  }
+
   private renderMessagesPanel() {
     const agent = this.agent!;
 
@@ -1049,10 +1090,12 @@ export class ScionPageAgentDetail extends LitElement {
     // (AC9 — byte-for-byte current Messages tab behaviour).
     if (!this.nativeChatEnabled) {
       return html`
+        ${this.renderMessagingBanners()}
         <scion-agent-message-viewer
           agentId=${this.agentId}
           agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'attach')}
+          ?canSend=${can(agent._capabilities, 'attach') &&
+          agent._messageability?.canMessage !== false}
           ?cloudLogging=${agent.cloudLogging || false}
         ></scion-agent-message-viewer>
       `;
@@ -1060,6 +1103,7 @@ export class ScionPageAgentDetail extends LitElement {
 
     // Feature flag ON: show Chat|Log toggle, default to Chat
     return html`
+      ${this.renderMessagingBanners()}
       <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
         <sl-radio-group
           value=${this.chatViewActive ? 'chat' : 'log'}
@@ -1082,14 +1126,16 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach')}
+        ?canSend=${can(agent._capabilities, 'attach') &&
+        agent._messageability?.canMessage !== false}
         ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
       ></scion-chat-thread>
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach')}
+        ?canSend=${can(agent._capabilities, 'attach') &&
+        agent._messageability?.canMessage !== false}
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
       ></scion-agent-message-viewer>
@@ -1112,6 +1158,10 @@ export class ScionPageAgentDetail extends LitElement {
               status=${getAgentDisplayStatus(agent) as StatusType}
               label=${getAgentDisplayStatus(agent)}
             ></scion-status-badge>
+            <scion-message-mode-badge
+              mode=${agent.messageMode || 'project'}
+              size="medium"
+            ></scion-message-mode-badge>
           </div>
           <div class="header-meta">
             <span class="template-badge">
@@ -1137,21 +1187,34 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
-          ${can(agent._capabilities, 'attach')
-            ? html`
-                <sl-button
-                  variant="default"
-                  size="small"
-                  outline
-                  @click=${() => {
-                    this.quickMessageOpen = true;
-                  }}
-                >
-                  <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-                  Message
-                </sl-button>
-              `
-            : nothing}
+          ${agent.messageMode === 'none'
+            ? nothing
+            : agent._messageability?.canMessage === false
+              ? html`
+                  <sl-tooltip
+                    content="${getDenialMessage(agent._messageability.reason, agent.name)}"
+                  >
+                    <sl-button variant="default" size="small" outline disabled>
+                      <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                      Message
+                    </sl-button>
+                  </sl-tooltip>
+                `
+              : can(agent._capabilities, 'attach')
+                ? html`
+                    <sl-button
+                      variant="default"
+                      size="small"
+                      outline
+                      @click=${() => {
+                        this.quickMessageOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                      Message
+                    </sl-button>
+                  `
+                : nothing}
           ${can(agent._capabilities, 'attach')
             ? html`
                 <a href="/agents/${this.agentId}/terminal" style="text-decoration: none;">
@@ -1632,11 +1695,193 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent)} ${this.renderLabelsCard(agent)}
-      ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
-      ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
-      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
+      ${this.renderIdentityCard(agent)} ${this.renderMessagingCard()}
+      ${this.renderLabelsCard(agent)} ${this.renderHarnessModelCard(agent, cfg, inline)}
+      ${this.renderRuntimeCard(agent, inline)} ${this.renderGCPIdentityCard(cfg?.gcpIdentity)}
+      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
+      ${this.renderInitialTaskCard(cfg)}
     `;
+  }
+
+  private renderMessagingCard() {
+    const agent = this.agent!;
+    const modeDisplay = getMessageModeDisplay(agent.messageMode);
+    const messageability = agent._messageability as AgentMessageabilityDetail | undefined;
+    const canSetMode = can(agent._capabilities, 'set_message_mode');
+    const hasChildren =
+      ((agent.childrenIds?.length) ?? 0) > 0;
+
+    return html`
+      <div class="card">
+        <h3 class="card-title">Messaging</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">Message Mode</span>
+            <span class="info-value">
+              ${canSetMode
+                ? html`
+                    <sl-select
+                      size="small"
+                      value=${agent.messageMode || 'project'}
+                      @sl-change=${(e: Event) => {
+                        const newMode = (e.target as HTMLSelectElement).value as MessageMode;
+                        void this.handleModeChange(newMode, e.target as HTMLElement);
+                      }}
+                      style="min-width: 280px; max-width: 360px;"
+                    >
+                      ${(Object.keys(MESSAGE_MODE_DISPLAY) as MessageMode[]).map(
+                        (mode) => html`
+                          <sl-option value=${mode}>
+                            <sl-icon slot="prefix" name=${MESSAGE_MODE_DISPLAY[mode].icon}></sl-icon>
+                            ${MESSAGE_MODE_DISPLAY[mode].label} —
+                            ${MESSAGE_MODE_DISPLAY[mode].description}
+                          </sl-option>
+                        `
+                      )}
+                    </sl-select>
+                  `
+                : html`
+                    <scion-message-mode-badge
+                      mode=${agent.messageMode || 'project'}
+                      size="medium"
+                    ></scion-message-mode-badge>
+                    <span style="margin-left: 0.5em; color: var(--sl-color-neutral-600);">
+                      ${modeDisplay.description}
+                    </span>
+                  `}
+            </span>
+          </div>
+          ${messageability && 'reachableAgentCount' in messageability
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Reachability</span>
+                  <span class="info-value">
+                    Can message: ${messageability.reachableAgentCount} agents,
+                    ${messageability.reachableUserCount} users
+                  </span>
+                </div>
+              `
+            : nothing}
+        </div>
+        ${canSetMode && hasChildren
+          ? html`
+              <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  outline
+                  @click=${() => {
+                    this.cascadeDialogOpen = true;
+                  }}
+                >
+                  <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+                  Apply to entire branch
+                </sl-button>
+              </div>
+            `
+          : nothing}
+      </div>
+
+      ${canSetMode
+        ? html`
+            <scion-cascade-mode-dialog
+              agentId=${agent.id}
+              agentName=${agent.name || ''}
+              ?open=${this.cascadeDialogOpen}
+              currentMode=${agent.messageMode || 'project'}
+              @sl-request-close=${() => {
+                this.cascadeDialogOpen = false;
+              }}
+              @cascade-applied=${() => {
+                this.cascadeDialogOpen = false;
+                this.backgroundRefresh();
+              }}
+            ></scion-cascade-mode-dialog>
+          `
+        : nothing}
+    `;
+  }
+
+  /**
+   * Handle message mode change with graduated confirmation flows.
+   * Expanding to project requires no confirmation; restricting or quarantining
+   * requires confirmation proportional to the severity of the change.
+   */
+  private async handleModeChange(newMode: MessageMode, selectEl: HTMLElement): Promise<void> {
+    const agent = this.agent!;
+    const oldMode = (agent.messageMode || 'project') as MessageMode;
+    if (newMode === oldMode) return;
+
+    const revertSelect = () => {
+      // Revert the sl-select back to the previous value
+      (selectEl as HTMLElement & { value: string }).value = oldMode;
+    };
+
+    // Determine if confirmation is needed
+    const needsConfirm = newMode !== 'project'; // Expanding to project = no confirm
+
+    if (needsConfirm) {
+      let message: string;
+      let variant: 'primary' | 'danger' = 'primary';
+
+      if (newMode === 'none') {
+        // High severity: quarantine
+        variant = 'danger';
+        message = `Seal ${agent.name}? It will not be able to send or receive any messages. Only super-admins can communicate with sealed agents. This takes effect immediately.`;
+      } else if (oldMode === 'none') {
+        // Medium severity: unsealing
+        const modeLabel = getMessageModeDisplay(newMode).label.toLowerCase();
+        message = `Unseal ${agent.name}? It will be able to send and receive messages in ${modeLabel} mode. This takes effect immediately.`;
+      } else if (newMode === 'lineage') {
+        // Medium severity: restricting to lineage
+        message = `Change ${agent.name} to lineage mode? It will only be able to message users in its ancestry chain. All agent-to-agent messaging will be denied.`;
+      } else if (newMode === 'branch') {
+        // Medium severity: restricting to branch
+        message = `Change ${agent.name} to branch mode? It will only be able to message its direct parent and children (if they are also in branch mode) and lineage users.`;
+      } else {
+        message = `Change ${agent.name} to ${getMessageModeDisplay(newMode).label.toLowerCase()} mode?`;
+      }
+
+      const confirmed = await showConfirm(message, {
+        title: 'Change Message Mode',
+        confirmText: newMode === 'none' ? 'Seal Agent' : 'Change Mode',
+        variant,
+      });
+
+      if (!confirmed) {
+        revertSelect();
+        return;
+      }
+    }
+
+    // Apply the mode change via API
+    try {
+      const response = await apiFetch(`/api/v1/agents/${agent.id}/actions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_message_mode', mode: newMode }),
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          await extractApiError(response, 'Failed to change message mode.')
+        );
+      }
+
+      // Optimistic update
+      const modeLabel = getMessageModeDisplay(newMode).label;
+      this.agent = { ...agent, messageMode: newMode };
+      showToast(`Message mode changed to ${modeLabel}.`, 'success');
+
+      // Background refresh to get updated _messageability
+      this.backgroundRefresh();
+    } catch (err) {
+      revertSelect();
+      showToast(
+        err instanceof Error ? err.message : 'Failed to change message mode.',
+        'danger'
+      );
+    }
   }
 
   private renderIdentityCard(agent: Agent) {

@@ -35,6 +35,7 @@ import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { TemplateFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
+import '../shared/message-mode-badge.js';
 
 @customElement('scion-page-template-detail')
 export class ScionPageTemplateDetail extends LitElement {
@@ -313,6 +314,11 @@ export class ScionPageTemplateDetail extends LitElement {
                 >Hash:
                 <scion-hash-display .hash=${t.contentHash} max-width="14ch"></scion-hash-display
               ></span>`
+            : ''}
+          ${t.config?.messageMode
+            ? html`<span>
+                Mode: <scion-message-mode-badge mode=${t.config.messageMode} size="small"></scion-message-mode-badge>
+              </span>`
             : ''}
         </div>
       </div>

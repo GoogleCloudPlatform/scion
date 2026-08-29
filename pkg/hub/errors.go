@@ -64,6 +64,9 @@ const (
 	// fetched or yielded nothing usable (see handleSkillsDiscoverDirectory).
 	ErrCodeDiscoverFailed = "discover_failed"
 
+	// Message authorization error codes
+	ErrCodeMessageDenied = "message_denied"
+
 	// Delivery error codes
 	ErrCodeAgentNotFound   = "agent_not_found"
 	ErrCodeDeliveryFailed  = "delivery_failed"

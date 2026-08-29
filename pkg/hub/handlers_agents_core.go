@@ -361,6 +361,13 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Compute messageability for each agent relative to the viewer.
+	if identity != nil {
+		for i := range agents {
+			agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
+		}
+	}
+
 	var scopeCap *Capabilities
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
@@ -2079,6 +2086,14 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, agentResource(agent))
+
+		// Compute detailed messageability with reachable counts for the detail endpoint.
+		projectAgentsResult, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: agent.ProjectID}, store.ListOptions{})
+		if err == nil {
+			resp.Messageability = s.ComputeMessageabilityDetail(ctx, identity, agent, projectAgentsResult.Items)
+		} else {
+			resp.Messageability = s.ComputeMessageability(ctx, identity, agent)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -2596,8 +2611,12 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 				"target_agent", id,
 				"reason", reason,
 			)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Message delivery denied", nil)
+			writeError(w, http.StatusForbidden, ErrCodeMessageDenied,
+				"Message delivery denied", map[string]interface{}{
+					"reason":        mapReasonToCode(reason),
+					"senderMode":    s.getSenderMode(r.Context(), identity),
+					"recipientMode": targetAgent.MessageMode,
+				})
 			return
 		}
 		// Authorization passed — fall through to action dispatch below.

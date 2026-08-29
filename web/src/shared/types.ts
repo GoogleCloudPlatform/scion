@@ -211,6 +211,59 @@ export type AgentPhase =
   | 'error';
 
 /**
+ * Message mode controlling an agent's messaging authorization scope
+ */
+export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
+
+// ---------------------------------------------------------------------------
+// Cascade mode change types
+// ---------------------------------------------------------------------------
+
+/** Detail for a single agent affected by a cascade mode change. */
+export interface CascadeAgentDetail {
+  agent_id: string;
+  agent_name: string;
+  current_mode: MessageMode;
+  new_mode: MessageMode;
+}
+
+/** Response from a cascade mode change (or dry-run preview). */
+export interface CascadePreview {
+  agent_id: string;
+  mode: string;
+  previous_mode: string;
+  cascade?: {
+    count: number;
+    agent_ids: string[];
+    details?: CascadeAgentDetail[];
+  };
+}
+
+/** Present on agent LIST and DETAIL responses. Cheap: O(1) per agent. */
+export interface AgentMessageability {
+  /** Whether the viewer can send a message to this agent */
+  canMessage: boolean;
+  /** Whether this agent can send a message to the viewer */
+  canReachViewer: boolean;
+  /** Reason code when canMessage is false */
+  reason?:
+    | 'mode_none'
+    | 'mode_lineage_no_ancestry'
+    | 'mode_branch_no_edge'
+    | 'mode_lineage_agent_to_agent'
+    | 'mode_none_sender'
+    | 'missing_permission';
+}
+
+/** Present on agent DETAIL responses only. O(n) per agent — too costly for lists. */
+export interface AgentMessageabilityDetail extends AgentMessageability {
+  /** Count of agents this agent can directly reach */
+  reachableAgentCount: number;
+  /** Count of users this agent can reach */
+  reachableUserCount: number;
+}
+
+/**
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
@@ -462,6 +515,28 @@ export interface Agent {
 
   // Port forwarding
   exposedPorts?: ExposedPort[];
+
+  // Messaging authorization scope
+  messageMode?: MessageMode;
+  _messageability?: AgentMessageability | AgentMessageabilityDetail;
+
+  // Children agent IDs (populated by some API responses)
+  childrenIds?: string[];
+}
+
+/**
+ * Template configuration embedded in template detail responses.
+ * Partial subset of the Go `store.TemplateConfig` struct, covering fields used by the frontend.
+ */
+export interface TemplateConfig {
+  harness?: string;
+  image?: string;
+  configDir?: string;
+  env?: Record<string, string>;
+  detached?: boolean;
+  commandArgs?: string[];
+  model?: string;
+  messageMode?: MessageMode;
 }
 
 /**
@@ -480,6 +555,7 @@ export interface Template {
   scopeId?: string;
   contentHash?: string;
   files?: TemplateFileInfo[];
+  config?: TemplateConfig;
   createdAt: string;
   updatedAt: string;
   _capabilities?: Capabilities;

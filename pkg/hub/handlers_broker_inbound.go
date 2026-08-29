@@ -154,10 +154,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		if !allowed {
 			log.Warn("broker inbound message authorization denied",
 				"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", reason)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			writeError(w, http.StatusForbidden, ErrCodeMessageDenied,
 				"Message delivery denied", map[string]interface{}{
-					"sender":     req.Message.Sender,
-					"agent_slug": agentSlug,
+					"reason":        mapReasonToCode(reason),
+					"senderMode":    "user",
+					"recipientMode": agent.MessageMode,
+					"sender":        req.Message.Sender,
+					"agent_slug":    agentSlug,
 				})
 			return
 		}

@@ -33,10 +33,13 @@ import type {
   GCPIdentityConfig,
   GCPServiceAccount,
   HarnessAdvancedCapabilities,
+  MessageMode,
 } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
+import '../shared/message-mode-badge.js';
 
 interface ScionConfigPayload {
   image?: string;
@@ -123,6 +126,9 @@ export class ScionPageAgentConfigure extends LitElement {
   // Form fields — Environment
   @state() private envEntries: EnvEntry[] = [];
   @state() private requiredEnvKeys: string[] = [];
+
+  // Form fields — Message Mode
+  @state() private messageMode = '';
 
   // Form fields — GCP Identity
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
@@ -511,6 +517,9 @@ export class ScionPageAgentConfigure extends LitElement {
     // Detect required keys that are empty (from env gathering)
     this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
 
+    // Message Mode
+    this.messageMode = this.agent.messageMode || '';
+
     // GCP Identity
     const gcpId = ac?.gcpIdentity;
     this.gcpMetadataMode = (gcpId?.metadataMode as 'block' | 'passthrough' | 'assign') || 'block';
@@ -622,6 +631,11 @@ export class ScionPageAgentConfigure extends LitElement {
       const body: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) body.gcp_identity = gcpIdentity;
+      // Always include messageMode for created-phase agents so "Default" can
+      // clear a previously set mode. Use null to signal "unset" to the backend.
+      if (this.agent?.phase === 'created') {
+        body.messageMode = this.messageMode || null;
+      }
       const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -669,6 +683,11 @@ export class ScionPageAgentConfigure extends LitElement {
       const saveBody: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) saveBody.gcp_identity = gcpIdentity;
+      // Always include messageMode for created-phase agents so "Default" can
+      // clear a previously set mode. Use null to signal "unset" to the backend.
+      if (this.agent?.phase === 'created') {
+        saveBody.messageMode = this.messageMode || null;
+      }
       const saveRes = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1028,6 +1047,52 @@ export class ScionPageAgentConfigure extends LitElement {
             </div>
           `
         : nothing}
+
+      <!-- Message Mode -->
+      ${this.agent?.phase === 'created'
+        ? html`
+            <div class="form-field">
+              <label>Message Mode</label>
+              <sl-select
+                placeholder="Select a message mode..."
+                .value=${this.messageMode}
+                @sl-change=${(e: Event) => {
+                  this.messageMode = (e.target as HTMLElement & { value: string }).value;
+                }}
+              >
+                <sl-option value="">Default (inherit from parent)</sl-option>
+                ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+                  ([mode, display]) => html`
+                    <sl-option value=${mode}>
+                      <sl-icon slot="prefix" name=${display.icon}></sl-icon>
+                      ${display.label} — ${display.description}
+                    </sl-option>
+                  `
+                )}
+              </sl-select>
+              ${this.messageMode === 'none'
+                ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+                    This agent is configured in sealed mode. It will not be able to send or receive messages.
+                  </div>`
+                : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+            </div>
+          `
+        : this.agent?.messageMode
+          ? html`
+              <div class="form-field">
+                <label>Message Mode</label>
+                <div style="padding: 0.25rem 0;">
+                  <scion-message-mode-badge
+                    mode=${this.agent.messageMode}
+                    size="medium"
+                  ></scion-message-mode-badge>
+                </div>
+                <div class="hint">
+                  Message mode is read-only for started agents. Use the agent detail page to change it.
+                </div>
+              </div>
+            `
+          : nothing}
 
       <div class="form-field">
         <label for="gcp-mode">GCP Identity</label>

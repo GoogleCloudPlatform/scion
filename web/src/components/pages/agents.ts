@@ -45,9 +45,13 @@ import { stateManager } from '../../client/state.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
+import '../shared/message-mode-badge.js';
+import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
+import { getDenialMessage, MESSAGE_MODE_DISPLAY, getMessageModeDisplay } from '../../shared/message-mode.js';
+import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 
@@ -112,6 +116,9 @@ export class ScionPageAgents extends LitElement {
 
   @state()
   private labelFilter = '';
+
+  @state()
+  private modeFilter = '';
 
   @state()
   private sortField: AgentSortField = 'updated';
@@ -358,6 +365,12 @@ export class ScionPageAgents extends LitElement {
       storedPhase === 'error'
     ) {
       this.phaseFilter = storedPhase;
+    }
+
+    // Read persisted mode filter
+    const storedMode = localStorage.getItem('scion-filter-agents-mode');
+    if (storedMode) {
+      this.modeFilter = storedMode;
     }
 
     // Read persisted sort
@@ -651,6 +664,16 @@ export class ScionPageAgents extends LitElement {
     if (this.phaseFilter) {
       list = list.filter((a) => a.phase === this.phaseFilter);
     }
+    if (this.modeFilter) {
+      if (this.modeFilter === 'can_message') {
+        list = list.filter((a) => a._messageability?.canMessage === true);
+      } else if (this.modeFilter === 'cannot_message') {
+        list = list.filter((a) => a._messageability?.canMessage === false);
+      } else {
+        // Filter by specific mode value
+        list = list.filter((a) => (a.messageMode || 'project') === this.modeFilter);
+      }
+    }
     if (this.labelFilter.trim()) {
       const parts = this.labelFilter.trim().split('=');
       const filterKey = parts[0];
@@ -715,6 +738,23 @@ export class ScionPageAgents extends LitElement {
     } else {
       localStorage.removeItem('scion-filter-agents-phase');
     }
+  }
+
+  private setModeFilter(mode: string): void {
+    if (this.modeFilter === mode) return;
+    this.modeFilter = mode;
+    if (mode) {
+      localStorage.setItem('scion-filter-agents-mode', mode);
+    } else {
+      localStorage.removeItem('scion-filter-agents-mode');
+    }
+  }
+
+  private getModeFilterLabel(): string {
+    if (!this.modeFilter) return 'All Modes';
+    if (this.modeFilter === 'can_message') return 'Can message';
+    if (this.modeFilter === 'cannot_message') return 'Cannot message';
+    return getMessageModeDisplay(this.modeFilter).label;
   }
 
   private toggleSort(field: AgentSortField): void {
@@ -906,6 +946,51 @@ export class ScionPageAgents extends LitElement {
         >
           <sl-icon slot="prefix" name="tag"></sl-icon>
         </sl-input>
+        <sl-dropdown>
+          <sl-button slot="trigger" size="small" outline>
+            ${this.modeFilter &&
+            this.modeFilter !== 'can_message' &&
+            this.modeFilter !== 'cannot_message'
+              ? html`<sl-icon
+                  slot="prefix"
+                  name=${MESSAGE_MODE_DISPLAY[this.modeFilter as MessageMode]?.icon || 'funnel'}
+                ></sl-icon>`
+              : html`<sl-icon slot="prefix" name="funnel"></sl-icon>`}
+            ${this.getModeFilterLabel()}
+          </sl-button>
+          <sl-menu
+            @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+              this.setModeFilter(e.detail.item.value)}
+          >
+            <sl-menu-item value="" ?checked=${this.modeFilter === ''}>All Modes</sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="project" ?checked=${this.modeFilter === 'project'}>
+              <sl-icon slot="prefix" name="globe2"></sl-icon>
+              Project
+            </sl-menu-item>
+            <sl-menu-item value="branch" ?checked=${this.modeFilter === 'branch'}>
+              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              Branch
+            </sl-menu-item>
+            <sl-menu-item value="lineage" ?checked=${this.modeFilter === 'lineage'}>
+              <sl-icon slot="prefix" name="person-lines-fill"></sl-icon>
+              Lineage
+            </sl-menu-item>
+            <sl-menu-item value="none" ?checked=${this.modeFilter === 'none'}>
+              <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+              Sealed
+            </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="can_message" ?checked=${this.modeFilter === 'can_message'}>
+              <sl-icon slot="prefix" name="check-circle"></sl-icon>
+              Can message
+            </sl-menu-item>
+            <sl-menu-item value="cannot_message" ?checked=${this.modeFilter === 'cannot_message'}>
+              <sl-icon slot="prefix" name="x-circle"></sl-icon>
+              Cannot message
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
         ${this.viewMode === 'grid'
           ? html`
               <sl-dropdown>
@@ -1017,28 +1102,47 @@ export class ScionPageAgents extends LitElement {
     const isLoading = this.actionLoading[agent.id] || false;
 
     return html`
-      ${can(agent._capabilities, 'attach')
-        ? html`
-            <sl-tooltip content="Message">
-              <span style="display: inline-flex">
-                <sl-button
-                  class="action-btn-primary"
-                  variant="default"
-                  size="small"
-                  outline
-                  @click=${() => {
-                    this.quickMessageAgentId = agent.id;
-                    this.quickMessageAgentName = agent.name;
-                    this.quickMessageOpen = true;
-                  }}
-                  aria-label="Message"
-                >
-                  <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-                </sl-button>
-              </span>
-            </sl-tooltip>
-          `
-        : nothing}
+      ${agent.messageMode === 'none'
+        ? nothing
+        : agent._messageability?.canMessage === false
+          ? html`
+              <sl-tooltip content="${getDenialMessage(agent._messageability.reason, agent.name)}">
+                <span style="display: inline-flex">
+                  <sl-button
+                    class="action-btn-primary"
+                    variant="default"
+                    size="small"
+                    outline
+                    disabled
+                    aria-label="Message"
+                  >
+                    <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                  </sl-button>
+                </span>
+              </sl-tooltip>
+            `
+          : can(agent._capabilities, 'attach')
+            ? html`
+                <sl-tooltip content="Message">
+                  <span style="display: inline-flex">
+                    <sl-button
+                      class="action-btn-primary"
+                      variant="default"
+                      size="small"
+                      outline
+                      @click=${() => {
+                        this.quickMessageAgentId = agent.id;
+                        this.quickMessageAgentName = agent.name;
+                        this.quickMessageOpen = true;
+                      }}
+                      aria-label="Message"
+                    >
+                      <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                    </sl-button>
+                  </span>
+                </sl-tooltip>
+              `
+            : nothing}
       ${can(agent._capabilities, 'attach')
         ? html`
             <sl-tooltip content="Terminal">
@@ -1191,6 +1295,19 @@ export class ScionPageAgents extends LitElement {
             size="small"
           >
           </scion-status-badge>
+          <scion-message-mode-badge
+            mode=${agent.messageMode || 'project'}
+            size="small"
+            ?showLabel=${false}
+          ></scion-message-mode-badge>
+          ${agent._messageability
+            ? html`
+                <scion-messageability-indicator
+                  .messageability=${agent._messageability}
+                  size="small"
+                ></scion-messageability-indicator>
+              `
+            : nothing}
         </div>
 
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
@@ -1250,6 +1367,7 @@ export class ScionPageAgents extends LitElement {
               >
                 Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
               </th>
+              <th class="hide-mobile">Messaging</th>
               <th
                 class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('updated')}
@@ -1291,6 +1409,20 @@ export class ScionPageAgents extends LitElement {
             label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
+        </td>
+        <td class="hide-mobile">
+          <scion-message-mode-badge
+            mode=${agent.messageMode || 'project'}
+            size="small"
+          ></scion-message-mode-badge>
+          ${agent._messageability
+            ? html`
+                <scion-messageability-indicator
+                  .messageability=${agent._messageability}
+                  size="small"
+                ></scion-messageability-indicator>
+              `
+            : nothing}
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||

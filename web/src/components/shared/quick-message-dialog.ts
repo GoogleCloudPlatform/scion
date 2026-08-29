@@ -25,6 +25,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getDenialMessage } from '../../shared/message-mode.js';
 
 @customElement('scion-quick-message-dialog')
 export class ScionQuickMessageDialog extends LitElement {
@@ -101,6 +102,18 @@ export class ScionQuickMessageDialog extends LitElement {
       });
 
       if (!res.ok) {
+        // Try to parse structured rejection error
+        try {
+          const errorBody = (await res.clone().json()) as {
+            error?: { code?: string; details?: { reason?: string } };
+          };
+          if (errorBody.error?.code === 'message_denied' && errorBody.error?.details?.reason) {
+            this.sendError = getDenialMessage(errorBody.error.details.reason, this.agentName);
+            return;
+          }
+        } catch {
+          /* fall through to generic */
+        }
         this.sendError = await extractApiError(res, 'Failed to send message');
         return;
       }

@@ -1125,7 +1125,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			"target_agent", primaryAgent.ID,
 			"reason", reason,
 		)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Message delivery denied", nil)
+		writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
+			"reason":        mapReasonToCode(reason),
+			"senderMode":    "user",
+			"recipientMode": primaryAgent.MessageMode,
+		})
 		return ""
 	}
 
