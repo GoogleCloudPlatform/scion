@@ -45,7 +45,7 @@ func newTestMapper(t *testing.T, users []hubclient.User) *Mapper {
 	t.Cleanup(func() { store.Close() })
 
 	client := &fakeHubClient{users: users}
-	return NewMapper(store, client, "http://hub.test", slog.Default())
+	return NewMapper(store, client, "http://hub.test", nil, slog.Default())
 }
 
 func TestAutoRegister_EmailMatch(t *testing.T) {

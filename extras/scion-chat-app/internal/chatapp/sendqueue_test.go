@@ -17,6 +17,7 @@ package chatapp
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"testing"
@@ -57,6 +58,9 @@ func (m *recordingMessenger) GetUser(context.Context, string) (*ChatUser, error)
 	return nil, nil
 }
 func (m *recordingMessenger) SetAgentIdentity(context.Context, AgentIdentity) error { return nil }
+func (m *recordingMessenger) UploadMedia(_ context.Context, _, _ string, _ io.Reader) (string, error) {
+	return "", nil
+}
 
 func (m *recordingMessenger) getCalls() []SendMessageRequest {
 	m.mu.Lock()
