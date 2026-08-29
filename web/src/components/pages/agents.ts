@@ -50,7 +50,8 @@ import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
-import { getDenialMessage } from '../../shared/message-mode.js';
+import { getDenialMessage, MESSAGE_MODE_DISPLAY, getMessageModeDisplay } from '../../shared/message-mode.js';
+import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 
@@ -115,6 +116,9 @@ export class ScionPageAgents extends LitElement {
 
   @state()
   private labelFilter = '';
+
+  @state()
+  private modeFilter = '';
 
   @state()
   private sortField: AgentSortField = 'updated';
@@ -361,6 +365,12 @@ export class ScionPageAgents extends LitElement {
       storedPhase === 'error'
     ) {
       this.phaseFilter = storedPhase;
+    }
+
+    // Read persisted mode filter
+    const storedMode = localStorage.getItem('scion-filter-agents-mode');
+    if (storedMode) {
+      this.modeFilter = storedMode;
     }
 
     // Read persisted sort
@@ -654,6 +664,16 @@ export class ScionPageAgents extends LitElement {
     if (this.phaseFilter) {
       list = list.filter((a) => a.phase === this.phaseFilter);
     }
+    if (this.modeFilter) {
+      if (this.modeFilter === 'can_message') {
+        list = list.filter((a) => a._messageability?.canMessage === true);
+      } else if (this.modeFilter === 'cannot_message') {
+        list = list.filter((a) => a._messageability?.canMessage === false);
+      } else {
+        // Filter by specific mode value
+        list = list.filter((a) => (a.messageMode || 'project') === this.modeFilter);
+      }
+    }
     if (this.labelFilter.trim()) {
       const parts = this.labelFilter.trim().split('=');
       const filterKey = parts[0];
@@ -718,6 +738,23 @@ export class ScionPageAgents extends LitElement {
     } else {
       localStorage.removeItem('scion-filter-agents-phase');
     }
+  }
+
+  private setModeFilter(mode: string): void {
+    if (this.modeFilter === mode) return;
+    this.modeFilter = mode;
+    if (mode) {
+      localStorage.setItem('scion-filter-agents-mode', mode);
+    } else {
+      localStorage.removeItem('scion-filter-agents-mode');
+    }
+  }
+
+  private getModeFilterLabel(): string {
+    if (!this.modeFilter) return 'All Modes';
+    if (this.modeFilter === 'can_message') return 'Can message';
+    if (this.modeFilter === 'cannot_message') return 'Cannot message';
+    return getMessageModeDisplay(this.modeFilter).label;
   }
 
   private toggleSort(field: AgentSortField): void {
@@ -909,6 +946,51 @@ export class ScionPageAgents extends LitElement {
         >
           <sl-icon slot="prefix" name="tag"></sl-icon>
         </sl-input>
+        <sl-dropdown>
+          <sl-button slot="trigger" size="small" outline>
+            ${this.modeFilter &&
+            this.modeFilter !== 'can_message' &&
+            this.modeFilter !== 'cannot_message'
+              ? html`<sl-icon
+                  slot="prefix"
+                  name=${MESSAGE_MODE_DISPLAY[this.modeFilter as MessageMode]?.icon || 'funnel'}
+                ></sl-icon>`
+              : html`<sl-icon slot="prefix" name="funnel"></sl-icon>`}
+            ${this.getModeFilterLabel()}
+          </sl-button>
+          <sl-menu
+            @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+              this.setModeFilter(e.detail.item.value)}
+          >
+            <sl-menu-item value="" ?checked=${this.modeFilter === ''}>All Modes</sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="project" ?checked=${this.modeFilter === 'project'}>
+              <sl-icon slot="prefix" name="globe2"></sl-icon>
+              Project
+            </sl-menu-item>
+            <sl-menu-item value="branch" ?checked=${this.modeFilter === 'branch'}>
+              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              Branch
+            </sl-menu-item>
+            <sl-menu-item value="lineage" ?checked=${this.modeFilter === 'lineage'}>
+              <sl-icon slot="prefix" name="person-lines-fill"></sl-icon>
+              Lineage
+            </sl-menu-item>
+            <sl-menu-item value="none" ?checked=${this.modeFilter === 'none'}>
+              <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+              Sealed
+            </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="can_message" ?checked=${this.modeFilter === 'can_message'}>
+              <sl-icon slot="prefix" name="check-circle"></sl-icon>
+              Can message
+            </sl-menu-item>
+            <sl-menu-item value="cannot_message" ?checked=${this.modeFilter === 'cannot_message'}>
+              <sl-icon slot="prefix" name="x-circle"></sl-icon>
+              Cannot message
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
         ${this.viewMode === 'grid'
           ? html`
               <sl-dropdown>

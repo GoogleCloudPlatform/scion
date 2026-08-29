@@ -215,6 +215,30 @@ export type AgentPhase =
  */
 export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
 
+// ---------------------------------------------------------------------------
+// Cascade mode change types
+// ---------------------------------------------------------------------------
+
+/** Detail for a single agent affected by a cascade mode change. */
+export interface CascadeAgentDetail {
+  agent_id: string;
+  agent_name: string;
+  current_mode: string;
+  new_mode: string;
+}
+
+/** Response from a cascade mode change (or dry-run preview). */
+export interface CascadePreview {
+  agent_id: string;
+  mode: string;
+  previous_mode: string;
+  cascade?: {
+    count: number;
+    agent_ids: string[];
+    details?: CascadeAgentDetail[];
+  };
+}
+
 /** Present on agent LIST and DETAIL responses. Cheap: O(1) per agent. */
 export interface AgentMessageability {
   /** Whether the viewer can send a message to this agent */
