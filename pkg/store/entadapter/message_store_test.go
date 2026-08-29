@@ -200,3 +200,114 @@ func TestCreateMessagePublishesEvent(t *testing.T) {
 	require.Len(t, pub.published, 1)
 	assert.Equal(t, msg.ID, pub.published[0].ID)
 }
+
+// ---------------------------------------------------------------------------
+// CountUnbackfilledMessages
+// ---------------------------------------------------------------------------
+
+func TestCountUnbackfilledMessages_ZeroWhenAllBackfilled(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	conversationID := uuid.NewString()
+
+	// Create two messages, then backfill both with a conversation_id.
+	m1 := newTestMessage(projectID, "agent-1")
+	m2 := newTestMessage(projectID, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, m1))
+	require.NoError(t, s.CreateMessage(ctx, m2))
+	require.NoError(t, s.SetMessageConversationID(ctx, m1.ID, conversationID))
+	require.NoError(t, s.SetMessageConversationID(ctx, m2.ID, conversationID))
+
+	count, err := s.CountUnbackfilledMessages(ctx, projectID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+func TestCountUnbackfilledMessages_SomeUnbackfilled(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	conversationID := uuid.NewString()
+
+	// Create three messages; backfill only one.
+	m1 := newTestMessage(projectID, "agent-1")
+	m2 := newTestMessage(projectID, "agent-1")
+	m3 := newTestMessage(projectID, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, m1))
+	require.NoError(t, s.CreateMessage(ctx, m2))
+	require.NoError(t, s.CreateMessage(ctx, m3))
+	require.NoError(t, s.SetMessageConversationID(ctx, m1.ID, conversationID))
+
+	count, err := s.CountUnbackfilledMessages(ctx, projectID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+}
+
+func TestCountUnbackfilledMessages_ProjectScopingFilters(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+
+	projectA := uuid.NewString()
+	projectB := uuid.NewString()
+	conversationID := uuid.NewString()
+
+	// Project A: 3 messages, backfill 1 → 2 unbackfilled.
+	a1 := newTestMessage(projectA, "agent-1")
+	a2 := newTestMessage(projectA, "agent-1")
+	a3 := newTestMessage(projectA, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, a1))
+	require.NoError(t, s.CreateMessage(ctx, a2))
+	require.NoError(t, s.CreateMessage(ctx, a3))
+	require.NoError(t, s.SetMessageConversationID(ctx, a1.ID, conversationID))
+
+	// Project B: 2 messages, backfill 0 → 2 unbackfilled.
+	b1 := newTestMessage(projectB, "agent-1")
+	b2 := newTestMessage(projectB, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, b1))
+	require.NoError(t, s.CreateMessage(ctx, b2))
+
+	// Scoped to project A → must return 2, NOT 4.
+	countA, err := s.CountUnbackfilledMessages(ctx, projectA)
+	require.NoError(t, err)
+	assert.Equal(t, 2, countA, "project A should have exactly 2 unbackfilled messages")
+
+	// Scoped to project B → must return 2, NOT 4.
+	countB, err := s.CountUnbackfilledMessages(ctx, projectB)
+	require.NoError(t, err)
+	assert.Equal(t, 2, countB, "project B should have exactly 2 unbackfilled messages")
+}
+
+func TestCountUnbackfilledMessages_EmptyProjectIDCountsAll(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+
+	projectA := uuid.NewString()
+	projectB := uuid.NewString()
+	conversationID := uuid.NewString()
+
+	// Project A: 2 messages, backfill 1 → 1 unbackfilled.
+	a1 := newTestMessage(projectA, "agent-1")
+	a2 := newTestMessage(projectA, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, a1))
+	require.NoError(t, s.CreateMessage(ctx, a2))
+	require.NoError(t, s.SetMessageConversationID(ctx, a1.ID, conversationID))
+
+	// Project B: 1 message, no backfill → 1 unbackfilled.
+	b1 := newTestMessage(projectB, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, b1))
+
+	// Empty projectID → counts all unbackfilled across both projects.
+	count, err := s.CountUnbackfilledMessages(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "empty projectID should count unbackfilled messages across all projects")
+}
+
+func TestCountUnbackfilledMessages_InvalidProjectIDReturnsError(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+
+	count, err := s.CountUnbackfilledMessages(ctx, "not-a-uuid")
+	assert.Error(t, err)
+	assert.Equal(t, 0, count)
+}

@@ -1331,6 +1331,11 @@ type MessageStore interface {
 	// message. Used by the Phase 4 backfill to link legacy messages to
 	// Conversation records. Returns ErrNotFound if the message doesn't exist.
 	SetMessageConversationID(ctx context.Context, messageID, conversationID string) error
+
+	// CountUnbackfilledMessages returns the number of messages with an empty
+	// conversation_id for the given project. When projectID is empty, counts
+	// across all projects.
+	CountUnbackfilledMessages(ctx context.Context, projectID string) (int, error)
 }
 
 // =============================================================================

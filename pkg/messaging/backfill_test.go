@@ -162,6 +162,20 @@ func (m *mockMessageStore) SetMessageConversationID(_ context.Context, messageID
 	return store.ErrNotFound
 }
 
+func (m *mockMessageStore) CountUnbackfilledMessages(_ context.Context, projectID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, msg := range m.messages {
+		if msg.ConversationID == "" {
+			if projectID == "" || msg.ProjectID == projectID {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 // mockConversationStore is an in-memory ConversationStore used by backfill tests.
 type mockConversationStore struct {
 	mu            sync.Mutex
