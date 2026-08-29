@@ -57,8 +57,35 @@ import {
 } from '../../shared/lineage.js';
 import type { StatusType } from './status-badge.js';
 import './status-badge.js';
-import { getMessageModeDisplay } from '../../shared/message-mode.js';
+import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
+import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
+
+/**
+ * Determine edge visual style based on parent/child message mode compatibility.
+ */
+function getEdgeStyle(
+  parentMode: MessageMode | undefined,
+  childMode: MessageMode | undefined
+): { stroke: string; dashArray: string; markerClass: string } {
+  const pm = parentMode || 'project';
+  const cm = childMode || 'project';
+
+  // Either endpoint sealed
+  if (pm === 'none' || cm === 'none') {
+    return { stroke: 'var(--sl-color-danger-400)', dashArray: '3,3', markerClass: 'sealed' };
+  }
+  // Both branch mode (messageable edge)
+  if (pm === 'branch' && cm === 'branch') {
+    return { stroke: 'var(--sl-color-primary-600)', dashArray: '', markerClass: 'lit' };
+  }
+  // Both project mode (messageable)
+  if (pm === 'project' && cm === 'project') {
+    return { stroke: 'var(--sl-color-neutral-400)', dashArray: '', markerClass: '' };
+  }
+  // Mode mismatch (non-messageable)
+  return { stroke: 'var(--sl-color-neutral-400)', dashArray: '5,5', markerClass: '' };
+}
 
 const VARIANT_COLOR: Record<StatusVariant, string> = {
   success: 'var(--sl-color-success-600)',
@@ -833,7 +860,7 @@ export class ScionAgentTreeView extends LitElement {
           style="transform: translate(${this.panX}px, ${this.panY}px) scale(${this.scale})"
         >
           <svg width=${width} height=${height} aria-hidden="true">
-            ${this.renderEdgeMarkers()} ${edges.map((e) => this.renderEdge(e, related))}
+            ${this.renderEdgeMarkers()} ${edges.map((e) => this.renderEdge(e, related, agents))}
           </svg>
           ${users.map((u) => this.renderUserNode(u, agents, edges, related))}
           ${nodes.map((n) => this.renderNode(n, related, hiddenCounts))}
@@ -886,16 +913,46 @@ export class ScionAgentTreeView extends LitElement {
     return svg`<defs>
       ${marker('arrow-neutral', 'var(--sl-color-neutral-400)')}
       ${marker('arrow-lit', 'var(--sl-color-primary-600)')}
+      ${marker('arrow-sealed', 'var(--sl-color-danger-400)')}
     </defs>`;
   }
 
-  private renderEdge(e: PositionedEdge, related: Set<string> | null) {
+  private renderEdge(e: PositionedEdge, related: Set<string> | null, agents: Agent[]) {
     const lit = related !== null && related.has(e.parentId) && related.has(e.childId);
     const dim = related !== null && !lit;
+
+    // Look up agents for mode-aware edge styling
+    const parentAgent = agents.find((a) => a.id === e.parentId);
+    const childAgent = agents.find((a) => a.id === e.childId);
+    const edgeStyle =
+      parentAgent && childAgent
+        ? getEdgeStyle(parentAgent.messageMode, childAgent.messageMode)
+        : null;
+
+    // Build marker-end reference based on mode styling + hover state
+    let markerEnd = 'url(#arrow-neutral)';
+    if (lit) {
+      markerEnd = 'url(#arrow-lit)';
+    } else if (edgeStyle?.markerClass === 'sealed') {
+      markerEnd = 'url(#arrow-sealed)';
+    } else if (edgeStyle?.markerClass === 'lit') {
+      markerEnd = 'url(#arrow-lit)';
+    }
+
+    // Build tooltip for mode-mismatch edges
+    const hasMismatch = edgeStyle && edgeStyle.dashArray !== '';
+    const titleText =
+      hasMismatch && parentAgent && childAgent
+        ? `Messaging denied: ${parentAgent.name} (${parentAgent.messageMode || 'project'}) ↔ ${childAgent.name} (${childAgent.messageMode || 'project'})`
+        : '';
+
     return svg`<path
       class="edge ${lit ? 'lit' : ''} ${dim ? 'dim' : ''}"
       d=${this.edgePath(e)}
-    />`;
+      stroke=${edgeStyle && !lit ? edgeStyle.stroke : nothing}
+      stroke-dasharray=${edgeStyle?.dashArray || nothing}
+      marker-end=${markerEnd}
+    >${titleText ? svg`<title>${titleText}</title>` : nothing}</path>`;
   }
 
   /**
@@ -968,26 +1025,43 @@ export class ScionAgentTreeView extends LitElement {
             size="small"
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
-          <span class="mode-icon" style="position: absolute; top: 4px; right: 6px; font-size: 14px; color: var(--sl-color-${modeDisplay.color}-600);">
+          <span
+            class="mode-icon"
+            style="position: absolute; top: 4px; right: 6px; font-size: 14px; color: var(--sl-color-${modeDisplay.color}-600);"
+          >
             <sl-icon name=${modeDisplay.icon}></sl-icon>
           </span>
         </a>
-        ${can(agent._capabilities, 'attach')
-          ? html`
-              <sl-icon-button
-                class="message-btn"
-                name="chat-dots"
-                label="Message"
-                @click=${(e: Event) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  this.quickMessageAgentId = agent.id;
-                  this.quickMessageAgentName = agent.name;
-                  this.quickMessageOpen = true;
-                }}
-              ></sl-icon-button>
-            `
-          : nothing}
+        ${agent.messageMode === 'none'
+          ? nothing
+          : agent._messageability?.canMessage === false
+            ? html`
+                <sl-tooltip content="${getDenialMessage(agent._messageability.reason, agent.name)}">
+                  <sl-icon-button
+                    class="message-btn"
+                    name="chat-dots"
+                    label="Message"
+                    disabled
+                    style="opacity: 0.4;"
+                  ></sl-icon-button>
+                </sl-tooltip>
+              `
+            : can(agent._capabilities, 'attach')
+              ? html`
+                  <sl-icon-button
+                    class="message-btn"
+                    name="chat-dots"
+                    label="Message"
+                    @click=${(e: Event) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      this.quickMessageAgentId = agent.id;
+                      this.quickMessageAgentName = agent.name;
+                      this.quickMessageOpen = true;
+                    }}
+                  ></sl-icon-button>
+                `
+              : nothing}
         ${can(agent._capabilities, 'attach')
           ? html`
               <sl-icon-button

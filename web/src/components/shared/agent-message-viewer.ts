@@ -25,6 +25,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getDenialMessage } from '../../shared/message-mode.js';
 import type { Message } from '../../shared/types.js';
 import './json-browser.js';
 
@@ -668,6 +669,18 @@ export class ScionAgentMessageViewer extends LitElement {
         body: JSON.stringify(body),
       });
       if (!res.ok) {
+        // Try to parse structured rejection error
+        try {
+          const errorBody = (await res.clone().json()) as {
+            error?: { code?: string; details?: { reason?: string } };
+          };
+          if (errorBody.error?.code === 'message_denied' && errorBody.error?.details?.reason) {
+            this.sendError = getDenialMessage(errorBody.error.details.reason, this.agentName);
+            return;
+          }
+        } catch {
+          /* fall through to generic */
+        }
         this.sendError = await extractApiError(res, 'Failed to send message');
         return;
       }

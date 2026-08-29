@@ -43,6 +43,7 @@ const USED_ICONS = [
   'arrow-down',
   'arrow-down-circle',
   'arrow-left',
+  'arrow-left-right',
   'arrow-right',
   'arrow-left-circle',
   'arrow-repeat',

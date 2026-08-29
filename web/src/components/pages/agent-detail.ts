@@ -53,6 +53,9 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
 import '../shared/message-mode-badge.js';
+import '../shared/messageability-indicator.js';
+import { getDenialMessage, getMessageModeDisplay } from '../../shared/message-mode.js';
+import type { AgentMessageabilityDetail } from '../../shared/types.js';
 import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
@@ -1050,10 +1053,33 @@ export class ScionPageAgentDetail extends LitElement {
     // (AC9 — byte-for-byte current Messages tab behaviour).
     if (!this.nativeChatEnabled) {
       return html`
+        ${agent._messageability?.canMessage === false && agent.messageMode !== 'none'
+          ? html`
+              <div
+                class="alert alert-warning"
+                style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-warning-100); border: 1px solid var(--sl-color-warning-300);"
+              >
+                <sl-icon name="exclamation-triangle" style="margin-right: 0.5em;"></sl-icon>
+                ${getDenialMessage(agent._messageability.reason, agent.name)}
+              </div>
+            `
+          : nothing}
+        ${agent.messageMode === 'none'
+          ? html`
+              <div
+                class="alert alert-danger"
+                style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-danger-100); border: 1px solid var(--sl-color-danger-300);"
+              >
+                <sl-icon name="shield-lock" style="margin-right: 0.5em;"></sl-icon>
+                This agent is sealed (mode: none). Only super-admins can message it.
+              </div>
+            `
+          : nothing}
         <scion-agent-message-viewer
           agentId=${this.agentId}
           agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'attach')}
+          ?canSend=${can(agent._capabilities, 'attach') &&
+          agent._messageability?.canMessage !== false}
           ?cloudLogging=${agent.cloudLogging || false}
         ></scion-agent-message-viewer>
       `;
@@ -1061,6 +1087,28 @@ export class ScionPageAgentDetail extends LitElement {
 
     // Feature flag ON: show Chat|Log toggle, default to Chat
     return html`
+      ${agent._messageability?.canMessage === false && agent.messageMode !== 'none'
+        ? html`
+            <div
+              class="alert alert-warning"
+              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-warning-100); border: 1px solid var(--sl-color-warning-300);"
+            >
+              <sl-icon name="exclamation-triangle" style="margin-right: 0.5em;"></sl-icon>
+              ${getDenialMessage(agent._messageability.reason, agent.name)}
+            </div>
+          `
+        : nothing}
+      ${agent.messageMode === 'none'
+        ? html`
+            <div
+              class="alert alert-danger"
+              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-danger-100); border: 1px solid var(--sl-color-danger-300);"
+            >
+              <sl-icon name="shield-lock" style="margin-right: 0.5em;"></sl-icon>
+              This agent is sealed (mode: none). Only super-admins can message it.
+            </div>
+          `
+        : nothing}
       <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
         <sl-radio-group
           value=${this.chatViewActive ? 'chat' : 'log'}
@@ -1083,14 +1131,16 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach')}
+        ?canSend=${can(agent._capabilities, 'attach') &&
+        agent._messageability?.canMessage !== false}
         ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
       ></scion-chat-thread>
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach')}
+        ?canSend=${can(agent._capabilities, 'attach') &&
+        agent._messageability?.canMessage !== false}
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
       ></scion-agent-message-viewer>
@@ -1142,21 +1192,34 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
-          ${can(agent._capabilities, 'attach')
-            ? html`
-                <sl-button
-                  variant="default"
-                  size="small"
-                  outline
-                  @click=${() => {
-                    this.quickMessageOpen = true;
-                  }}
-                >
-                  <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-                  Message
-                </sl-button>
-              `
-            : nothing}
+          ${agent.messageMode === 'none'
+            ? nothing
+            : agent._messageability?.canMessage === false
+              ? html`
+                  <sl-tooltip
+                    content="${getDenialMessage(agent._messageability.reason, agent.name)}"
+                  >
+                    <sl-button variant="default" size="small" outline disabled>
+                      <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                      Message
+                    </sl-button>
+                  </sl-tooltip>
+                `
+              : can(agent._capabilities, 'attach')
+                ? html`
+                    <sl-button
+                      variant="default"
+                      size="small"
+                      outline
+                      @click=${() => {
+                        this.quickMessageOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                      Message
+                    </sl-button>
+                  `
+                : nothing}
           ${can(agent._capabilities, 'attach')
             ? html`
                 <a href="/agents/${this.agentId}/terminal" style="text-decoration: none;">
@@ -1637,10 +1700,48 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent)} ${this.renderLabelsCard(agent)}
-      ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
-      ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
-      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
+      ${this.renderIdentityCard(agent)} ${this.renderMessagingCard()}
+      ${this.renderLabelsCard(agent)} ${this.renderHarnessModelCard(agent, cfg, inline)}
+      ${this.renderRuntimeCard(agent, inline)} ${this.renderGCPIdentityCard(cfg?.gcpIdentity)}
+      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
+      ${this.renderInitialTaskCard(cfg)}
+    `;
+  }
+
+  private renderMessagingCard() {
+    const agent = this.agent!;
+    const modeDisplay = getMessageModeDisplay(agent.messageMode);
+    const messageability = agent._messageability as AgentMessageabilityDetail | undefined;
+
+    return html`
+      <div class="card">
+        <h3 class="card-title">Messaging</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">Message Mode</span>
+            <span class="info-value">
+              <scion-message-mode-badge
+                mode=${agent.messageMode || 'project'}
+                size="medium"
+              ></scion-message-mode-badge>
+              <span style="margin-left: 0.5em; color: var(--sl-color-neutral-600);">
+                ${modeDisplay.description}
+              </span>
+            </span>
+          </div>
+          ${messageability && 'reachableAgentCount' in messageability
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Reachability</span>
+                  <span class="info-value">
+                    Can message: ${messageability.reachableAgentCount} agents,
+                    ${messageability.reachableUserCount} users
+                  </span>
+                </div>
+              `
+            : nothing}
+        </div>
+      </div>
     `;
   }
 

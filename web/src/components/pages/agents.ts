@@ -46,9 +46,11 @@ import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/message-mode-badge.js';
+import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
+import { getDenialMessage } from '../../shared/message-mode.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 
@@ -1018,28 +1020,47 @@ export class ScionPageAgents extends LitElement {
     const isLoading = this.actionLoading[agent.id] || false;
 
     return html`
-      ${can(agent._capabilities, 'attach')
-        ? html`
-            <sl-tooltip content="Message">
-              <span style="display: inline-flex">
-                <sl-button
-                  class="action-btn-primary"
-                  variant="default"
-                  size="small"
-                  outline
-                  @click=${() => {
-                    this.quickMessageAgentId = agent.id;
-                    this.quickMessageAgentName = agent.name;
-                    this.quickMessageOpen = true;
-                  }}
-                  aria-label="Message"
-                >
-                  <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-                </sl-button>
-              </span>
-            </sl-tooltip>
-          `
-        : nothing}
+      ${agent.messageMode === 'none'
+        ? nothing
+        : agent._messageability?.canMessage === false
+          ? html`
+              <sl-tooltip content="${getDenialMessage(agent._messageability.reason, agent.name)}">
+                <span style="display: inline-flex">
+                  <sl-button
+                    class="action-btn-primary"
+                    variant="default"
+                    size="small"
+                    outline
+                    disabled
+                    aria-label="Message"
+                  >
+                    <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                  </sl-button>
+                </span>
+              </sl-tooltip>
+            `
+          : can(agent._capabilities, 'attach')
+            ? html`
+                <sl-tooltip content="Message">
+                  <span style="display: inline-flex">
+                    <sl-button
+                      class="action-btn-primary"
+                      variant="default"
+                      size="small"
+                      outline
+                      @click=${() => {
+                        this.quickMessageAgentId = agent.id;
+                        this.quickMessageAgentName = agent.name;
+                        this.quickMessageOpen = true;
+                      }}
+                      aria-label="Message"
+                    >
+                      <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                    </sl-button>
+                  </span>
+                </sl-tooltip>
+              `
+            : nothing}
       ${can(agent._capabilities, 'attach')
         ? html`
             <sl-tooltip content="Terminal">
@@ -1197,6 +1218,14 @@ export class ScionPageAgents extends LitElement {
             size="small"
             ?showLabel=${false}
           ></scion-message-mode-badge>
+          ${agent._messageability
+            ? html`
+                <scion-messageability-indicator
+                  .messageability=${agent._messageability}
+                  size="small"
+                ></scion-messageability-indicator>
+              `
+            : nothing}
         </div>
 
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
@@ -1304,6 +1333,14 @@ export class ScionPageAgents extends LitElement {
             mode=${agent.messageMode || 'project'}
             size="small"
           ></scion-message-mode-badge>
+          ${agent._messageability
+            ? html`
+                <scion-messageability-indicator
+                  .messageability=${agent._messageability}
+                  size="small"
+                ></scion-messageability-indicator>
+              `
+            : nothing}
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
