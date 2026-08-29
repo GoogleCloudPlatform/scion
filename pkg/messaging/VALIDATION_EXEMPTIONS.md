@@ -1,10 +1,8 @@
 # Validation Choke Point Exemptions
 
-The following server-generated message emitters will be exempt from
-`ValidateLegacyMessage` when C5 (hub handler wiring) lands. They construct
-messages entirely from server-internal state, not from untrusted user input.
-Until C5 lands, these emitters are not on main and this document records the
-intended exemption set for review.
+The following server-generated message emitters are exempt from
+`ValidateLegacyMessage`. They construct messages entirely from
+server-internal state, not from untrusted user input.
 
 ## 1. Mention Fan-Out (`sendAgentRouted` in handlers_chat_v2.go)
 
@@ -54,5 +52,7 @@ and channels do not benefit from re-validation.
 If any of these emitters is modified to accept user-supplied content in the
 future, it MUST be routed through the validation choke point at that time.
 
-**Enforcement:** DEF-37 tracks a marker gate that enforces the exempt set
-mechanically, so a future emitter cannot join it silently.
+**Enforcement:** DEF-37 tracks a marker gate that would enforce the exempt
+set mechanically, so a future emitter cannot join it silently. This gate is
+not yet implemented. If it should be built, that decision belongs to the
+project's CI owners, not to the team changing the validation layer.
