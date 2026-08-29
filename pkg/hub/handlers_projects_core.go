@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -2400,11 +2401,37 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Message action: route through authorizeAgentMessage (D1/D8).
+	if action == api.AgentActionMessage {
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"This action requires user or agent authentication", nil)
+			return
+		}
+		isSystemPlane := false
+		allowed, reason := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
+		if !allowed {
+			slog.Warn("message authorization denied",
+				"sender_type", identity.Type(),
+				"sender_id", identity.ID(),
+				"target_agent", agent.ID,
+				"reason", reason,
+			)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Message delivery denied", nil)
+			return
+		}
+		// Skip lifecycle authorization for messages — dispatch directly.
+		s.handleAgentMessage(w, r, agent.ID)
+		return
+	}
+
 	// For interactive actions, enforce lifecycle authorization for every caller
 	// kind: users via policy, agents via ScopeAgentLifecycle within their own
 	// project, everything else denied. authorizeAgentLifecycle logs the denial.
 	switch action {
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionExec:
 		if !s.authorizeAgentLifecycle(w, r, agent) {
 			return
 		}
@@ -2415,8 +2442,6 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		s.updateAgentStatus(w, r, agent.ID)
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, agent.ID, action)
-	case api.AgentActionMessage:
-		s.handleAgentMessage(w, r, agent.ID)
 	case api.AgentActionExec:
 		s.handleAgentExec(w, r, agent.ID)
 	case api.AgentActionEnv:

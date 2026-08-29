@@ -53,6 +53,13 @@ func (s *Server) authorizeAgentMessage(
 		return true, "system plane bypass"
 	}
 
+	// Agent self-message: allow an agent to deliver to itself regardless of mode.
+	// This is NOT system-plane (D8); it is a self-access exemption for harness
+	// integration (sciontool port-expose, etc.).
+	if agentIdent, ok := senderIdentity.(AgentIdentity); ok && agentIdent.ID() == targetAgent.ID {
+		return true, "agent self-message"
+	}
+
 	// ---- D6: super-admin user pierces everything, including none ----
 	if user, ok := senderIdentity.(UserIdentity); ok {
 		if IsUnscopedLocalPlatformAdmin(user) {
@@ -91,9 +98,18 @@ func (s *Server) authorizeUserToAgent(
 
 	targetResource := agentResource(targetAgent)
 
+	// D6 UAT caveat: piercing applies only when the token carries agent:message.
+	// Full-session users (non-UAT) always have piercing ability.
+	uatDeniesMessage := false
+	if scoped, ok := userIdent.(*ScopedUserIdentity); ok {
+		if !scoped.HasScope("agent:message") {
+			uatDeniesMessage = true
+		}
+	}
+
 	// Ancestry check: U in target.Ancestry → ALLOW (lineage/branch/project)
 	// Only trust ancestry when hub-attested (not federated).
-	if AncestryIsHubAttested(senderIdentity) {
+	if !uatDeniesMessage && AncestryIsHubAttested(senderIdentity) {
 		if canAccessAsAncestor(userIdent.ID(), targetResource) {
 			return true, "user in target ancestry"
 		}
@@ -101,7 +117,7 @@ func (s *Server) authorizeUserToAgent(
 
 	// Project owner pierces lineage/branch/project (D6).
 	// Owner only — NOT admin. Admin piercing would let admins unseal agents.
-	if s.isProjectOwner(ctx, userIdent.ID(), targetAgent.ProjectID) {
+	if !uatDeniesMessage && s.isProjectOwner(ctx, userIdent.ID(), targetAgent.ProjectID) {
 		return true, "project owner piercing"
 	}
 

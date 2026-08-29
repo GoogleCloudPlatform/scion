@@ -2566,12 +2566,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			return
 		}
 
-		// Self-message: an agent delivering to itself (sciontool system
-		// notifications). This is the system-plane path (D8).
+		// Self-message is handled inside authorizeAgentMessage as a
+		// self-access exemption, separate from system-plane (D8).
 		isSystemPlane := false
-		if claims := GetAgentFromContext(r.Context()); claims != nil && claims.Subject == id {
-			isSystemPlane = true
-		}
 
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {
@@ -2588,7 +2585,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 				"reason", reason,
 			)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Message delivery denied: "+reason, nil)
+				"Message delivery denied", nil)
 			return
 		}
 		// Authorization passed — fall through to action dispatch below.

@@ -643,3 +643,100 @@ func TestAuthorizeAgentMessage_MixedBranchModes(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Test: UAT without agent:message scope denied piercing (HIGH-2 fix)
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeAgentMessage_UATWithoutMessageScope(t *testing.T) {
+	srv, s, owner, _, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	lineageAgent := msgAuthzAgent(t, s, "uat-lineage-target", projectID, store.MessageModeLineage,
+		[]string{owner.ID})
+	projectAgent := msgAuthzAgent(t, s, "uat-project-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	t.Run("UAT without agent:message denied piercing lineage", func(t *testing.T) {
+		// Create a UAT-scoped identity for the project owner with only agent:read (no agent:message)
+		baseIdent := msgAuthzUserIdentity(owner.ID)
+		scopedIdent := NewScopedUserIdentity(baseIdent, projectID, []string{"agent:read"})
+
+		allowed, _ := srv.authorizeAgentMessage(ctx, scopedIdent, lineageAgent, false)
+		if allowed {
+			t.Fatal("UAT without agent:message should be denied piercing lineage mode")
+		}
+	})
+
+	t.Run("UAT with agent:message allowed piercing lineage", func(t *testing.T) {
+		baseIdent := msgAuthzUserIdentity(owner.ID)
+		scopedIdent := NewScopedUserIdentity(baseIdent, projectID, []string{"agent:read", "agent:message"})
+
+		allowed, reason := srv.authorizeAgentMessage(ctx, scopedIdent, lineageAgent, false)
+		if !allowed {
+			t.Fatalf("UAT with agent:message should be allowed to pierce lineage: %s", reason)
+		}
+	})
+
+	t.Run("UAT without agent:message allowed for project-mode via CheckAccess", func(t *testing.T) {
+		// For project-mode agents, authorization goes through CheckAccess which
+		// handles UAT intersection, so this should still work if the user has
+		// the underlying agent.message permission.
+		baseIdent := msgAuthzUserIdentity(owner.ID)
+		scopedIdent := NewScopedUserIdentity(baseIdent, projectID, []string{"agent:read", "agent:message"})
+
+		allowed, reason := srv.authorizeAgentMessage(ctx, scopedIdent, projectAgent, false)
+		if !allowed {
+			t.Fatalf("UAT with agent:message should be allowed for project-mode agent: %s", reason)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Test: Agent self-message to none-mode agent (MEDIUM-1 fix)
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeAgentMessage_SelfMessage(t *testing.T) {
+	srv, s, owner, _, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	t.Run("self-message to none-mode agent allowed", func(t *testing.T) {
+		noneAgent := msgAuthzAgent(t, s, "self-none-agent", projectID, store.MessageModeNone,
+			[]string{owner.ID})
+
+		// Agent identity sends to itself — should be allowed even with mode none
+		selfIdent := msgAuthzAgentIdentity(noneAgent.ID, projectID, noneAgent.Ancestry)
+		allowed, reason := srv.authorizeAgentMessage(ctx, selfIdent, noneAgent, false)
+		if !allowed {
+			t.Fatalf("agent self-message should be allowed even when mode is none: %s", reason)
+		}
+	})
+
+	t.Run("self-message is NOT system-plane", func(t *testing.T) {
+		projectModeAgent := msgAuthzAgent(t, s, "self-project-agent", projectID, store.MessageModeProject,
+			[]string{owner.ID})
+
+		// Agent sends to itself with isSystemPlane=false — should still be allowed
+		selfIdent := msgAuthzAgentIdentity(projectModeAgent.ID, projectID, projectModeAgent.Ancestry)
+		allowed, reason := srv.authorizeAgentMessage(ctx, selfIdent, projectModeAgent, false)
+		if !allowed {
+			t.Fatalf("agent self-message should be allowed without system-plane flag: %s", reason)
+		}
+		if reason != "agent self-message" {
+			t.Fatalf("expected reason 'agent self-message', got %q", reason)
+		}
+	})
+
+	t.Run("different agent still denied for none-mode target", func(t *testing.T) {
+		noneAgent := msgAuthzAgent(t, s, "self-none-target2", projectID, store.MessageModeNone,
+			[]string{owner.ID})
+		otherAgent := msgAuthzAgent(t, s, "self-other-sender", projectID, store.MessageModeProject,
+			[]string{owner.ID})
+
+		otherIdent := msgAuthzAgentIdentity(otherAgent.ID, projectID, otherAgent.Ancestry)
+		allowed, _ := srv.authorizeAgentMessage(ctx, otherIdent, noneAgent, false)
+		if allowed {
+			t.Fatal("different agent should be denied when target is mode none")
+		}
+	})
+}
