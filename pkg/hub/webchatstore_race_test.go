@@ -51,6 +51,17 @@ func (noopWebChatStore) GetTopic(context.Context, string) (*WebChatTopic, error)
 // race with handler reads of s.webChatStore. Running under `go test -race`
 // would fail before the fix (DEF-42) because handlers read the field without
 // holding s.mu.
+//
+// WARNING: This test is a no-op without the race detector. A green run
+// under `go test ./pkg/hub/` (no -race) proves nothing — the test
+// exercises a concurrency window that only the race detector can observe.
+// To get a meaningful result, run:
+//
+//   go test ./pkg/hub/ -run TestWebChatStoreRace -race
+//
+// CI does not currently pass -race, so this test does not gate merges.
+// It exists for local verification and will become load-bearing if/when
+// a -race CI job is added.
 func TestWebChatStoreRace(t *testing.T) {
 	srv, _ := testServer(t)
 
