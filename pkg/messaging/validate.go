@@ -96,9 +96,19 @@ func ValidateAddressees(addrs []Addressee, msg *Message) error {
 	return nil
 }
 
+// isUnsetProjectID returns true if the project ID represents an agent
+// that cannot be placed in a project — either empty or the zero UUID.
+func isUnsetProjectID(id string) bool {
+	return id == "" || id == "00000000-0000-0000-0000-000000000000"
+}
+
 // ValidateCrossProjectAddressees checks that all agent addressees belong to
 // the same project. This prevents a single message from addressing agents
 // across project boundaries, which would violate project isolation (AC-33 / DEF-2).
+//
+// Agents with an empty or zero-UUID ProjectID are "unplaceable" — they cannot
+// be verified as belonging to any project and are rejected when addressed
+// alongside any other agent. A single unplaceable agent alone is allowed.
 //
 // User addressees are ignored — the rule applies to agent addressees only.
 func ValidateCrossProjectAddressees(
@@ -107,7 +117,8 @@ func ValidateCrossProjectAddressees(
 	addrs []Addressee,
 ) error {
 	var projectID string
-	var projectAgents []string // for error reporting
+	var anchorSet bool
+	var rejectedAddressees []string
 
 	for _, a := range addrs {
 		if a.PrincipalKind != "agent" {
@@ -117,19 +128,37 @@ func ValidateCrossProjectAddressees(
 		if err != nil {
 			return fmt.Errorf("failed to look up agent %q: %w", a.PrincipalID, err)
 		}
-		if projectID == "" {
-			projectID = agent.ProjectID
-			projectAgents = append(projectAgents, a.PrincipalID)
+
+		// An agent without a project identity cannot be placed.
+		// A single unplaceable agent alone is fine, but alongside any
+		// other agent it must be rejected — we cannot verify same-project.
+		if isUnsetProjectID(agent.ProjectID) {
+			rejectedAddressees = append(rejectedAddressees, a.PrincipalID)
 			continue
 		}
-		if agent.ProjectID != projectID {
-			projectAgents = append(projectAgents, a.PrincipalID)
-			return fmt.Errorf(
-				"message addresses agents in multiple projects; " +
-					"a single message may only target agents within one project",
-			)
+
+		if !anchorSet {
+			projectID = agent.ProjectID
+			anchorSet = true
+			continue
 		}
-		projectAgents = append(projectAgents, a.PrincipalID)
+
+		if agent.ProjectID != projectID {
+			rejectedAddressees = append(rejectedAddressees, a.PrincipalID)
+		}
+	}
+
+	// Reject if there are rejected addressees AND either:
+	// - a placed anchor exists (unplaceable/mismatched alongside placed), or
+	// - multiple unplaceable agents with no anchor (cannot verify same-project).
+	// A single unplaceable agent with no anchor is allowed (no cross-project issue).
+	if len(rejectedAddressees) > 0 && (anchorSet || len(rejectedAddressees) > 1) {
+		// AC-33: name the rejected addressee IDs but NEVER the project IDs.
+		// Naming project IDs leaks project existence/membership.
+		return fmt.Errorf(
+			"message addresses agents across project boundaries; "+
+				"rejected addressees: %v", rejectedAddressees,
+		)
 	}
 	return nil
 }
