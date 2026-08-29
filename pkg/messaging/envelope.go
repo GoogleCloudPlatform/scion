@@ -164,10 +164,10 @@ func (p PrincipalRef) PrincipalID() string {
 type AddressedVia string
 
 const (
-	ViaExplicit     AddressedVia = "explicit"       // --to flag
-	ViaBodyMention  AddressedVia = "body-mention"    // @mention in body
-	ViaDefaultAgent AddressedVia = "default-agent"   // conversation's default agent
-	ViaDirect       AddressedVia = "direct"          // other participant in DM
+	ViaExplicit     AddressedVia = "explicit"      // --to flag
+	ViaBodyMention  AddressedVia = "body-mention"  // @mention in body
+	ViaDefaultAgent AddressedVia = "default-agent" // conversation's default agent
+	ViaDirect       AddressedVia = "direct"        // other participant in DM
 )
 
 // validAddressedVia enumerates all accepted AddressedVia values.

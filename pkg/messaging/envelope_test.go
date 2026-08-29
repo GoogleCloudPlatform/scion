@@ -94,11 +94,11 @@ func TestValidatePrincipalRef(t *testing.T) {
 		{"user:alice", false},
 		{"agent:code-reviewer", false},
 		{"system:scheduler", false},
-		{"user:", true},    // empty id
-		{"bad:ref", true},  // unknown prefix
-		{"nocolon", true},  // no colon
-		{"", true},         // empty
-		{":orphan", true},  // empty prefix
+		{"user:", true},   // empty id
+		{"bad:ref", true}, // unknown prefix
+		{"nocolon", true}, // no colon
+		{"", true},        // empty
+		{":orphan", true}, // empty prefix
 	}
 	for _, tc := range tests {
 		err := ValidatePrincipalRef(tc.ref)
@@ -206,7 +206,7 @@ func TestValidateVisibility(t *testing.T) {
 		{VisibilityNormal, false},
 		{VisibilityVerbose, false},
 		{VisibilityFull, false},
-		{"", false},       // empty defaults to normal
+		{"", false}, // empty defaults to normal
 		{"unknown", true},
 	}
 	for _, tc := range tests {

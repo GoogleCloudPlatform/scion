@@ -590,9 +590,9 @@ func TestNewEnvelopeToLegacy_EventStateChanged(t *testing.T) {
 
 func TestNewEnvelopeToLegacy_EventSystem(t *testing.T) {
 	tests := []struct {
-		name     string
+		name      string
 		eventType EventType
-		wantCat  string
+		wantCat   string
 	}{
 		{"schedule.fired", EventScheduleFired, messages.SystemCategoryScheduler},
 		{"port.exposed", EventPortExposed, messages.SystemCategoryPortForward},
@@ -690,7 +690,7 @@ func TestNewEnvelopeToLegacy_Attachments(t *testing.T) {
 
 func TestNewEnvelopeToLegacy_Visibility(t *testing.T) {
 	tests := []struct {
-		vis    Visibility
+		vis     Visibility
 		wantOld string
 	}{
 		{VisibilityNormal, ""},
@@ -849,14 +849,14 @@ func TestRoundTrip_OldToNewToOld(t *testing.T) {
 func TestRoundTrip_NewToOldToNew(t *testing.T) {
 	intent := IntentRequest
 	original := &Message{
-		ID:   "msg-1",
-		From: "user:alice",
-		Kind: KindText,
-		Intent: &intent,
-		Body: "Build it",
+		ID:          "msg-1",
+		From:        "user:alice",
+		Kind:        KindText,
+		Intent:      &intent,
+		Body:        "Build it",
 		Attachments: []AttachmentRef{{Path: "/tmp/a.go"}},
-		Visibility: VisibilityVerbose,
-		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+		Visibility:  VisibilityVerbose,
+		CreatedAt:   time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
 	originalAddrs := []Addressee{{
 		MessageID:     "msg-1",
@@ -931,6 +931,6 @@ func TestBuildPrincipalRef_AgentKindDerived(t *testing.T) {
 
 // ---------- helpers ----------
 
-func ptrIntent(i TextIntent) *TextIntent     { return &i }
-func ptrEventType(e EventType) *EventType     { return &e }
-func ptrVia(v AddressedVia) *AddressedVia     { return &v }
+func ptrIntent(i TextIntent) *TextIntent  { return &i }
+func ptrEventType(e EventType) *EventType { return &e }
+func ptrVia(v AddressedVia) *AddressedVia { return &v }

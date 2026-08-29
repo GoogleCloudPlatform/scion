@@ -27,10 +27,10 @@ const (
 // ConversationInfo is the conversation context delivered to agents.
 type ConversationInfo struct {
 	ID           string   `json:"id"`
-	Kind         string   `json:"kind"`                          // "direct" or "group"
-	Surface      string   `json:"surface"`                       // "native", "discord", etc.
-	Name         string   `json:"name,omitempty"`                // human-readable
-	Participants []string `json:"participants,omitempty"`         // principal refs
+	Kind         string   `json:"kind"`                   // "direct" or "group"
+	Surface      string   `json:"surface"`                // "native", "discord", etc.
+	Name         string   `json:"name,omitempty"`         // human-readable
+	Participants []string `json:"participants,omitempty"` // principal refs
 }
 
 // DeliveryEnvelope is the new agent-facing message format.
@@ -38,15 +38,15 @@ type ConversationInfo struct {
 type DeliveryEnvelope struct {
 	Timestamp    string           `json:"timestamp"`
 	Conversation ConversationInfo `json:"conversation"`
-	From         string           `json:"from"`                   // PrincipalRef
-	To           []string         `json:"to,omitempty"`           // addressee PrincipalRefs
+	From         string           `json:"from"`         // PrincipalRef
+	To           []string         `json:"to,omitempty"` // addressee PrincipalRefs
 	Kind         MessageKind      `json:"kind"`
-	Intent       *TextIntent      `json:"intent,omitempty"`       // Kind == text
-	Event        *EventBody       `json:"event,omitempty"`        // Kind == event
+	Intent       *TextIntent      `json:"intent,omitempty"` // Kind == text
+	Event        *EventBody       `json:"event,omitempty"`  // Kind == event
 	Msg          string           `json:"msg"`
 	Visibility   Visibility       `json:"visibility,omitempty"`
 	Attachments  []string         `json:"attachments,omitempty"`
-	ReplyTo      *string          `json:"reply_to,omitempty"`     // msg ID
+	ReplyTo      *string          `json:"reply_to,omitempty"` // msg ID
 }
 
 // DeliveryOptions captures transport-level options that are not part of the
