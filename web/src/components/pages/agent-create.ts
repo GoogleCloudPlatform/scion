@@ -26,7 +26,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template, GCPServiceAccount } from '../../shared/types.js';
+import type { Project, RuntimeBroker, Template, GCPServiceAccount, MessageMode } from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -40,6 +40,7 @@ interface HarnessConfigEntry {
 import { isSharedWorkspace } from '../../shared/types.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import type { EnvEntry } from '../shared/env-editor.js';
@@ -88,6 +89,7 @@ export class ScionPageAgentCreate extends LitElement {
 
   // ── Additional Options > Auth & Security Tab ────────────────────────
   @state() private agentRole = '';
+  @state() private messageMode = '';
   @state() private harnessAuth = '';
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
   @state() private gcpServiceAccountId = '';
@@ -887,6 +889,7 @@ export class ScionPageAgentCreate extends LitElement {
       if (this.profile) body.profile = this.profile;
       if (this.task.trim()) body.task = this.task.trim();
       if (this.agentRole) body.agentRole = this.agentRole;
+      if (this.messageMode) body.messageMode = this.messageMode;
       if (provisionOnly) body.provisionOnly = true;
 
       const builtLabels = this.buildLabels();
@@ -1525,6 +1528,33 @@ export class ScionPageAgentCreate extends LitElement {
           <sl-option value="full">Full (requires admin)</sl-option>
         </sl-select>
         <div class="hint">Authorization role for hub API access.</div>
+      </div>
+
+      <!-- Message Mode -->
+      <div class="form-field">
+        <label>Message Mode</label>
+        <sl-select
+          placeholder="Select a message mode..."
+          .value=${this.messageMode}
+          @sl-change=${(e: Event) => {
+            this.messageMode = (e.target as HTMLElement & { value: string }).value;
+          }}
+        >
+          <sl-option value="">Default (inherit from parent)</sl-option>
+          ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+            ([mode, display]) => html`
+              <sl-option value=${mode}>
+                <sl-icon slot="prefix" name=${display.icon}></sl-icon>
+                ${display.label} — ${display.description}
+              </sl-option>
+            `
+          )}
+        </sl-select>
+        ${this.messageMode === 'none'
+          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+              This agent will be created in sealed mode. It will not be able to send or receive messages.
+            </div>`
+          : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
       </div>
 
       <!-- Harness Authentication -->

@@ -525,6 +525,21 @@ export interface Agent {
 }
 
 /**
+ * Template configuration embedded in template detail responses.
+ * Mirrors the Go `store.TemplateConfig` struct.
+ */
+export interface TemplateConfig {
+  harness?: string;
+  image?: string;
+  configDir?: string;
+  env?: Record<string, string>;
+  detached?: boolean;
+  commandArgs?: string[];
+  model?: string;
+  messageMode?: MessageMode;
+}
+
+/**
  * Template information from the Hub API
  */
 export interface Template {
@@ -540,6 +555,7 @@ export interface Template {
   scopeId?: string;
   contentHash?: string;
   files?: TemplateFileInfo[];
+  config?: TemplateConfig;
   createdAt: string;
   updatedAt: string;
   _capabilities?: Capabilities;
