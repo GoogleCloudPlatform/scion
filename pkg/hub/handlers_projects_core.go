@@ -600,14 +600,18 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 // the webchat store is configured. Best-effort: failures are logged but do not
 // block project creation.
 func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.Project) {
-	if s.webChatStore == nil {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
 		return
 	}
 	createdBy := project.CreatedBy
 	if createdBy == "" {
 		createdBy = "system"
 	}
-	topicID, created, err := s.webChatStore.EnsureGeneralTopic(ctx, project.ID, createdBy)
+	topicID, created, err := wcs.EnsureGeneralTopic(ctx, project.ID, createdBy)
 	if err != nil {
 		s.projectsLogger().Warn("failed to create #general topic for project",
 			"project_id", project.ID, "error", err)
@@ -620,7 +624,7 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	if !created {
 		return
 	}
-	topic, err := s.webChatStore.GetTopic(ctx, topicID)
+	topic, err := wcs.GetTopic(ctx, topicID)
 	if err != nil || topic == nil {
 		return
 	}

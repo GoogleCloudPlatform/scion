@@ -44,7 +44,11 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.webChatStore == nil {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
 		writeJSON(w, http.StatusOK, chatThreadsResponse{Threads: []chatThreadEntry{}})
 		return
 	}
@@ -73,7 +77,7 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	threads, err := s.webChatStore.GetThreads(r.Context(), user.ID(), projectID, limit)
+	threads, err := wcs.GetThreads(r.Context(), user.ID(), projectID, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch threads"})
 		return
@@ -201,7 +205,11 @@ func (s *Server) handleChatThreadRoutes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if s.webChatStore == nil {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -216,7 +224,7 @@ func (s *Server) handleChatThreadRoutes(w http.ResponseWriter, r *http.Request) 
 	// DEPRECATED(wave-1): Writes to webchat_thread (wave-1 table). V2 UI uses
 	// handleConversationRead which writes to webchat_read_state instead.
 	// When v2 flag is ON, the frontend never calls this endpoint.
-	if err := s.webChatStore.MarkThreadRead(r.Context(), user.ID(), projectID, agentID); err != nil {
+	if err := wcs.MarkThreadRead(r.Context(), user.ID(), projectID, agentID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to mark thread read"})
 		return
 	}
