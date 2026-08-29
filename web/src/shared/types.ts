@@ -211,6 +211,11 @@ export type AgentPhase =
   | 'error';
 
 /**
+ * Message mode controlling an agent's messaging authorization scope
+ */
+export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
+
+/**
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
@@ -462,6 +467,9 @@ export interface Agent {
 
   // Port forwarding
   exposedPorts?: ExposedPort[];
+
+  // Messaging authorization scope
+  messageMode?: MessageMode;
 }
 
 /**
