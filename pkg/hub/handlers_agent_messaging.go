@@ -872,15 +872,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				lookupFailed = true
 			}
 		} else {
-			senderKind := ""
-			if k, ok := messages.PrincipalKindFromAddress(structuredMsg.Sender); ok {
-				senderKind = k
-			}
+			// B5 SECURITY: derive sender identity for the conversation key
+			// from the authenticated context, never from the message payload.
+			// authenticatedSender is the B5 choke point — the always-override
+			// at the top of handleAgentMessage already stamped structuredMsg
+			// fields, but using authenticatedSender here makes the invariant
+			// locally visible and satisfies the security-marker gate.
+			authKind, authID := authenticatedSender(ctx)
 			extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
 				ThreadID:      structuredMsg.ThreadID,
 				ProjectID:     agent.ProjectID,
-				SenderKind:    senderKind,
-				SenderID:      structuredMsg.SenderID,
+				SenderKind:    authKind,
+				SenderID:      authID,
 				RecipientKind: "agent",
 				RecipientID:   agent.ID,
 			})
