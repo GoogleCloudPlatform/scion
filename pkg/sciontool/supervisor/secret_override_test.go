@@ -89,7 +89,9 @@ func TestSecretOverride_MergeOverlayDoesNotOverride(t *testing.T) {
 // not already in the environment is added via the supervisor path.
 func TestSecretOverride_NewKeyAdded(t *testing.T) {
 	// Make sure this key does NOT exist in the current env.
-	os.Unsetenv("TEST_NEW_SECRET_P2D")
+	// t.Setenv registers cleanup to restore the original state on test exit.
+	t.Setenv("TEST_NEW_SECRET_P2D", "")
+	require.NoError(t, os.Unsetenv("TEST_NEW_SECRET_P2D"))
 
 	outFile := filepath.Join(t.TempDir(), "new_secret.txt")
 
@@ -114,7 +116,9 @@ func TestSecretOverride_NewKeyAdded(t *testing.T) {
 // A placeholder set by the additive merge is overridden by the fetched value.
 func TestSecretOverride_AppliedAfterMergeOverlay(t *testing.T) {
 	// Ensure the key doesn't exist in process env so mergeEnvOverlay adds it.
-	os.Unsetenv("TEST_OVERLAY_SECRET_P2D")
+	// t.Setenv registers cleanup to restore the original state on test exit.
+	t.Setenv("TEST_OVERLAY_SECRET_P2D", "")
+	require.NoError(t, os.Unsetenv("TEST_OVERLAY_SECRET_P2D"))
 
 	outFile := filepath.Join(t.TempDir(), "overlay_secret.txt")
 
