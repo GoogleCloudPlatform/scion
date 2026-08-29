@@ -82,9 +82,9 @@ check_symbol_in_file \
     "authorizeAgentMessage in handlers_chat_v2.go (sendAgentRouted)"
 
 echo ""
-echo "--- Required gates (ValidateLegacyMessage) ---"
+echo "--- Required gates (ValidateLegacyMessage — shape/content validation) ---"
 
-# V1-V3: ValidateLegacyMessage on all primary send paths
+# V1-V3: ValidateLegacyMessage on all primary send paths (pre-attribution)
 check_symbol_in_file \
     pkg/hub/handlers_agent_messaging.go \
     ValidateLegacyMessage \
@@ -99,6 +99,30 @@ check_symbol_in_file \
     pkg/hub/handlers_chat_v2.go \
     ValidateLegacyMessage \
     "ValidateLegacyMessage in handlers_chat_v2.go"
+
+echo ""
+echo "--- Required gates (ValidateAttributed — post-attribution validation) ---"
+
+# V4-V6: ValidateAttributed on all primary send paths (post-attribution).
+# DEF-41: the legacy validation split. ValidateLegacyMessage checks shape/content
+# before attribution; ValidateAttributed checks ConversationID after attribution
+# has set a real one. Both halves must be present on every path that attributes
+# a conversation — removing either half while the gate watches only the other
+# would let a handler skip validation and stay green.
+check_symbol_in_file \
+    pkg/hub/handlers_agent_messaging.go \
+    ValidateAttributed \
+    "ValidateAttributed in handlers_agent_messaging.go"
+
+check_symbol_in_file \
+    pkg/hub/handlers_broker_inbound.go \
+    ValidateAttributed \
+    "ValidateAttributed in handlers_broker_inbound.go"
+
+check_symbol_in_file \
+    pkg/hub/handlers_chat_v2.go \
+    ValidateAttributed \
+    "ValidateAttributed in handlers_chat_v2.go"
 
 # ---------------------------------------------------------------------------
 # EXEMPT: enumerated bypasses with architect-approved reason and date.

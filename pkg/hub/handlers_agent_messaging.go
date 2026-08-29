@@ -303,6 +303,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if convResult != nil {
 		storeMsg.ConversationID = convResult.ConversationID
+		// DEF-41: post-attribution validation. The ConversationID check was
+		// previously dead on this path because the legacy adapter fabricated
+		// a sentinel. Now it is live: if attribution produced a result, the
+		// ConversationID must be well-formed.
+		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
 	}
 	// Always log divergence — even when convResult is nil, that is a divergence signal.
 	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
@@ -934,6 +942,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
+		}
+		// DEF-41: post-attribution validation. Runs after both the
+		// CLI-pre-resolved path (:889) and the server-side resolution path
+		// (:932) have had their chance to set ConversationID.
+		if storeMsg.ConversationID != "" {
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return
+			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)

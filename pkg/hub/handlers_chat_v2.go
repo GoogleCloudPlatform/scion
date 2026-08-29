@@ -1177,6 +1177,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
+			// DEF-41: post-attribution validation. The ConversationID
+			// check was previously dead on this path because the legacy
+			// adapter fabricated a sentinel. Now it is live.
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return ""
+			}
 		}
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {

@@ -361,6 +361,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
+			// DEF-41: post-attribution validation. The ConversationID check
+			// was previously dead on this path because the legacy adapter
+			// fabricated a sentinel. Now it is live.
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+				return
+			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(senderUserID, agent.ID, storeMsg.ThreadID)
