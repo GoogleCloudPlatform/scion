@@ -53,8 +53,20 @@ type CascadeResult struct {
 // ---------------------------------------------------------------------------
 
 // handleSetMessageMode handles the set_message_mode action on an agent.
-// D7: human-only operation — agent callers and UATs are denied unconditionally.
-// D10: mode changes are live, audited, and all transitions are legal.
+//
+// Authorization enforces D7: this is a human-only operation. The following
+// callers are denied unconditionally:
+//   - Agent callers (no agent scope exists or will ever exist)
+//   - UATs / scoped tokens (no UAT scope exists)
+//   - Project admins who are not also project owners or lineage owners
+//
+// Allowed callers: super-admin, project owner, lineage owner (user in the
+// agent's ancestry chain).
+//
+// Mode changes are live (D10): the new mode takes effect on the next message
+// delivery. Every change emits an audit record. All transitions are legal
+// with no preconditions. See docs/messaging-authorization.md for the full
+// API reference.
 func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 

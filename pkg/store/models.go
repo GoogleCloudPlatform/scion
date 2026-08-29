@@ -774,12 +774,18 @@ const (
 	VisibilityPublic  = api.VisibilityPublic
 )
 
-// MessageMode constants define the messaging reach of an agent.
+// MessageMode constants define the per-agent message mode that controls who
+// can deliver messages to the agent. The mode is orthogonal to agent role
+// (D5) and is read live from the agent record at delivery time (D10).
+//
+// See docs/messaging-authorization.md for the full decision table and
+// piercing rules. See pkg/hub/authorize_message.go for the enforcement
+// choke point.
 const (
-	MessageModeNone    = "none"    // Sealed: no messaging (send or receive)
-	MessageModeLineage = "lineage" // Ancestry users only; no agent-to-agent edges
-	MessageModeBranch  = "branch"  // Ancestry users + parent agent + direct children
-	MessageModeProject = "project" // Bidirectional with all agents and users in project
+	MessageModeNone    = "none"    // Sealed: no message-plane delivery except super-admin (D6)
+	MessageModeLineage = "lineage" // Ancestry users + project owners only; zero agent-to-agent edges (D4)
+	MessageModeBranch  = "branch"  // Ancestry users + project owners + direct parent/child agents (both must be branch mode)
+	MessageModeProject = "project" // Bidirectional with all agents and users in project (default; matches pre-mode behavior)
 )
 
 // IsValidMessageMode returns true if mode is one of the four valid message modes.

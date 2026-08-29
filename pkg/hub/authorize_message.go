@@ -24,17 +24,33 @@ import (
 
 // authorizeAgentMessage is the single choke point for ALL messaging
 // authorization. It implements the decision logic from design doc Section 5
-// (D1–D10). Every ingress (direct API, chat v2, broadcast, broker inbound)
+// (D1-D10). Every ingress (direct API, chat v2, broadcast, broker inbound)
 // must call this function before delivering a message.
 //
+// The decision table evaluates in this order:
+//
+//  1. System-plane messages bypass all checks (D8).
+//  2. Agent self-messages are allowed (harness integration).
+//  3. Super-admin users pierce everything including mode=none (D6).
+//  4. User senders: ancestry and project-owner piercing for lineage/branch;
+//     agent.message permission check for project mode; none always denied.
+//  5. Agent senders: both endpoints must be in the same project; both must
+//     be project mode (project cell) or both branch mode with a direct
+//     parent/child relationship (branch cell); lineage-mode agents have
+//     zero agent-to-agent edges (D4).
+//
 // Parameters:
-//   - senderIdentity: the authenticated caller (user or agent)
-//   - targetAgent: the target agent record (freshly read from the store)
+//   - senderIdentity: the authenticated caller (user or agent).
+//   - targetAgent: the target agent record (freshly read from the store;
+//     mode is evaluated live per D10).
 //   - isSystemPlane: true ONLY for hub-internal system messages (sciontool
-//     self-messages, state-change notices). Must NEVER be derived from
-//     external request data.
+//     self-messages, state-change notices, scheduled events). Must NEVER
+//     be derived from external request data.
 //
 // Returns (allowed, reason). When allowed is false, reason describes why.
+//
+// See docs/messaging-authorization.md for the full decision table and
+// piercing rules.
 func (s *Server) authorizeAgentMessage(
 	ctx context.Context,
 	senderIdentity Identity,
