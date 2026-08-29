@@ -251,14 +251,16 @@ When an agent creates a child agent (for example, to delegate a sub-task), the s
 - **Strict Scoping**: Agent identities are strictly scoped by their project using a specific naming convention (e.g., `project--agent`). This prevents name collisions across different workspaces and ensures that progeny agents cannot impersonate or interfere with agents in other projects.
 - **Granular Secret Access**: Progeny agents inherit granular secret access controls from their parents, ensuring they only have the credentials necessary to perform their specific tasks.
 
-## Managing Users and Groups
+## Managing Access and Infrastructure
 
-The Scion Web Dashboard includes a centralized **Admin Management Suite** (accessible to users with administrative privileges) that provides dedicated views for access control management:
+The Scion Web Dashboard includes a centralized **Admin Management Suite** (accessible to users with appropriate administrative capabilities) that provides dedicated views for access control and infrastructure management:
 
 - **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. This allows administrators to view and modify the global `settings.yaml` through the Web UI with support for tabbed navigation, sensitive field masking, and hot-reloading of key settings like log levels, telemetry defaults, and admin emails.
 - **Users List**: View all authenticated users, search for specific accounts, track "Last Seen" timestamps, and manage their system-wide roles (e.g., granting `hub-admin` access).
 - **Groups Management**: Create organizational groups and manage their membership with a human-friendly member editor and user search autocomplete. Group creation is strictly authorized, and the `project:` prefix is a reserved slug. To prevent slug collisions, colliding group identifiers require a system marker combined with the `ProjectID`. Membership lookups rely on canonical identity resolution. This enables policy-based authorization where permissions can be granted to an entire team at once, while strictly enforcing group ownership and authorization rules.
-- **Admin Security**: When verifying administrative privileges across endpoints, the `requireAdmin` guard explicitly rejects scoped user identities (e.g. from limited personal access tokens) prior to evaluating the principal's embedded roles, ensuring that scoped identities cannot inadvertently bypass administrative gates.
+- **Role & Binding Management**: Full CRUD interfaces for Role Definitions and Role Bindings. Administrators can define custom roles, map permissions, and bind them to users, groups, or agents at the Hub or Project scope, while the system enforces `CanDelegate` checks to prevent privilege escalation.
+- **Quota Management**: Dedicated admin view to manage the Quota System. Administrators can view, create, and update `LimitDefinition` thresholds and monitor `EntitlementBinding` status across projects.
+- **Admin Security & Navigation**: The dashboard uses capabilities-based navigation to render the Admin Suite. Instead of a binary `role===admin` check, visibility and access are scoped to specific permissions (e.g., `hub-admin` vs `super-admin`), ensuring users only see the management tools they are authorized to use.
 - **Broker Visibility**: Comprehensive broker detail pages provide a grouped view of all active agents by their respective projects, helping administrators understand resource distribution.
 - **Maintenance Mode**: Administrators can toggle maintenance mode for the Hub and Web servers directly from the UI to facilitate safe infrastructure updates.
 

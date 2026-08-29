@@ -7,6 +7,10 @@ Scion provides a robust messaging system that allows for bidirectional communica
 
 ## The Inbox Tray
 
+:::note[Design Record]
+For an in-depth look at the architecture, semantic contract, and design invariants underlying the Scion messaging system, see the [Conversation Model Design](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model.md) and its companion [Defect Inventory](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model-findings.md) in the project repository.
+:::
+
 In the Web Dashboard, the **Inbox Tray** provides a centralized view of all messages sent by your agents.
 - **Unread Badges:** The top navigation bar displays a badge indicating the number of unread messages across all your agents.
 - **Mark as Read:** You can mark individual messages or all messages as read, helping you keep track of what needs your attention.
@@ -216,11 +220,14 @@ When using slug-based query paths or addressing agents via `agent:<name>` (e.g.,
   - **Granular Scopes**: Authorization gates require the agent token to hold the `project:read` scope for reading subscriptions and the `project:agent:notify` scope for writing (creating, updating, or deleting) subscriptions.
   - **Ownership Constraints**: Acknowledging notifications or modifying/deleting existing subscriptions strictly requires ownership validation, meaning an agent can only modify or acknowledge subscriptions that target or belong to itself.
 
-### 4. Message Security & Thread Validation
+### 4. Security Controls for Direct Messages & Broadcasts
 
-Scion employs strict, ingress-level security controls for Direct Messages (DMs) to prevent spoofing and cross-project injection:
-- **Ownership Validation**: At all message ingress points, the system validates the authenticated identity from the request context against the provided DM key. An agent cannot write into another agent's DM conversation by supplying a well-formed but unauthorized DM key.
-- **Thread ID Formatting**: When an agent supplies a `thread_id` (used as the DM key), it is strictly validated against the canonical DM key format at ingress. Malformed or unauthorized thread IDs are rejected with a `400 Bad Request` before any dispatch or persistence occurs.
+Scion employs strict, ingress-level security controls and invariants for Direct Messages (DMs) and Broadcasts to prevent spoofing, cross-project injection, and message divergence:
+- **Server-Side Sender Identity & Derivation**: Sender identity is forced server-side based on the authenticated request context, completely ignoring any sender claims in the payload. Furthermore, DM conversation keys are derived dynamically from the authenticated caller rather than trusting the payload, closing spoofed-sender conversation-selection vectors.
+- **Canonical DM Key Enforcement**: Thread IDs (used as DM keys) undergo strict canonicality enforcement. Non-canonical kinds and UUIDs are rejected immediately at derivation without silent normalization, ensuring precise routing.
+- **Participant Guard Consolidation**: A unified participant guard (`CheckDMParticipantKey`) protects all DM ingresses (adding/ensuring participants or merging conversations). This strict invariant guarantees that participant records cannot diverge from their canonical thread keys.
+- **Broadcast Authorization**: Project membership is strictly required and enforced for all broadcast calls.
+- **Publish Gating & Stamping**: Message publishing to real-time streams (SSE) is securely gated on successful database persistence (dual-write conversation stamping). This ensures that a message is never broadcasted to clients without being safely committed to history.
 
 ### 5. Sleep Anti-Pattern & Polling
 
