@@ -45,6 +45,14 @@ permissions). Available scopes:
 | `agent:dispatch` | Dispatch agents (create + start) |
 | `agent:manage` | All agent scopes (convenience alias) |
 
+In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. 
+
+You can dynamically discover all available scopes and their descriptions by querying the API:
+```bash
+curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
+     https://scion.example.com/api/v1/auth/scopes
+```
+
 ## Creating a token
 
 Generate a new token with the Scion CLI:

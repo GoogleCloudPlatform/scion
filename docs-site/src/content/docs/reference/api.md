@@ -76,6 +76,21 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /`: List available agent templates.
 - `POST /`: Upload a new template or version.
 
+#### Auth (`/api/v1/auth`)
+- `GET /scopes`: Dynamically discover all available User Access Token (UAT) scopes and their descriptions.
+
+#### Admin (`/api/v1/admin`)
+- `GET /roles`: List Role Definitions.
+- `POST /roles`, `PUT /roles/:id`, `DELETE /roles/:id`: Manage Role Definitions (requires appropriate administrative capabilities). Note that `updateRoleDefinition` includes a `CanDelegate` check to prevent privilege escalation.
+- `GET /role-bindings`: List Role Bindings (paginated).
+- `POST /role-bindings`, `PUT /role-bindings/:id`, `DELETE /role-bindings/:id`: Manage Role Bindings.
+- `GET /limits`: List Limit Definitions.
+- `GET /limits/:id`, `PUT /limits/:id`: Inspect or update a Limit Definition.
+- `GET /entitlements/:id`: Inspect an Entitlement Binding.
+- `GET /gcp-quota`: View GCP quota status.
+
+The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
+
 ## Runtime Broker API
 
 The Runtime Broker exposes a local API (usually on port 9800) for agent execution and management.
