@@ -60,6 +60,9 @@ export class ScionCascadeModeDialog extends LitElement {
   /** Error message to show inline. */
   @state() private error: string | null = null;
 
+  /** AbortController for in-flight preview requests (prevents race conditions). */
+  private previewAbort: AbortController | null = null;
+
   static override styles = css`
     .dialog-body {
       display: flex;
@@ -186,6 +189,13 @@ export class ScionCascadeModeDialog extends LitElement {
 
   private async fetchPreview(): Promise<void> {
     if (!this.agentId) return;
+
+    // Cancel any in-flight preview request to prevent race conditions
+    // when the user rapidly changes the mode selector.
+    this.previewAbort?.abort();
+    const abort = new AbortController();
+    this.previewAbort = abort;
+
     this.loading = true;
     this.error = null;
 
@@ -200,6 +210,7 @@ export class ScionCascadeModeDialog extends LitElement {
             mode: this.selectedMode,
             cascade: true,
           }),
+          signal: abort.signal,
         }
       );
 
@@ -211,10 +222,15 @@ export class ScionCascadeModeDialog extends LitElement {
 
       this.preview = (await response.json()) as CascadePreview;
     } catch (err) {
+      // Ignore aborted requests — a newer fetch is already in flight.
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       this.error = err instanceof Error ? err.message : 'Failed to load preview.';
       this.preview = null;
     } finally {
-      this.loading = false;
+      // Only clear loading if this request was not superseded.
+      if (this.previewAbort === abort) {
+        this.loading = false;
+      }
     }
   }
 
@@ -352,24 +368,27 @@ export class ScionCascadeModeDialog extends LitElement {
     }
 
     const details = this.preview.cascade.details;
-    const sealCount = details.filter(
-      (d) => d.new_mode === 'none' && d.current_mode !== 'none'
+    // Only count agents whose mode actually changes for the header and summary.
+    // The scrollable list shows all agents (including "no change" rows) for context.
+    const changingDetails = details.filter((d) => d.current_mode !== d.new_mode);
+    const sealCount = changingDetails.filter(
+      (d) => d.new_mode === 'none'
     ).length;
-    const unsealCount = details.filter(
-      (d) => d.current_mode === 'none' && d.new_mode !== 'none'
+    const unsealCount = changingDetails.filter(
+      (d) => d.current_mode === 'none'
     ).length;
 
     return html`
       <div>
         <div style="font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.5rem;">
-          Affected agents (${details.length}):
+          Affected agents (${changingDetails.length}):
         </div>
         <div class="affected-list">
           ${details.map((d) => this.renderAffectedAgent(d))}
         </div>
       </div>
 
-      ${this.renderImpactSummary(details.length, sealCount, unsealCount)}
+      ${this.renderImpactSummary(changingDetails.length, sealCount, unsealCount)}
     `;
   }
 

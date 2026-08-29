@@ -1709,7 +1709,7 @@ export class ScionPageAgentDetail extends LitElement {
     const messageability = agent._messageability as AgentMessageabilityDetail | undefined;
     const canSetMode = can(agent._capabilities, 'set_message_mode');
     const hasChildren =
-      (agent as Agent & { childrenIds?: string[] }).childrenIds?.length ?? 0 > 0;
+      ((agent.childrenIds?.length) ?? 0) > 0;
 
     return html`
       <div class="card">
@@ -1734,13 +1734,7 @@ export class ScionPageAgentDetail extends LitElement {
                           <sl-option value=${mode}>
                             <sl-icon slot="prefix" name=${MESSAGE_MODE_DISPLAY[mode].icon}></sl-icon>
                             ${MESSAGE_MODE_DISPLAY[mode].label} —
-                            ${mode === 'project'
-                              ? 'Messages all agents and users'
-                              : mode === 'branch'
-                                ? 'Parent/children and lineage users'
-                                : mode === 'lineage'
-                                  ? 'Lineage users only'
-                                  : 'No messaging (quarantine)'}
+                            ${MESSAGE_MODE_DISPLAY[mode].description}
                           </sl-option>
                         `
                       )}

@@ -223,8 +223,8 @@ export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
 export interface CascadeAgentDetail {
   agent_id: string;
   agent_name: string;
-  current_mode: string;
-  new_mode: string;
+  current_mode: MessageMode;
+  new_mode: MessageMode;
 }
 
 /** Response from a cascade mode change (or dry-run preview). */
@@ -519,6 +519,9 @@ export interface Agent {
   // Messaging authorization scope
   messageMode?: MessageMode;
   _messageability?: AgentMessageability | AgentMessageabilityDetail;
+
+  // Children agent IDs (populated by some API responses)
+  childrenIds?: string[];
 }
 
 /**
