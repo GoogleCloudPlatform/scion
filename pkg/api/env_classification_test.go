@@ -120,8 +120,9 @@ func TestEnvKind_Constants(t *testing.T) {
 
 // TestEnvKindSecretBootstrap_DistinctFromInjected verifies that secret-bootstrap
 // is a distinct kind from secret-injected. P3b must handle them differently:
-// secret-injected values get an alternative delivery channel, while
-// secret-bootstrap values MUST stay in argv (they bootstrap the channel itself).
+// secret-injected values need an alternative delivery channel;
+// secret-bootstrap values need no routing at all, because they bootstrap
+// the channel. Whether either reaches argv is a separate, per-key fact.
 func TestEnvKindSecretBootstrap_DistinctFromInjected(t *testing.T) {
 	assert.NotEqual(t, EnvKindSecretBootstrap, EnvKindSecretInjected,
 		"secret-bootstrap must be distinct from secret-injected — "+
