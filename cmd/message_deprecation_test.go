@@ -648,10 +648,8 @@ func TestRetainedFlags_NotHidden(t *testing.T) {
 }
 
 // TestBroadcastCmd_IsRegistered verifies the broadcast command is available
-// on the root command. Skipped until cmd/broadcast.go is ported by its
-// assigned developer.
+// on the root command.
 func TestBroadcastCmd_IsRegistered(t *testing.T) {
-	t.Skip("broadcast command not yet registered — handled by another developer (cmd/broadcast.go)")
 	found := false
 	for _, cmd := range rootCmd.Commands() {
 		if cmd.Name() == "broadcast" {
@@ -733,12 +731,6 @@ func findReplacementProblems(stderr string) (problems []string, checked int) {
 // It triggers all deprecated flags, captures the warnings, extracts any
 // 'scion <subcommand>' references, and verifies each resolves via
 // rootCmd.Find().
-//
-// Note: 'scion broadcast' and 'scion keys' are referenced by deprecation
-// warnings but those commands are ported by another developer (C6-broadcast
-// and C6-keys phases). We allow those known-missing commands and reduce the
-// floor accordingly. Once those commands land, remove the allowlist and
-// raise the floor back to 6.
 func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
@@ -762,36 +754,14 @@ func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 
-	// Commands that are referenced in deprecation warnings but ported by
-	// another developer and not yet present on this branch.
-	knownMissing := map[string]bool{
-		"broadcast": true,
-		"keys":      true,
-	}
-
 	problems, checked := findReplacementProblems(stderr)
-	var realProblems []string
 	for _, p := range problems {
-		isKnown := false
-		for cmd := range knownMissing {
-			if strings.Contains(p, "scion "+cmd) {
-				isKnown = true
-				break
-			}
-		}
-		if !isKnown {
-			realProblems = append(realProblems, p)
-		}
-	}
-	for _, p := range realProblems {
 		t.Error(p)
 	}
-	// Four of the ten warnings name a 'scion ...' command that exists on
-	// this branch (schedule create ×2, notifications subscribe, broadcast --all
-	// maps to broadcast which is known-missing). Once broadcast and keys land,
-	// raise this floor back to 6.
-	require.GreaterOrEqual(t, checked, 4,
-		"expected at least 4 replacement references in deprecation warnings; got %d — "+
+	// Six of the ten warnings name a 'scion ...' command; assert a floor.
+	// Raise this floor when adding replacement references; never lower it.
+	require.GreaterOrEqual(t, checked, 6,
+		"expected at least 6 replacement references in deprecation warnings; got %d — "+
 			"the extractor may be broken or warnings were removed", checked)
 
 	// Rule 10: prove findReplacementProblems catches bad replacements.
@@ -813,7 +783,7 @@ func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 	})
 	t.Run("accepts_valid_replacement", func(t *testing.T) {
 		problems, checked := findReplacementProblems(
-			"Warning: --x is deprecated, use 'scion schedule create' instead")
+			"Warning: --x is deprecated, use 'scion broadcast' instead")
 		assert.Empty(t, problems, "should accept valid replacement command")
 		assert.Equal(t, 1, checked, "should have checked exactly one reference")
 	})
