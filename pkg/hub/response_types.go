@@ -25,6 +25,7 @@ import (
 type AgentWithCapabilities struct {
 	store.Agent
 	Cap                 *Capabilities                    `json:"_capabilities,omitempty"`
+	Messageability      interface{}                      `json:"_messageability,omitempty"`
 	ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 	CloudLogging        bool                             `json:"cloudLogging,omitempty"`
@@ -36,6 +37,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
 		AgentAlias
 		Cap                 *Capabilities                    `json:"_capabilities,omitempty"`
+		Messageability      interface{}                      `json:"_messageability,omitempty"`
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
@@ -43,6 +45,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
+		Messageability:      a.Messageability,
 		ResolvedHarness:     a.ResolvedHarness,
 		HarnessCapabilities: a.HarnessCapabilities,
 		CloudLogging:        a.CloudLogging,
@@ -57,6 +60,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	}
 	type WrapperFields struct {
 		Cap                 *Capabilities                    `json:"_capabilities,omitempty"`
+		Messageability      *AgentMessageability             `json:"_messageability,omitempty"`
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
@@ -66,6 +70,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	a.Cap = wrapper.Cap
+	a.Messageability = wrapper.Messageability
 	a.ResolvedHarness = wrapper.ResolvedHarness
 	a.HarnessCapabilities = wrapper.HarnessCapabilities
 	a.CloudLogging = wrapper.CloudLogging
