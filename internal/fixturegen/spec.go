@@ -441,7 +441,7 @@ func Spec() []TableFixture {
 		{Table: "agent_session_metrics", Rows: []row{
 			{
 				"id": "sm000000-0000-0000-0000-000000000001", "agent_id": agentID,
-				"grove_id": "grove-1", "session_id": "session-1",
+				"grove_id": projectID, "session_id": "session-1",
 				"started_at": baseTime, "status": "completed",
 				"turn_count": 5, "tokens_input": 1000, "tokens_output": 500,
 				"created_at": baseTime,
