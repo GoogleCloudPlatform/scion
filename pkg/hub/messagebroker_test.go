@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,8 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // brokerMockDispatcher records dispatched messages for test assertions.
@@ -1048,51 +1049,267 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	}
 }
 
-// TestResolveDMConversation_BothPathsAgree verifies that the user path
-// (PrincipalKindFromAddress for the recipient) and the agent path
-// (hardcoded "agent" kind) produce the same conversation ID when given
-// the same principal pair.
-func TestResolveDMConversation_BothPathsAgree(t *testing.T) {
+// TestDEF20_NativeTopicUsesTopicConversation verifies that when a message is
+// sent through the MessageBrokerProxy with a ThreadID matching a native webchat
+// topic, the persisted message carries the topic's pre-existing conversation_id
+// rather than a newly minted one. This is the production-path integration test
+// for DEF-20.
+func TestDEF20_NativeTopicUsesTopicConversation(t *testing.T) {
+	// 1. Create test store and webchat store sharing the same *sql.DB.
+	// The Ent migrations create the conversations table; sharing the DB lets
+	// the webchat store's CreateTopic dual-write into it.
 	s := newBrokerTestStore(t)
-	log := slog.Default()
+	cs, ok := s.(*entadapter.CompositeStore)
+	if !ok {
+		t.Fatal("expected *entadapter.CompositeStore from newBrokerTestStore")
+	}
+	rawDB := cs.DB()
+	if rawDB == nil {
+		t.Fatal("CompositeStore.DB() returned nil")
+	}
+
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("webchat store Init: %v", err)
+	}
+
+	// 2. Set up project and agent.
+	ctx := context.Background()
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "test-agent", "running")
+
+	// 3. Create a topic with a known conversation_id. CreateTopic atomically
+	// inserts both the topic row and a conversations row.
+	topicID := "topic-" + api.NewUUID()[:8]
+	convID := api.NewUUID()
+	topic := WebChatTopic{
+		ID:             topicID,
+		ProjectID:      projectID,
+		Name:           "test-topic",
+		ConversationID: convID,
+		CreatedBy:      "user-1",
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := wcs.CreateTopic(ctx, topic); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// 4. Create proxy with webchat store wired in.
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.webChatStore = wcs
+	proxy.Start()
+	defer proxy.Stop()
+	proxy.subscribeAgent(projectID, "test-agent")
+
+	// 5. Send a message with ThreadID = topicID. The proxy's deliverToAgent
+	// should resolve the topic's conversation_id via WithTopicLookup.
+	msg := messages.NewInstruction("user:alice", "agent:test-agent", "hello via topic")
+	msg.SenderID = tid("user-alice")
+	msg.RecipientID = agent.ID
+	msg.ThreadID = topicID
+	if err := proxy.PublishMessage(ctx, projectID, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. Wait for async delivery.
+	time.Sleep(200 * time.Millisecond)
+
+	// 7. Verify the dispatched message reached the agent.
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
+	}
+	if dispatched[0].msg != "hello via topic" {
+		t.Errorf("expected dispatched msg 'hello via topic', got %q", dispatched[0].msg)
+	}
+
+	// 8. Verify the persisted message has the topic's conversation_id.
+	result, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != convID {
+		t.Errorf("expected conversation_id %q (from topic), got %q",
+			convID, result.Items[0].ConversationID)
+	}
+}
+
+// logSpy is a slog.Handler that captures log records for test assertions.
+// It passes all records through to a wrapped handler and records them.
+type logSpy struct {
+	slog.Handler
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func newLogSpy(inner slog.Handler) *logSpy {
+	return &logSpy{Handler: inner}
+}
+
+func (s *logSpy) Handle(ctx context.Context, r slog.Record) error {
+	s.mu.Lock()
+	s.records = append(s.records, r)
+	s.mu.Unlock()
+	return s.Handler.Handle(ctx, r)
+}
+
+// containsMessage returns true if any captured record contains the substring.
+func (s *logSpy) containsMessage(substr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.records {
+		if strings.Contains(r.Message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEmptySenderID_DeliverToUser_SkipsDMResolution verifies that an empty
+// SenderID prevents DM conversation resolution in the deliverToUser path.
+//
+// The DM key IS the ACL: a conversation resolved with an empty sender ID
+// produces a key that names the wrong participant set. The SenderID != ""
+// conjunct at messagebroker.go deliverToUser ensures this cannot happen.
+//
+// The test asserts TWO things:
+//  1. No conversation_id is stamped on the persisted message.
+//  2. ResolveOrCreateDMConversation is never CALLED — the messagebroker guard
+//     prevents the resolution path from being entered at all, rather than
+//     relying on the downstream function's own empty-ID check.
+//
+// POSITIVE CONTROL: remove the msg.SenderID != "" conjunct from deliverToUser's
+// else-if (the DM resolution branch), re-run this test, and verify it FAILS.
+// The downstream function logs "skipping conversation resolution: missing
+// sender or recipient ID" — that log appearing means the guard was bypassed.
+func TestEmptySenderID_DeliverToUser_SkipsDMResolution(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	proxy := &MessageBrokerProxy{
-		store: s,
-		log:   log,
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	spy := newLogSpy(slog.Default().Handler())
+	log := slog.New(spy)
+
+	b := eventbus.NewInProcessEventBus(log)
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, log)
+
+	// Message has a valid RecipientID but empty SenderID — the guard must
+	// prevent DM resolution despite having a non-empty recipient.
+	msg := messages.NewInstruction("agent:some-agent", "user:bob", "should not resolve DM")
+	msg.SenderID = "" // deliberately empty
+	msg.RecipientID = api.NewUUID()
+
+	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	// Assert 1: no conversation_id on the persisted message.
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: msg.RecipientID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != "" {
+		t.Fatalf("SECURITY: empty SenderID must not resolve a DM conversation, "+
+			"but got conversation_id %q — the SenderID guard is broken",
+			result.Items[0].ConversationID)
 	}
 
-	agentID := api.NewUUID()
-	userID := api.NewUUID()
-
-	msg := messages.NewInstruction("agent:test-bot", "user:alice", "hello")
-	msg.SenderID = agentID
-	msg.RecipientID = userID
-
-	// User path: derive recipientKind from msg.Recipient
-	recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
-	if !rOK {
-		t.Fatal("expected recipient kind to resolve")
+	// Assert 2: the resolution function was never entered. If it was called,
+	// it logs "skipping conversation resolution: missing sender or recipient ID".
+	// That log appearing means the messagebroker guard was bypassed and we are
+	// relying on defense-in-depth rather than the gate itself.
+	if spy.containsMessage("skipping conversation resolution: missing sender or recipient ID") {
+		t.Fatal("SECURITY: ResolveOrCreateDMConversation was called with empty SenderID — " +
+			"the messagebroker guard (msg.SenderID != \"\") was bypassed. " +
+			"The downstream function rejected it, but the guard should have prevented the call entirely.")
 	}
-	resultUser := proxy.resolveDMConversation(ctx, msg, recipientKind, msg.RecipientID)
-	if resultUser == nil {
-		t.Fatal("expected non-nil conversation result from user path")
+}
+
+// TestEmptySenderID_DeliverToAgent_SkipsDMResolution verifies that an empty
+// SenderID prevents DM conversation resolution in the deliverToAgent path.
+//
+// Same security property as the deliverToUser variant: the DM key names
+// participants, and an empty sender ID would produce a malformed key that
+// resolves to the wrong participant set.
+//
+// POSITIVE CONTROL: remove the msg.SenderID != "" conjunct from deliverToAgent's
+// else-if (the DM resolution branch), re-run this test, and verify it FAILS.
+// The downstream function logs "skipping conversation resolution: missing
+// sender or recipient ID" — that log appearing means the guard was bypassed.
+func TestEmptySenderID_DeliverToAgent_SkipsDMResolution(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "target-agent", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	spy := newLogSpy(slog.Default().Handler())
+	log := slog.New(spy)
+
+	b := eventbus.NewInProcessEventBus(log)
+	defer func() { _ = b.Close() }()
+
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, log)
+	proxy.Start()
+	defer proxy.Stop()
+
+	proxy.subscribeAgent(projectID, "target-agent")
+
+	// Message has a valid agent target but empty SenderID — the guard must
+	// prevent DM resolution despite having a known agent.ID.
+	msg := messages.NewInstruction("user:alice", "agent:target-agent", "should not resolve DM")
+	msg.SenderID = "" // deliberately empty
+	msg.RecipientID = agent.ID
+
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
+		t.Fatal(err)
 	}
 
-	// Agent path: caller knows recipient is an agent, hardcode kind
-	// Build the reciprocal message: user sends to agent
-	msgAgent := messages.NewInstruction("user:alice", "agent:test-bot", "hi back")
-	msgAgent.SenderID = userID
-	msgAgent.RecipientID = agentID
+	time.Sleep(100 * time.Millisecond)
 
-	resultAgent := proxy.resolveDMConversation(ctx, msgAgent, "agent", agentID)
-	if resultAgent == nil {
-		t.Fatal("expected non-nil conversation result from agent path")
+	// Assert 1: the message was dispatched (delivery works regardless).
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
 	}
 
-	if resultUser.ConversationID != resultAgent.ConversationID {
-		t.Fatalf("conversation IDs differ: user-path=%q agent-path=%q",
-			resultUser.ConversationID, resultAgent.ConversationID)
+	// Assert 2: no conversation_id on the persisted message.
+	result, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].ConversationID != "" {
+		t.Fatalf("SECURITY: empty SenderID must not resolve a DM conversation, "+
+			"but got conversation_id %q — the SenderID guard is broken",
+			result.Items[0].ConversationID)
+	}
+
+	// Assert 3: the resolution function was never entered.
+	if spy.containsMessage("skipping conversation resolution: missing sender or recipient ID") {
+		t.Fatal("SECURITY: ResolveOrCreateDMConversation was called with empty SenderID — " +
+			"the messagebroker guard (msg.SenderID != \"\") was bypassed. " +
+			"The downstream function rejected it, but the guard should have prevented the call entirely.")
 	}
 }
 
@@ -1133,30 +1350,3 @@ func TestResolveDMConversation_BroadcastSkipped(t *testing.T) {
 		t.Fatalf("expected empty ConversationID for broadcast, got %q", result.Items[0].ConversationID)
 	}
 }
-
-// TestResolveDMConversation_EmptySenderID verifies the helper returns nil when
-// SenderID is empty, without panicking.
-func TestResolveDMConversation_EmptySenderID(t *testing.T) {
-	s := newBrokerTestStore(t)
-	log := slog.Default()
-	ctx := context.Background()
-
-	proxy := &MessageBrokerProxy{
-		store: s,
-		log:   log,
-	}
-
-	msg := messages.NewInstruction("agent:test-bot", "user:alice", "hello")
-	// Deliberately leave SenderID empty.
-	msg.SenderID = ""
-	msg.RecipientID = api.NewUUID()
-
-	result := proxy.resolveDMConversation(ctx, msg, "user", msg.RecipientID)
-	if result != nil {
-		t.Fatalf("expected nil result when SenderID is empty, got %+v", result)
-	}
-}
-
-// Compile-time check: ensure messaging import is used by verifying the type
-// is accessible. This prevents "imported and not used" errors.
-var _ *messaging.ConversationResult

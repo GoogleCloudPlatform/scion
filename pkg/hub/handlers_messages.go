@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -51,11 +52,30 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if projectID := q.Get("project"); projectID != "" {
 		filter.ProjectID = projectID
 	}
-	if agentID := q.Get("agent"); agentID != "" {
+	agentID := q.Get("agent")
+	if agentID != "" {
 		filter.AgentID = agentID
 	}
 	if msgType := q.Get("type"); msgType != "" {
 		filter.Type = msgType
+	}
+
+	// Phase 8 read-switch: when ConversationReadSwitch is ON and an agent
+	// filter is provided, resolve the DM conversation and add ConversationID
+	// to the filter so reads use the conversation model.
+	// R-9: agentID is client-supplied and may be a slug. Resolve to UUID
+	// before the DM key derivation. On lookup failure, skip the conversation
+	// path WITHOUT calling IncFallback — a bad reference is not a migration
+	// gap, and mixing the two corrupts the S4 readiness metric.
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() && agentID != "" {
+		if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
+			convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
+			if convResult != nil {
+				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
+			}
+		}
 	}
 
 	opts := store.ListOptions{}
@@ -216,7 +236,8 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	}
 
 	// Optional query params for chat filtering.
-	if channel := q.Get("channel"); channel != "" {
+	channel := q.Get("channel")
+	if channel != "" {
 		filter.Channel = channel
 	}
 	if visParams := q["visibility"]; len(visParams) > 0 {
@@ -228,6 +249,32 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	if beforeStr := q.Get("before"); beforeStr != "" {
 		if t, err := time.Parse(time.RFC3339, beforeStr); err == nil {
 			filter.Before = t
+		}
+	}
+
+	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
+	// conversation and add ConversationID to the filter. For agent messages
+	// with a web channel, the conversation is a DM between the agent and the
+	// requesting user. For thread-scoped queries, resolve via the thread key.
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+		threadID := q.Get("thread_id")
+		if threadID != "" && agent.ProjectID != "" {
+			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID)
+			if convResult != nil {
+				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
+			}
+		} else if channel == "web" || channel == "" {
+			// Default: DM conversation between agent and current user.
+			// R-1: Use agent.ID (UUID) not agentID (raw handler param, may be a slug).
+			// The resolved agent is already in scope from GetAgent above.
+			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			if convResult != nil {
+				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
+			}
 		}
 	}
 

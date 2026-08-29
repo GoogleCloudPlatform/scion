@@ -579,6 +579,7 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 	// The mention should still produce a result (dispatch may fail, but that's OK).
 	t.Logf("mention results: %+v", results)
 
+	// After C3 dual-write changes, SSE publish fires regardless of
 	// The publish must NOT have fired because CreateMessage failed.
 	if msgs := spy.getUserMessages(); len(msgs) != 0 {
 		t.Errorf("expected no PublishUserMessage calls when persistence fails for mention, got %d", len(msgs))

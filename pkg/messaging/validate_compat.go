@@ -69,8 +69,10 @@ func ValidateLegacyMessage(msg *messages.StructuredMessage) error {
 		}
 	}
 
-	// Body must not be empty (legacy rule).
-	if msg.Msg == "" {
+	// Body must not be empty unless attachments are present (legacy rule).
+	// Attachment-only messages (e.g. image uploads from chat v2) have an empty
+	// Msg field but carry content via StructuredMessage.Attachments.
+	if msg.Msg == "" && len(msg.Attachments) == 0 {
 		return fmt.Errorf("msg field is required")
 	}
 

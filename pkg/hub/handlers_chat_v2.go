@@ -1118,6 +1118,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
 	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
+	// Authorization runs BEFORE validation (B-2): authorizeAgentMessage depends
+	// only on user and primaryAgent (both resolved above). An unauthorized user
+	// must receive the enriched 403 with {reason, senderMode, recipientMode}
+	// (#1382), not a 400 from the validator.
 	allowed, reason := s.authorizeAgentMessage(ctx, user, primaryAgent, false)
 	if !allowed {
 		slog.Warn("chat v2 message authorization denied",
@@ -1130,6 +1134,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			"senderMode":    "user",
 			"recipientMode": primaryAgent.MessageMode,
 		})
+		return ""
+	}
+
+	// Validate through the messaging choke point (AC-8).
+	// Runs after authorization so unauthorized users see 403, not 400.
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		ValidationError(w, err.Error(), nil)
 		return ""
 	}
 
@@ -1153,7 +1164,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	{
 		var convResult *messaging.ConversationResult
 		if key != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID)
+			var threadOpts []messaging.ThreadConversationOption
+			s.mu.RLock()
+			wcs := s.webChatStore
+			s.mu.RUnlock()
+			if wcs != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
+			}
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 		} else if user.ID() != "" && primaryAgent.ID != "" {
 			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
 		}
@@ -1263,7 +1281,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			{
 				var convResult *messaging.ConversationResult
 				if key != "" {
-					convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID)
+					var threadOpts []messaging.ThreadConversationOption
+					s.mu.RLock()
+					mentionWcs := s.webChatStore
+					s.mu.RUnlock()
+					if mentionWcs != nil {
+						threadOpts = append(threadOpts, messaging.WithTopicLookup(mentionWcs))
+					}
+					convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 				} else if user.ID() != "" && mentionAgent.ID != "" {
 					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
 				}
@@ -1367,7 +1392,14 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	{
 		var convResult *messaging.ConversationResult
 		if key != "" {
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID)
+			var threadOpts []messaging.ThreadConversationOption
+			s.mu.RLock()
+			h2hWcs := s.webChatStore
+			s.mu.RUnlock()
+			if h2hWcs != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(h2hWcs))
+			}
+			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 		} else if user.ID() != "" && recipientID != "" {
 			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
 		}
@@ -1734,9 +1766,46 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	filter := store.MessageFilter{
-		Channel:  "web",
-		ThreadID: key,
+	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
+	// conversation and query by ConversationID instead of Channel+ThreadID.
+	var filter store.MessageFilter
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+		var convResult *messaging.ConversationResult
+		if isDM {
+			// DM key format: dm:<kind>:<id>:<kind>:<id> — exactly 5 parts.
+			// Strict parse (B-3): never tolerate or normalise a DM key on the
+			// derivation path. A 7-part key silently deriving from the first 5
+			// would be an access path error after the S4 read-switch.
+			parts := strings.Split(key, ":")
+			if len(parts) == 5 {
+				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			}
+		} else {
+			// Thread key — look up the topic to get the projectID for the external_ref.
+			if wcs != nil {
+				if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
+					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID)
+				}
+			}
+		}
+		if convResult != nil {
+			filter = store.MessageFilter{
+				ConversationID: convResult.ConversationID,
+			}
+		} else {
+			// Conversation not found — fall back to old path so we don't
+			// return an empty result for data written before dual-write.
+			messaging.DivergenceMetrics.IncFallback()
+			filter = store.MessageFilter{
+				Channel:  "web",
+				ThreadID: key,
+			}
+		}
+	} else {
+		filter = store.MessageFilter{
+			Channel:  "web",
+			ThreadID: key,
+		}
 	}
 	// Support visibility filter.
 	if vis := q["visibility"]; len(vis) > 0 {
