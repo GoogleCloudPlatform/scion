@@ -189,7 +189,7 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 | **Phase `created` / lastSeen zero** for 5+ minutes | The agent creation timed out or failed to schedule. | The system is likely under heavy resource pressure. Wait a few minutes. If still stuck, delete and recreate. **To prevent:** reduce concurrent agent starts. |
 | **Start fails with `no_runtime_broker` (422)** | Temporary connection issue after a system restart or project reconnect. | Wait 30–60 seconds and try starting again. If persistent, verify broker status with `scion broker status`. |
 | **Split-Brain Configuration** (git project ignore settings) | Config files are loading incorrectly due to overlapping global vs. project settings. | Run `scion config dir` to see the effective config path. Ensure the merge chain matches: `defaults → global → in-repo → external → environment`. |
-| **Interactive prompt blocking** | The agent's harness is stuck waiting for an unhandled prompt (e.g. yes/no query). | Send the dismissive keystroke raw to the terminal: `scion message <agent-name> --raw "ENTER"` (or `"y"`, etc.). |
+| **Interactive prompt blocking** | The agent's harness is stuck waiting for an unhandled prompt (e.g. yes/no query). | Send the dismissive keystroke raw to the terminal: `scion keys <agent-name> "ENTER"` (or `"y"`, etc.). |
 
 ---
 
