@@ -49,6 +49,11 @@ jobs:
           if [ "$RACES" -eq 0 ] && [ "$FAILS" -eq 0 ]; then
             echo "All tests passed with race detector enabled." >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "_Scope: the Go race detector instruments shared-memory access in exercised code paths only." >> $GITHUB_STEP_SUMMARY
+          echo "It does not detect file-level TOCTOU, database races, or cross-process concurrency issues." >> $GITHUB_STEP_SUMMARY
+          echo "A clean report means no detected data races — not no concurrency bugs._" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload race detection results
         if: always()
