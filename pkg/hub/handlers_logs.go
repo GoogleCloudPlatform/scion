@@ -97,12 +97,6 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 		return
 	}
 
-	if s.logQueryService == nil {
-		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Cloud Logging is not configured", nil)
-		return
-	}
-
 	ctx := r.Context()
 
 	// Verify agent exists and caller has read access
@@ -121,6 +115,12 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 		}
 	}
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
+	}
+
+	if s.logQueryService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"Cloud Logging is not configured", nil)
 		return
 	}
 
@@ -178,18 +178,6 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if s.logQueryService == nil {
-		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Cloud Logging is not configured", nil)
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
 	ctx := r.Context()
 
 	// Verify agent exists and caller has read access
@@ -208,6 +196,18 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
+	}
+
+	if s.logQueryService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"Cloud Logging is not configured", nil)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
@@ -288,12 +288,6 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if s.logQueryService == nil {
-		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Cloud Logging is not configured", nil)
-		return
-	}
-
 	ctx := r.Context()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -311,6 +305,12 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
+	}
+
+	if s.logQueryService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"Cloud Logging is not configured", nil)
 		return
 	}
 
@@ -362,18 +362,6 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if s.logQueryService == nil {
-		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Cloud Logging is not configured", nil)
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
 	ctx := r.Context()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -391,6 +379,18 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
+	}
+
+	if s.logQueryService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"Cloud Logging is not configured", nil)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
@@ -460,12 +460,6 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if s.logQueryService == nil {
-		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Cloud Logging is not configured", nil)
-		return
-	}
-
 	ctx := r.Context()
 
 	project, err := s.store.GetProject(ctx, projectID)
@@ -483,6 +477,12 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	if s.logQueryService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"Cloud Logging is not configured", nil)
 		return
 	}
 
@@ -532,18 +532,6 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if s.logQueryService == nil {
-		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Cloud Logging is not configured", nil)
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
 	ctx := r.Context()
 
 	project, err := s.store.GetProject(ctx, projectID)
@@ -561,6 +549,18 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 		}
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	if s.logQueryService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"Cloud Logging is not configured", nil)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 

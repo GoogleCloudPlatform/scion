@@ -181,9 +181,13 @@ func TestScopedAdmin_HubAdminAccessesDiagnosticsLogsViaReadAllPolicy(t *testing.
 	// grants read+list on * to all hub members. This means diagnostics/logs (action=read)
 	// is accessible via policy evaluation even though it is not in the hub-admin role.
 	// The test documents the actual behavior.
+	//
+	// When Cloud Logging is not configured (no GCP project ID), the handler
+	// returns 501 after passing authorization. Both 200 and 501 confirm the
+	// request was authorized; 403 would mean it was denied.
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/admin/diagnostics/logs", nil)
-	assert.Equal(t, http.StatusOK, rec.Code,
-		"hub-admin should access diagnostics/logs via hub-member-read-all policy (action=read)")
+	assert.Contains(t, []int{http.StatusOK, http.StatusNotImplemented}, rec.Code,
+		"hub-admin should pass authorization for diagnostics/logs (200 when Cloud Logging is configured, 501 when not); got: %s", rec.Body.String())
 }
 
 func TestScopedAdmin_HubAdminDeniedAdminModeToggle(t *testing.T) {

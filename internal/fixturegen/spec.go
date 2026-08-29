@@ -34,13 +34,17 @@ import (
 
 // Shared, stable identifiers referenced across multiple tables.
 const (
-	projectID = "11111111-1111-1111-1111-111111111111"
-	userID    = "22222222-2222-2222-2222-222222222222"
-	agentID   = "33333333-3333-3333-3333-333333333333"
-	brokerID  = "44444444-4444-4444-4444-444444444444"
-	groupID   = "55555555-5555-5555-5555-555555555555"
-	policyID  = "66666666-6666-6666-6666-666666666666"
-	subID     = "77777777-7777-7777-7777-777777777777"
+	projectID      = "11111111-1111-1111-1111-111111111111"
+	userID         = "22222222-2222-2222-2222-222222222222"
+	agentID        = "33333333-3333-3333-3333-333333333333"
+	brokerID       = "44444444-4444-4444-4444-444444444444"
+	groupID        = "55555555-5555-5555-5555-555555555555"
+	policyID       = "66666666-6666-6666-6666-666666666666"
+	subID          = "77777777-7777-7777-7777-777777777777"
+	messageID      = "88888888-8888-8888-8888-888888888888"
+	conversationID = "99999999-9999-9999-9999-999999999999"
+	roleDefID      = "aa000000-0000-0000-0000-000000000001"
+	limitDefID     = "bb000000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -257,7 +261,7 @@ func Spec() []TableFixture {
 		}},
 		{Table: "messages", Rows: []row{
 			{
-				"id": "11500000-0000-0000-0000-000000000001", "project_id": projectID,
+				"id": messageID, "project_id": projectID,
 				"sender": "user:alice", "sender_id": userID, "recipient": "agent:worker",
 				"recipient_id": agentID, "msg": "do the thing — café ☕", "type": "instruction",
 				"agent_id": agentID, "created_at": baseTime,
@@ -421,6 +425,162 @@ func Spec() []TableFixture {
 				"skill_uri": "registry:reviewer@1.0.0",
 				"optional":  false, "sort_order": 0,
 				"created_at": baseTime, "created_by": userID,
+			},
+		}},
+
+		// ---- Agent credentials ----
+		{Table: "agent_credentials", Rows: []row{
+			{
+				"id": "ac000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"project_id": projectID, "token_jti_hash": "sha256:fixture-jti-hash",
+				"issued_at": baseTime, "expires_at": baseTime.Add(24 * time.Hour),
+			},
+		}},
+
+		// ---- Agent session metrics ----
+		{Table: "agent_session_metrics", Rows: []row{
+			{
+				"id": "sm000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"grove_id": projectID, "session_id": "session-1",
+				"started_at": baseTime, "status": "completed",
+				"turn_count": 5, "tokens_input": 1000, "tokens_output": 500,
+				"created_at": baseTime,
+			},
+		}},
+
+		// ---- Chat link codes ----
+		{Table: "chat_link_codes", Rows: []row{
+			{
+				"id":        "cl000000-0000-0000-0000-000000000001",
+				"code_hash": "sha256:fixture-link-code", "user_identifier": "alice@example.com",
+				"provider": "telegram", "status": "pending",
+				"expires_at": baseTime.Add(24 * time.Hour), "created_at": baseTime,
+			},
+		}},
+
+		// ---- Conversations & participants ----
+		{Table: "conversations", Rows: []row{
+			{
+				"id": conversationID, "project_id": projectID,
+				"kind": "direct", "surface": "native",
+				"drift_state": "active", "last_activity_at": baseTime, "created_at": baseTime,
+			},
+		}},
+		{Table: "conversation_participants", Rows: []row{
+			{
+				"id":              "cp000000-0000-0000-0000-000000000001",
+				"conversation_id": conversationID, "principal_kind": "user",
+				"principal_id": userID, "role": "member", "joined_at": baseTime,
+			},
+		}},
+
+		// ---- Decision audits ----
+		{Table: "decision_audits", Rows: []row{
+			{
+				"id": "da000000-0000-0000-0000-000000000001", "timestamp": baseTime,
+				"principal_kind": "user", "principal_id": userID,
+				"resource_type": "agent", "permission": "read",
+				"result": "allow", "reason": "owner", "sampled": false,
+			},
+		}},
+
+		// ---- Delegation edges ----
+		{Table: "delegation_edges", Rows: []row{
+			{
+				"id":             "de000000-0000-0000-0000-000000000001",
+				"delegator_type": "user", "delegator_id": userID,
+				"delegate_type": "agent", "delegate_id": agentID,
+				"scope_type": "project", "scope_id": projectID,
+				"role": "creator", "active": true, "grandfathered": false,
+			},
+		}},
+
+		// ---- Limit definitions (must precede entitlement_bindings & usage_reservations) ----
+		{Table: "limit_definitions", Rows: []row{
+			{
+				"id": limitDefID, "name": "fixture_max_agents",
+				"resource_type": "agent", "unit": "count",
+				"default_value": 100, "system": false,
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- Entitlement bindings ----
+		{Table: "entitlement_bindings", Rows: []row{
+			{
+				"id":                  "eb000000-0000-0000-0000-000000000001",
+				"limit_definition_id": limitDefID,
+				"subject_type":        "project", "subject_id": projectID,
+				"scope_type": "project", "scope_id": projectID,
+				"value": 50, "created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- GitHub resolution cache ----
+		{Table: "github_resolution_cache", Rows: []row{
+			{
+				"id":           "gr000000-0000-0000-0000-000000000001",
+				"cache_key":    "github:example/platform@main",
+				"original_uri": "https://github.com/example/platform",
+				"commit_sha":   "abc123def456", "file_entries": `["README.md","main.go"]`,
+				"bundle_hash": "sha256:bundlehash", "token_scope": "public",
+				"expires_at": baseTime.Add(24 * time.Hour), "create_time": baseTime,
+			},
+		}},
+
+		// ---- Message addressees ----
+		{Table: "message_addressees", Rows: []row{
+			{
+				"id":         "ma000000-0000-0000-0000-000000000001",
+				"message_id": messageID, "principal_kind": "user",
+				"principal_id": userID, "via": "direct", "delivery_state": "delivered",
+			},
+		}},
+
+		// ---- Mutation audits ----
+		{Table: "mutation_audits", Rows: []row{
+			{
+				"id": "mu000000-0000-0000-0000-000000000001", "timestamp": baseTime,
+				"mutation_type": "create", "actor_principal_kind": "user",
+				"actor_principal_id": userID, "target_type": "agent", "target_id": agentID,
+			},
+		}},
+
+		// ---- Nonce cache ----
+		{Table: "nonce_cache", Rows: []row{
+			{
+				"id":         "nc000000-0000-0000-0000-000000000001",
+				"nonce":      "fixture-nonce-value",
+				"expires_at": baseTime.Add(time.Hour), "created_at": baseTime,
+			},
+		}},
+
+		// ---- Role definitions (must precede role_bindings) ----
+		{Table: "role_definitions", Rows: []row{
+			{
+				"id": roleDefID, "name": "fixture-custom-role",
+				"scope_type": "system", "permissions": `["agent.read","agent.list"]`,
+				"system": false,
+			},
+		}},
+
+		// ---- Role bindings ----
+		{Table: "role_bindings", Rows: []row{
+			{
+				"id":                 "rb000000-0000-0000-0000-000000000001",
+				"role_definition_id": roleDefID, "principal_type": "user",
+				"principal_id": userID, "scope_type": "system",
+				"created_by": "system",
+			},
+		}},
+
+		// ---- Usage reservations ----
+		{Table: "usage_reservations", Rows: []row{
+			{
+				"id":                  "ur000000-0000-0000-0000-000000000001",
+				"limit_definition_id": limitDefID,
+				"subject_id":          projectID, "scope_type": "project", "scope_id": projectID,
+				"resource_id": agentID, "reserved": 1, "created_at": baseTime,
 			},
 		}},
 	}
