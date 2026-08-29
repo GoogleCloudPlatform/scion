@@ -185,10 +185,20 @@ if [[ -s "$tmp" ]]; then
       stmt=$(sed -n "${lineno},${end}p" "$file")
       # Strip prefix before INSERT on the first line (removes opening `)
       stmt=$(printf '%s\n' "$stmt" | sed '1s/^[^Ii]*INSERT/INSERT/I')
-      # Truncate at the first closing backtick (`) to bound the statement.
-      # This prevents text after the statement (comments, next func) from
-      # influencing the kind check.
-      stmt=$(printf '%s\n' "$stmt" | sed '/`/{ s/`.*//; p; d; }' | head -21)
+      # Check for closing backtick — if absent, statement exceeds the
+      # 20-line window and we cannot verify its kind. Refuse to exempt
+      # (fail-closed).
+      # shellcheck disable=SC2016  # backtick is a literal match target (Go raw string delimiter)
+      if ! printf '%s\n' "$stmt" | grep -q '`'; then
+        violations="${violations}${match}"$'\n'
+        continue
+      fi
+
+      # Truncate at the first closing backtick (`) and stop processing
+      # (q quits sed). This prevents text after the statement (comments,
+      # next func, subsequent lines) from influencing the kind check.
+      # shellcheck disable=SC2016  # backtick is a literal match target (Go raw string delimiter)
+      stmt=$(printf '%s\n' "$stmt" | sed '/`/{ s/`.*//; q; }' | head -21)
 
       # Check 1: 'group' must appear in the statement text.
       if ! printf '%s\n' "$stmt" | grep -q "'group'"; then

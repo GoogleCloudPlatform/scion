@@ -12,6 +12,10 @@
 #   8. Rejects single-line kind='direct' INSERT
 #   9. Rejects kind='direct' INSERT with decoy 'group' after statement (Case C regression)
 #  10. Rejects decoy 'group' after closing backtick
+#  11. Rejects post-backtick content leak (kind via variable, 'group' after backtick)
+#  12. Rejects 20-line cap truncation (unbounded statement with decoy 'group')
+#  13. Exempts long kind='group' statement with closing backtick within window
+#  14. Exempts kind='group' INSERT with 'direct' mentioned only after backtick
 #
 # Each test injects a synthetic pattern, runs the guard, and checks the exit code.
 # Originals are always restored via trap.
@@ -175,6 +179,91 @@ func c1TestDecoyGroupAfterBacktick() {
 }
 INJECT
 run_test "decoy 'group' after closing backtick is rejected" 1
+
+# --- Test 11: Post-backtick content leak — NOT EXEMPTED (exit 1) ---
+# Regression test for Fix 1 (sed d→q): kind is set via a variable (no literal
+# in the SQL). 'group' appears on a line AFTER the closing backtick that has
+# no backtick of its own — the old `p; d` sed logic would leak it into $stmt.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestLeakedGroupAfterStatement() {
+	kind := "group"
+	db.Exec(`INSERT INTO conversations (id, project_id, kind, surface)
+		VALUES (?, ?, ?, 'native')`, id, pid, kind)
+	// Use 'group' conversation for sidebar
+}
+INJECT
+run_test "post-backtick 'group' on non-backtick line does not leak into statement" 1
+
+# --- Test 12: 20-line cap truncation — NOT EXEMPTED (exit 1) ---
+# Regression test for Fix 2: an INSERT statement longer than 20 lines. A decoy
+# 'group' appears inside the statement (within the first 20 lines) and the real
+# 'direct' is in VALUES beyond line 20. Without the fix, the truncated text
+# would show 'group' (pass Check 1) and no 'direct' (pass Check 2), wrongly
+# exempting the INSERT. With the fix, the missing closing backtick within the
+# 20-line window causes fail-closed rejection.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestCapTruncation() {
+	db.Exec(`INSERT INTO conversations (
+		id,
+		project_id,
+		kind,
+		surface,
+		external_ref,
+		created_at,
+		updated_at,
+		col8,
+		col9,
+		col10, -- 'group' placeholder
+		col11,
+		col12,
+		col13,
+		col14,
+		col15,
+		col16,
+		col17,
+		col18,
+		col19,
+		col20
+	) VALUES (
+		?, ?, 'direct', 'native', ?, NOW(), NOW(),
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
+	// 'group' reference for documentation
+}
+INJECT
+run_test "20-line cap truncation: unbounded statement is rejected (fail-closed)" 1
+
+# --- Test 13: Long kind='group' statement with backtick within window — EXEMPTED (exit 0) ---
+# Control test for Fix 2: a multi-line kind='group' INSERT that IS bounded
+# (closing backtick within 20 lines). Proves the fail-closed path doesn't
+# reject everything.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestLongGroupStatement() {
+	db.Exec(`INSERT INTO conversations (id, project_id, kind, surface, external_ref, created_at, updated_at)
+		VALUES (?, ?, 'group', 'native', ?, NOW(), NOW())`, args...)
+}
+INJECT
+run_test "long kind='group' INSERT with closing backtick within window is exempted" 0
+
+# --- Test 14: kind='group' INSERT with 'direct' only after backtick — EXEMPTED (exit 0) ---
+# Control test for Fix 1: a valid kind='group' INSERT where 'direct' appears
+# only in a comment after the closing backtick. Proves Fix 1 correctly ignores
+# post-backtick content.
+cat >>"$SQLITE" <<'INJECT'
+
+// c1-negative-test-inject
+func c1TestGroupWithPostBacktickDirect() {
+	db.Exec(`INSERT INTO conversations (id, project_id, kind, surface)
+		VALUES (?, ?, 'group', 'native')`, id, pid)
+	// Also handle 'direct' conversations elsewhere
+}
+INJECT
+run_test "kind='group' INSERT with 'direct' only after backtick is exempted" 0
 
 # --- Summary ---
 echo

@@ -478,10 +478,14 @@ func TestValidateCrossProjectAddressees_SpanningProjects(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for agents spanning projects")
 	}
-	if !strings.Contains(err.Error(), "multiple projects") {
-		t.Fatalf("error should mention multiple projects, got: %v", err)
+	if !strings.Contains(err.Error(), "across project boundaries") {
+		t.Fatalf("error should mention project boundaries, got: %v", err)
 	}
-	// Project IDs must NOT be disclosed in the error (security audit M3).
+	// AC-33: error MUST name the rejected addressee IDs.
+	if !strings.Contains(err.Error(), "agent-2") {
+		t.Fatalf("error should name the rejected addressee, got: %v", err)
+	}
+	// AC-33: project IDs must NOT be disclosed in the error.
 	if strings.Contains(err.Error(), "project-a") || strings.Contains(err.Error(), "project-b") {
 		t.Fatalf("error must not disclose project IDs, got: %v", err)
 	}
@@ -521,6 +525,167 @@ func TestValidateCrossProjectAddressees_NoAgents(t *testing.T) {
 	}
 	if err := ValidateCrossProjectAddressees(context.Background(), s, addrs); err != nil {
 		t.Fatalf("no agent addressees should pass: %v", err)
+	}
+}
+
+// ---------- DEF-40: sentinel-collision tests ----------
+
+func TestValidateCrossProjectAddressees_EmptyProjectFirst(t *testing.T) {
+	// Empty-project agent first, then normal agent → must reject (order-independent).
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-empty": {ID: "agent-empty", ProjectID: ""},
+		"agent-p1":    {ID: "agent-p1", ProjectID: "project-a"},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-empty"},
+		{PrincipalKind: "agent", PrincipalID: "agent-p1"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("expected error: empty-project agent alongside placed agent must be rejected")
+	}
+	// AC-33: error names rejected addressees but never project IDs.
+	if !strings.Contains(err.Error(), "agent-empty") {
+		t.Fatalf("error should name the rejected addressee, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "project-a") {
+		t.Fatalf("error must not disclose project IDs, got: %v", err)
+	}
+}
+
+func TestValidateCrossProjectAddressees_EmptyProjectSecond(t *testing.T) {
+	// Normal agent first, then empty-project agent → must also reject.
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-p1":    {ID: "agent-p1", ProjectID: "project-a"},
+		"agent-empty": {ID: "agent-empty", ProjectID: ""},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-p1"},
+		{PrincipalKind: "agent", PrincipalID: "agent-empty"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("expected error: empty-project agent alongside placed agent must be rejected regardless of order")
+	}
+	if !strings.Contains(err.Error(), "agent-empty") {
+		t.Fatalf("error should name the rejected addressee, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "project-a") {
+		t.Fatalf("error must not disclose project IDs, got: %v", err)
+	}
+}
+
+func TestValidateCrossProjectAddressees_ZeroUUIDFirst(t *testing.T) {
+	// Zero-UUID agent first, then normal agent → must reject.
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-zero": {ID: "agent-zero", ProjectID: "00000000-0000-0000-0000-000000000000"},
+		"agent-p1":   {ID: "agent-p1", ProjectID: "project-a"},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-zero"},
+		{PrincipalKind: "agent", PrincipalID: "agent-p1"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("expected error: zero-UUID agent alongside placed agent must be rejected")
+	}
+	if !strings.Contains(err.Error(), "agent-zero") {
+		t.Fatalf("error should name the rejected addressee, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "project-a") {
+		t.Fatalf("error must not disclose project IDs, got: %v", err)
+	}
+}
+
+func TestValidateCrossProjectAddressees_ZeroUUIDSecond(t *testing.T) {
+	// Normal agent first, then zero-UUID agent → must also reject.
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-p1":   {ID: "agent-p1", ProjectID: "project-a"},
+		"agent-zero": {ID: "agent-zero", ProjectID: "00000000-0000-0000-0000-000000000000"},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-p1"},
+		{PrincipalKind: "agent", PrincipalID: "agent-zero"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("expected error: zero-UUID agent alongside placed agent must be rejected regardless of order")
+	}
+	if !strings.Contains(err.Error(), "agent-zero") {
+		t.Fatalf("error should name the rejected addressee, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "project-a") {
+		t.Fatalf("error must not disclose project IDs, got: %v", err)
+	}
+}
+
+func TestValidateCrossProjectAddressees_SingleEmptyProjectAgent(t *testing.T) {
+	// A single unplaceable agent alone has no cross-project issue → must pass.
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-empty": {ID: "agent-empty", ProjectID: ""},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-empty"},
+	}
+	if err := ValidateCrossProjectAddressees(context.Background(), s, addrs); err != nil {
+		t.Fatalf("single unplaceable agent should pass: %v", err)
+	}
+}
+
+func TestValidateCrossProjectAddressees_SingleZeroUUIDAgent(t *testing.T) {
+	// A single zero-UUID agent alone has no cross-project issue → must pass.
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-zero": {ID: "agent-zero", ProjectID: "00000000-0000-0000-0000-000000000000"},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-zero"},
+	}
+	if err := ValidateCrossProjectAddressees(context.Background(), s, addrs); err != nil {
+		t.Fatalf("single zero-UUID agent should pass: %v", err)
+	}
+}
+
+func TestValidateCrossProjectAddressees_MultipleUnplaceableAgents(t *testing.T) {
+	// Multiple unplaceable agents → cannot verify same-project → must reject.
+	s := &mockAgentStore{agents: map[string]*store.Agent{
+		"agent-empty": {ID: "agent-empty", ProjectID: ""},
+		"agent-zero":  {ID: "agent-zero", ProjectID: "00000000-0000-0000-0000-000000000000"},
+	}}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "agent-empty"},
+		{PrincipalKind: "agent", PrincipalID: "agent-zero"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("expected error: multiple unplaceable agents must be rejected")
+	}
+	if !strings.Contains(err.Error(), "agent-empty") || !strings.Contains(err.Error(), "agent-zero") {
+		t.Fatalf("error should name all rejected addressees, got: %v", err)
+	}
+}
+
+// ---------- Nil agent guard test (DEF-40 adjacent) ----------
+
+// nilAgentStore is a pathological store that returns (nil, nil) — no agent, no
+// error. This models a buggy or incomplete AgentProjectLookup implementation.
+type nilAgentStore struct{}
+
+func (s *nilAgentStore) GetAgent(_ context.Context, _ string) (*store.Agent, error) {
+	return nil, nil // pathological: no agent, no error
+}
+
+func TestValidateCrossProjectAddressees_NilAgentDenied(t *testing.T) {
+	// A store that returns (nil, nil) must produce an error, not a panic.
+	s := &nilAgentStore{}
+	addrs := []Addressee{
+		{PrincipalKind: "agent", PrincipalID: "ghost-agent"},
+	}
+	err := ValidateCrossProjectAddressees(context.Background(), s, addrs)
+	if err == nil {
+		t.Fatal("nil agent with nil error must be denied, not silently passed")
+	}
+	if !strings.Contains(err.Error(), "ghost-agent") {
+		t.Fatalf("error should name the agent, got: %v", err)
 	}
 }
 
@@ -571,8 +736,8 @@ func TestValidateMessageAddressees_CrossProjectRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for cross-project addressees")
 	}
-	if !strings.Contains(err.Error(), "multiple projects") {
-		t.Fatalf("error should mention multiple projects, got: %v", err)
+	if !strings.Contains(err.Error(), "across project boundaries") {
+		t.Fatalf("error should mention project boundaries, got: %v", err)
 	}
 }
 
