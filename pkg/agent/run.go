@@ -1203,6 +1203,7 @@ func writeAgentTokenFile(agentHome, token string) error {
 	tokenPath := filepath.Join(scionDir, "scion-token")
 	tmp := tokenPath + ".tmp"
 	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write agent token file %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, tokenPath); err != nil {
