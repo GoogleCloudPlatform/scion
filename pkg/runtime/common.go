@@ -632,7 +632,7 @@ func WriteRuntimeDebugFile(config RunConfig, command string, args []string) {
 
 	var buf strings.Builder
 	buf.WriteString(command)
-	buf.WriteString(fmt.Sprintf(" [%d args redacted — may contain credentials, see #127]\n", len(args)))
+	fmt.Fprintf(&buf, " [%d args redacted — may contain credentials, see #127]\n", len(args))
 
 	if err := os.WriteFile(debugPath, []byte(buf.String()), 0644); err != nil {
 		runtimeLog.Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
