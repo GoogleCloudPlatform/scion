@@ -1700,11 +1700,16 @@ func TestDownloadDiscordAttachment_EmptyProjectID_LegacyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Point HOME to a temp dir. Even though projectID is empty, the legacy
-	// path uses /home/scion/.scion/projects/<slug>/downloads on the host, so
-	// we set HOME so the file write succeeds somewhere writable.
+	// Point legacyProjectsRoot at a temp dir so the fallback path is writable
+	// on CI runners where /home/scion does not exist. The t.Setenv("HOME",…)
+	// below has no effect on this code path (the path is a literal, not
+	// HOME-derived) and is kept only for documentation.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+
+	origRoot := legacyProjectsRoot
+	legacyProjectsRoot = filepath.Join(fakeHome, ".scion/projects")
+	t.Cleanup(func() { legacyProjectsRoot = origRoot })
 
 	b := &DiscordBroker{
 		log:        discardLogger(),
