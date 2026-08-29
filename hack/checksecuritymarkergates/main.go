@@ -397,6 +397,12 @@ func main() {
 	//   recipients through authorizeAgentMessage.
 	// sendHumanToHuman: user-to-user path (no target agent), called from
 	//   handleConversationSend which verifies GetUserIdentityFromContext.
+	//
+	// SCOPE LIMITATION: caller discovery scans only pkg/hub/handlers_*.go.
+	// A caller added outside that glob (e.g. in a new top-level file) would
+	// be invisible to the rule. Both real callers are inside the glob today,
+	// and minCallers guards against silent drift: if a caller moves out of
+	// the glob, the count drops and the self-test fires.
 	// =========================================================================
 
 	type callerRule struct {
