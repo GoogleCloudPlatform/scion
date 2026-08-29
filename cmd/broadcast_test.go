@@ -115,10 +115,10 @@ func TestBroadcastCmd_NoAgents(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.URL.Path == "/api/v1/projects/"+projectID+"/broadcast":
+		case "/api/v1/projects/" + projectID + "/broadcast":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":   "accepted",
 				"total":    0,
@@ -157,13 +157,14 @@ func TestBroadcastCmd_WithInterrupt(t *testing.T) {
 		{Name: "agent-1", Status: "running"},
 	}
 
+	broadcastPath := "/api/v1/projects/" + projectID + "/broadcast"
 	var receivedInterrupt bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.URL.Path == "/api/v1/projects/"+projectID+"/broadcast":
+		case broadcastPath:
 			var body struct {
 				Interrupt         bool                        `json:"interrupt"`
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`

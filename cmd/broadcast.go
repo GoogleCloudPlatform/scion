@@ -101,7 +101,7 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 		}
 		agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), broadcastHubTimeout)
 		defer cancel()
 
 		msg := buildBroadcastMessage(sender, message)
@@ -122,7 +122,7 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	// Global broadcast (--all): fan-out at client level across projects.
 	agentSvc := hubCtx.Client.Agents()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), broadcastHubTimeout)
 	defer cancel()
 
 	resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{Phase: "running"})
@@ -147,7 +147,7 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), broadcastHubSendTimeout)
 			defer cancel()
 
 			msg := buildBroadcastMessage(sender, message)
@@ -165,11 +165,13 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	return nil
 }
 
-// Timeouts for local broadcast operations. Separate deadlines so that when
-// a timeout fires it names exactly one operation, not "something was slow."
+// Timeouts for broadcast operations. Separate deadlines so that when a timeout
+// fires it names exactly one operation, not "something was slow."
 const (
-	broadcastListTimeout    = 15 * time.Second
-	broadcastMessageTimeout = 30 * time.Second // generous: --interrupt makes Message do more work
+	broadcastHubTimeout     = 30 * time.Second // project-scoped Hub broadcast or global Hub list
+	broadcastHubSendTimeout = 30 * time.Second // per-agent send in global Hub fan-out
+	broadcastListTimeout    = 15 * time.Second // local agent list
+	broadcastMessageTimeout = 30 * time.Second // local per-agent message; generous: --interrupt adds work
 )
 
 func broadcastLocal(message string) error {
