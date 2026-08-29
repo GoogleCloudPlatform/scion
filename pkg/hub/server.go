@@ -4447,10 +4447,13 @@ func (s *Server) seedGitHubResolutionCacheSettings(ctx context.Context) error {
 // registered as a standalone plugin, or "" if not configured. Used to
 // conditionally register the Hub-driven sweep scheduler job.
 func (s *Server) getA2ABridgeExternalURL() string {
-	if s.pluginManager == nil {
+	s.mu.RLock()
+	mgr := s.pluginManager
+	s.mu.RUnlock()
+	if mgr == nil {
 		return ""
 	}
-	cfg := s.pluginManager.GetPluginConfig("broker", "a2a-bridge")
+	cfg := mgr.GetPluginConfig("broker", "a2a-bridge")
 	return cfg["external_url"]
 }
 
