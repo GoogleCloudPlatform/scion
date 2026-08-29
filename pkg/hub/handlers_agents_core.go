@@ -570,7 +570,7 @@ func (s *Server) createAgentInProject(
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.
 	var effectiveRole AgentRole
-	var parentRole AgentRole  // empty for user-created agents; set in agent-caller branch
+	var parentRole AgentRole     // empty for user-created agents; set in agent-caller branch
 	var parentMessageMode string // parent's message_mode for inheritance (D10)
 	requestedRole := AgentRole(req.AgentRole)
 

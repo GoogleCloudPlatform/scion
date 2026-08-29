@@ -51,10 +51,10 @@ const (
 	// it — currently attaching a GCP service account to an agent. Declared here
 	// so policies can be written against it; the assignment call sites still
 	// check ActionRead and are converted separately.
-	ActionAssign  Action = "assign"
-	ActionInvite  Action = "invite"
-	ActionSuspend Action = "suspend"
-	ActionPromote Action = "promote"
+	ActionAssign         Action = "assign"
+	ActionInvite         Action = "invite"
+	ActionSuspend        Action = "suspend"
+	ActionPromote        Action = "promote"
 	ActionClone          Action = "clone"
 	ActionExecute        Action = "execute"
 	ActionSetMessageMode Action = "set_message_mode"
