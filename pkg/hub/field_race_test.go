@@ -185,8 +185,17 @@ func TestChannelRegistryRace(t *testing.T) {
 //
 // The fix snapshots via GetDispatcher() (which holds RLock) and uses the local.
 //
-// WARNING: This test is a no-op without the race detector in the same way
-// as TestChannelRegistryRace — see that test's doc comment for details.
+// This test has two detection modes:
+//
+//  1. Without -race (go test -count=1 ./pkg/hub/): goroutines recover from
+//     nil-deref panics and fail the test. This is probabilistic — the timing
+//     window is narrow and may not be hit on every run. A green result without
+//     -race is NOT proof of correctness.
+//
+//  2. With -race (go test -race ./pkg/hub/): the race detector instruments
+//     every memory access and will reliably detect the unsynchronized read
+//     even if the nil-deref timing is never hit.
+//
 // CI does not currently pass -race, so this test does not gate merges.
 func TestDispatcherRace(t *testing.T) {
 	srv, s := testServer(t)
