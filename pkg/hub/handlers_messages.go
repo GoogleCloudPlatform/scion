@@ -63,12 +63,18 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Phase 8 read-switch: when ConversationReadSwitch is ON and an agent
 	// filter is provided, resolve the DM conversation and add ConversationID
 	// to the filter so reads use the conversation model.
+	// R-9: agentID is client-supplied and may be a slug. Resolve to UUID
+	// before the DM key derivation. On lookup failure, skip the conversation
+	// path WITHOUT calling IncFallback — a bad reference is not a migration
+	// gap, and mixing the two corrupts the S4 readiness metric.
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() && agentID != "" {
-		convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", agentID, "user", user.ID())
-		if convResult != nil {
-			filter.ConversationID = convResult.ConversationID
-		} else {
-			messaging.DivergenceMetrics.IncFallback()
+		if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
+			convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
+			if convResult != nil {
+				filter.ConversationID = convResult.ConversationID
+			} else {
+				messaging.DivergenceMetrics.IncFallback()
+			}
 		}
 	}
 
