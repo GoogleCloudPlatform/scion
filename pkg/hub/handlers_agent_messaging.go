@@ -381,11 +381,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// event already sees the attachments.
 		s.mu.RLock()
 		wcs := s.webChatStore
+		cr := s.channelRegistry // DEF-54: snapshot depends on this RLock; do not separate from it.
 		s.mu.RUnlock()
 		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		s.events.PublishUserMessage(ctx, storeMsg)
-		if s.channelRegistry != nil && s.channelRegistry.Len() > 0 {
-			s.channelRegistry.Dispatch(ctx, structuredMsg)
+		if cr != nil && cr.Len() > 0 {
+			cr.Dispatch(ctx, structuredMsg)
 		}
 	}
 

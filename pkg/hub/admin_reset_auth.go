@@ -21,7 +21,8 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 
 	ctx := r.Context()
 
-	if s.dispatcher == nil {
+	disp := s.GetDispatcher()
+	if disp == nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"agent dispatcher not configured", nil)
 		return
@@ -53,7 +54,7 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 			defer func() { <-sem }()
 
 			res := agentResult{ID: a.ID, Name: a.Name}
-			if err := s.dispatcher.DispatchAgentResetAuth(ctx, &a); err != nil {
+			if err := disp.DispatchAgentResetAuth(ctx, &a); err != nil {
 				slog.Error("Bulk reset-auth failed for agent", "agent_id", a.ID, "error", err)
 				res.Error = err.Error()
 			}

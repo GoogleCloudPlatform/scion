@@ -2925,13 +2925,14 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	if s.dispatcher == nil {
+	disp := s.GetDispatcher()
+	if disp == nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"agent dispatcher not configured", nil)
 		return
 	}
 
-	if err := s.dispatcher.DispatchAgentResetAuth(ctx, agent); err != nil {
+	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"auth reset failed: "+err.Error(), nil)
