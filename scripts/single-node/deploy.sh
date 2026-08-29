@@ -183,6 +183,42 @@ di_iap_patch_body() {
 }
 
 # ---------------------------------------------------------------------------
+# Tempfile tracking — every mktemp in this file goes through _scion_mktemp,
+# which creates the file with mode 0600, registers it for cleanup, and
+# assigns its path to the caller's variable.  One EXIT trap deletes them all.
+#
+# Why EXIT, not RETURN: under set -e, a failing command inside a function
+# exits the shell outright — the RETURN trap never fires, and tempfiles
+# containing credential material (auth_config_file) leak to disk.
+# EXIT fires on every exit path, including set -e aborts.
+#
+# The EXIT trap is installed once in di_main, so sourcing this file for
+# testing has no side effects.
+# ---------------------------------------------------------------------------
+_SCION_TMPFILES=()
+
+_scion_cleanup() {
+  if [[ ${#_SCION_TMPFILES[@]} -gt 0 ]]; then
+    rm -f -- "${_SCION_TMPFILES[@]}"
+  fi
+}
+
+# _scion_mktemp VAR_NAME
+# Creates a 0600 temporary file, registers it for EXIT cleanup, and assigns
+# its path to the named variable.  Aborts with a diagnostic if mktemp fails —
+# an empty path fed to rm -f later is how cleanup code turns into a bug.
+_scion_mktemp() {
+  local _tmpf
+  _tmpf="$(mktemp)" || {
+    echo "Error: mktemp failed — cannot create temporary file" >&2
+    return 1
+  }
+  chmod 600 "$_tmpf"
+  _SCION_TMPFILES+=("$_tmpf")
+  printf -v "$1" '%s' "$_tmpf"
+}
+
+# ---------------------------------------------------------------------------
 # Preflight checks — verify prerequisites before any side effects
 # ---------------------------------------------------------------------------
 
@@ -369,14 +405,13 @@ di_preflight_rest_credential() {
 
   # Capture stderr so we can print it on failure (never suppress with 2>/dev/null).
   local adc_stderr_file
-  adc_stderr_file="$(mktemp)"
+  _scion_mktemp adc_stderr_file
 
   local tok
   tok="$(gcloud auth application-default print-access-token 2>"$adc_stderr_file" | tr -d '[:space:]')" || {
     echo "Error: 'gcloud auth application-default print-access-token' failed." >&2
     echo "stderr from gcloud:" >&2
     cat "$adc_stderr_file" >&2
-    rm -f "$adc_stderr_file"
     echo "" >&2
     echo "Fix: run 'gcloud auth application-default login' and retry." >&2
     return 1
@@ -388,7 +423,6 @@ di_preflight_rest_credential() {
       echo "stderr from gcloud:" >&2
       cat "$adc_stderr_file" >&2
     fi
-    rm -f "$adc_stderr_file"
     echo "" >&2
     echo "Fix: run 'gcloud auth application-default login' and retry." >&2
     return 1
@@ -397,10 +431,31 @@ di_preflight_rest_credential() {
 
   echo "    ADC token minted (${#tok} chars, prefix: ${tok:0:4}...)"
 
+  # --- Keep the token out of curl's argv ---
+  # A live access token on the command line is readable by any local user via
+  # ps(1), leaks into shell history, and appears in set -x traces.  Three sites
+  # originally carried the token in curl's argv: two -H "Authorization: Bearer …"
+  # headers and one URL query parameter (?access_token=…).
+  #
+  # FIX: -K <configfile> hides the Bearer header from the process table;
+  # -d @<file> POSTs the tokeninfo query to avoid placing it in the URL.
+  # Measured: POST to the tokeninfo endpoint with access_token as form data
+  # returns HTTP 400 {"error":"invalid_token"} for a bad token — i.e. the body
+  # is parsed.  A 405 would mean the method is rejected; 400 invalid_token
+  # confirms POST is a supported method.
+  #
+  # None of the three sites requires the token in a URL.  The tokeninfo endpoint
+  # accepts the token via POST body, and the other two are standard Bearer auth.
+  local auth_config_file tokeninfo_data_file
+  _scion_mktemp auth_config_file
+  _scion_mktemp tokeninfo_data_file
+  printf '%s\n' "header = \"Authorization: Bearer ${tok}\"" > "$auth_config_file"
+  printf '%s' "access_token=${tok}" > "$tokeninfo_data_file"
+
   # --- Resolve ADC identity via tokeninfo ---
   echo "    Resolving ADC identity via $tokeninfo_url"
   local tokeninfo_resp
-  tokeninfo_resp="$(curl -s "${tokeninfo_url}?access_token=${tok}" 2>&1)" || true
+  tokeninfo_resp="$(curl -s -d @"$tokeninfo_data_file" "${tokeninfo_url}" 2>&1)" || true
 
   # tokeninfo does not always carry "email": a service-account token scoped
   # only to cloud-platform returns azp/aud/scope and no email. azp is a
@@ -441,13 +496,12 @@ di_preflight_rest_credential() {
   echo "    GET $list_url"
 
   local resp_file
-  resp_file="$(mktemp)"
+  _scion_mktemp resp_file
   local http_code
   http_code="$(curl -s -o "$resp_file" -w "%{http_code}" \
-    -H "Authorization: Bearer ${tok}" \
+    -K "$auth_config_file" \
     "$list_url")" || {
     echo "Error: could not connect to $list_url — check network connectivity" >&2
-    rm -f "$resp_file"
     return 1
   }
 
@@ -462,7 +516,6 @@ di_preflight_rest_credential() {
   # pins the stub, not the script.
   if [[ ! "$http_code" =~ ^[0-9]+$ ]]; then
     echo "Error: curl returned no HTTP status for GET $list_url — treating as a failure" >&2
-    rm -f "$resp_file"
     return 1
   fi
 
@@ -470,7 +523,6 @@ di_preflight_rest_credential() {
     echo "Error: ADC credential check failed — GET $list_url returned HTTP $http_code:" >&2
     head -c 500 "$resp_file" >&2
     echo >&2
-    rm -f "$resp_file"
     echo "" >&2
     echo "The ADC token was rejected by the Cloud Run v2 API before any resources were created." >&2
     if [[ "$http_code" == "403" ]]; then
@@ -531,7 +583,7 @@ di_preflight_rest_credential() {
 di_assert_perimeter() {
   local instance_url="$1"
   local headers_file
-  headers_file="$(mktemp)"
+  _scion_mktemp headers_file
 
   local status_code
   status_code="$(curl -s -o /dev/null -D "$headers_file" -w "%{http_code}" \
@@ -539,13 +591,11 @@ di_assert_perimeter() {
     "$instance_url" 2>/dev/null)" || status_code="000"
 
   if [[ "$status_code" == "000" ]]; then
-    rm -f "$headers_file"
     echo "SECURITY FAILURE: could not reach instance URL $instance_url" >&2
     return 1
   fi
 
   if [[ "$status_code" != "302" ]]; then
-    rm -f "$headers_file"
     if [[ "$status_code" == "502" ]] || [[ "$status_code" == "503" ]]; then
       echo "SECURITY FAILURE: expected 302 redirect but got $status_code — the instance may not be serving (check Dockerfile CMD, port configuration, and container logs). Cloud Run returns $status_code when the container is unhealthy or not listening on port 8080" >&2
     else
@@ -559,7 +609,6 @@ di_assert_perimeter() {
   # no Location header. The downstream check still fails closed.
   local location
   location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')" || location=""
-  rm -f "$headers_file"
 
   if [[ "$location" != *"accounts.google.com"* ]]; then
     echo "SECURITY FAILURE: got 302 but not to accounts.google.com (Location: $location) — IAP may not be enforcing" >&2
@@ -580,7 +629,7 @@ di_wait_for_iap() {
   local elapsed=0
   local last_status=""
   local headers_file
-  headers_file="$(mktemp)"
+  _scion_mktemp headers_file
 
   while [[ $elapsed -lt $max_wait ]]; do
     local probe_code
@@ -594,7 +643,6 @@ di_wait_for_iap() {
       local location
       location="$(grep -i '^location:' "$headers_file" | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')" || location=""
       if [[ "$location" == *"accounts.google.com"* ]]; then
-        rm -f "$headers_file"
         return 0
       fi
     fi
@@ -608,7 +656,6 @@ di_wait_for_iap() {
     sleep "$poll_interval"
     elapsed=$((elapsed + poll_interval))
   done
-  rm -f "$headers_file" 2>/dev/null
 
   local diag="timed out after ${max_wait}s waiting for IAP to enforce on $instance_url"
   if [[ "$last_status" == "502" ]] || [[ "$last_status" == "503" ]]; then
@@ -628,6 +675,7 @@ di_wait_for_iap() {
 
 di_main() {
   set -euo pipefail
+  trap _scion_cleanup EXIT
 
   # Defaults (must match the Go command's defaults byte-for-byte)
   local DI_NAME=""
@@ -857,13 +905,16 @@ di_main() {
   echo "    PATCH $patch_url"
 
   local patch_resp_file
-  patch_resp_file="$(mktemp)"
-  # shellcheck disable=SC2064
-  trap "rm -f '$patch_resp_file'" RETURN
+  _scion_mktemp patch_resp_file
+
+  # Keep the token out of curl's argv — same rationale as the preflight.
+  local auth_config_file
+  _scion_mktemp auth_config_file
+  printf '%s\n' "header = \"Authorization: Bearer ${access_token}\"" > "$auth_config_file"
   local http_code
   http_code="$(curl -s -o "$patch_resp_file" -w "%{http_code}" \
     -X PATCH \
-    -H "Authorization: Bearer ${access_token}" \
+    -K "$auth_config_file" \
     -H "Content-Type: application/json" \
     -d "$(di_iap_patch_body)" \
     "$patch_url")" || {
