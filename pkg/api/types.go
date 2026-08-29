@@ -787,9 +787,24 @@ const (
 
 	// EnvKindSecretInjected is a value produced at dispatch time that
 	// exists in no store. Delivery channel is TBD (P3b).
-	// Examples: GITHUB_TOKEN from GitHub App, SCION_AUTH_TOKEN (JWT),
-	// SCION_TRANSPORT_TOKEN, SCION_GIT_CLONE_URL.
+	// Examples: GITHUB_TOKEN from GitHub App, SCION_DEV_TOKEN,
+	// SCION_GIT_CLONE_URL.
 	EnvKindSecretInjected EnvKind = "secret-injected"
+
+	// EnvKindSecretBootstrap is a credential that MUST stay in argv
+	// because it bootstraps the delivery channel itself. P3b must NOT
+	// attempt alternative delivery — there is none by construction.
+	// Exposure is managed by lifetime (single-use JWT, short-lived OIDC),
+	// not by concealment.
+	//
+	// Exactly two values today:
+	//   SCION_AUTH_TOKEN      — authorises the secret fetch (X-Scion-Agent-Token).
+	//                           Removing it from argv makes SCION_SECRET_KEYS unfetchable.
+	//   SCION_TRANSPORT_TOKEN — Google-signed OIDC token that authenticates to the hub
+	//                           via IAP. Removing it from argv makes the hub unreachable.
+	//
+	// See design doc §3.4 (auth token) and §3.4.1 (transport token).
+	EnvKindSecretBootstrap EnvKind = "secret-bootstrap"
 )
 
 // ClassifyEnvKey looks up the classification for a key in a classifications

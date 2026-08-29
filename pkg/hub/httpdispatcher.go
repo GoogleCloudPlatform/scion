@@ -858,7 +858,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				req.ResolvedEnv = make(map[string]string)
 			}
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
-			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretInjected)
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			req.ResolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
@@ -2014,7 +2014,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
-			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretInjected)
+			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
 	}
 
@@ -2027,7 +2027,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			}
 		} else if tToken != "" {
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretInjected)
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
@@ -2299,7 +2299,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
-			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretInjected)
+			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
 	}
 
@@ -2312,7 +2312,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if tToken != "" {
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretInjected)
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)

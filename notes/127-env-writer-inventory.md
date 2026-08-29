@@ -4,10 +4,11 @@ Every writer into `ResolvedEnv` (hub→broker wire, `map[string]string`) and
 `ResolvedSecrets` (`[]api.ResolvedSecret`), plus broker-side and runtime-side
 env writers that add keys after the wire crossing.
 
-Classification kinds per §3.2.1:
+Classification kinds per §3.2.1 (updated with Q2 bootstrap kind):
 - **plain** — non-sensitive operational metadata, delivered via `--env KEY=VALUE`
 - **secret-fetchable** — lives in the secret store, can be fetched via P2 endpoint
 - **secret-injected** — produced at dispatch time, in no store, delivery channel TBD (P3b)
+- **secret-bootstrap** — credential that MUST stay in argv because it bootstraps the delivery channel itself. Exposure managed by lifetime (single-use JWT, short-lived OIDC), not concealment. See §3.4/§3.4.1.
 
 ---
 
@@ -31,7 +32,7 @@ Classification kinds per §3.2.1:
 | H12 | `httpdispatcher.go:730` | `SCION_GITHUB_TOKEN_EXPIRY` | GitHub App token expiry timestamp | **plain** |
 | H13 | `httpdispatcher.go:731` | `SCION_GITHUB_TOKEN_PATH` | Literal `"/tmp/.github-token"` | **plain** |
 | H14 | `httpdispatcher.go:816` | `SCION_DEV_TOKEN` | `d.devAuthToken` (dev-mode auth token) | **secret-injected** |
-| H15 | `httpdispatcher.go:830-834` | `SCION_TRANSPORT_TOKEN`, `SCION_TRANSPORT_AUDIENCE`, `SCION_TRANSPORT_TOKEN_EXPIRY`, `SCION_TRANSPORT_MODE` | `transportMinter.MintIDToken` — IAP/Cloud Run invoker token | **secret-injected** (token), **plain** (audience, expiry, mode) |
+| H15 | `httpdispatcher.go:830-834` | `SCION_TRANSPORT_TOKEN`, `SCION_TRANSPORT_AUDIENCE`, `SCION_TRANSPORT_TOKEN_EXPIRY`, `SCION_TRANSPORT_MODE` | `transportMinter.MintIDToken` — IAP/Cloud Run invoker token | **secret-bootstrap** (token), **plain** (audience, expiry, mode) |
 
 ## Hub-side writers into `req.ResolvedEnv` (DispatchAgentStart)
 
@@ -51,8 +52,8 @@ Same keys as buildCreateRequest, but constructed independently (not via buildCre
 | S10 | `httpdispatcher.go:1902` | `SCION_HUB_NAME` | `d.hubName` | **plain** |
 | S11 | `httpdispatcher.go:1917-1932` | `SCION_WORKSPACE_MODE`, `SCION_WORKSPACE_GIT` | Resolved workspace config | **plain** |
 | S12 | `httpdispatcher.go:1941-1947` | `SCION_METADATA_MODE`, `SCION_METADATA_SA_EMAIL`, `SCION_METADATA_PROJECT_ID` | GCP identity config | **plain** (SA email is a public identifier, not a secret) |
-| S13 | `httpdispatcher.go:1956` | `SCION_AUTH_TOKEN` | `tokenGenerator.GenerateAgentToken` — agent JWT | **secret-injected** |
-| S14 | `httpdispatcher.go:1968-1972` | `SCION_TRANSPORT_TOKEN`, `SCION_TRANSPORT_AUDIENCE`, `SCION_TRANSPORT_TOKEN_EXPIRY`, `SCION_TRANSPORT_MODE` | Transport token minting | **secret-injected** (token), **plain** (rest) |
+| S13 | `httpdispatcher.go:1956` | `SCION_AUTH_TOKEN` | `tokenGenerator.GenerateAgentToken` — agent JWT | **secret-bootstrap** |
+| S14 | `httpdispatcher.go:1968-1972` | `SCION_TRANSPORT_TOKEN`, `SCION_TRANSPORT_AUDIENCE`, `SCION_TRANSPORT_TOKEN_EXPIRY`, `SCION_TRANSPORT_MODE` | Transport token minting | **secret-bootstrap** (token), **plain** (rest) |
 | S15 | `httpdispatcher.go:1993-2003` | `GITHUB_TOKEN`, `SCION_GITHUB_APP_ENABLED`, `SCION_GITHUB_TOKEN_EXPIRY`, `SCION_GITHUB_TOKEN_PATH` | GitHub App minting | **secret-injected** (GITHUB_TOKEN), **plain** (rest) |
 | S16 | `httpdispatcher.go:2008` | `SCION_USER_GITHUB_TOKEN`, `SCION_GITHUB_APP_ENABLED` | User-GITHUB_TOKEN precedence flags | **plain** |
 
@@ -71,7 +72,7 @@ Mirrors DispatchAgentStart. Same keys as S1–S16 at corresponding line ranges (
 
 | # | File:Line | Key(s) | Value origin | Kind |
 |---|-----------|--------|-------------|------|
-| T1 | `httpdispatcher.go:454` | `AgentToken` (becomes `SCION_AUTH_TOKEN` at broker) | `tokenGenerator.GenerateAgentToken` | **secret-injected** |
+| T1 | `httpdispatcher.go:454` | `AgentToken` (becomes `SCION_AUTH_TOKEN` at broker) | `tokenGenerator.GenerateAgentToken` | **secret-bootstrap** |
 
 ## Hub-side writers into `req.ResolvedSecrets`
 
@@ -90,9 +91,9 @@ These write into the local `env map[string]string` which becomes `opts.Env`:
 |---|-----------|--------|-------------|------|
 | B1 | `start_context.go:217` | `*` (all of `in.ResolvedEnv`) | Hub wire — passthrough | mixed (inherits hub classification) |
 | B2 | `start_context.go:226-229` | `*` (Config.Env overrides) | Agent config env list | mixed (same as H1) |
-| B3 | `start_context.go:241` | `SCION_AUTH_TOKEN` | `in.AgentToken` (dedicated field from hub) | **secret-injected** |
-| B4 | `start_context.go:245-248` | `SCION_AUTH_TOKEN` | Kept from resolvedEnv (start/resume path) | **secret-injected** |
-| B5 | `start_context.go:251` | `SCION_AUTH_TOKEN` | Broker's own dev token (`os.Getenv`) — last resort | **secret-injected** |
+| B3 | `start_context.go:241` | `SCION_AUTH_TOKEN` | `in.AgentToken` (dedicated field from hub) | **secret-bootstrap** |
+| B4 | `start_context.go:245-248` | `SCION_AUTH_TOKEN` | Kept from resolvedEnv (start/resume path) | **secret-bootstrap** |
+| B5 | `start_context.go:251` | `SCION_AUTH_TOKEN` | Broker's own dev token (`os.Getenv`) — last resort | **secret-bootstrap** |
 | B6 | `start_context.go:308-309` | `SCION_HUB_ENDPOINT`, `SCION_HUB_URL` | Resolved hub endpoint | **plain** |
 | B7 | `start_context.go:326-327` | `SCION_AGENT_SLUG` | `in.Slug` | **plain** |
 | B8 | `start_context.go:329` | `SCION_AGENT_ID` | `in.AgentID` | **plain** |
@@ -154,17 +155,25 @@ These operate on `RunConfig.Env []string` which already contains the broker's ou
 
 ---
 
+## Summary of secret-bootstrap keys (must stay in argv)
+
+These credentials bootstrap the delivery channel itself. Exposure is managed by
+lifetime, not concealment. P3b must NOT attempt alternative delivery.
+
+| Key | Origin | Lifetime control |
+|-----|--------|-----------------|
+| `SCION_AUTH_TOKEN` | `GenerateAgentToken` (JWT) | Single-use (§3.4) |
+| `SCION_TRANSPORT_TOKEN` | `MintIDToken` (IAP/Cloud Run) | Short-lived OIDC (§3.4.1) |
+
 ## Summary of secret-injected keys (the P3b problem set)
 
 These are values produced at dispatch time, in no store, that cannot be delivered
-via `SCION_SECRET_KEYS` + fetch:
+via `SCION_SECRET_KEYS` + fetch. P3b must find an alternative delivery channel.
 
 | Key | Origin | Notes |
 |-----|--------|-------|
 | `GITHUB_TOKEN` (from GitHub App) | `MintGitHubAppTokenForProject` | Ephemeral, expires, not in secret store |
-| `SCION_AUTH_TOKEN` | `GenerateAgentToken` (JWT) | Per-agent, per-dispatch, not stored |
 | `SCION_DEV_TOKEN` | `d.devAuthToken` (dev mode only) | Dev-mode fallback |
-| `SCION_TRANSPORT_TOKEN` | `MintIDToken` (IAP/Cloud Run) | Platform-layer token, ephemeral |
 | `SCION_GIT_CLONE_URL` | `gc.URL` from GitClone config | May embed credentials — the original #127 bug |
 | `SCION_STAGED_SECRETS` | `serializeSecrets(ResolvedSecrets)` | Base64 blob of all secrets — injected at runtime level |
 | `gcloud-adc` (ResolvedSecret) | Host ADC file (colocated broker) | **FILE**, not an env var. Content from host ADC, not in hub secret store |

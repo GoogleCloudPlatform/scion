@@ -484,7 +484,7 @@ type RemoteCreateAgentRequest struct {
 	ProjectID   string             `json:"projectId"`
 	UserID      string             `json:"userId,omitempty"`
 	Config      *RemoteAgentConfig `json:"config,omitempty"`
-	ResolvedEnv map[string]string `json:"resolvedEnv,omitempty"`
+	ResolvedEnv map[string]string  `json:"resolvedEnv,omitempty"`
 	// EnvClassifications records the classification (plain, secret-fetchable,
 	// secret-injected) for each key in ResolvedEnv. Parallel structure:
 	// same key names, independent lifecycle (#127, P3a).

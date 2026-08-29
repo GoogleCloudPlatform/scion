@@ -109,10 +109,25 @@ func TestClassifyEnvKey_EmptyMapKeyAbsent(t *testing.T) {
 	assert.NotNil(t, cls)
 }
 
-// TestEnvKind_Constants verifies the string values of the three classification
+// TestEnvKind_Constants verifies the string values of the four classification
 // kinds. These are wire values (JSON) and must not change without a migration.
 func TestEnvKind_Constants(t *testing.T) {
 	assert.Equal(t, EnvKind("plain"), EnvKindPlain)
 	assert.Equal(t, EnvKind("secret-fetchable"), EnvKindSecretFetchable)
 	assert.Equal(t, EnvKind("secret-injected"), EnvKindSecretInjected)
+	assert.Equal(t, EnvKind("secret-bootstrap"), EnvKindSecretBootstrap)
+}
+
+// TestEnvKindSecretBootstrap_DistinctFromInjected verifies that secret-bootstrap
+// is a distinct kind from secret-injected. P3b must handle them differently:
+// secret-injected values get an alternative delivery channel, while
+// secret-bootstrap values MUST stay in argv (they bootstrap the channel itself).
+func TestEnvKindSecretBootstrap_DistinctFromInjected(t *testing.T) {
+	assert.NotEqual(t, EnvKindSecretBootstrap, EnvKindSecretInjected,
+		"secret-bootstrap must be distinct from secret-injected — "+
+			"they have different P3b delivery instructions")
+	assert.NotEqual(t, EnvKindSecretBootstrap, EnvKindPlain,
+		"secret-bootstrap is a credential, not plain")
+	assert.NotEqual(t, EnvKindSecretBootstrap, EnvKindSecretFetchable,
+		"secret-bootstrap is not in the secret store")
 }

@@ -106,6 +106,36 @@ func TestGitHubToken_StoreOnly_StaysSecretFetchable(t *testing.T) {
 }
 
 // =============================================================================
+// Bootstrap tokens: SCION_AUTH_TOKEN, SCION_TRANSPORT_TOKEN (#127, P3a Q2)
+// =============================================================================
+
+// TestBootstrapTokens_ClassifiedAsBootstrap verifies that the two channel-
+// bootstrapping credentials are classified as secret-bootstrap, not
+// secret-injected. These tokens open the delivery channel itself:
+//   - SCION_AUTH_TOKEN authorises the secret fetch (X-Scion-Agent-Token).
+//   - SCION_TRANSPORT_TOKEN authenticates to the hub via IAP (OIDC).
+//
+// Classifying them as secret-injected would tell P3b to route them through
+// an alternative delivery channel — which is impossible by construction,
+// since they ARE what makes the channel work. secret-bootstrap tells P3b:
+// leave in argv, manage exposure by lifetime.
+func TestBootstrapTokens_ClassifiedAsBootstrap(t *testing.T) {
+	var cls map[string]api.EnvKind
+
+	classifyEnv(&cls, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
+	classifyEnv(&cls, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
+
+	assert.Equal(t, api.EnvKindSecretBootstrap, cls["SCION_AUTH_TOKEN"],
+		"SCION_AUTH_TOKEN must be secret-bootstrap — it authorises the fetch channel")
+	assert.Equal(t, api.EnvKindSecretBootstrap, cls["SCION_TRANSPORT_TOKEN"],
+		"SCION_TRANSPORT_TOKEN must be secret-bootstrap — it opens the transport to the hub")
+
+	// Verify these are NOT secret-injected (the old, incorrect classification).
+	assert.NotEqual(t, api.EnvKindSecretInjected, cls["SCION_AUTH_TOKEN"])
+	assert.NotEqual(t, api.EnvKindSecretInjected, cls["SCION_TRANSPORT_TOKEN"])
+}
+
+// =============================================================================
 // Unclassified key: fail-closed + loud (D4 guard test)
 // =============================================================================
 
@@ -134,6 +164,9 @@ func TestUnclassifiedKey_FailClosed(t *testing.T) {
 	// NEW_UNCLASSED: unclassified → fail-closed.
 	kind, ok = api.ClassifyEnvKey(cls, "NEW_UNCLASSED")
 	assert.False(t, ok, "unclassified key must return ok=false")
+	assert.Equal(t, api.EnvKind(""), kind,
+		"unclassified key must return zero EnvKind — caller must not get "+
+			"a stale kind from a previous lookup")
 
 	// Verify the key IS in ResolvedEnv (the condition for the loud path).
 	_, inEnv := resolvedEnv["NEW_UNCLASSED"]
