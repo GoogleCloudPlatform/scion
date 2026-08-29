@@ -44,6 +44,16 @@ type Config struct {
 	// Existing entries in the runtime environment win on conflict; overlay
 	// values only fill keys that are not already set.
 	EnvOverlay map[string]string
+	// SecretOverrides are secret values fetched from the hub's
+	// POST /api/v1/agent/secrets endpoint (#127, P2d). Unlike EnvOverlay,
+	// these REPLACE existing entries — the runtime-provided value is a
+	// placeholder by construction (P3 writes SCION_SECRET_KEYS=A,B,C with
+	// empty values), so the fetched value must win.
+	//
+	// Applied AFTER mergeEnvOverlay. Do NOT fold these into EnvOverlay or
+	// change mergeEnvOverlay's precedence rule — it is correct for its own
+	// case. See the override reasoning in the P2d PR description.
+	SecretOverrides map[string]string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -159,6 +169,18 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		before := len(s.cmd.Env)
 		s.cmd.Env = mergeEnvOverlay(s.cmd.Env, s.config.EnvOverlay)
 		log.Debug("Applied harness env overlay: %d entries (added %d)", len(s.config.EnvOverlay), len(s.cmd.Env)-before)
+	}
+
+	// Apply fetched secret overrides. These REPLACE existing entries —
+	// the runtime-provided value is a placeholder (P3 writes empty values
+	// in SCION_SECRET_KEYS), so the fetched value must win. This is
+	// deliberately separate from mergeEnvOverlay, which is additive-only.
+	// (#127, P2d)
+	if len(s.config.SecretOverrides) > 0 {
+		for k, v := range s.config.SecretOverrides {
+			s.cmd.Env = setEnvVar(s.cmd.Env, k, v)
+		}
+		log.Debug("Applied %d fetched secret override(s)", len(s.config.SecretOverrides))
 	}
 
 	if err := s.cmd.Start(); err != nil {
