@@ -763,6 +763,57 @@ func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// EnvKind classifies the origin and delivery channel of an environment
+// variable in the dispatch request. Used by the env classification system
+// (#127, P3a) to determine how each value should be delivered to the
+// sandbox (plain env var, fetched secret, or dispatch-injected secret).
+//
+// Three states govern classification lookup:
+//  1. Key present in a non-nil EnvClassifications map → that kind.
+//  2. Key absent from a non-nil map → unclassified → secret (fail-closed + loud).
+//  3. Map entirely nil → classification unavailable (version skew). Distinct
+//     from state 2 — must NOT be treated as "all secret".
+type EnvKind string
+
+const (
+	// EnvKindPlain is a non-sensitive operational value delivered via
+	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_DEBUG.
+	EnvKindPlain EnvKind = "plain"
+
+	// EnvKindSecretFetchable is a value stored in the hub's secret store,
+	// deliverable via SCION_SECRET_KEYS and the P2 fetch endpoint.
+	// Examples: user-stored API keys, project-scoped GITHUB_TOKEN.
+	EnvKindSecretFetchable EnvKind = "secret-fetchable"
+
+	// EnvKindSecretInjected is a value produced at dispatch time that
+	// exists in no store. Delivery channel is TBD (P3b).
+	// Examples: GITHUB_TOKEN from GitHub App, SCION_AUTH_TOKEN (JWT),
+	// SCION_TRANSPORT_TOKEN, SCION_GIT_CLONE_URL.
+	EnvKindSecretInjected EnvKind = "secret-injected"
+)
+
+// ClassifyEnvKey looks up the classification for a key in a classifications
+// map, implementing the three-state lookup described on EnvKind:
+//
+//   - Non-nil map, key present: returns (kind, true).
+//   - Non-nil map, key absent: returns ("", false) — caller must treat as
+//     unclassified (default secret + loud error).
+//   - Nil map: returns ("", false) — caller must distinguish this from the
+//     absent-key case via a separate nil check on the map. The nil case
+//     means classification data is unavailable (e.g. old hub), not that
+//     every key is unclassified.
+//
+// This function does NOT implement the fail-closed default or the loud
+// path — those are the caller's responsibility and belong in P3b's
+// consumption logic. P3a only records and tests.
+func ClassifyEnvKey(classifications map[string]EnvKind, key string) (EnvKind, bool) {
+	if classifications == nil {
+		return "", false
+	}
+	kind, ok := classifications[key]
+	return kind, ok
+}
+
 // GitCloneConfig specifies how to clone a git repository into the workspace.
 // When present, the runtime skips local worktree creation and workspace
 // mounting — sciontool clones the repo inside the container at startup.

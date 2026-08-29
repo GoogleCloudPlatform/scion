@@ -127,7 +127,7 @@ These operate on `RunConfig.Env []string` which already contains the broker's ou
 
 | # | File:Line | Key(s) | Value origin | Kind |
 |---|-----------|--------|-------------|------|
-| R1 | `docker.go:60` / `podman.go:149` / `apple_container.go:59` | `SCION_STAGED_SECRETS` | `serializeSecrets(config.ResolvedSecrets)` — base64-encoded secret blob | **secret-injected** (contains all file+env secrets serialized) |
+| R1 | `docker.go:60` / `podman.go:149` / `apple_container.go:59` | `SCION_STAGED_SECRETS` | `serializeSecrets(config.ResolvedSecrets)` — base64-encoded secret blob | **secret-injected** (contains all file+env secrets serialized). **BYPASS CHANNEL**: this single key carries every secret value regardless of what P3b does for the other six. Flag only — do not solve here. |
 | R2 | `docker.go:66` / `podman.go:155` / `apple_container.go:65` | `SCION_OTEL_GCP_CREDENTIALS` | `findGCPTelemetryCredentialPath` — path to GCP telemetry cred | **plain** (it's a file path, not a credential value) |
 | R3 | `common.go:354-359` | `*` (config.Env passthrough) | Broker output → `-e KEY=VALUE` args | mixed (inherits) |
 | R4 | `common.go:364-366` | `*` (env-type ResolvedSecrets) | `-e KEY=VALUE` for env-type secrets | **secret-fetchable** |
@@ -167,4 +167,4 @@ via `SCION_SECRET_KEYS` + fetch:
 | `SCION_TRANSPORT_TOKEN` | `MintIDToken` (IAP/Cloud Run) | Platform-layer token, ephemeral |
 | `SCION_GIT_CLONE_URL` | `gc.URL` from GitClone config | May embed credentials — the original #127 bug |
 | `SCION_STAGED_SECRETS` | `serializeSecrets(ResolvedSecrets)` | Base64 blob of all secrets — injected at runtime level |
-| `gcloud-adc` (ResolvedSecret) | Host ADC file (colocated broker) | File content, not in hub secret store |
+| `gcloud-adc` (ResolvedSecret) | Host ADC file (colocated broker) | **FILE**, not an env var. Content from host ADC, not in hub secret store |
