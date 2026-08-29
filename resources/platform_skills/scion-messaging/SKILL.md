@@ -75,6 +75,12 @@ The `scion message` command provides the following flags:
 - **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal (replaces the old `--raw` flag).
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery (replaces the old `--in` and `--at` flags). See the `scion-scheduler` skill.
 - **Broadcasting**: Use `scion broadcast` to send to all agents in a project, or `scion broadcast --all` for global broadcast (replaces the old `--broadcast` flag).
+- **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes (replaces the old `--notify` flag).
+
+**Deprecated flags still accepted (with warnings):**
+- `--cc`: Carbon-copy additional agents. Use `group[...]` addressing or body `@mentions` instead.
+- `--plain`: Mark for plain-text delivery. Will be removed in a future release.
+- `--channel` and `--thread-id`: See "Channel and Thread Targeting" above.
 
 ## Agent-to-Agent Coordination Patterns
 
