@@ -1,36 +1,32 @@
 #!/usr/bin/env bash
-# Guard: no messaging path may reach send without passing authorizeAgentMessage
+# Guard: messaging handler files must contain authorizeAgentMessage
 #
-# DEF-37: Verify that every handler path that dispatches a message to an
-# agent goes through the authorizeAgentMessage choke point. This is the
-# per-message authorization gate added in #1371.
+# DEF-37: FILE-LEVEL check that every pkg/hub/handlers_*.go file containing
+# message dispatch calls also contains authorizeAgentMessage. This is the
+# per-message authorization choke point added in #1371.
+#
+# SCOPE AND LIMITATIONS
+#
+# This script checks at the FILE level, not the function level. It verifies:
+#   - Known handler files contain authorizeAgentMessage (REQUIRED gates)
+#   - Any handlers_*.go file with dispatch calls also contains authorizeAgentMessage
+#     (fail-closed scan via glob, catches new files)
+#   - Known handler files contain ValidateLegacyMessage
+#
+# It CANNOT detect a new dispatching function inside an already-covered file
+# that bypasses authorizeAgentMessage. That requires function-level AST
+# analysis, which is out of scope for a bash guard.
 #
 # DESIGN: FAIL-CLOSED
 #
-# Every messaging entry point must either:
-#   (a) contain authorizeAgentMessage  → checked as a REQUIRED gate, OR
-#   (b) be listed as EXEMPT with a reason and date.
-#
-# A new messaging path that bypasses authorizeAgentMessage and is NOT
-# listed here causes exit 1. The exemption list is the control —
-# adding an entry requires architect approval.
-#
-# REQUIRED entry points (must contain authorizeAgentMessage):
-#   1. handleAgentMessage        (user/agent → agent inbound)
-#   2. handleBrokerInbound       (broker plugin → agent)
-#   3. sendAgentRouted           (web chat → agent)
-#   4. processMentions           (mention fan-out)
-#   5. handleProjectBroadcast    (project-scoped broadcast)
+# Handler files are discovered by glob (pkg/hub/handlers_*.go), not by a
+# hardcoded list. A new handler file that dispatches without authz will
+# fail the scan. Exemptions must be enumerated with reason and date.
 #
 # EXEMPT entry points (enumerated bypass, architect-approved):
-#   E1. fanOutGlobal             (admin-only --all broadcast, separate
-#                                 authz via project-level permission check;
-#                                 O-2 tracks tightening. 2026-08-29)
-#
-# REQUIRED validation (ValidateLegacyMessage must appear in all handler files):
-#   V1. handlers_agent_messaging.go
-#   V2. handlers_broker_inbound.go
-#   V3. handlers_chat_v2.go
+#   E1. fanOutGlobal in messagebroker.go (admin-only --all broadcast,
+#       separate authz via project-level permission check;
+#       O-2 tracks tightening. 2026-08-29)
 #
 # EXIT CODES
 #   0  all gates pass
@@ -131,20 +127,29 @@ fi
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "--- Fail-closed scan ---"
+echo "--- Fail-closed scan (glob: pkg/hub/handlers_*.go) ---"
 
-for hfile in \
-    pkg/hub/handlers_agent_messaging.go \
-    pkg/hub/handlers_broker_inbound.go \
-    pkg/hub/handlers_chat_v2.go; do
+for hfile in pkg/hub/handlers_*.go; do
     [ -f "$hfile" ] || continue
-    if grep -q "dispatchWithBrokerRetry\|managedAgentMessage" "$hfile" 2>/dev/null; then
+    # Skip test files
+    case "$hfile" in *_test.go) continue;; esac
+    # Check for message dispatch calls. We look for method CALLS (s.func or p.func)
+    # to dispatch functions, not for function DEFINITIONS. A file that defines a
+    # dispatch helper but is always called from an authorized context is safe;
+    # a file that CALLS a dispatch function is an ingress point.
+    #
+    # Patterns: dispatchWithBrokerRetry, PublishUserMessage, PublishBroadcast
+    # are the three dispatch sinks. managedAgentMessage is excluded — it is an
+    # internal helper always called from handlers_agent_messaging.go (authorized).
+    if grep -q 'dispatchWithBrokerRetry\|\.PublishUserMessage\|\.PublishBroadcast' "$hfile" 2>/dev/null; then
         if ! grep -q "authorizeAgentMessage" "$hfile" 2>/dev/null; then
             echo "FAIL [FAIL-CLOSED] $(basename "$hfile") contains dispatch calls but no authorizeAgentMessage"
             failures=$((failures + 1))
         else
             echo "  ok  $(basename "$hfile") — dispatch paths covered"
         fi
+    else
+        echo "  --  $(basename "$hfile") — no dispatch calls (not a messaging handler)"
     fi
 done
 
