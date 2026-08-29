@@ -1560,18 +1560,18 @@ const UATPrefix = "scion_pat_"
 // constants are retained for old stored-token metadata, but UATValidScopes below
 // is registry-derived and controls newly-created tokens.
 const (
-	UATScopeProjectRead     = permissions.ResourceProject + ":" + permissions.ActionRead
-	UATScopeProjectUpdate   = permissions.ResourceProject + ":" + permissions.ActionUpdate
-	UATScopeAgentCreate     = permissions.ResourceAgent + ":" + permissions.ActionCreate
-	UATScopeAgentRead       = permissions.ResourceAgent + ":" + permissions.ActionRead
-	UATScopeAgentList       = permissions.ResourceAgent + ":" + permissions.ActionList
-	UATScopeAgentStart      = "agent:start"    // legacy stale scope; not valid for new tokens
-	UATScopeAgentStop       = "agent:stop"     // legacy stale scope; not valid for new tokens
-	UATScopeAgentMessage    = "agent:message"  // registry-backed scope (D2); valid for new tokens
-	UATScopeAgentDispatch   = "agent:dispatch" // legacy stale scope; not valid for new tokens
-	UATScopeAgentDelete     = permissions.ResourceAgent + ":" + permissions.ActionDelete
-	UATScopeAgentAttach     = permissions.ResourceAgent + ":" + permissions.ActionAttach
-	UATScopeAgentPortAccess = permissions.ResourceAgent + ":" + permissions.ActionPortAccess
+	UATScopeProjectRead         = permissions.ResourceProject + ":" + permissions.ActionRead
+	UATScopeProjectUpdate       = permissions.ResourceProject + ":" + permissions.ActionUpdate
+	UATScopeAgentCreate         = permissions.ResourceAgent + ":" + permissions.ActionCreate
+	UATScopeAgentRead           = permissions.ResourceAgent + ":" + permissions.ActionRead
+	UATScopeAgentList           = permissions.ResourceAgent + ":" + permissions.ActionList
+	UATScopeAgentStart          = "agent:start"    // legacy stale scope; not valid for new tokens
+	UATScopeAgentStop           = "agent:stop"     // legacy stale scope; not valid for new tokens
+	UATScopeAgentMessage        = "agent:message"  // registry-backed scope (D2); valid for new tokens
+	UATScopeAgentDispatch       = "agent:dispatch" // legacy stale scope; not valid for new tokens
+	UATScopeAgentDelete         = permissions.ResourceAgent + ":" + permissions.ActionDelete
+	UATScopeAgentAttach         = permissions.ResourceAgent + ":" + permissions.ActionAttach
+	UATScopeAgentPortAccess     = permissions.ResourceAgent + ":" + permissions.ActionPortAccess
 	UATScopeAgentManage         = permissions.UATScopeAgentManage         // Convenience alias
 	UATScopeSkillManage         = permissions.UATScopeSkillManage         // Convenience alias
 	UATScopeTemplateManage      = permissions.UATScopeTemplateManage      // Convenience alias
