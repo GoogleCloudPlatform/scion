@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -236,13 +237,13 @@ func (s *UserAccessTokenService) DeleteToken(ctx context.Context, userID, tokenI
 	return s.tokens.DeleteUserAccessToken(ctx, tokenID)
 }
 
-// expandScopes expands convenience aliases like agent:manage.
+// expandScopes expands convenience aliases like agent:manage, skill:manage, etc.
 func expandScopes(scopes []string) []string {
 	seen := make(map[string]bool)
 	var result []string
 	for _, scope := range scopes {
-		if scope == store.UATScopeAgentManage {
-			for _, s := range store.UATManageScopes {
+		if resource, ok := permissions.UATManageAliases[scope]; ok {
+			for _, s := range permissions.UATManageScopesFor(resource) {
 				if !seen[s] {
 					seen[s] = true
 					result = append(result, s)

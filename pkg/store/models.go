@@ -1572,7 +1572,11 @@ const (
 	UATScopeAgentDelete     = permissions.ResourceAgent + ":" + permissions.ActionDelete
 	UATScopeAgentAttach     = permissions.ResourceAgent + ":" + permissions.ActionAttach
 	UATScopeAgentPortAccess = permissions.ResourceAgent + ":" + permissions.ActionPortAccess
-	UATScopeAgentManage     = permissions.UATScopeAgentManage // Convenience alias
+	UATScopeAgentManage         = permissions.UATScopeAgentManage         // Convenience alias
+	UATScopeSkillManage         = permissions.UATScopeSkillManage         // Convenience alias
+	UATScopeTemplateManage      = permissions.UATScopeTemplateManage      // Convenience alias
+	UATScopeHarnessConfigManage = permissions.UATScopeHarnessConfigManage // Convenience alias
+	UATScopeGroupManage         = permissions.UATScopeGroupManage         // Convenience alias
 )
 
 // UATValidScopes is the set of all valid UAT scope strings.
