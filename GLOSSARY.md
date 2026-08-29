@@ -249,19 +249,48 @@ A seeded system or custom limit configuration that defines a quota boundary with
 
 ## Messaging
 
-**Native Web Chat**:
-The built-in interactive messaging interface in the Web Dashboard (enabled via the `web.native_chat` feature flag) that promotes chat to a top-level fourth ShellType (alongside standalone, profile, and app). It features a dedicated thread rail, unread indicators, three-state visibility filtering (Conversation/Verbose/Full), @-mention autocomplete, and cross-channel reply coherence.
-_Avoid_: chat plugin, external chat, messages tab (only for the old tab)
+**Branch mode** (message mode):
+A message mode that permits messaging from ancestry users (like lineage) plus the agent's direct parent and child agents. Project owners can pierce branch mode.
+_Avoid_: tree mode, family mode
+
+**Lineage mode** (message mode):
+A message mode that restricts messaging to users in the agent's ancestry chain — the creating user and their ancestors. No agent-to-agent messaging is permitted for lineage-mode agents. Project owners can pierce lineage mode.
+_Avoid_: ancestry mode, parent-only mode
 
 **Message Group**:
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project.
 _Avoid_: group, set, group chat, room, thread
 _See also_: Group (different concept — hub users, not recipients)
 
+**Message Mode**:
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of four values: **none**, **lineage**, **branch**, or **project** (the default). Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+_Avoid_: messaging mode, communication mode, access mode
+_See also_: Ancestry chain, Piercing
+
+**Messageability**:
+A server-computed assessment of whether a specific viewer can message a specific agent, considering the agent's message mode, the viewer's identity, ancestry relationship, and permissions. Exposed in API responses as `_messageability` with `canMessage` and `canReachViewer` booleans. Used by the UI to gate message buttons and show reachability indicators.
+_Avoid_: reachability (acceptable in UI context but not as the canonical term)
+
+**Native Web Chat**:
+The built-in interactive messaging interface in the Web Dashboard (enabled via the `web.native_chat` feature flag) that promotes chat to a top-level fourth ShellType (alongside standalone, profile, and app). It features a dedicated thread rail, unread indicators, three-state visibility filtering (Conversation/Verbose/Full), @-mention autocomplete, and cross-channel reply coherence.
+_Avoid_: chat plugin, external chat, messages tab (only for the old tab)
+
+**None mode** (message mode):
+A message mode that seals the agent from all messaging except system-plane notices and super-admin piercing. No users and no agents can message a none-mode agent through normal paths.
+_Avoid_: sealed, quarantined (informal usage acceptable in UI confirmation dialogs, not in technical docs)
+
 **Notification**:
 An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion message`.
 _Avoid_: alert, event (for the notification), watch (for the subscription)
 _See also_: Activity (notifications fire on activity values)
+
+**Piercing** (message authorization):
+The ability of a privileged user to bypass an agent's message mode restrictions. Super-admins pierce all modes including none. Project owners pierce lineage and branch modes. Piercing applies only to user identities — it is never inherited by an owner's agents.
+_Avoid_: override, bypass (too generic)
+
+**Project mode** (message mode):
+The default message mode. Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode.
+_Avoid_: open mode, public mode
 
 ## Identity & State
 
