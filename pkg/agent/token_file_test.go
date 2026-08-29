@@ -135,11 +135,11 @@ func TestWriteAgentTokenFile_FailurePaths(t *testing.T) {
 			}
 			assertUsefulTokenWriteError(t, err, tc.wantOp, scionDir)
 
-			// The temp file holds the credential in plaintext. On the rename
-			// failure it must not be left behind on a path we are aborting on.
+			// The temp file holds the credential in plaintext. On any failure
+			// after the file may have been created, it must not be left behind.
 			if _, statErr := os.Stat(filepath.Join(scionDir, "scion-token.tmp")); statErr == nil {
-				if tc.wantOp == "install agent token file" {
-					t.Error("temp token file survived the failed rename; a plaintext credential " +
+				if tc.wantOp == "write agent token file" || tc.wantOp == "install agent token file" {
+					t.Error("temp token file survived the failed " + tc.wantOp + "; a plaintext credential " +
 						"was left in the agent home")
 				}
 			}
