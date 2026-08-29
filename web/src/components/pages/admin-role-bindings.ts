@@ -25,6 +25,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
+import '../shared/principal-picker.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,9 +37,12 @@ interface RoleBinding {
   roleDefinitionId: string;
   principalType: string;
   principalId: string;
+  principalDisplayName?: string;
   scopeType: string;
   scopeId: string;
+  scopeDisplayName?: string;
   createdBy: string;
+  createdByDisplayName?: string;
   createdAt: string;
 }
 
@@ -612,7 +617,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
       <tr>
         <td>
           <div class="principal-info">
-            <span class="principal-id">${binding.principalId}</span>
+            <span class="principal-id">${binding.principalDisplayName || binding.principalId}</span>
             <span class="principal-type">${binding.principalType}</span>
           </div>
         </td>
@@ -620,7 +625,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <td><span class="scope-badge">${binding.scopeType}</span></td>
         <td class="hide-mobile">
           ${binding.scopeId
-            ? html`<span class="scope-id">${binding.scopeId}</span>`
+            ? html`<span class="scope-id">${binding.scopeDisplayName || binding.scopeId}</span>`
             : html`<span class="meta-text">—</span>`}
         </td>
         <td class="hide-mobile">
@@ -685,6 +690,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
             .value=${this.formPrincipalType}
             @sl-change=${(e: Event) => {
               this.formPrincipalType = (e.target as HTMLSelectElement).value;
+              this.formPrincipalId = '';
             }}
           >
             <sl-option value="user">User</sl-option>
@@ -692,15 +698,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
           </sl-select>
         </div>
         <div class="form-group">
-          <sl-input
-            label="Principal ID"
-            placeholder="User or agent ID"
-            .value=${this.formPrincipalId}
-            @sl-input=${(e: Event) => {
-              this.formPrincipalId = (e.target as HTMLInputElement).value;
+          <scion-principal-picker
+            .principalType=${this.formPrincipalType as 'user' | 'agent'}
+            @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
+              this.formPrincipalId = e.detail.principalId;
             }}
-            required
-          ></sl-input>
+          ></scion-principal-picker>
         </div>
         <div class="form-group">
           <sl-select
@@ -779,7 +782,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
       >
         <p>
           Are you sure you want to delete this role binding for
-          <strong>${this.deletingBinding.principalId}</strong>
+          <strong>${this.deletingBinding.principalDisplayName || this.deletingBinding.principalId}</strong>
           (${this.getRoleName(this.deletingBinding.roleDefinitionId)})?
         </p>
         <p class="delete-warning">This action cannot be undone.</p>

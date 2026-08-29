@@ -57,3 +57,5 @@ export { ScionGitRemoteDisplay } from './git-remote-display.js';
 export { ScionHashDisplay } from './hash-display.js';
 export { ScionPreStartHookList } from './pre-start-hook-list.js';
 export { ScionQuickMessageDialog } from './quick-message-dialog.js';
+export { ScionPrincipalPicker } from './principal-picker.js';
+export type { PrincipalChangeDetail } from './principal-picker.js';
