@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -1656,13 +1657,20 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	manageScopes := permissions.UATManageScopes()
-	aliases := []AuthScopeAlias{
-		{
-			ID:          permissions.UATScopeAgentManage,
-			Description: "All agent management operations",
-			ExpandsTo:   manageScopes,
-		},
+	// Build aliases dynamically from the manage alias registry.
+	aliasKeys := make([]string, 0, len(permissions.UATManageAliases))
+	for alias := range permissions.UATManageAliases {
+		aliasKeys = append(aliasKeys, alias)
+	}
+	sort.Strings(aliasKeys)
+	aliases := make([]AuthScopeAlias, 0, len(aliasKeys))
+	for _, alias := range aliasKeys {
+		resource := permissions.UATManageAliases[alias]
+		aliases = append(aliases, AuthScopeAlias{
+			ID:          alias,
+			Description: fmt.Sprintf("All %s management operations", resource),
+			ExpandsTo:   permissions.UATManageScopesFor(resource),
+		})
 	}
 
 	writeJSON(w, http.StatusOK, AuthScopesResponse{

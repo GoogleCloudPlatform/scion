@@ -281,3 +281,58 @@ func TestUATScopes_AgentManageAliasStillExpands(t *testing.T) {
 		t.Error("agent:manage not valid in UATValidScopes()")
 	}
 }
+
+// TestHandleAuthScopes_AllManageAliasesPresent verifies that every manage alias
+// from UATManageAliases appears in the GET /api/v1/auth/scopes response.
+func TestHandleAuthScopes_AllManageAliasesPresent(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/auth/scopes", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp AuthScopesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	aliasMap := map[string]AuthScopeAlias{}
+	for _, alias := range resp.Aliases {
+		aliasMap[alias.ID] = alias
+	}
+
+	for aliasScope, resource := range permissions.UATManageAliases {
+		alias, ok := aliasMap[aliasScope]
+		if !ok {
+			t.Errorf("manage alias %q not found in response", aliasScope)
+			continue
+		}
+		if len(alias.ExpandsTo) == 0 {
+			t.Errorf("manage alias %q has empty expands_to", aliasScope)
+		}
+		expectedScopes := permissions.UATManageScopesFor(resource)
+		sort.Strings(alias.ExpandsTo)
+		if strings.Join(alias.ExpandsTo, ",") != strings.Join(expectedScopes, ",") {
+			t.Errorf("%s expands_to mismatch\ngot:  %v\nwant: %v", aliasScope, alias.ExpandsTo, expectedScopes)
+		}
+		// Verify all expanded scopes belong to the correct resource type.
+		prefix := resource + ":"
+		for _, s := range alias.ExpandsTo {
+			if !strings.HasPrefix(s, prefix) {
+				t.Errorf("%s expanded to non-%s scope %q", aliasScope, resource, s)
+			}
+		}
+	}
+}
+
+// TestUATScopes_AllManageAliasesValid verifies all manage aliases are accepted
+// by UATValidScopes.
+func TestUATScopes_AllManageAliasesValid(t *testing.T) {
+	valid := permissions.UATValidScopes()
+	for alias := range permissions.UATManageAliases {
+		if !valid[alias] {
+			t.Errorf("manage alias %q not valid in UATValidScopes()", alias)
+		}
+	}
+}

@@ -60,8 +60,23 @@ const (
 	ActionMessage        = "message"
 	ActionSetMessageMode = "set_message_mode"
 
-	UATScopeAgentManage = "agent:manage"
+	UATScopeAgentManage         = "agent:manage"
+	UATScopeSkillManage         = "skill:manage"
+	UATScopeTemplateManage      = "template:manage"
+	UATScopeHarnessConfigManage = "harness_config:manage"
+	UATScopeGroupManage         = "group:manage"
 )
+
+// UATManageAliases maps each manage-alias scope to its resource type.
+// Only resource types with 5+ UAT scopes get aliases — types with fewer
+// scopes (broker, user, gcp_service_account, project) are not worth aliasing.
+var UATManageAliases = map[string]string{
+	UATScopeAgentManage:         ResourceAgent,
+	UATScopeSkillManage:         ResourceSkill,
+	UATScopeTemplateManage:      ResourceTemplate,
+	UATScopeHarnessConfigManage: ResourceHarnessConfig,
+	UATScopeGroupManage:         ResourceGroup,
+}
 
 // CapabilityKind says whether a permission applies to an individual resource or
 // to a collection/scope. It drives Hub capability projections.
@@ -249,7 +264,10 @@ func actionsByKind(kind CapabilityKind) map[string][]string {
 // UATValidScopes returns the set of scopes valid for newly-created UATs,
 // including aliases.
 func UATValidScopes() map[string]bool {
-	out := map[string]bool{UATScopeAgentManage: true}
+	out := make(map[string]bool)
+	for alias := range UATManageAliases {
+		out[alias] = true
+	}
 	for _, permission := range Registry {
 		if permission.UATScope != "" {
 			out[permission.UATScope] = true
@@ -260,7 +278,13 @@ func UATValidScopes() map[string]bool {
 
 // UATManageScopes returns the concrete scopes expanded from agent:manage.
 func UATManageScopes() []string {
-	scopes := uatScopesForResource(ResourceAgent)
+	return UATManageScopesFor(ResourceAgent)
+}
+
+// UATManageScopesFor returns the concrete scopes expanded from a manage alias
+// for the given resource type.
+func UATManageScopesFor(resource string) []string {
+	scopes := uatScopesForResource(resource)
 	sort.Strings(scopes)
 	return scopes
 }
@@ -277,14 +301,23 @@ func UATScopeOptions(includeAliases bool) []Permission {
 		return out[i].UATScope < out[j].UATScope
 	})
 	if includeAliases {
-		out = append(out, Permission{
-			ID:          "agent.manage",
-			Resource:    ResourceAgent,
-			Action:      "manage",
-			UATScope:    UATScopeAgentManage,
-			Description: "All agent scopes (convenience alias)",
-			NonRouteUse: []string{"UAT scope expansion alias"},
-		})
+		// Sort alias scopes for stable output order.
+		aliases := make([]string, 0, len(UATManageAliases))
+		for alias := range UATManageAliases {
+			aliases = append(aliases, alias)
+		}
+		sort.Strings(aliases)
+		for _, alias := range aliases {
+			resource := UATManageAliases[alias]
+			out = append(out, Permission{
+				ID:          resource + ".manage",
+				Resource:    resource,
+				Action:      "manage",
+				UATScope:    alias,
+				Description: fmt.Sprintf("All %s scopes (convenience alias)", resource),
+				NonRouteUse: []string{"UAT scope expansion alias"},
+			})
+		}
 	}
 	return out
 }
