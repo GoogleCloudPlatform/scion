@@ -261,7 +261,9 @@ func processHookData(data []byte) error {
 		}
 		if rawEventName != "" {
 			if resp := mappingDialect.Response(rawEventName); resp != nil {
-				json.NewEncoder(os.Stdout).Encode(resp)
+				if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+					return fmt.Errorf("writing hook response: %w", err)
+				}
 			}
 		}
 	}

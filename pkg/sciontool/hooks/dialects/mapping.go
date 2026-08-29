@@ -19,11 +19,11 @@ import (
 // It maps harness-specific event names to normalized Scion event names and
 // optionally extracts fields from the event payload using dotted paths.
 type MappingDialectSpec struct {
-	Dialect         string                                `yaml:"dialect"`
-	EventNameField  string                                `yaml:"event_name_field"`
-	EventNameFields []string                              `yaml:"event_name_fields"`
-	Mappings        map[string]MappingEntrySpec            `yaml:"mappings"`
-	Responses       map[string]map[string]interface{}      `yaml:"responses,omitempty"`
+	Dialect         string                            `yaml:"dialect"`
+	EventNameField  string                            `yaml:"event_name_field"`
+	EventNameFields []string                          `yaml:"event_name_fields"`
+	Mappings        map[string]MappingEntrySpec       `yaml:"mappings"`
+	Responses       map[string]map[string]interface{} `yaml:"responses,omitempty"`
 }
 
 // MappingEntrySpec defines how a single harness event maps to a normalized event.
