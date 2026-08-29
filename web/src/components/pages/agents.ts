@@ -45,6 +45,7 @@ import { stateManager } from '../../client/state.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
+import '../shared/message-mode-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
@@ -1191,6 +1192,11 @@ export class ScionPageAgents extends LitElement {
             size="small"
           >
           </scion-status-badge>
+          <scion-message-mode-badge
+            mode=${agent.messageMode || 'project'}
+            size="small"
+            ?showLabel=${false}
+          ></scion-message-mode-badge>
         </div>
 
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
@@ -1250,6 +1256,7 @@ export class ScionPageAgents extends LitElement {
               >
                 Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
               </th>
+              <th class="hide-mobile">Messaging</th>
               <th
                 class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('updated')}
@@ -1291,6 +1298,12 @@ export class ScionPageAgents extends LitElement {
             label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
+        </td>
+        <td class="hide-mobile">
+          <scion-message-mode-badge
+            mode=${agent.messageMode || 'project'}
+            size="small"
+          ></scion-message-mode-badge>
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||

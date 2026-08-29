@@ -52,6 +52,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
+import '../shared/message-mode-badge.js';
 import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
@@ -1112,6 +1113,10 @@ export class ScionPageAgentDetail extends LitElement {
               status=${getAgentDisplayStatus(agent) as StatusType}
               label=${getAgentDisplayStatus(agent)}
             ></scion-status-badge>
+            <scion-message-mode-badge
+              mode=${agent.messageMode || 'project'}
+              size="medium"
+            ></scion-message-mode-badge>
           </div>
           <div class="header-meta">
             <span class="template-badge">

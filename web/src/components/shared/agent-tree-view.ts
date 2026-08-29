@@ -57,6 +57,8 @@ import {
 } from '../../shared/lineage.js';
 import type { StatusType } from './status-badge.js';
 import './status-badge.js';
+import { getMessageModeDisplay } from '../../shared/message-mode.js';
+import './message-mode-badge.js';
 import './quick-message-dialog.js';
 
 const VARIANT_COLOR: Record<StatusVariant, string> = {
@@ -965,6 +967,9 @@ export class ScionAgentTreeView extends LitElement {
             size="small"
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
+          <span class="mode-icon" style="position: absolute; top: 4px; right: 6px; font-size: 14px; color: var(--sl-color-${getMessageModeDisplay(agent.messageMode).color}-600);">
+            <sl-icon name=${getMessageModeDisplay(agent.messageMode).icon}></sl-icon>
+          </span>
         </a>
         ${can(agent._capabilities, 'attach')
           ? html`
