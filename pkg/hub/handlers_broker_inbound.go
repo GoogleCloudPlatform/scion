@@ -249,8 +249,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			agentID := agent.ID
 			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
 		}
-		if s.webChatStore != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
 		convResult := messaging.ResolveOrCreateConversationByKey(
 			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
@@ -308,7 +311,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	senderUserID := req.Message.SenderID
 	if senderUserID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
 		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
+		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil && u != nil {
 			senderUserID = u.ID
 		}
 	}
@@ -346,8 +349,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		var convResult *messaging.ConversationResult
 		if storeMsg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
-			if s.webChatStore != nil {
-				threadOpts = append(threadOpts, messaging.WithTopicLookup(s.webChatStore))
+			s.mu.RLock()
+			wcs := s.webChatStore
+			s.mu.RUnlock()
+			if wcs != nil {
+				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 			}
 			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
 		} else if senderUserID != "" && agent.ID != "" {
@@ -365,7 +371,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			actualRef = convResult.ExternalRef
 		}
 		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+		messaging.LogDivergence(log, messaging.DivergenceEntry{
 			MessageID:  storeMsg.ID,
 			OldRouting: oldRouting,
 			NewRouting: messaging.NewRoutingStr(convID),
@@ -373,7 +379,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			Reason:     reason,
 		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, s.messageLog)
+		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log)
 	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
 		log.Error("Failed to persist inbound broker message", "error", err)

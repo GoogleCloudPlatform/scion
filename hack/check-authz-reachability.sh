@@ -129,6 +129,7 @@ fi
 echo ""
 echo "--- Fail-closed scan (glob: pkg/hub/handlers_*.go) ---"
 
+dispatch_hits=0
 for hfile in pkg/hub/handlers_*.go; do
     [ -f "$hfile" ] || continue
     # Skip test files
@@ -143,7 +144,8 @@ for hfile in pkg/hub/handlers_*.go; do
     # (\.Symbol) so they match method CALLS (s.Symbol) not function DEFINITIONS
     # (func ... Symbol). handlers_managed_agents.go defines managedAgentMessage
     # but does not call it via method syntax, so it correctly shows 0 hits.
-    if grep -q 'dispatchWithBrokerRetry\|\.PublishUserMessage\|\.PublishBroadcast\|\.managedAgentMessage' "$hfile" 2>/dev/null; then
+    if grep -E -q 'dispatchWithBrokerRetry|\.PublishUserMessage|\.PublishBroadcast|\.managedAgentMessage' "$hfile" 2>/dev/null; then
+        dispatch_hits=$((dispatch_hits + 1))
         if ! grep -q "authorizeAgentMessage" "$hfile" 2>/dev/null; then
             echo "FAIL [FAIL-CLOSED] $(basename "$hfile") contains dispatch calls but no authorizeAgentMessage"
             failures=$((failures + 1))
@@ -154,6 +156,13 @@ for hfile in pkg/hub/handlers_*.go; do
         echo "  --  $(basename "$hfile") — no dispatch calls (not a messaging handler)"
     fi
 done
+
+# Self-test: the dispatch pattern must match at least one file. If zero files
+# matched, the recogniser regex is broken and the fail-closed scan is inert.
+if [ "$dispatch_hits" -eq 0 ]; then
+    echo "FAIL [SELF-TEST] dispatch pattern matched zero handler files — recogniser is broken"
+    failures=$((failures + 1))
+fi
 
 # ---------------------------------------------------------------------------
 # Result

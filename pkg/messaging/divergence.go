@@ -270,7 +270,9 @@ func CheckConversationConsistency(
 				"thread_id", threadID, "error", err)
 			return true // fail open on query errors
 		}
-		messages = result.Items
+		if result != nil {
+			messages = result.Items
+		}
 	} else if senderID != "" && recipientID != "" {
 		// Look up prior DM messages between the same two principals.
 		// Query both directions: sender→recipient and recipient→sender.
@@ -292,7 +294,12 @@ func CheckConversationConsistency(
 				"sender_id", recipientID, "recipient_id", senderID, "error", err)
 			return true
 		}
-		messages = append(result1.Items, result2.Items...)
+		if result1 != nil {
+			messages = append(messages, result1.Items...)
+		}
+		if result2 != nil {
+			messages = append(messages, result2.Items...)
+		}
 	} else {
 		// Not enough info to look up prior messages.
 		return true

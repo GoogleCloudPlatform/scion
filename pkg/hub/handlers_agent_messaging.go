@@ -293,8 +293,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		)
 	} else {
 		var keyOpts []messaging.ConversationByKeyOption
-		if s.webChatStore != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
 		convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 	}
@@ -652,37 +655,35 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// AC-33: Cross-project mention check. Verify that all mentioned agents
-	// belong to the same project as the primary recipient before any dispatch.
-	if len(req.Mentions) > 0 {
-		primaryAgent, agentErr := s.store.GetAgent(ctx, id)
-		if agentErr == nil {
-			mentionAddrs := make([]messaging.Addressee, 0, len(req.Mentions)+1)
-			// Include the primary recipient agent.
-			mentionAddrs = append(mentionAddrs, messaging.Addressee{
-				PrincipalKind: "agent",
-				PrincipalID:   primaryAgent.ID,
-			})
-			// Resolve mention slugs to agent IDs for the cross-project check.
-			for _, slug := range req.Mentions {
-				if mentionAgent, lookupErr := s.store.GetAgentBySlug(ctx, primaryAgent.ProjectID, slug); lookupErr == nil {
-					mentionAddrs = append(mentionAddrs, messaging.Addressee{
-						PrincipalKind: "agent",
-						PrincipalID:   mentionAgent.ID,
-					})
-				}
-			}
-			if crossErr := messaging.ValidateCrossProjectAddressees(ctx, s.store, mentionAddrs); crossErr != nil {
-				ValidationError(w, crossErr.Error(), nil)
-				return
-			}
-		}
-	}
-
+	// R-7: Hoist GetAgent before the mentions block so we don't call it twice.
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// AC-33: Cross-project mention check. Verify that all mentioned agents
+	// belong to the same project as the primary recipient before any dispatch.
+	if len(req.Mentions) > 0 {
+		mentionAddrs := make([]messaging.Addressee, 0, len(req.Mentions)+1)
+		// Include the primary recipient agent.
+		mentionAddrs = append(mentionAddrs, messaging.Addressee{
+			PrincipalKind: "agent",
+			PrincipalID:   agent.ID,
+		})
+		// Resolve mention slugs to agent IDs for the cross-project check.
+		for _, slug := range req.Mentions {
+			if mentionAgent, lookupErr := s.store.GetAgentBySlug(ctx, agent.ProjectID, slug); lookupErr == nil && mentionAgent != nil {
+				mentionAddrs = append(mentionAddrs, messaging.Addressee{
+					PrincipalKind: "agent",
+					PrincipalID:   mentionAgent.ID,
+				})
+			}
+		}
+		if crossErr := messaging.ValidateCrossProjectAddressees(ctx, s.store, mentionAddrs); crossErr != nil {
+			ValidationError(w, crossErr.Error(), nil)
+			return
+		}
 	}
 
 	// Phase 11: Conversation resolution for broker plugins using the SDK path
@@ -701,8 +702,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			agentID := agent.ID
 			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
 		}
-		if s.webChatStore != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
 		convResult := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
@@ -890,7 +894,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// DEF-11: The CLI pre-resolved the ConversationID but didn't send
 			// the ExternalRef. Look it up from the store so
 			// ComputeDivergenceMatch gets the real value instead of "".
-			if conv, err := s.store.GetConversation(ctx, structuredMsg.ConversationID); err == nil {
+			if conv, err := s.store.GetConversation(ctx, structuredMsg.ConversationID); err == nil && conv != nil {
 				convResult.ExternalRef = conv.ExternalRef
 			} else {
 				lookupFailed = true
@@ -919,8 +923,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				)
 			} else {
 				var keyOpts []messaging.ConversationByKeyOption
-				if s.webChatStore != nil {
-					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(s.webChatStore))
+				s.mu.RLock()
+				wcs := s.webChatStore
+				s.mu.RUnlock()
+				if wcs != nil {
+					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 				}
 				convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 			}

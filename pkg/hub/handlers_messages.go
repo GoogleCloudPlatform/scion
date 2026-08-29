@@ -261,7 +261,9 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 			}
 		} else if channel == "web" || channel == "" {
 			// Default: DM conversation between agent and current user.
-			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agentID, "user", user.ID())
+			// R-1: Use agent.ID (UUID) not agentID (raw handler param, may be a slug).
+			// The resolved agent is already in scope from GetAgent above.
+			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
 			} else {
