@@ -2107,11 +2107,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		inlineConfig = agent.AppliedConfig.InlineConfig
 	}
 
-	// TODO(#127-P3a): Thread envClassifications to broker via client.StartAgent.
-	// For now, classifications are recorded but not yet sent over the wire from
-	// the start/restart paths. The create path (buildCreateRequest) sets
-	// req.EnvClassifications directly on the request struct.
-	_ = envClassifications // avoid unused-variable error until wire threading is added
+	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
+	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
+	// "classification unavailable") on the start path. P3b must not land
+	// until #1350 is done — otherwise fail-closed + nil map = total outage.
+	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
 	if isHashMismatchError(err) {
@@ -2366,11 +2366,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		}
 	}
 
-	// TODO(#127-P3a): Thread envClassifications to broker via client.RestartAgent.
-	// For now, classifications are recorded but not yet sent over the wire from
-	// the start/restart paths. The create path (buildCreateRequest) sets
-	// req.EnvClassifications directly on the request struct.
-	_ = envClassifications // avoid unused-variable error until wire threading is added
+	// TODO(#1350): Thread envClassifications to broker via client.RestartAgent.
+	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
+	// "classification unavailable") on the restart path. P3b must not land
+	// until #1350 is done — otherwise fail-closed + nil map = total outage.
+	_ = envClassifications // avoid unused-variable error until #1350 wire threading
 
 	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
 	if errors.Is(err, ErrLifecycleDeferred) {
