@@ -65,6 +65,8 @@ export class ScionPageAdminRoles extends LitElement {
   @state() private showDeleteDialog = false;
   @state() private editingRole: RoleDefinition | null = null;
   @state() private deletingRole: RoleDefinition | null = null;
+  @state() private showViewDialog = false;
+  @state() private viewingRole: RoleDefinition | null = null;
 
   // Form fields
   @state() private formName = '';
@@ -463,6 +465,11 @@ export class ScionPageAdminRoles extends LitElement {
     this.showDeleteDialog = true;
   }
 
+  private openViewDialog(role: RoleDefinition): void {
+    this.viewingRole = role;
+    this.showViewDialog = true;
+  }
+
   private togglePermission(permId: string): void {
     const next = new Set(this.formPermissions);
     if (next.has(permId)) {
@@ -622,6 +629,7 @@ export class ScionPageAdminRoles extends LitElement {
 
       ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderRoles()}
       ${this.renderCreateDialog()} ${this.renderEditDialog()} ${this.renderDeleteDialog()}
+      ${this.renderViewPermissionsDialog()}
     `;
   }
 
@@ -701,10 +709,15 @@ export class ScionPageAdminRoles extends LitElement {
           <span class="perm-count">${this.formatRelativeTime(role.updatedAt)}</span>
         </td>
         <td>
-          ${role.system
-            ? html`<span class="perm-count">—</span>`
-            : html`
-                <div class="actions">
+          <div class="actions">
+            <sl-icon-button
+              name="eye"
+              label="View permissions"
+              @click=${() => this.openViewDialog(role)}
+            ></sl-icon-button>
+            ${role.system
+              ? nothing
+              : html`
                   <sl-icon-button
                     name="pencil"
                     label="Edit role"
@@ -715,8 +728,8 @@ export class ScionPageAdminRoles extends LitElement {
                     label="Delete role"
                     @click=${() => this.openDeleteDialog(role)}
                   ></sl-icon-button>
-                </div>
-              `}
+                `}
+          </div>
         </td>
       </tr>
     `;
@@ -929,6 +942,74 @@ export class ScionPageAdminRoles extends LitElement {
           ?loading=${this.actionInProgress}
           @click=${() => this.deleteRole()}
           >Delete Role</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  private renderViewPermissionsDialog() {
+    if (!this.showViewDialog || !this.viewingRole) return nothing;
+
+    const rolePermIds = new Set(this.viewingRole.permissions ?? []);
+    const rolePerms = this.permissions.filter((p) => rolePermIds.has(p.ID));
+
+    // Group the filtered permissions by resource
+    const groups = new Map<string, Permission[]>();
+    for (const perm of rolePerms) {
+      const resource = perm.Resource || 'other';
+      if (!groups.has(resource)) {
+        groups.set(resource, []);
+      }
+      groups.get(resource)!.push(perm);
+    }
+
+    const permCount = rolePerms.length;
+    const resourceCount = groups.size;
+
+    return html`
+      <sl-dialog
+        label="Permissions: ${this.viewingRole.name}"
+        open
+        @sl-request-close=${() => {
+          this.showViewDialog = false;
+          this.viewingRole = null;
+        }}
+      >
+        ${permCount === 0
+          ? html`<p>This role has no permissions assigned.</p>`
+          : html`
+              <div class="permissions-scroll">
+                ${[...groups.entries()].map(
+                  ([resource, perms]) => html`
+                    <div class="permission-group">
+                      <div class="permission-group-title">${this.resourceLabel(resource)}</div>
+                      ${perms.map(
+                        (perm) => html`
+                          <div class="permission-item">
+                            <div>
+                              <div class="permission-label">${perm.ID}</div>
+                              <div class="permission-desc">${perm.Description}</div>
+                            </div>
+                          </div>
+                        `
+                      )}
+                    </div>
+                  `
+                )}
+              </div>
+              <p>
+                ${permCount} permission${permCount !== 1 ? 's' : ''} across ${resourceCount}
+                resource${resourceCount !== 1 ? 's' : ''}
+              </p>
+            `}
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.showViewDialog = false;
+            this.viewingRole = null;
+          }}
+          >Close</sl-button
         >
       </sl-dialog>
     `;
