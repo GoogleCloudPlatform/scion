@@ -1,0 +1,59 @@
+name: Race Detection (nightly)
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6am UTC
+  workflow_dispatch:       # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  race-detection:
+    name: Race Detection (reporting only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run tests with race detector
+        run: |
+          set -o pipefail
+          go test -race -count=1 -timeout 90m ./... 2>&1 | tee race-detection-output.txt
+
+      - name: Summarize race findings
+        if: always()
+        run: |
+          echo "## Race Detection Results" >> $GITHUB_STEP_SUMMARY
+          RACES=$(grep -c "^WARNING: DATA RACE" race-detection-output.txt || true)
+          FAILS=$(grep -c "^--- FAIL:" race-detection-output.txt || true)
+          echo "- Data races found: ${RACES}" >> $GITHUB_STEP_SUMMARY
+          echo "- Test failures: ${FAILS}" >> $GITHUB_STEP_SUMMARY
+          if [ "$RACES" -gt 0 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Race locations" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -A2 "^WARNING: DATA RACE" race-detection-output.txt >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "$RACES" -eq 0 ] && [ "$FAILS" -eq 0 ]; then
+            echo "All tests passed with race detector enabled." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload race detection results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: race-detection-results
+          path: race-detection-output.txt
+          retention-days: 30
