@@ -541,4 +541,3 @@ func TestValidateMessageContent_SkipsConversationIDCheck(t *testing.T) {
 			"(that is ValidateAttributed's job), got: %v", err)
 	}
 }
-
