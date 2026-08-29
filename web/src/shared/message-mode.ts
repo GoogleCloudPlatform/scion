@@ -96,3 +96,49 @@ export function getMessageModeDisplay(mode?: string): MessageModeDisplay {
   }
   return MESSAGE_MODE_DISPLAY.project;
 }
+
+// ---------------------------------------------------------------------------
+// Denial reason codes and user-facing copy
+// ---------------------------------------------------------------------------
+
+export type MessageDenialReason =
+  | 'mode_none'
+  | 'mode_none_sender'
+  | 'mode_lineage_no_ancestry'
+  | 'mode_branch_no_edge'
+  | 'mode_lineage_agent_to_agent'
+  | 'missing_permission';
+
+/**
+ * Maps denial reason codes to user-facing copy.
+ * The {recipient} and {sender} placeholders should be replaced by the caller.
+ */
+export const DENIAL_REASON_COPY: Record<MessageDenialReason, string> = {
+  mode_none: '{recipient} is sealed (mode: none) and cannot receive messages.',
+  mode_none_sender: 'You cannot send messages: this agent is sealed (mode: none).',
+  mode_lineage_no_ancestry:
+    '{recipient} is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.',
+  mode_branch_no_edge:
+    '{recipient} is in branch mode and only exchanges messages with its direct parent/children that are also in branch mode.',
+  mode_lineage_agent_to_agent:
+    '{sender} is in lineage mode: it can message lineage users but not other agents.',
+  missing_permission: 'You do not have permission to message this agent.',
+};
+
+/**
+ * Get user-facing denial message from reason code.
+ * Substitutes agent names into the template.
+ */
+export function getDenialMessage(
+  reason: string | undefined,
+  recipientName?: string,
+  senderName?: string,
+): string {
+  const template = DENIAL_REASON_COPY[reason as MessageDenialReason];
+  if (!template) {
+    return 'Message delivery denied.';
+  }
+  return template
+    .replace('{recipient}', recipientName || 'This agent')
+    .replace('{sender}', senderName || 'This agent');
+}

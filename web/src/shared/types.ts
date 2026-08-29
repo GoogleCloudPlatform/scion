@@ -215,6 +215,30 @@ export type AgentPhase =
  */
 export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
 
+/** Present on agent LIST and DETAIL responses. Cheap: O(1) per agent. */
+export interface AgentMessageability {
+  /** Whether the viewer can send a message to this agent */
+  canMessage: boolean;
+  /** Whether this agent can send a message to the viewer */
+  canReachViewer: boolean;
+  /** Reason code when canMessage is false */
+  reason?:
+    | 'mode_none'
+    | 'mode_lineage_no_ancestry'
+    | 'mode_branch_no_edge'
+    | 'mode_lineage_agent_to_agent'
+    | 'mode_none_sender'
+    | 'missing_permission';
+}
+
+/** Present on agent DETAIL responses only. O(n) per agent — too costly for lists. */
+export interface AgentMessageabilityDetail extends AgentMessageability {
+  /** Count of agents this agent can directly reach */
+  reachableAgentCount: number;
+  /** Count of users this agent can reach */
+  reachableUserCount: number;
+}
+
 /**
  * Agent runtime activity (only meaningful when phase=running)
  */
@@ -470,6 +494,7 @@ export interface Agent {
 
   // Messaging authorization scope
   messageMode?: MessageMode;
+  _messageability?: AgentMessageability | AgentMessageabilityDetail;
 }
 
 /**
