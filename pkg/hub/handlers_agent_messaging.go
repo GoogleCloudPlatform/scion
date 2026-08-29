@@ -894,19 +894,96 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
-		lookupFailed := false // DEF-11: true only when a pre-resolved conv lookup fails
 		if structuredMsg.ConversationID != "" {
+			// DEF-49 SECURITY: authorize the caller-supplied conversation_id
+			// against the authenticated sender before honouring it.
+			// The else branch below derives the conversation key from the
+			// authenticated context (B5); this branch must verify the caller's
+			// assertion is consistent with that identity.
+			authKind, authID := authenticatedSender(ctx)
+			if authKind == "" || authID == "" {
+				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+					"authenticated identity required for caller-supplied conversation_id", nil)
+				return
+			}
+
+			conv, convErr := s.store.GetConversation(ctx, structuredMsg.ConversationID)
+			if convErr != nil {
+				if errors.Is(convErr, store.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						"caller-supplied conversation_id does not exist", nil)
+					return
+				}
+				s.messageLog.Error("DEF-49: GetConversation failed for caller-supplied conversation_id",
+					"conversation_id", structuredMsg.ConversationID,
+					"error", convErr,
+				)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"conversation lookup failed", nil)
+				return
+			}
+			if conv == nil {
+				// Defensive: GetConversation should not return (nil, nil),
+				// but if it does, fail closed.
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"caller-supplied conversation_id does not exist", nil)
+				return
+			}
+
+			// Authority differs by conversation kind. Direct conversations
+			// have ProjectID == nil (global), so project scoping cannot be
+			// the universal check. The DM key IS the ACL for direct rows.
+			//
+			// `agent` is the recipient agent (resolved from the URL path at
+			// :668), not the sender. The group case is therefore a containment
+			// check — "the conversation belongs to the addressed agent's
+			// project" — not a sender-participation check.
+			switch conv.Kind {
+			case "direct":
+				if err := messages.CheckDMParticipantKey(conv.Kind, conv.ExternalRef, authKind, authID); err != nil {
+					s.messageLog.Warn("DEF-49: direct conversation authorization failed",
+						"conversation_id", conv.ID,
+						"auth_kind", authKind,
+						"error", err,
+					)
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"authenticated sender is not a participant in the direct conversation", nil)
+					return
+				}
+			case "group":
+				// Deny when either project ID is unset (empty or zero UUID).
+				// Two unset IDs comparing equal would authorize a request
+				// that has no project context — the same class of bug that
+				// isUnsetProjectID (validate.go:136) guards against.
+				const zeroUUID = "00000000-0000-0000-0000-000000000000"
+				convProjUnset := conv.ProjectID == nil || *conv.ProjectID == "" || *conv.ProjectID == zeroUUID
+				agentProjUnset := agent.ProjectID == "" || agent.ProjectID == zeroUUID
+				if convProjUnset || agentProjUnset || *conv.ProjectID != agent.ProjectID {
+					s.messageLog.Warn("DEF-49: group conversation project mismatch or unset project",
+						"conversation_id", conv.ID,
+						"conv_project_id", conv.ProjectID,
+						"agent_project_id", agent.ProjectID,
+					)
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"conversation does not belong to the agent's project", nil)
+					return
+				}
+			default:
+				// Unknown conversation kind — fail closed.
+				s.messageLog.Warn("DEF-49: unknown conversation kind, denying",
+					"conversation_id", conv.ID,
+					"kind", conv.Kind,
+				)
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"unsupported conversation kind", nil)
+				return
+			}
+
+			// Authorization passed — honour the caller's assertion.
 			storeMsg.ConversationID = structuredMsg.ConversationID
 			convResult = &messaging.ConversationResult{
 				ConversationID: structuredMsg.ConversationID,
-			}
-			// DEF-11: The CLI pre-resolved the ConversationID but didn't send
-			// the ExternalRef. Look it up from the store so
-			// ComputeDivergenceMatch gets the real value instead of "".
-			if conv, err := s.store.GetConversation(ctx, structuredMsg.ConversationID); err == nil && conv != nil {
-				convResult.ExternalRef = conv.ExternalRef
-			} else {
-				lookupFailed = true
+				ExternalRef:    conv.ExternalRef,
 			}
 		} else {
 			// B5 SECURITY: derive sender identity for the conversation key
@@ -944,10 +1021,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
+		// B10: ValidateAttributed rejection deliberately demoted to a log
+		// line. Converting a derivation-path empty ConversationID into a
+		// client-visible 4xx is a B10 violation — that flip belongs to
+		// Tranche G's read-switch, not to an accidental merge artifact.
+		// Keep the signal so a Tranche G operator can grep for it.
 		if convResult != nil {
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				ValidationError(w, err.Error(), nil)
-				return
+				s.messageLog.Warn("ValidateAttributed: empty ConversationID after attribution (B10 demoted)",
+					"message_id", storeMsg.ID,
+					"conversation_id", storeMsg.ConversationID,
+					"error", err,
+				)
 			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
@@ -958,29 +1043,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convID = convResult.ConversationID
 			actualRef = convResult.ExternalRef
 		}
-		// DEF-11: When the CLI pre-resolved a ConversationID but the store
-		// lookup failed, record a fallback with a distinct reason instead of
-		// feeding an empty ref into ComputeDivergenceMatch (which would
-		// produce "routing-type-mismatch: old=… new=", the DEF-11 artifact).
-		if lookupFailed {
-			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
-				MessageID:  storeMsg.ID,
-				OldRouting: oldRouting,
-				NewRouting: messaging.NewRoutingStr(convID),
-				Match:      false,
-				Reason:     "conv-lookup-failed",
-				Fallback:   true,
-			})
-		} else {
-			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-			messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
-				MessageID:  storeMsg.ID,
-				OldRouting: oldRouting,
-				NewRouting: messaging.NewRoutingStr(convID),
-				Match:      match,
-				Reason:     reason,
-			})
-		}
+		// DEF-49: lookupFailed was removed — both lookup-failure cases now
+		// deny before reaching this point, so the "conv-lookup-failed"
+		// divergence entry is unreachable dead code. Removed per AC-D-7.
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
 		// DEF-3: Independent consistency check against prior messages.
 		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
 		// Propagate GroupID from metadata so CLI-originated group[] messages
