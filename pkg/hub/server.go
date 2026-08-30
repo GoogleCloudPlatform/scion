@@ -1375,6 +1375,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// the rest.
 	backfillProjectMemberReadPolicies(ctx, s)
 
+	// Backfill per-project scheduled-event member policies. Existing role
+	// definitions are not updated by seedRoleDefinitions, so without this
+	// policy backfill existing project members would be denied scheduled-event
+	// operations until the role definitions are recreated.
+	backfillScheduledEventPermissions(ctx, s)
+
 	// Seed role definitions for the role-binding authorization model (Phase 1E).
 	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
 	seedRoleDefinitions(ctx, s)

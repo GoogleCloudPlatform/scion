@@ -403,6 +403,44 @@ func backfillProjectMemberReadPolicies(ctx context.Context, s store.Store) {
 	}
 }
 
+// backfillScheduledEventPermissions ensures every existing project has a
+// project-scoped policy granting the scheduled_event actions (create, read,
+// list) to project members. Projects created after this change pick up
+// scheduled_event permissions through the role definitions seeded by
+// seedRoleDefinitions, but existing role definitions are not updated at
+// startup — so this policy-based backfill closes the gap for existing
+// deployments.
+//
+// Idempotent: the function looks up the policy by name before creating. It
+// follows the same pattern as backfillProjectAssignPolicies.
+func backfillScheduledEventPermissions(ctx context.Context, s store.Store) {
+	var cursor string
+	for {
+		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:  500,
+			Cursor: cursor,
+		})
+		if err != nil {
+			slog.Warn("failed to list projects for scheduled-event-permission backfill", "error", err)
+			return
+		}
+		for i := range res.Items {
+			project := &res.Items[i]
+			group, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+			if err != nil {
+				slog.Debug("skipping scheduled-event-permission backfill, no members group",
+					"project_id", project.ID, "slug", project.Slug)
+				continue
+			}
+			ensureProjectScheduledEventPolicy(ctx, s, project, group.ID)
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+}
+
 // ensureProjectMemberReadPolicies creates read+list policies for "project"
 // and "agent" resource types scoped to the given project, bound to the
 // project's members group. Idempotent: skips creation if the policy already
@@ -493,6 +531,57 @@ func narrowHubMemberReadAll(ctx context.Context, s store.Store, hubMembersGroupI
 		"id", policy.ID)
 }
 
+// ensureProjectScheduledEventPolicy creates the project's scheduled-event
+// member policy and binds it to the project's members group. Idempotent by
+// policy-name lookup, following the ensureProjectAssignPolicy pattern.
+func ensureProjectScheduledEventPolicy(ctx context.Context, s store.Store, project *store.Project, groupID string) {
+	name := "project:" + project.Slug + ":member-scheduled-events"
+
+	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
+	if err != nil {
+		slog.Warn("failed to check for existing project scheduled-event policy",
+			"project_id", project.ID, "policy", name, "error", err.Error())
+		return
+	}
+
+	var policy *store.Policy
+	if len(existing.Items) > 0 {
+		policy = &existing.Items[0]
+		if policy.ScopeID != project.ID {
+			policy.ScopeID = project.ID
+			if updateErr := s.UpdatePolicy(ctx, policy); updateErr != nil {
+				slog.Warn("failed to update existing project scheduled-event policy",
+					"project_id", project.ID, "policy", name, "error", updateErr.Error())
+			}
+		}
+	} else {
+		policy = &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         name,
+			Description:  "Allow project members to create, read, and list scheduled events",
+			ScopeType:    "project",
+			ScopeID:      project.ID,
+			ResourceType: "scheduled_event",
+			Actions:      []string{"create", "read", "list"},
+			Effect:       "allow",
+		}
+		if createErr := s.CreatePolicy(ctx, policy); createErr != nil {
+			slog.Warn("failed to create project scheduled-event policy",
+				"project_id", project.ID, "policy", name, "error", createErr.Error())
+			return
+		}
+		slog.Info("created project scheduled-event policy", "project_id", project.ID, "policy", name, "id", policy.ID)
+	}
+
+	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID:      policy.ID,
+		PrincipalType: "group",
+		PrincipalID:   groupID,
+	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.Warn("failed to bind project scheduled-event policy",
+			"project_id", project.ID, "policy", name, "error", err.Error())
+	}
+}
 // seedPolicyTombstoneKey returns the hub-setting key used to record that a
 // seeded policy was intentionally deleted by an operator.
 func seedPolicyTombstoneKey(policyName string) string {
@@ -795,11 +884,12 @@ func permissionIDsByActions(actions ...string) []string {
 // plus project.* itself.
 func projectScopedPermissionIDs() []string {
 	projectResources := map[string]bool{
-		permissions.ResourceAgent:         true,
-		permissions.ResourceProject:       true,
-		permissions.ResourceTemplate:      true,
-		permissions.ResourceHarnessConfig: true,
-		permissions.ResourceSkill:         true,
+		permissions.ResourceAgent:          true,
+		permissions.ResourceProject:        true,
+		permissions.ResourceTemplate:       true,
+		permissions.ResourceHarnessConfig:  true,
+		permissions.ResourceSkill:          true,
+		permissions.ResourceScheduledEvent: true,
 	}
 	var ids []string
 	for _, p := range permissions.Registry {
@@ -814,11 +904,12 @@ func projectScopedPermissionIDs() []string {
 // excluding those with the given action.
 func projectPermissionIDsExcluding(excludeAction string) []string {
 	projectResources := map[string]bool{
-		permissions.ResourceAgent:         true,
-		permissions.ResourceProject:       true,
-		permissions.ResourceTemplate:      true,
-		permissions.ResourceHarnessConfig: true,
-		permissions.ResourceSkill:         true,
+		permissions.ResourceAgent:          true,
+		permissions.ResourceProject:        true,
+		permissions.ResourceTemplate:       true,
+		permissions.ResourceHarnessConfig:  true,
+		permissions.ResourceSkill:          true,
+		permissions.ResourceScheduledEvent: true,
 	}
 	// Explicit permission IDs excluded from this role regardless of action.
 	// agent.set_message_mode must NOT be held by project admins — only project
@@ -845,11 +936,12 @@ func projectMemberPermissionIDs() []string {
 		"message": true,
 	}
 	projectResources := map[string]bool{
-		permissions.ResourceAgent:         true,
-		permissions.ResourceProject:       true,
-		permissions.ResourceTemplate:      true,
-		permissions.ResourceHarnessConfig: true,
-		permissions.ResourceSkill:         true,
+		permissions.ResourceAgent:          true,
+		permissions.ResourceProject:        true,
+		permissions.ResourceTemplate:       true,
+		permissions.ResourceHarnessConfig:  true,
+		permissions.ResourceSkill:          true,
+		permissions.ResourceScheduledEvent: true,
 	}
 	var ids []string
 	for _, p := range permissions.Registry {

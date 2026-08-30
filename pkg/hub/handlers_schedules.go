@@ -83,15 +83,67 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		}
 	}
 
+	// Determine the authorization action from method and path.
+	var authzAction Action
 	if schedulePath == "" {
-		// Collection endpoint
+		switch r.Method {
+		case http.MethodGet:
+			authzAction = ActionList
+		case http.MethodPost:
+			authzAction = ActionCreate
+		default:
+			MethodNotAllowed(w)
+			return
+		}
+	} else {
+		parts := strings.SplitN(schedulePath, "/", 2)
+		subAction := ""
+		if len(parts) > 1 {
+			subAction = parts[1]
+		}
+
+		switch subAction {
+		case "":
+			switch r.Method {
+			case http.MethodGet:
+				authzAction = ActionRead
+			case http.MethodPatch:
+				authzAction = ActionUpdate
+			case http.MethodDelete:
+				authzAction = ActionDelete
+			default:
+				MethodNotAllowed(w)
+				return
+			}
+		case "pause", "resume":
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w)
+				return
+			}
+			authzAction = ActionUpdate
+		case "history":
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w)
+				return
+			}
+			authzAction = ActionRead
+		default:
+			NotFound(w, "Schedule action")
+			return
+		}
+	}
+
+	// Authorize access — fail closed for all identity types.
+	if !s.authorizeScheduledEventAccess(w, r, projectID, authzAction) {
+		return
+	}
+
+	if schedulePath == "" {
 		switch r.Method {
 		case http.MethodGet:
 			s.listSchedules(w, r, projectID)
 		case http.MethodPost:
 			s.createSchedule(w, r, projectID)
-		default:
-			MethodNotAllowed(w)
 		}
 		return
 	}
@@ -99,12 +151,12 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 	// Parse schedule ID and optional action from path
 	parts := strings.SplitN(schedulePath, "/", 2)
 	scheduleID := parts[0]
-	action := ""
+	routeAction := ""
 	if len(parts) > 1 {
-		action = parts[1]
+		routeAction = parts[1]
 	}
 
-	switch action {
+	switch routeAction {
 	case "":
 		// Individual schedule endpoint
 		switch r.Method {
@@ -114,29 +166,13 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 			s.updateSchedule(w, r, projectID, scheduleID)
 		case http.MethodDelete:
 			s.deleteSchedule(w, r, projectID, scheduleID)
-		default:
-			MethodNotAllowed(w)
 		}
 	case "pause":
-		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
-			return
-		}
 		s.pauseSchedule(w, r, projectID, scheduleID)
 	case "resume":
-		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
-			return
-		}
 		s.resumeSchedule(w, r, projectID, scheduleID)
 	case "history":
-		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
-			return
-		}
 		s.getScheduleHistory(w, r, projectID, scheduleID)
-	default:
-		NotFound(w, "Schedule action")
 	}
 }
 
