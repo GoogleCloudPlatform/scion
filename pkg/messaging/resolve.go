@@ -478,6 +478,13 @@ func resolveThread(ctx context.Context, s ResolutionStore, name string, rctx Res
 // the participant was newly added (i.e. the conversation was just created for
 // this pair). ErrAlreadyExists is swallowed — re-adding an existing
 // participant is expected on the upsert path.
+//
+// G2 EXCEPTION — same class as EnsureParticipant in conversation.go.
+// Participants are a LISTING concern, not an access concern: authorization
+// is key-derived (the DM key IS the ACL), not participant-derived. Denying
+// a send because a listing row failed to write turns a cosmetic gap into
+// an outage. Errors are logged as warnings and self-repair on the next
+// message in the same conversation.
 func ensureParticipant(ctx context.Context, s ResolutionStore, convID, kind, id string) bool {
 	err := s.AddParticipant(ctx, &store.ConversationParticipant{
 		ID:             uuid.NewString(),

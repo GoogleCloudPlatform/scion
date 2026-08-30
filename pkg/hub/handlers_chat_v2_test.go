@@ -1148,7 +1148,7 @@ func TestValidDMKey(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // setupSendTest creates a project, webchat store, and a topic for send path testing.
-func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project) {
+func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project, *sql.DB) {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1169,16 +1169,55 @@ func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Pro
 	}
 	srv.SetWebChatStore(wcs)
 
-	return srv, s, wcs, proj
+	return srv, s, wcs, proj, db
+}
+
+// setTopicConversationID creates a conversation for a topic and updates the topic's conversation_id.
+// This is required after the G2 refactor made conversation resolution fatal.
+func setTopicConversationID(t *testing.T, db *sql.DB, s store.Store, topicID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	pid := projectID
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:" + projectID + ":" + topicID,
+		DriftState:  "active",
+		ProjectID:   &pid,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation: %v", err)
+	}
+	_, err = db.ExecContext(ctx, "UPDATE webchat_topic SET conversation_id = ? WHERE id = ?", conv.ID, topicID)
+	if err != nil {
+		t.Fatalf("update topic conversation_id: %v", err)
+	}
+}
+
+// setDMConversationID creates a conversation for a DM key.
+// This is required after the G2 refactor made conversation resolution fatal.
+func setDMConversationID(t *testing.T, s store.Store, dmKey, _ string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation for DM: %v", err)
+	}
 }
 
 func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create a topic with no default_agent.
+	topicID := tid("topic-send-1")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-send-1"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "chat-only",
 		CreatedBy: "dev",
@@ -1186,9 +1225,10 @@ func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	body := map[string]string{"content": "hello world"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-send-1")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1206,7 +1246,7 @@ func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
 }
 
 func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
-	srv, s, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent.
@@ -1224,8 +1264,9 @@ func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
 	}
 
 	// Create a topic with default_agent set.
+	topicID := tid("topic-default-agent")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:           tid("topic-default-agent"),
+		ID:           topicID,
 		ProjectID:    proj.ID,
 		Name:         "agent-thread",
 		CreatedBy:    "dev",
@@ -1234,9 +1275,10 @@ func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	body := map[string]string{"content": "please help"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-default-agent")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1252,7 +1294,7 @@ func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
 }
 
 func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
-	srv, s, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent.
@@ -1270,8 +1312,9 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	}
 
 	// Topic without default_agent.
+	topicID := tid("topic-mention")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-mention"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "mention-thread",
 		CreatedBy: "dev",
@@ -1279,10 +1322,11 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	// Send with @reviewer mention.
 	body := map[string]string{"content": "@reviewer please check this"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-mention")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1302,7 +1346,7 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 }
 
 func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
-	srv, s, _, proj := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent so resolveProjectFromDMKey can find the project.
@@ -1321,6 +1365,7 @@ func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
 
 	// Build a valid DM key: agent DM so project can be resolved.
 	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	body := map[string]string{"content": "hi there"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
@@ -1344,12 +1389,13 @@ func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
 }
 
 func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create a topic with no default_agent.
+	topicID := tid("topic-h2h")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-h2h"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "human-only",
 		CreatedBy: "dev",
@@ -1357,9 +1403,10 @@ func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	body := map[string]string{"content": "just chatting"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-h2h")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1377,11 +1424,12 @@ func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
 }
 
 func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
+	topicID := tid("topic-maxlen")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-maxlen"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "maxlen-thread",
 		CreatedBy: "dev",
@@ -1389,10 +1437,11 @@ func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	longContent := strings.Repeat("x", messages.MaxMessageLength+1)
 	body := map[string]string{"content": longContent}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-maxlen")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for oversized message, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1400,14 +1449,14 @@ func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
 	// Exactly at limit should succeed.
 	exactContent := strings.Repeat("y", messages.MaxMessageLength)
 	body = map[string]string{"content": exactContent}
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-maxlen")+"/messages", body)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("expected 201 for exact-limit message, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestChatV2_Send_InvalidDMKey_Rejected(t *testing.T) {
-	srv, _, _, _ := setupSendTest(t)
+	srv, _, _, _, _ := setupSendTest(t)
 
 	// Malformed DM key.
 	body := map[string]string{"content": "hello"}
@@ -1447,7 +1496,7 @@ func TestChatV2_MethodNotAllowed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
-	srv, s, _, proj := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent.
@@ -1466,6 +1515,7 @@ func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
 
 	// Build a valid agent DM key.
 	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	// Send a message without any @mention — it should be implicitly
 	// routed to the agent (type:instruction), not go through human-to-human.
@@ -1486,7 +1536,7 @@ func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
 }
 
 func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
-	srv, s, _, proj := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create the DM agent.
@@ -1518,6 +1568,7 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 	}
 
 	dmKey := "dm:agent:" + dmAgent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	// Send a message with @other-agent mention — mention should take precedence
 	// over the implicit DM agent routing.
@@ -1542,11 +1593,15 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 }
 
 func TestChatV2_Send_UserDM_HumanToHuman(t *testing.T) {
-	srv, _, _, _ := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 
-	// Build a user-to-user DM key.
+	// Build a user-to-user DM key (canonical order via DMConversationKey).
 	peerID := tid("dm-peer-user")
-	dmKey := "dm:user:" + DevUserID + ":user:" + peerID
+	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	body := map[string]string{"content": "hey there, how are you?"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
@@ -2229,7 +2284,7 @@ func seedHistoryMessages(t *testing.T, s store.Store, projectID, threadID string
 // scrollback never advanced past the first page (#1027). Paginating twice is
 // the only way to catch that: a single-page assertion passes either way.
 func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
-	srv, s, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	topicID := tid("topic-history-paginate")
@@ -2242,6 +2297,7 @@ func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	// More than one default page (50) so a second page must exist.
 	const total = 120
@@ -2649,11 +2705,12 @@ func TestChatV2_Delete_ContentBlankedInHistory(t *testing.T) {
 // than being allowed to fill the conversation, and the cut-off lifts as soon
 // as tokens refill (#1054).
 func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
+	topicID := tid("topic-ratelimit")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-ratelimit"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "flooded",
 		CreatedBy: "dev",
@@ -2661,13 +2718,14 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	// Production limits, test clock: the real 30/min ceiling without a real
 	// minute of waiting.
 	clock := newTestClock()
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
-	path := "/api/v1/chat/conversations/" + tid("topic-ratelimit") + "/messages"
+	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 	for i := range chatSendHumanRatePerMinute {
 		rec := doRequest(t, srv, http.MethodPost, path, map[string]string{"content": "flood"})
 		if rec.Code != http.StatusCreated {
@@ -2708,7 +2766,7 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create a topic.
@@ -2722,6 +2780,7 @@ func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 	idemKey := "test-idempotency-key-123"
@@ -2758,7 +2817,7 @@ func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
 }
 
 func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	topicID := tid("topic-idem-2")
@@ -2771,6 +2830,7 @@ func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 
@@ -2797,7 +2857,7 @@ func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.
 }
 
 func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	topicID := tid("topic-idem-3")
@@ -2810,6 +2870,7 @@ func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 
@@ -2844,6 +2905,7 @@ type def31Fixture struct {
 	srv      *Server
 	store    store.Store
 	wcs      WebChatStore
+	db       *sql.DB
 	projA    *store.Project
 	projB    *store.Project
 	agentA   *store.Agent // lives in project A
@@ -2916,6 +2978,7 @@ func setupDEF31(t *testing.T) def31Fixture {
 		srv:      srv,
 		store:    s,
 		wcs:      wcs,
+		db:       db,
 		projA:    projA,
 		projB:    projB,
 		agentA:   agentA,
@@ -3259,6 +3322,7 @@ func TestDEF31_SendPath_ForeignProjectAgent_NotRouted(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, f.db, f.store, topicID, f.projA.ID)
 
 	// Send a message via the HTTP handler.
 	body := map[string]string{"content": "hello from bad row"}
@@ -3305,6 +3369,7 @@ func TestDEF31_SendPath_SoftDeletedAgent_NotRouted(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, f.db, f.store, topicID, f.projA.ID)
 
 	body := map[string]string{"content": "hello from stale row"}
 	rec := doRequest(t, f.srv, http.MethodPost,
@@ -3347,6 +3412,7 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, f.db, f.store, topicID, f.projA.ID)
 
 	body := map[string]string{"content": "hello from good row"}
 	rec := doRequest(t, f.srv, http.MethodPost,

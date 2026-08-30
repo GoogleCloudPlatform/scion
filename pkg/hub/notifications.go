@@ -494,17 +494,25 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 	}
 
 	// Phase 5 dual-write: resolve-or-create DM conversation for inbox notification messages.
+	//
+	// G2 EXCEPTION — federated subscriber skip stays non-fatal.
 	// SubscriberID may be a slug or federated identity rather than a UUID;
-	// DMConversationKey requires valid UUIDs for both parties.
+	// DMConversationKey requires valid UUIDs for both parties. Denying here
+	// means federated users stop receiving notifications entirely. The
+	// federated population is counted by the G1 attribution report and blocks
+	// the flip at the OPERATOR level; it must not deny per-request.
 	if _, parseErr := uuid.Parse(sub.SubscriberID); parseErr != nil {
-		nd.log.Warn("skipping DM conversation resolution for inbox message: subscriber ID not a UUID",
+		nd.log.Warn("skipping DM conversation resolution for inbox message: subscriber ID not a UUID (federated subscriber — G2 exempt)",
 			"subscriber_id", sub.SubscriberID, "notification_id", notif.ID)
 	} else {
-		convResult := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
+		convResult, convErr := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
 			"agent", agent.ID, "user", sub.SubscriberID)
-		if convResult != nil {
-			storeMsg.ConversationID = convResult.ConversationID
+		if convErr != nil {
+			nd.log.Error("conversation resolution failed for inbox notification",
+				"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
+			return
 		}
+		storeMsg.ConversationID = convResult.ConversationID
 	}
 
 	if err := nd.store.CreateMessage(ctx, storeMsg); err != nil {

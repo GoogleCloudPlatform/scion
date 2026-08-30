@@ -279,7 +279,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
 	// Uses DeriveConversationKey to unify thread and DM key derivation (§2.15).
-	var convResult *messaging.ConversationResult
 	extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
 		ThreadID:      req.ThreadID,
 		ProjectID:     agent.ProjectID,
@@ -289,32 +288,27 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		RecipientID:   recipientID,
 	})
 	if deriveErr != nil {
-		s.messageLog.Warn("skipping conversation resolution: key derivation refused",
-			"thread_id", req.ThreadID,
-			"agent_id", agent.ID,
-			"error", deriveErr,
-		)
-	} else {
-		var keyOpts []messaging.ConversationByKeyOption
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"conversation key derivation failed: "+deriveErr.Error(), nil)
+		return
 	}
-	if convResult != nil {
-		storeMsg.ConversationID = convResult.ConversationID
-		// DEF-41: structural pre-placement. This check is inert while B10
-		// holds: convResult is non-nil only when attribution succeeded, and
-		// ent.Conversation.ID is a uuid.UUID that always renders non-empty.
-		// It becomes load-bearing at Tranche G, when derivation failure
-		// becomes fatal and this call moves outside the nil guard.
-		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-			ValidationError(w, err.Error(), nil)
-			return
-		}
+	var keyOpts []messaging.ConversationByKeyOption
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs != nil {
+		keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+	}
+	convResult, convErr := messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+	if convErr != nil {
+		s.messageLog.Error("conversation resolution failed", "error", convErr)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+		return
+	}
+	storeMsg.ConversationID = convResult.ConversationID
+	if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
 	}
 	// Always log divergence — even when convResult is nil, that is a divergence signal.
 	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
@@ -727,14 +721,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if wcs != nil {
 			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
-		convResult := messaging.ResolveOrCreateConversationByKey(
+		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
-		if convResult != nil {
-			if structuredMsg.Metadata == nil {
-				structuredMsg.Metadata = make(map[string]string)
-			}
-			structuredMsg.Metadata["conversation_id"] = convResult.ConversationID
+		if convErr != nil {
+			s.messageLog.Error("conversation resolution failed", "error", convErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+			return
 		}
+		if structuredMsg.Metadata == nil {
+			structuredMsg.Metadata = make(map[string]string)
+		}
+		structuredMsg.Metadata["conversation_id"] = convResult.ConversationID
 	}
 
 	// Ownership check: verify the DM key IDs match the actual participants.
@@ -1013,39 +1010,32 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				RecipientID:   agent.ID,
 			})
 			if deriveErr != nil {
-				s.messageLog.Warn("skipping conversation resolution: key derivation refused",
-					"thread_id", structuredMsg.ThreadID,
-					"sender", structuredMsg.Sender,
-					"error", deriveErr,
-				)
-			} else {
-				var keyOpts []messaging.ConversationByKeyOption
-				s.mu.RLock()
-				wcs := s.webChatStore
-				s.mu.RUnlock()
-				if wcs != nil {
-					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-				}
-				convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					"conversation key derivation failed: "+deriveErr.Error(), nil)
+				return
+			}
+			var keyOpts []messaging.ConversationByKeyOption
+			s.mu.RLock()
+			wcs := s.webChatStore
+			s.mu.RUnlock()
+			if wcs != nil {
+				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return
 			}
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
 		messaging.RecordStep(ctx, "conversation_resolved")
-		// B10: ValidateAttributed rejection deliberately demoted to a log
-		// line. Converting a derivation-path empty ConversationID into a
-		// client-visible 4xx is a B10 violation — that flip belongs to
-		// Tranche G's read-switch, not to an accidental merge artifact.
-		// Keep the signal so a Tranche G operator can grep for it.
-		if convResult != nil {
-			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				s.messageLog.Warn("ValidateAttributed: empty ConversationID after attribution (B10 demoted)",
-					"message_id", storeMsg.ID,
-					"conversation_id", storeMsg.ConversationID,
-					"error", err,
-				)
-			}
+		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
@@ -1331,11 +1321,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var convResult *messaging.ConversationResult
 			if agent.ID != "" {
 				if authKind, authID := authenticatedSender(ctx); authID != "" {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
+					if convErr != nil {
+						s.messageLog.Error("conversation resolution failed", "error", convErr)
+						results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+						continue
+					}
+					storeMsg.ConversationID = convResult.ConversationID
 				}
-			}
-			if convResult != nil {
-				storeMsg.ConversationID = convResult.ConversationID
 			}
 			// Always log divergence — even when convResult is nil, that is a divergence signal.
 			oldRouting := messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, "")
@@ -1456,11 +1450,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var convResult *messaging.ConversationResult
 			if userID != "" {
 				if authKind, authID := authenticatedSender(ctx); authID != "" {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
+					if convErr != nil {
+						s.messageLog.Error("conversation resolution failed", "error", convErr)
+						results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+						continue
+					}
+					storeMsg.ConversationID = convResult.ConversationID
 				}
-			}
-			if convResult != nil {
-				storeMsg.ConversationID = convResult.ConversationID
 			}
 			// Always log divergence — even when convResult is nil, that is a divergence signal.
 			oldRouting := messaging.OldRoutingFromMessage(userMsg.SenderID, userID, "")

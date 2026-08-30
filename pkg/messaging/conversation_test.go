@@ -87,9 +87,12 @@ func TestResolveOrCreateDMConversation_HappyPath(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -106,7 +109,10 @@ func TestResolveOrCreateDMConversation_EmptySender(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger, "user", "", "agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger, "user", "", "agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for empty sender, got %+v", got)
 	}
@@ -120,7 +126,10 @@ func TestResolveOrCreateDMConversation_EmptyRecipient(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger, "user", "550e8400-e29b-41d4-a716-446655440000", "agent", "")
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger, "user", "550e8400-e29b-41d4-a716-446655440000", "agent", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for empty recipient, got %+v", got)
 	}
@@ -136,15 +145,17 @@ func TestResolveOrCreateDMConversation_UpsertError(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"user", "550e8400-e29b-41d4-a716-446655440000",
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
-	output := buf.String()
-	if !strings.Contains(output, "conversation resolution failed") {
-		t.Errorf("expected error log, got: %s", output)
+	if !strings.Contains(err.Error(), "conversation upsert failed") {
+		t.Errorf("expected upsert error message, got: %s", err.Error())
 	}
 }
 
@@ -153,7 +164,7 @@ func TestResolveOrCreateDMConversation_ExternalRefIsKindEncoded(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	// Call with user first, agent second — ref should sort to agent:...:user:...
-	ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	_, _ = ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"user", "550e8400-e29b-41d4-a716-446655440000",
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if mock.lastConv == nil {
@@ -170,7 +181,7 @@ func TestResolveOrCreateDMConversation_ProjectIDAlwaysNil(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	// DM conversations must never have ProjectID set (design 2.4.1).
-	ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	_, _ = ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"user", "550e8400-e29b-41d4-a716-446655440000",
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	if mock.lastConv == nil {
@@ -192,9 +203,12 @@ func TestResolveOrCreateDMConversation_ReturnsExternalRefFromDB(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"user", "550e8400-e29b-41d4-a716-446655440000",
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -212,9 +226,12 @@ func TestResolveOrCreateDMConversation_EmptyKindReturnsNil(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"", "550e8400-e29b-41d4-a716-446655440000",
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for empty kind, got %+v", got)
 	}
@@ -228,18 +245,20 @@ func TestResolveOrCreateDMConversation_InvalidKindReturnsNil(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"bot", "550e8400-e29b-41d4-a716-446655440000",
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for invalid kind, got %+v", got)
 	}
 	if mock.lastConv != nil {
 		t.Error("upsert should not have been called with invalid kind")
 	}
-	output := buf.String()
-	if !strings.Contains(output, "invalid DM key inputs") {
-		t.Errorf("expected warning log about invalid DM key, got: %s", output)
+	if !strings.Contains(err.Error(), "invalid DM key inputs") {
+		t.Errorf("expected error about invalid DM key, got: %s", err.Error())
 	}
 }
 
@@ -249,9 +268,12 @@ func TestResolveOrCreateDMConversation_RegistersBothParticipants(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -286,9 +308,12 @@ func TestResolveOrCreateDMConversation_ParticipantErrorIsNonFatal(t *testing.T) 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result — participant registration failure must not block resolution")
 	}
@@ -312,7 +337,7 @@ func TestResolveOrCreateDMConversation_ThirdPartyGuardDocumented(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	_, _ = ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
 
@@ -343,9 +368,12 @@ func TestResolveOrCreateDMConversation_IdempotentEnsure(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, mock, logger,
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result when EnsureParticipant returns nil")
 	}
@@ -371,7 +399,10 @@ func TestResolveOrCreateThreadConversation_HappyPath(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "proj1")
+	got, err := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "proj1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -388,7 +419,10 @@ func TestResolveOrCreateThreadConversation_EmptyThreadID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "", "proj1")
+	got, err := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "", "proj1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for empty threadID, got %+v", got)
 	}
@@ -402,7 +436,10 @@ func TestResolveOrCreateThreadConversation_EmptyProjectID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "")
+	got, err := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for empty projectID, got %+v", got)
 	}
@@ -418,13 +455,15 @@ func TestResolveOrCreateThreadConversation_UpsertError(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "proj1")
+	got, err := ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-123", "proj1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
-	output := buf.String()
-	if !strings.Contains(output, "conversation resolution failed") {
-		t.Errorf("expected error log, got: %s", output)
+	if !strings.Contains(err.Error(), "conversation upsert failed") {
+		t.Errorf("expected upsert error message, got: %s", err.Error())
 	}
 }
 
@@ -432,7 +471,7 @@ func TestResolveOrCreateThreadConversation_ExternalRefFormat(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
+	_, _ = ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
@@ -446,7 +485,7 @@ func TestResolveOrCreateThreadConversation_ProjectIDSet(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
+	_, _ = ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
@@ -462,7 +501,7 @@ func TestResolveOrCreateThreadConversation_KindIsGroup(t *testing.T) {
 	mock := &mockConversationUpserter{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
+	_, _ = ResolveOrCreateThreadConversation(context.Background(), mock, logger, "thread-ABC", "proj-42")
 	if mock.lastConv == nil {
 		t.Fatal("expected upsert to be called")
 	}
@@ -486,8 +525,11 @@ func TestWriteThenRead_DMPrefixedThreadID(t *testing.T) {
 
 	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
 
-	writeResult := ResolveOrCreateThreadConversation(
+	writeResult, err := ResolveOrCreateThreadConversation(
 		context.Background(), cs, logger, dmKey, "")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
 	if writeResult == nil {
 		t.Fatal("write: expected non-nil result for dm:-prefixed ThreadID")
 	}
@@ -513,8 +555,11 @@ func TestWriteThenRead_NonDMThreadID(t *testing.T) {
 	cs := &mockConversationStore{}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	writeResult := ResolveOrCreateThreadConversation(
+	writeResult, err := ResolveOrCreateThreadConversation(
 		context.Background(), cs, logger, "thread-xyz", "proj-1")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
 	if writeResult == nil {
 		t.Fatal("write: expected non-nil result for non-dm ThreadID")
 	}
@@ -550,20 +595,19 @@ func TestResolveOrCreateThreadConversation_DMKeyRefusalLogsDistinctly(t *testing
 	// Non-canonical: user before agent (canonical order is agent before user).
 	nonCanonical := "dm:user:550e8400-e29b-41d4-a716-446655440000:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 
-	got := ResolveOrCreateThreadConversation(context.Background(), mock, logger,
+	got, err := ResolveOrCreateThreadConversation(context.Background(), mock, logger,
 		nonCanonical, "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for non-canonical dm key, got %+v", got)
 	}
 	if mock.lastConv != nil {
 		t.Error("upsert should not have been called for refused key")
 	}
-	output := buf.String()
-	if !strings.Contains(output, "conversation key derivation refused") {
-		t.Errorf("expected distinct refusal log, got: %s", output)
-	}
-	if strings.Contains(output, "thread conversation resolution failed") {
-		t.Errorf("refusal log should NOT contain the old resolution-failed text, got: %s", output)
+	if !strings.Contains(err.Error(), "conversation key derivation refused") {
+		t.Errorf("expected distinct refusal error, got: %s", err.Error())
 	}
 }
 
@@ -586,9 +630,12 @@ func TestResolveOrCreateDMConversation_NilParticipantEnsurer(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Pass nil as pe — must not panic.
-	got := ResolveOrCreateDMConversation(context.Background(), mock, nil, logger,
+	got, err := ResolveOrCreateDMConversation(context.Background(), mock, nil, logger,
 		"agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		"user", "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil ConversationResult with nil pe — conversation itself resolved")
 	}
@@ -613,8 +660,11 @@ func TestResolveThreadConversationForRead_DMKeyWithEmptyProjectID(t *testing.T) 
 	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
 
 	// Write first.
-	writeResult := ResolveOrCreateThreadConversation(
+	writeResult, err := ResolveOrCreateThreadConversation(
 		context.Background(), cs, logger, dmKey, "")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
 	if writeResult == nil {
 		t.Fatal("write: expected non-nil result")
 	}
@@ -710,13 +760,16 @@ func TestAC_U3_NoMintForNativeTopicWithoutRow(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	// Thread ID that looks like a topic UUID but doesn't exist.
-	got := ResolveOrCreateThreadConversation(
+	got, err := ResolveOrCreateThreadConversation(
 		context.Background(), mock, logger,
 		"topic-uuid-nonexistent", "proj-1",
 		WithTopicLookup(lookup))
 
 	// When topic lookup returns store.ErrNotFound, the sink falls through to
 	// upsert — this is the expected behavior for non-native surface threads.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result — ErrNotFound should fall through to upsert")
 	}
@@ -741,20 +794,22 @@ func TestAC_U3_NoMintForTopicWithoutConversationID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateThreadConversation(
+	got, err := ResolveOrCreateThreadConversation(
 		context.Background(), mock, logger,
 		"topic-no-conv", "proj-1",
 		WithTopicLookup(lookup))
 
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for topic without conversation_id, got %+v", got)
 	}
 	if mock.lastConv != nil {
 		t.Error("upsert MUST NOT be called — no conversation row should be minted")
 	}
-	output := buf.String()
-	if !strings.Contains(output, "topic has no conversation_id") {
-		t.Errorf("expected log about missing conversation_id, got: %s", output)
+	if !strings.Contains(err.Error(), "topic has no conversation_id") {
+		t.Errorf("expected error about missing conversation_id, got: %s", err.Error())
 	}
 }
 
@@ -770,11 +825,14 @@ func TestAC_U3_ResolveViaTopicLookup(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateThreadConversation(
+	got, err := ResolveOrCreateThreadConversation(
 		context.Background(), mock, logger,
 		"topic-with-conv", "proj-1",
 		WithTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result for topic with conversation_id")
 	}
@@ -800,11 +858,14 @@ func TestAC_U3_DMPrefixFallsThrough(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
-	got := ResolveOrCreateThreadConversation(
+	got, err := ResolveOrCreateThreadConversation(
 		context.Background(), mock, logger,
 		dmKey, "",
 		WithTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result — dm: keys must fall through to upsert")
 	}
@@ -824,10 +885,13 @@ func TestAC_U3_WithoutTopicLookup_StillMints(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateThreadConversation(
+	got, err := ResolveOrCreateThreadConversation(
 		context.Background(), mock, logger,
 		"topic-uuid", "proj-1") // no WithTopicLookup
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result — without lookup, must mint as before")
 	}
@@ -860,14 +924,18 @@ func TestDEF21_InfraErrorMustNotMint(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateThreadConversation(
+	got, err := ResolveOrCreateThreadConversation(
 		context.Background(), mock, logger,
 		"some-topic", "proj-1",
 		WithTopicLookup(lookup))
 
 	// After the DEF-21 fix:
+	// - err must be non-nil (infra error propagated)
 	// - got must be nil (no spurious conversation minted)
 	// - mock.lastConv must be nil (upserter must NOT be called)
+	if err == nil {
+		t.Fatal("DEF-21: expected error on infra error, got nil")
+	}
 	if got != nil {
 		t.Errorf("DEF-21: expected nil on infra error, got %+v (spurious mint!)", got)
 	}

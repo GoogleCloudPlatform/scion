@@ -464,12 +464,22 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			if convErr != nil {
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return
+			}
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
 			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
 			if sOK && rOK {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+				var convErr error
+				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+				if convErr != nil {
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
+				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
 					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
@@ -646,10 +656,20 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			if convErr != nil {
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return
+			}
 		} else if msg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+				var convErr error
+				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+				if convErr != nil {
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
+				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
 					"sender", msg.Sender, "sender_id", msg.SenderID)

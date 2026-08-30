@@ -1171,18 +1171,24 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			if wcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return ""
+			}
 		} else if user.ID() != "" && primaryAgent.ID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return ""
+			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
-			// DEF-41: structural pre-placement. This check is inert
-			// while B10 holds: convResult is non-nil only when
-			// attribution succeeded, and ent.Conversation.ID is a
-			// uuid.UUID that always renders non-empty. It becomes
-			// load-bearing at Tranche G, when derivation failure
-			// becomes fatal and this call moves outside the nil guard.
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				ValidationError(w, err.Error(), nil)
 				return ""
@@ -1298,9 +1304,19 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					if mentionWcs != nil {
 						threadOpts = append(threadOpts, messaging.WithTopicLookup(mentionWcs))
 					}
-					convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+					if convErr != nil {
+						s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+						continue
+					}
 				} else if user.ID() != "" && mentionAgent.ID != "" {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
+					if convErr != nil {
+						s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+						continue
+					}
 				}
 				if convResult != nil {
 					mentionStoreMsg.ConversationID = convResult.ConversationID
@@ -1409,9 +1425,21 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			if h2hWcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(h2hWcs))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return ""
+			}
 		} else if user.ID() != "" && recipientID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return ""
+			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID

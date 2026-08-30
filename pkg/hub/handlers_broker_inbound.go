@@ -253,17 +253,20 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		if wcs != nil {
 			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
-		convResult := messaging.ResolveOrCreateConversationByKey(
+		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
-		if convResult != nil {
-			if req.Message.Metadata == nil {
-				req.Message.Metadata = make(map[string]string)
-			}
-			req.Message.Metadata["conversation_id"] = convResult.ConversationID
-			log.Info("Resolved conversation for broker inbound",
-				"conversation_id", convResult.ConversationID,
-				"surface", req.Surface, "external_ref", req.ExternalRef)
+		if convErr != nil {
+			log.Error("conversation resolution failed", "error", convErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+			return
 		}
+		if req.Message.Metadata == nil {
+			req.Message.Metadata = make(map[string]string)
+		}
+		req.Message.Metadata["conversation_id"] = convResult.ConversationID
+		log.Info("Resolved conversation for broker inbound",
+			"conversation_id", convResult.ConversationID,
+			"surface", req.Surface, "external_ref", req.ExternalRef)
 	}
 
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery
@@ -353,18 +356,24 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			if wcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return
+			}
 		} else if senderUserID != "" && agent.ID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
+			if convErr != nil {
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return
+			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
-			// DEF-41: structural pre-placement. This check is inert
-			// while B10 holds: convResult is non-nil only when
-			// attribution succeeded, and ent.Conversation.ID is a
-			// uuid.UUID that always renders non-empty. It becomes
-			// load-bearing at Tranche G, when derivation failure
-			// becomes fatal and this call moves outside the nil guard.
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
 				return

@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -78,29 +79,23 @@ type ConversationResult struct {
 // GLOBAL — they have no ProjectID (design 2.4.1). The external_ref is
 // deterministic and kind-encoded: dm:<kind>:<uuid>:<kind>:<uuid> (sorted).
 //
-// On any error the function returns nil and logs the failure. Callers MUST NOT
-// treat a nil return as fatal — message delivery continues without a
-// conversation_id (Phase 5 non-fatal contract).
+// G2 contract (replaces B10): on any error the function returns an error.
+// Callers MUST deny the write — a message written without a conversation_id
+// is a message that disappears once reads are scoped by conversation_id.
 func ResolveOrCreateDMConversation(
 	ctx context.Context,
 	cs ConversationUpserter,
 	pe ParticipantEnsurer,
 	log *slog.Logger,
 	senderKind, senderID, recipientKind, recipientID string,
-) *ConversationResult {
+) (*ConversationResult, error) {
 	if senderID == "" || recipientID == "" {
-		log.Warn("skipping conversation resolution: missing sender or recipient ID",
-			"sender_id", senderID, "recipient_id", recipientID)
-		return nil
+		return nil, fmt.Errorf("conversation resolution refused: missing sender or recipient ID (sender_id=%q, recipient_id=%q)", senderID, recipientID)
 	}
 
 	extRef, err := messages.DMConversationKey(senderKind, senderID, recipientKind, recipientID)
 	if err != nil {
-		log.Warn("skipping conversation resolution: invalid DM key inputs (non-fatal)",
-			"sender_kind", senderKind, "sender_id", senderID,
-			"recipient_kind", recipientKind, "recipient_id", recipientID,
-			"error", err)
-		return nil
+		return nil, fmt.Errorf("conversation resolution refused: invalid DM key inputs: %w", err)
 	}
 
 	conv := &store.Conversation{
@@ -113,13 +108,7 @@ func ResolveOrCreateDMConversation(
 
 	result, err := cs.UpsertConversationByExternalRef(ctx, conv)
 	if err != nil {
-		log.Error("conversation resolution failed (non-fatal)",
-			"external_ref", extRef,
-			"sender_id", senderID,
-			"recipient_id", recipientID,
-			"error", err,
-		)
-		return nil
+		return nil, fmt.Errorf("conversation upsert failed (external_ref=%q): %w", extRef, err)
 	}
 
 	// B7 nil-pe guard: a nil ParticipantEnsurer must not panic. The function
@@ -131,21 +120,23 @@ func ResolveOrCreateDMConversation(
 		return &ConversationResult{
 			ConversationID: result.ID,
 			ExternalRef:    result.ExternalRef,
-		}
+		}, nil
 	}
 
 	// Register both participants so the DM appears in each party's sidebar.
-	// Errors are logged but not returned — participant registration is a listing
-	// concern, not an access concern (the DM key IS the access authority).
+	//
+	// G2 EXCEPTION — EnsureParticipant failure stays non-fatal.
+	// Participants are a LISTING concern, not an access concern: authorization
+	// is key-derived (the DM key IS the ACL), not participant-derived. Denying
+	// a send because a listing row failed to write turns a cosmetic gap into
+	// an outage. The failure is logged and self-repairs on the next message in
+	// the same DM.
 	//
 	// This registration runs on EVERY resolve, not only on first create.
 	// EnsureParticipant is insert-if-absent: if the row already exists (active
 	// or soft-removed), it is left untouched — including left_at. This prevents
 	// resolve-driven calls from silently overwriting a user's listing preference
 	// (B6 un-leaving fix).
-	//
-	// Registration is self-repairing: if one of the two EnsureParticipant calls
-	// fails transiently, the next message in the same DM retries it.
 	//
 	// Race note: concurrent ResolveOrCreateDMConversation calls may both
 	// attempt EnsureParticipant. This is benign: EnsureParticipant is
@@ -172,7 +163,7 @@ func ResolveOrCreateDMConversation(
 	return &ConversationResult{
 		ConversationID: result.ID,
 		ExternalRef:    result.ExternalRef,
-	}
+	}, nil
 }
 
 // ResolveDMConversationForRead looks up a DM conversation without creating it.
@@ -227,18 +218,17 @@ func ResolveDMConversationForRead(
 // (store.ErrNotFound), the sink falls through to upsert — this is the normal
 // path for non-native surfaces where the threadID is not a webchat topic UUID.
 //
-// On any error the function returns nil and logs the failure.
-// Callers MUST NOT treat a nil return as fatal (Phase 5 non-fatal contract).
+// G2 contract (replaces B10): on any error the function returns an error.
+// Callers MUST deny the write.
 func ResolveOrCreateThreadConversation(
 	ctx context.Context,
 	cs ConversationUpserter,
 	log *slog.Logger,
 	threadID, projectID string,
 	opts ...ThreadConversationOption,
-) *ConversationResult {
+) (*ConversationResult, error) {
 	if threadID == "" {
-		log.Warn("skipping thread conversation resolution: empty threadID")
-		return nil
+		return nil, fmt.Errorf("thread conversation resolution refused: empty threadID")
 	}
 
 	// Apply options.
@@ -252,14 +242,7 @@ func ResolveOrCreateThreadConversation(
 		ProjectID: projectID,
 	})
 	if err != nil {
-		// CHANGE 5: A dm: key that fails canonicality is a REFUSAL, not a resolution miss.
-		// Log distinctly so it's visible on the divergence board.
-		log.Warn("conversation key derivation refused (non-fatal)",
-			"thread_id", threadID,
-			"project_id", projectID,
-			"error", err,
-		)
-		return nil
+		return nil, fmt.Errorf("conversation key derivation refused: %w", err)
 	}
 
 	// Forward topic lookup to the shared sink so all paths benefit from
