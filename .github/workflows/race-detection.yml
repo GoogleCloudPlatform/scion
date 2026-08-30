@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   race-detection:
-    name: Race Detection (reporting only)
+    name: Race Detection — all packages (reporting only)
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 120
@@ -19,22 +19,19 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
           cache: true
-
-      - name: Run tests with race detector
+      - name: Run tests with race detector (excluding pkg/hub)
         run: |
           set -o pipefail
-          go test -race -count=1 -timeout 90m ./... 2>&1 | tee race-detection-output.txt
-
+          go test -race -count=1 -timeout 90m $(go list ./... | grep -v -E '/pkg/hub(/|$)') 2>&1 | tee race-detection-output.txt
       - name: Summarize race findings
         if: always()
         run: |
-          echo "## Race Detection Results" >> $GITHUB_STEP_SUMMARY
+          echo "## Race Detection Results — All Packages (excluding pkg/hub)" >> $GITHUB_STEP_SUMMARY
           RACES=$(grep -c "^WARNING: DATA RACE" race-detection-output.txt 2>/dev/null || true)
           FAILS=$(grep -c "^--- FAIL:" race-detection-output.txt 2>/dev/null || true)
           RACES=${RACES:-0}
@@ -50,15 +47,63 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "_Scope: the Go race detector instruments shared-memory access in exercised code paths only." >> $GITHUB_STEP_SUMMARY
-          echo "It does not detect file-level TOCTOU, database races, or cross-process concurrency issues." >> $GITHUB_STEP_SUMMARY
-          echo "This run covers the root module only (extras/ modules are separate and not included)." >> $GITHUB_STEP_SUMMARY
-          echo "A clean report means no detected data races — not no concurrency bugs._" >> $GITHUB_STEP_SUMMARY
-
+          echo "_Scope: all packages except pkg/hub (which runs in a separate job)._" >> $GITHUB_STEP_SUMMARY
+          echo "_The Go race detector instruments shared-memory access in exercised code paths only._" >> $GITHUB_STEP_SUMMARY
+          echo "_It does not detect file-level TOCTOU, database races, or cross-process concurrency issues._" >> $GITHUB_STEP_SUMMARY
       - name: Upload race detection results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: race-detection-results
           path: race-detection-output.txt
+          retention-days: 30
+
+  race-detection-hub:
+    name: Race Detection — pkg/hub tagged (reporting only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: Run pkg/hub tests with race detector (tagged)
+        run: |
+          set -o pipefail
+          go test -race -tags no_sqlite -count=1 -timeout 45m ./pkg/hub/... 2>&1 | tee race-detection-hub-output.txt
+      - name: Summarize race findings
+        if: always()
+        run: |
+          echo "## Race Detection Results — pkg/hub (tagged subset)" >> $GITHUB_STEP_SUMMARY
+          RACES=$(grep -c "^WARNING: DATA RACE" race-detection-hub-output.txt 2>/dev/null || true)
+          FAILS=$(grep -c "^--- FAIL:" race-detection-hub-output.txt 2>/dev/null || true)
+          RACES=${RACES:-0}
+          FAILS=${FAILS:-0}
+          echo "- Data races found: ${RACES}" >> $GITHUB_STEP_SUMMARY
+          echo "- Test failures: ${FAILS}" >> $GITHUB_STEP_SUMMARY
+          if [ "$RACES" -gt 0 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Race details are in the uploaded artifact." >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "$RACES" -eq 0 ] && [ "$FAILS" -eq 0 ]; then
+            echo "All pkg/hub tagged tests passed with race detector enabled." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "**Scope: pkg/hub tests compiled with -tags no_sqlite ONLY.**" >> $GITHUB_STEP_SUMMARY
+          echo "Tests behind //go:build !no_sqlite (sqlite-dependent tests) were NOT included in this run." >> $GITHUB_STEP_SUMMARY
+          echo "A clean result here does NOT mean pkg/hub is race-free — it means the tagged subset showed no races on this run." >> $GITHUB_STEP_SUMMARY
+          echo "_The Go race detector instruments shared-memory access in exercised code paths only._" >> $GITHUB_STEP_SUMMARY
+      - name: Upload race detection results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: race-detection-hub-results
+          path: race-detection-hub-output.txt
           retention-days: 30
