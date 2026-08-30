@@ -91,10 +91,6 @@ func init() {
 // DisableAllConfirmPhrase is the exact phrase required when using --disable-all-constraints.
 const DisableAllConfirmPhrase = "I understand this disables all access constraints"
 
-// LockRecoveryAuthz is the advisory lock key for offline authorization recovery.
-// It prevents concurrent recovery operations and ensures no server is running.
-const LockRecoveryAuthz store.AdvisoryLockKey = 0x5C100020
-
 // recoverConfirmReader is the source of user input for interactive confirmation.
 // Tests replace this with a strings.Reader to avoid blocking.
 var recoverConfirmReader io.Reader = os.Stdin
@@ -157,9 +153,11 @@ func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = s.Close() }()
 
 	// Acquire exclusive maintenance lock
-	if err := acquireRecoveryLock(ctx, s, out); err != nil {
+	release, err := acquireRecoveryLock(ctx, s, out)
+	if err != nil {
 		return err
 	}
+	defer func() { _ = release() }()
 
 	if recoverDisableAll {
 		return recoverDisableAllConstraints(ctx, s, operator, out)
@@ -169,8 +167,8 @@ func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
 
 func openRecoveryStore(ctx context.Context, cfg *config.GlobalConfig) (*entadapter.CompositeStore, error) {
 	pool := entc.PoolConfig{
-		MaxOpenConns: 1,
-		MaxIdleConns: 1,
+		MaxOpenConns: 2,
+		MaxIdleConns: 2,
 	}
 
 	var entClient interface{ Close() error }
@@ -213,26 +211,24 @@ func openRecoveryStore(ctx context.Context, cfg *config.GlobalConfig) (*entadapt
 	return cs, nil
 }
 
-// acquireRecoveryLock tries to acquire an exclusive advisory lock.
-// If the lock cannot be acquired, it means another server instance or recovery
-// process is running, and the command refuses to proceed.
+// acquireRecoveryLock tries to acquire an exclusive advisory lock and returns
+// a release function that the caller must defer. If the lock cannot be acquired,
+// it means another server instance or recovery process is running, and the
+// command refuses to proceed.
 //
 // On Postgres, this uses pg_try_advisory_lock. On SQLite, the lock is a no-op
 // (always succeeds) because the single-writer model already serializes access.
-func acquireRecoveryLock(ctx context.Context, s *entadapter.CompositeStore, out io.Writer) error {
-	acquired, release, err := s.TryAdvisoryLock(ctx, LockRecoveryAuthz)
+func acquireRecoveryLock(ctx context.Context, s *entadapter.CompositeStore, out io.Writer) (func() error, error) {
+	acquired, release, err := s.TryAdvisoryLock(ctx, store.LockRecoveryAuthz)
 	if err != nil {
-		return fmt.Errorf("failed to acquire maintenance lock: %w", err)
+		return nil, fmt.Errorf("failed to acquire maintenance lock: %w", err)
 	}
 	if !acquired {
 		_ = release()
-		return fmt.Errorf("cannot acquire maintenance lock: another server instance or recovery process is running\n\nStop all server instances before running offline recovery:\n  scion server stop\n\nThen retry this command")
+		return nil, fmt.Errorf("cannot acquire maintenance lock: another server instance or recovery process is running\n\nStop all server instances before running offline recovery:\n  scion server stop\n\nThen retry this command")
 	}
-	// Keep the lock held — it will be released when the connection closes.
-	// We intentionally don't defer release() here because the store's Close()
-	// will close the connection, releasing the lock.
 	_, _ = fmt.Fprintln(out, "Maintenance lock acquired.")
-	return nil
+	return release, nil
 }
 
 func recoverDisableSingleConstraint(ctx context.Context, s *entadapter.CompositeStore, constraintID, operator string, out io.Writer) error {
@@ -286,11 +282,20 @@ func recoverDisableSingleConstraint(ctx context.Context, s *entadapter.Composite
 	return nil
 }
 
+// maxConstraintLimit is the maximum number of constraints fetched in a single
+// ListAccessConstraints call. If the result set hits this limit, the command
+// errors rather than silently truncating.
+const maxConstraintLimit = 1000
+
 func recoverDisableAllConstraints(ctx context.Context, s *entadapter.CompositeStore, operator string, out io.Writer) error {
 	// List all constraints
-	constraints, err := s.ListAccessConstraints(ctx, 1000, 0)
+	constraints, err := s.ListAccessConstraints(ctx, maxConstraintLimit, 0)
 	if err != nil {
 		return fmt.Errorf("failed to list constraints: %w", err)
+	}
+
+	if len(constraints) == maxConstraintLimit {
+		return fmt.Errorf("more than %d constraints exist; --disable-all-constraints cannot guarantee completeness — disable constraints individually with --disable-constraint", maxConstraintLimit)
 	}
 
 	if len(constraints) == 0 {
@@ -328,8 +333,8 @@ func recoverDisableAllConstraints(ctx context.Context, s *entadapter.CompositeSt
 
 	for _, c := range active {
 		if err := s.DisableAccessConstraint(ctx, c.ID); err != nil {
-			_, _ = fmt.Fprintf(out, "ERROR: failed to disable constraint %q (%s): %v\n", c.Name, c.ID, err)
-			continue
+			return fmt.Errorf("failed to disable constraint %q (%s) after %d successful disable(s): %w",
+				c.Name, c.ID, disabledCount, err)
 		}
 
 		// Write individual audit record for each disabled constraint

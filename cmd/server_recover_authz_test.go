@@ -399,11 +399,37 @@ func TestRecoverAuthz_LockAcquisition(t *testing.T) {
 	s := newRecoveryTestStore(t)
 
 	// On SQLite, advisory locks always succeed (no-op). Verify acquisition
-	// does not error.
+	// does not error and returns a non-nil release function.
 	var out bytes.Buffer
-	err := acquireRecoveryLock(ctx, s, &out)
+	release, err := acquireRecoveryLock(ctx, s, &out)
 	require.NoError(t, err)
+	require.NotNil(t, release, "release function must be non-nil")
 	assert.Contains(t, out.String(), "Maintenance lock acquired")
+	assert.NoError(t, release(), "releasing the lock should not error")
+}
+
+func TestRecoverAuthz_StoreOperationsWhileLockHeld(t *testing.T) {
+	ctx := context.Background()
+	s := newRecoveryTestStore(t)
+
+	// Create a constraint before acquiring the lock
+	constraintID := createTestConstraint(t, ctx, s, "pool-test")
+
+	// Acquire the lock (simulating the Postgres path where the lock holds a connection)
+	var out bytes.Buffer
+	release, err := acquireRecoveryLock(ctx, s, &out)
+	require.NoError(t, err)
+	defer func() { _ = release() }()
+
+	// Verify store operations succeed while the lock is held.
+	// On Postgres with MaxOpenConns=1 (pre-fix), these would deadlock.
+	c, err := s.GetAccessConstraint(ctx, constraintID)
+	require.NoError(t, err, "GetAccessConstraint must succeed while lock is held")
+	assert.Equal(t, "pool-test", c.Name)
+
+	constraints, err := s.ListAccessConstraints(ctx, 100, 0)
+	require.NoError(t, err, "ListAccessConstraints must succeed while lock is held")
+	assert.Len(t, constraints, 1)
 }
 
 // ---------------------------------------------------------------------------
