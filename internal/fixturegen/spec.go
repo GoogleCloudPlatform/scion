@@ -82,7 +82,7 @@ func Spec() []TableFixture {
 				"git_remote": "https://github.com/example/platform.git",
 				"labels":     unicodeJSON, "annotations": `{"note":"primary"}`,
 				"created_at": baseTime, "updated_at": baseTime,
-				"owner_id": userID, "visibility": "private",
+				"owner_id": userID,
 			},
 			{ // minimal row: nullable optionals (git_remote, labels, owner...) left NULL
 				"id": "11111111-1111-1111-1111-1111111111aa", "name": "Minimal Project",
