@@ -514,7 +514,11 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	if req.PrincipalType == store.RoleBindingPrincipalGroup {
 		_, err := s.store.GetGroup(r.Context(), req.PrincipalID)
 		if err != nil {
-			BadRequest(w, "group not found: "+req.PrincipalID)
+			if errors.Is(err, store.ErrNotFound) {
+				BadRequest(w, "group not found: "+req.PrincipalID)
+			} else {
+				writeErrorFromErr(w, err, "")
+			}
 			return
 		}
 	}

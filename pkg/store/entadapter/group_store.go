@@ -324,6 +324,12 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 		}
 		query.Where(group.ProjectIDEQ(projectUID))
 	}
+	if filter.Search != "" {
+		query.Where(group.Or(
+			group.NameContainsFold(filter.Search),
+			group.SlugContainsFold(filter.Search),
+		))
+	}
 
 	// Get total count before pagination unless this is a bounded scan.
 	totalCount := 0
