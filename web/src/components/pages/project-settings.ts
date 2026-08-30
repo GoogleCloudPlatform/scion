@@ -45,6 +45,7 @@ import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/group-member-editor.js';
+import '../shared/project-members-editor.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -1344,17 +1345,13 @@ export class ScionPageProjectSettings extends LitElement {
       </div>
 
       ${this.renderConfigSection()} ${this.renderGitHubAppSection()}
-      ${this.membersGroup
-        ? html`
-            <scion-group-member-editor
-              groupId=${this.membersGroup.id}
-              ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
-              compact
-              sectionTitle="Members"
-              sectionDescription="Users and groups with access to this project. To make this project visible to all hub users, add the hub-members group."
-            ></scion-group-member-editor>
-          `
-        : ''}
+      <scion-project-members-editor
+        projectId=${this.project.id}
+        ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
+        compact
+        sectionTitle="Members"
+        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
+      ></scion-project-members-editor>
       ${this.renderResourcesSection()}
       ${this.pageData?.user
         ? html`

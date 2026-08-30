@@ -59,3 +59,5 @@ export { ScionPreStartHookList } from './pre-start-hook-list.js';
 export { ScionQuickMessageDialog } from './quick-message-dialog.js';
 export { ScionPrincipalPicker } from './principal-picker.js';
 export type { PrincipalChangeDetail } from './principal-picker.js';
+export { ScionEffectiveRoleProvenance } from './effective-role-provenance.js';
+export { ScionProjectMembersEditor } from './project-members-editor.js';

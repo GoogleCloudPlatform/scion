@@ -26,6 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import type { AdminUser, UserRole } from '../../shared/types.js';
 import '../shared/status-badge.js';
+import '../shared/effective-role-provenance.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
@@ -171,6 +172,10 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private inviteCopied = false;
+
+  /** User for which we are showing the effective roles dialog. */
+  @state()
+  private viewRolesUser: AdminUser | null = null;
 
   static override styles = css`
     :host {
@@ -1230,6 +1235,7 @@ export class ScionPageAdminUsers extends LitElement {
         : this.renderInvitesTab()}
       ${this.renderConfirmDialog()} ${this.renderInviteUserDialog()} ${this.renderImportDialog()}
       ${this.renderCreateInviteDialog()} ${this.renderInviteRevealDialog()}
+      ${this.renderViewRolesDialog()}
     `;
   }
 
@@ -1497,13 +1503,18 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
-    // Active users: Change role, Suspend, Delete
+    // Active users: View Roles, Change role, Suspend, Delete
     return html`
       <sl-dropdown placement="bottom-end" hoist>
         <sl-button slot="trigger" size="small" variant="text" caret>
           <sl-icon name="three-dots-vertical"></sl-icon>
         </sl-button>
         <sl-menu>
+          <sl-menu-item @click=${() => { this.viewRolesUser = user; }}>
+            <sl-icon slot="prefix" name="shield"></sl-icon>
+            View Roles
+          </sl-menu-item>
+          <sl-divider></sl-divider>
           ${user.role !== 'admin'
             ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
                 <sl-icon slot="prefix" name="shield-check"></sl-icon>
@@ -1882,6 +1893,35 @@ export class ScionPageAdminUsers extends LitElement {
           <sl-icon slot="prefix" name=${this.inviteCopied ? 'check' : 'clipboard'}></sl-icon>
           ${this.inviteCopied ? 'Copied!' : 'Copy Link'}
         </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderViewRolesDialog() {
+    if (!this.viewRolesUser) return nothing;
+    const user = this.viewRolesUser;
+    return html`
+      <sl-dialog
+        label="Effective Roles — ${user.displayName || user.email}"
+        open
+        style="--width: 36rem;"
+        @sl-request-close=${() => {
+          this.viewRolesUser = null;
+        }}
+      >
+        <scion-effective-role-provenance
+          principalType="user"
+          principalId=${user.id}
+          sectionTitle="Effective Roles"
+        ></scion-effective-role-provenance>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.viewRolesUser = null;
+          }}
+          >Close</sl-button
+        >
       </sl-dialog>
     `;
   }

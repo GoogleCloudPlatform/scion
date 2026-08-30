@@ -70,6 +70,7 @@ import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
+import '../shared/effective-role-provenance.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 
@@ -1695,7 +1696,14 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent)} ${this.renderMessagingCard()}
+      ${this.renderIdentityCard(agent)}
+      <scion-effective-role-provenance
+        principalType="agent"
+        principalId=${this.agentId}
+        compact
+        sectionTitle="Effective Roles"
+      ></scion-effective-role-provenance>
+      ${this.renderMessagingCard()}
       ${this.renderLabelsCard(agent)} ${this.renderHarnessModelCard(agent, cfg, inline)}
       ${this.renderRuntimeCard(agent, inline)} ${this.renderGCPIdentityCard(cfg?.gcpIdentity)}
       ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
