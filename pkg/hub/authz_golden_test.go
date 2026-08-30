@@ -32,6 +32,7 @@ package hub
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1003,6 +1004,42 @@ func TestGolden_CrossProjectVisibilityRegression(t *testing.T) {
 	// After PG1 curates the hub-member role, these assertions flip:
 	// assert.False(t, decision.Allowed)
 	// The test documents both the current gap and the fix criteria.
+
+	// --- LS1: Handler-level fix is in place ---
+	// The list handlers now use ResolveAuthorizedScopes instead of hasAdminView.
+	// The vulnerability above remains at the evaluator/role-definition level
+	// (hub-member still includes project.list at system scope), which means
+	// ResolveAuthorizedScopes returns ScopeSetAll for hub members. PG1 must
+	// curate the role to complete the fix.
+	//
+	// However, the mechanism is correct: when hub-member is curated to exclude
+	// project.list at system scope, ResolveAuthorizedScopes returns only
+	// project-scoped bindings, and the handler pushes those IDs into the store
+	// query. Verify this with a simulated curated role:
+	curatedClosure := map[string]struct{}{f.memberNoneID: {}}
+	curatedBindings := []CandidateBinding{
+		{
+			BindingID:        "curated-b1",
+			RoleDefinitionID: "curated-hub-member",
+			PrincipalType:    "user",
+			PrincipalID:      f.memberNoneID,
+			ScopeType:        ScopeTypeSystem,
+		},
+	}
+	// Curated hub-member: read/list permissions removed at system scope.
+	curatedRoles := map[string]*RolePermissions{
+		"curated-hub-member": NewRolePermissions(
+			"curated-hub-member", "Hub Member (Curated)", ScopeTypeSystem,
+			[]string{"user.read", "group.read"}, // No project.list or agent.list
+		),
+	}
+	projectScopes := ResolveAuthorizedScopes(curatedClosure, "project.list", curatedBindings, curatedRoles, time.Now())
+	assert.True(t, projectScopes.IsNone(),
+		"LS1 MECHANISM: curated hub-member without project.list yields None — member cannot get admin view")
+
+	agentScopes := ResolveAuthorizedScopes(curatedClosure, "agent.list", curatedBindings, curatedRoles, time.Now())
+	assert.True(t, agentScopes.IsNone(),
+		"LS1 MECHANISM: curated hub-member without agent.list yields None — member cannot get admin view")
 }
 
 // =============================================================================

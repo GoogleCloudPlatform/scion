@@ -307,39 +307,51 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	var nextCursor string
 	var totalCount int
 
-	// Check if user has admin-level list visibility via permission.
-	hasAdminView := false
-	if user, ok := identity.(UserIdentity); ok {
-		hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "agent", ID: "hub"},
-			Action:     Action("list"),
-			Permission: "agent.list",
-		}).Allowed
-	}
-	if identity != nil && !hasAdminView {
-		// Non-admin: use authorizedList for policy-enforced filtering.
-		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Agent], error) {
-			page, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-			if err != nil {
-				return authorizedCandidatePage[store.Agent]{}, err
-			}
-			return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, agentResource, func(a *store.Agent) string { return authorizedListCursor(a.Created, a.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-		if err != nil {
-			writeAuthorizedListError(w, err)
-			return
-		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+	// Scope-aware list authorization: resolve the caller's authorized project
+	// set from role bindings instead of using a binary admin-view check on a
+	// synthetic hub resource.
+	if identity == nil {
+		// Unauthenticated: return empty list.
+		items = []store.Agent{}
 	} else {
-		// Admin or unauthenticated: direct store query.
-		result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
+		scopes := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+		switch {
+		case scopes.IsAll():
+			// System-wide authority: unfiltered query (admin view).
+			result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		case !scopes.IsNone():
+			// Explicit project set: push authorized IDs into the store query
+			// so pagination and totals reflect only the visible set.
+			filter.AuthorizedProjectIDs = scopes.ProjectIDs()
+			result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		default:
+			// No role bindings resolved. Fall back to per-item policy filtering
+			// for backward compatibility during the transition period before
+			// CO1 cutover completes. After cutover, all principals will have
+			// role bindings and this path will not be reached.
+			result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Agent], error) {
+				page, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
+				if err != nil {
+					return authorizedCandidatePage[store.Agent]{}, err
+				}
+				return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
+			}, agentResource, func(a *store.Agent) string { return authorizedListCursor(a.Created, a.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
+			if err != nil {
+				writeAuthorizedListError(w, err)
+				return
+			}
+			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	}
 
 	// Enrich agents with project and broker names

@@ -423,6 +423,21 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 		}
 	}
 
+	// AuthorizedProjectIDs: scope-aware authorization filter applied at the SQL
+	// level so pagination and totals reflect only the authorized set.
+	if filter.AuthorizedProjectIDs != nil {
+		if len(filter.AuthorizedProjectIDs) == 0 {
+			// Empty authorized set: no projects visible.
+			query.Where(project.IDEQ(uuid.Nil))
+		} else {
+			ids, err := parseUUIDs(filter.AuthorizedProjectIDs)
+			if err != nil {
+				return nil, err
+			}
+			query.Where(project.IDIn(ids...))
+		}
+	}
+
 	totalCount := 0
 	if !opts.SkipTotalCount {
 		var err error

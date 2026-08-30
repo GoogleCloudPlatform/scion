@@ -300,6 +300,13 @@ type AgentFilter struct {
 	// Labels, when non-empty, restricts results to agents whose labels
 	// contain all specified key-value pairs (AND semantics).
 	Labels map[string]string
+
+	// AuthorizedProjectIDs, when non-nil, restricts results to agents whose
+	// project_id is in this set. This is used by scope-aware list authorization
+	// to push the resolved ScopeSet into the SQL query so pagination and totals
+	// reflect only the authorized set. A nil value means no authorization
+	// filtering. An empty non-nil slice means no agents are authorized.
+	AuthorizedProjectIDs []string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -414,6 +421,14 @@ type ProjectFilter struct {
 	// (true) or non-template projects (false). Template projects carry the
 	// scion.io/template: "true" label.
 	IsTemplate *bool
+
+	// AuthorizedProjectIDs, when non-nil, restricts results to projects whose
+	// ID is in this set. This is used by scope-aware list authorization to push
+	// the resolved ScopeSet into the SQL query so pagination and totals reflect
+	// only the authorized set. A nil value means no authorization filtering
+	// (caller has admin view or filtering is handled elsewhere). An empty non-nil
+	// slice means no projects are authorized — the query returns zero results.
+	AuthorizedProjectIDs []string
 }
 
 // RuntimeBrokerStore defines runtime broker persistence operations.

@@ -209,44 +209,51 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	var nextCursor string
 	var totalCount int
 
-	// Check if user has admin-level list visibility via permission.
-	hasAdminView := false
-	if identity != nil {
-		if user, ok := identity.(UserIdentity); ok {
-			hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
-				Principal:  principalContextForIdentity(user),
-				Credential: credentialContextForIdentity(user),
-				Resource:   Resource{Type: "project", ID: "hub"},
-				Action:     Action("list"),
-				Permission: "project.list",
-			}).Allowed
-		}
-	}
-	if hasAdminView {
-		// Admin view: direct store query without authorization filtering.
-		result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-	} else if identity != nil {
-		// Authenticated non-admin: use authorizedList for policy-enforced filtering.
-		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Project], error) {
-			page, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-			if err != nil {
-				return authorizedCandidatePage[store.Project]{}, err
-			}
-			return authorizedCandidatePage[store.Project]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, projectResource, func(p *store.Project) string { return authorizedListCursor(p.Created, p.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-		if err != nil {
-			writeAuthorizedListError(w, err)
-			return
-		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-	} else {
-		// Unauthenticated: return empty list (no identity to authorize against).
+	// Scope-aware list authorization: resolve the caller's authorized project
+	// set from role bindings instead of using a binary admin-view check on a
+	// synthetic hub resource.
+	if identity == nil {
+		// Unauthenticated: return empty list.
 		items = []store.Project{}
+	} else {
+		scopes := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+		switch {
+		case scopes.IsAll():
+			// System-wide authority: unfiltered query (admin view).
+			result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		case !scopes.IsNone():
+			// Explicit project set: push authorized IDs into the store query
+			// so pagination and totals reflect only the visible set.
+			filter.AuthorizedProjectIDs = scopes.ProjectIDs()
+			result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		default:
+			// No role bindings resolved. Fall back to per-item policy filtering
+			// for backward compatibility during the transition period before
+			// CO1 cutover completes. After cutover, all principals will have
+			// role bindings and this path will not be reached.
+			result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Project], error) {
+				page, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
+				if err != nil {
+					return authorizedCandidatePage[store.Project]{}, err
+				}
+				return authorizedCandidatePage[store.Project]{Items: page.Items, NextCursor: page.NextCursor}, nil
+			}, projectResource, func(p *store.Project) string { return authorizedListCursor(p.Created, p.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
+			if err != nil {
+				writeAuthorizedListError(w, err)
+				return
+			}
+			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		}
 	}
 
 	// Enrich owner display names
