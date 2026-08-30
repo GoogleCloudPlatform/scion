@@ -104,6 +104,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		ParentID:  query.Get("parentId"),
 		GroupType: query.Get("groupType"),
 		ProjectID: query.Get("projectId"),
+		Search:    query.Get("search"),
 	}
 
 	identity := GetIdentityFromContext(ctx)

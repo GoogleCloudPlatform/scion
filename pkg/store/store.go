@@ -897,6 +897,7 @@ type GroupFilter struct {
 	ParentID  string // Filter by parent group
 	GroupType string // Filter by group type ("explicit" or "project_agents")
 	ProjectID string // Filter by project ID (for project_agents groups)
+	Search    string // Case-insensitive match on name or slug
 }
 
 // PrincipalRef identifies a principal by type and ID.
