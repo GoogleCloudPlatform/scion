@@ -420,3 +420,33 @@ func TestBackfillMergeResult(t *testing.T) {
 	assert.Equal(t, "new-cp", dst.LastCheckpoint)
 	assert.Equal(t, []string{"err1", "err2", "err3"}, dst.Errors)
 }
+
+// TestBackfillPreUpgradeCheckpointRejected ensures that a pre-upgrade
+// checkpoint — a bare message ID saved under the old GetMessage-based
+// checkpoint mechanism — is rejected with a loud error, not silently
+// treated as "start from zero" or as a no-op. The real store's
+// decodeCursor validates the cursor format and returns "invalid cursor"
+// on a malformed value. This is the store-layer complement to
+// TestBackfill_UnrecognizedCheckpointServiceLayer in pkg/messaging.
+func TestBackfillPreUpgradeCheckpointRejected(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	// Seed one message so the store is not empty.
+	senderID := uuid.NewString()
+	seedDMMessage(t, ctx, s, projectID, senderID, uuid.NewString(), time.Now())
+
+	// A bare UUID is what the old mechanism would have saved as a checkpoint.
+	// Under cursor-based semantics, this is not a valid cursor.
+	preUpgradeCheckpoint := uuid.NewString()
+
+	_, err := runBackfillWithStore(ctx, s, messaging.BackfillConfig{
+		DryRun:     false,
+		ProjectID:  projectID,
+		Checkpoint: preUpgradeCheckpoint,
+	})
+	require.Error(t, err, "pre-upgrade checkpoint (bare message ID) must be rejected")
+	assert.Contains(t, err.Error(), "listing messages",
+		"error should come from the store's cursor validation")
+}
