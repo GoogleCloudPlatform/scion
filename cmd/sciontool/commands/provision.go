@@ -85,10 +85,11 @@ func runProvision(ctx context.Context) error {
 
 	var gc *api.GitCloneConfig
 	if cloneURL != "" {
+		depthVal := provisionDepth
 		gc = &api.GitCloneConfig{
 			URL:    cloneURL,
 			Branch: cloneBranch,
-			Depth:  &provisionDepth,
+			Depth:  &depthVal,
 		}
 	}
 

@@ -2473,14 +2473,9 @@ func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
 		return []string{"sciontool", "provision"}
 	}
 
-	depth := 1 // default: shallow
-	if gc.Depth != nil {
-		depth = *gc.Depth
-	}
-
 	cmd := []string{"sciontool", "provision"}
 	if gc.Depth != nil {
-		cmd = append(cmd, "--depth", fmt.Sprintf("%d", depth))
+		cmd = append(cmd, "--depth", fmt.Sprintf("%d", *gc.Depth))
 	}
 	return cmd
 }

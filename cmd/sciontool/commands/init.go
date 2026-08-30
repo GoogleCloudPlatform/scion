@@ -1556,6 +1556,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 	if err != nil {
 		log.Info("WARNING: SCION_GIT_DEPTH is not a valid integer (%q), defaulting to 1", depthStr)
 		depth = 1
+		depthStr = "1"
 	}
 	agentName := os.Getenv("SCION_AGENT_NAME")
 
