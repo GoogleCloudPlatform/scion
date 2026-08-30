@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Tests in this file reinitialise the package-global messaging.DivergenceMetrics
+// counter and assert on its values. Because the counter is shared mutable state
+// (a package-level *DivergenceCounter backed by atomic.Int64 fields), concurrent
+// tests that each reset and increment it would observe each other's writes and
+// fail intermittently. These tests MUST run serially — do not add t.Parallel().
 package hub
 
 import (

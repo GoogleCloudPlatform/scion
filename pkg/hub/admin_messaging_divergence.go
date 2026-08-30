@@ -64,10 +64,11 @@ var divergenceCaveats = divergenceBoardCaveats{
 	NotGoNoGo: "This board is NOT the Tranche G go/no-go input. " +
 		"The offline recomputation report is the artifact that answers " +
 		"the go/no-go question.",
-	CounterSnapshot: "matches, mismatches, and comparisons are read-consistent " +
-		"(comparisons = matches + mismatches from one snapshot). fallbacks is " +
-		"an independent atomic read and may reflect a slightly different point " +
-		"in time under concurrent traffic.",
+	CounterSnapshot: "All counters are read independently via separate atomic loads " +
+		"and may not correspond to a single instant. comparisons is computed as " +
+		"matches + mismatches from those independent reads, so the triple is " +
+		"arithmetically consistent but not a true snapshot. Ratios derived from " +
+		"these values (e.g. mismatch rate, fallback percentage) are approximate.",
 }
 
 // handleAdminMessagingDivergence handles GET /api/v1/admin/messaging/divergence.
