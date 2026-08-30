@@ -1051,26 +1051,55 @@ func projectIDForResource(r Resource) string {
 }
 
 // isProjectOwnerOrAdmin reports whether the user has project-owner or
-// project-admin role in the given project. Uses role bindings as the sole
-// source of truth (Phase 1F: legacy group-based fallback removed).
+// project-admin role in the given project. Checks direct membership first,
+// then group-expanded role bindings.
 func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
 	if userID == "" || projectID == "" {
 		return false
 	}
 
+	// 1. Direct user membership (existing behavior).
 	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
-	if err != nil || membership == nil {
+	if err == nil && membership != nil {
+		if membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin {
+			return true
+		}
+	}
+
+	// 2. Group-expanded: check if any of the user's groups have owner/admin
+	//    role binding on this project.
+	groupIDs, err := a.store.GetEffectiveGroups(ctx, userID)
+	if err != nil || len(groupIDs) == 0 {
 		return false
 	}
-	return membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin
+	for _, gid := range groupIDs {
+		groupBindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, gid)
+		if err != nil {
+			continue
+		}
+		for _, b := range groupBindings {
+			if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+				continue
+			}
+			rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			if err != nil {
+				continue
+			}
+			if rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // getEffectivePermissions resolves the set of permission IDs granted to a
-// principal via role bindings. It collects all bindings for the principal,
-// filters by scope, resolves each binding's role definition, and returns a
-// deduplicated list of permission IDs.
+// principal via role bindings. It collects all bindings for the principal
+// (including group-expanded bindings), filters by scope, resolves each
+// binding's role definition, and returns a deduplicated list of permission IDs.
 func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalType, principalID string, scopeType, scopeID string) ([]string, error) {
-	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+	// Collect all role bindings: direct + group-expanded.
+	allBindings, err := a.getAllRoleBindings(ctx, principalType, principalID)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,7 +1107,7 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 	seen := make(map[string]bool)
 	var result []string
 
-	for _, b := range bindings {
+	for _, b := range allBindings {
 		// Filter by scope: system bindings always apply; project bindings
 		// apply only if the scope matches.
 		if b.ScopeType == store.RoleScopeProject {
@@ -1106,6 +1135,43 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 	return result, nil
 }
 
+// getAllRoleBindings returns direct role bindings for the principal PLUS
+// role bindings for all groups the principal belongs to (transitive via BFS).
+func (a *AuthzService) getAllRoleBindings(ctx context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	// 1. Direct bindings for the principal.
+	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Group-expanded bindings.
+	var groupIDs []string
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
+	case store.RoleBindingPrincipalAgent:
+		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
+	default:
+		// For "group" principal type, no further expansion needed.
+		return bindings, nil
+	}
+	if err != nil {
+		a.logger.Warn("failed to get effective groups for role binding expansion",
+			"principalType", principalType, "principalID", principalID, "error", err)
+		return bindings, nil // Fall back to direct bindings only.
+	}
+
+	for _, gid := range groupIDs {
+		groupBindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, gid)
+		if err != nil {
+			a.logger.Warn("failed to get group role bindings", "groupID", gid, "error", err)
+			continue
+		}
+		bindings = append(bindings, groupBindings...)
+	}
+	return bindings, nil
+}
+
 // IsSystemAdmin checks whether the given user has a system-scoped super-admin
 // role binding. This is the role-binding-based authority check (Phase 1F),
 // complementing the fast-path IsUnscopedLocalPlatformAdmin which uses
@@ -1114,8 +1180,8 @@ func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
-	// Check if the user has a super-admin role binding directly.
-	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	// Check direct + group-expanded role bindings.
+	bindings, err := a.getAllRoleBindings(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return false
 	}
@@ -1143,7 +1209,8 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
-	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	// Check direct + group-expanded role bindings.
+	bindings, err := a.getAllRoleBindings(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return false
 	}

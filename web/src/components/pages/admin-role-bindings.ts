@@ -695,11 +695,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
           >
             <sl-option value="user">User</sl-option>
             <sl-option value="agent">Agent</sl-option>
+            <sl-option value="group">Group</sl-option>
           </sl-select>
         </div>
         <div class="form-group">
           <scion-principal-picker
-            .principalType=${this.formPrincipalType as 'user' | 'agent'}
+            .principalType=${this.formPrincipalType as 'user' | 'agent' | 'group'}
             @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
               this.formPrincipalId = e.detail.principalId;
             }}

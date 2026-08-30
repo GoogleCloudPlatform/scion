@@ -328,8 +328,8 @@ func TestRolesAPI_CreateRoleBinding_InvalidPrincipalType(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: "some-id",
-		PrincipalType:    "group",
-		PrincipalID:      "g1",
+		PrincipalType:    "organization",
+		PrincipalID:      "o1",
 		ScopeType:        "system",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -580,6 +580,53 @@ func TestRolesAPI_CreateRoleBinding_AgentPrincipal(t *testing.T) {
 	assert.Equal(t, "agent", binding.PrincipalType)
 	assert.Equal(t, "some-agent-id", binding.PrincipalID)
 	assert.Equal(t, "project", binding.ScopeType)
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create a group so the group existence check passes
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("rb-test-group"), Slug: "rb-test-group", Name: "RB Test Group",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "group-binding-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      tid("rb-test-group"),
+		ScopeType:        "system",
+	})
+
+	assert.Equal(t, "group", binding.PrincipalType)
+	assert.Equal(t, tid("rb-test-group"), binding.PrincipalID)
+	assert.Equal(t, "system", binding.ScopeType)
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal_NotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "group-notfound-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Try to create a binding for a non-existent group
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      "00000000-0000-0000-0000-000000000099",
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "group not found")
 }
 
 // ---------------------------------------------------------------------------

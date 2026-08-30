@@ -2493,6 +2493,7 @@ const (
 const (
 	RoleBindingPrincipalUser  = "user"
 	RoleBindingPrincipalAgent = "agent"
+	RoleBindingPrincipalGroup = "group"
 )
 
 // =============================================================================
