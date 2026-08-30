@@ -717,10 +717,9 @@ func TestProjectSettings_DefaultGCPIdentity_OtherProjectSAIsNotAnOracle(t *testi
 	project := createTestProjectForSettings(t, s)
 
 	other := &store.Project{
-		ID:         tid("other-project-" + t.Name()),
-		Name:       "Other Project",
-		Slug:       "other-project",
-		Visibility: "private",
+		ID:   tid("other-project-" + t.Name()),
+		Name: "Other Project",
+		Slug: "other-project",
 	}
 	require.NoError(t, s.CreateProject(t.Context(), other))
 	otherSA := newSettingsTestSA(t, s, other.ID, "sa-elsewhere")
@@ -1039,10 +1038,9 @@ func TestProjectSettings_MaxAgentRole_ClearValue(t *testing.T) {
 func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
 	t.Helper()
 	project := &store.Project{
-		ID:         tid("test-project-settings-" + t.Name()),
-		Name:       "Test Project",
-		Slug:       "test-project-settings",
-		Visibility: "private",
+		ID:   tid("test-project-settings-" + t.Name()),
+		Name: "Test Project",
+		Slug: "test-project-settings",
 	}
 	require.NoError(t, s.CreateProject(t.Context(), project))
 	return project

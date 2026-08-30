@@ -188,13 +188,12 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:         tid("project_gh_test"),
-		Slug:       "gh-test-project",
-		Name:       "GH Test Project",
-		GitRemote:  "https://github.com/acme/widgets",
-		Created:    time.Now(),
-		Updated:    time.Now(),
-		Visibility: "private",
+		ID:        tid("project_gh_test"),
+		Slug:      "gh-test-project",
+		Name:      "GH Test Project",
+		GitRemote: "https://github.com/acme/widgets",
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -261,8 +260,7 @@ func TestHandleProjectGitHubStatus_PostNoInstallation(t *testing.T) {
 	project := &store.Project{
 		ID: tid("project_gh_status_check"), Slug: "gh-status-check", Name: "GH Status Check",
 		GitRemote: "https://github.com/acme/widgets",
-		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
-	}
+		Created:   time.Now(), Updated: time.Now()}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
@@ -294,8 +292,7 @@ func TestHandleProjectGitHubStatus_PostWithInstallation(t *testing.T) {
 	project := &store.Project{
 		ID: tid("project_gh_status_check2"), Slug: "gh-status-check2", Name: "GH Status Check 2",
 		GitRemote: "https://github.com/acme/widgets",
-		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
-	}
+		Created:   time.Now(), Updated: time.Now()}
 	project.GitHubInstallationID = &instID
 	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:       store.GitHubAppStateUnchecked,
@@ -339,8 +336,7 @@ func TestHandleProjectGitHubInstallation_NotFoundInstallation(t *testing.T) {
 
 	project := &store.Project{
 		ID: tid("project_gh_notfound"), Slug: "gh-nf", Name: "GH NF",
-		Created: time.Now(), Updated: time.Now(), Visibility: "private",
-	}
+		Created: time.Now(), Updated: time.Now()}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
@@ -363,8 +359,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 
 	project := &store.Project{
 		ID: tid("project_gh_perms"), Slug: "gh-perms", Name: "GH Perms",
-		Created: time.Now(), Updated: time.Now(), Visibility: "private",
-	}
+		Created: time.Now(), Updated: time.Now()}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}

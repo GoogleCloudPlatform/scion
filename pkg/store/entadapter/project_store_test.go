@@ -63,7 +63,6 @@ func TestProject_CreateGet(t *testing.T) {
 	assert.Equal(t, p.Name, got.Name)
 	assert.Equal(t, p.Slug, got.Slug)
 	assert.Equal(t, "https://github.com/acme/repo.git", got.GitRemote)
-	assert.Equal(t, store.VisibilityPrivate, got.Visibility)
 	assert.Equal(t, store.ProjectTypeHubManaged, got.ProjectType) // computed default
 }
 
@@ -448,7 +447,7 @@ func TestProvider_UpsertAndGet(t *testing.T) {
 
 	projectID := uuid.NewString()
 	brokerID := uuid.NewString()
-	require.NoError(t, ps.CreateProject(ctx, &store.Project{ID: projectID, Name: "p", Slug: "p-" + projectID[:8], Visibility: store.VisibilityPrivate}))
+	require.NoError(t, ps.CreateProject(ctx, &store.Project{ID: projectID, Name: "p", Slug: "p-" + projectID[:8]}))
 
 	prov := &store.ProjectProvider{
 		ProjectID:  projectID,
@@ -669,10 +668,9 @@ func TestListProjects_MaxLimit(t *testing.T) {
 	const total = 1010
 	for i := 0; i < total; i++ {
 		p := &store.Project{
-			ID:         uuid.NewString(),
-			Name:       fmt.Sprintf("proj-%04d", i),
-			Slug:       fmt.Sprintf("proj-%04d", i),
-			Visibility: store.VisibilityPrivate,
+			ID:   uuid.NewString(),
+			Name: fmt.Sprintf("proj-%04d", i),
+			Slug: fmt.Sprintf("proj-%04d", i),
 		}
 		require.NoError(t, ps.CreateProject(ctx, p))
 	}

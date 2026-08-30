@@ -169,10 +169,9 @@ func TestHandleAgentMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "guard-project",
-		Slug:       "guard-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "guard-project",
+		Slug: "guard-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -224,10 +223,9 @@ func TestHandleAgentMessage_ResponseStatusNotDeliveredOnPersistFailure(t *testin
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "status-project",
-		Slug:       "status-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "status-project",
+		Slug: "status-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -293,10 +291,9 @@ func TestHandleAgentMessage_PublishesOnPersistSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "ok-project",
-		Slug:       "ok-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "ok-project",
+		Slug: "ok-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -351,10 +348,9 @@ func TestHandleGroupMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "group-project",
-		Slug:       "group-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "group-project",
+		Slug: "group-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -433,10 +429,9 @@ func TestHandleGroupMessage_PublishesOnPersistSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "group-ok-project",
-		Slug:       "group-ok-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "group-ok-project",
+		Slug: "group-ok-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -520,10 +515,9 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "mention-project",
-		Slug:       "mention-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "mention-project",
+		Slug: "mention-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -591,10 +585,9 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "mention-ok-project",
-		Slug:       "mention-ok-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "mention-ok-project",
+		Slug: "mention-ok-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)

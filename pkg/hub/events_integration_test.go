@@ -78,10 +78,9 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 	t.Cleanup(pub.Close)
 
 	project := &store.Project{
-		ID:         tid("project-evt"),
-		Name:       "Event Test Project",
-		Slug:       "event-test-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   tid("project-evt"),
+		Name: "Event Test Project",
+		Slug: "event-test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 

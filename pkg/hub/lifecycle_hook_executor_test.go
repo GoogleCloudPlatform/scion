@@ -122,12 +122,11 @@ func seedExecutorProject(t *testing.T, s store.Store, name string) string {
 	t.Helper()
 	id := uuid.New().String()
 	require.NoError(t, s.CreateProject(context.Background(), &store.Project{
-		ID:         id,
-		Name:       name,
-		Slug:       name,
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      id,
+		Name:    name,
+		Slug:    name,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 	return id
 }
@@ -733,12 +732,11 @@ func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 	// Use distinct Name and Slug to verify the code reads the correct field.
 	projID := uuid.New().String()
 	require.NoError(t, s.CreateProject(context.Background(), &store.Project{
-		ID:         projID,
-		Name:       "Test Project Display Name",
-		Slug:       "test-project-slug",
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      projID,
+		Name:    "Test Project Display Name",
+		Slug:    "test-project-slug",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	executor := newTestExecutor(s, nil, nil, slog.Default())

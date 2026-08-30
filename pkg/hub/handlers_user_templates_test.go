@@ -68,16 +68,15 @@ func setupUserTemplateTest(t *testing.T) (*Server, store.Store, *store.User, *st
 func createUserTemplate(t *testing.T, s store.Store, ownerID, name string) *store.Template {
 	t.Helper()
 	tmpl := &store.Template{
-		ID:         api.NewUUID(),
-		Name:       name,
-		Slug:       api.Slugify(name),
-		Harness:    "antigravity",
-		Scope:      store.TemplateScopeUser,
-		ScopeID:    ownerID,
-		OwnerID:    ownerID,
-		CreatedBy:  ownerID,
-		Status:     store.TemplateStatusActive,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      name,
+		Slug:      api.Slugify(name),
+		Harness:   "antigravity",
+		Scope:     store.TemplateScopeUser,
+		ScopeID:   ownerID,
+		OwnerID:   ownerID,
+		CreatedBy: ownerID,
+		Status:    store.TemplateStatusActive,
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
 	return tmpl
@@ -164,7 +163,6 @@ func TestUpdateUserTemplate_NotFoundForOtherUser(t *testing.T) {
 		Name:        "updated-name",
 		Description: "updated description",
 		Status:      store.TemplateStatusActive,
-		Visibility:  store.VisibilityPrivate,
 	}
 
 	// Alice can update her own template.

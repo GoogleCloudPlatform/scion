@@ -33,10 +33,9 @@ func TestCreateInboxMessage_StampsConversationID(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "conv-stamp-project",
-		Slug:       "conv-stamp-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "conv-stamp-project",
+		Slug: "conv-stamp-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -114,10 +113,9 @@ func TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "conv-noid-project",
-		Slug:       "conv-noid-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "conv-noid-project",
+		Slug: "conv-noid-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)

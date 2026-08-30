@@ -53,12 +53,11 @@ func TestDecisionAudit_AllowAndDeny(t *testing.T) {
 	// Create a project and an agent for testing
 	ctx := context.Background()
 	project := &store.Project{
-		ID:         tid("audit-project"),
-		Name:       "Audit Test Project",
-		Slug:       "audit-project",
-		Visibility: "private",
-		CreatedBy:  DevUserID,
-		OwnerID:    DevUserID,
+		ID:        tid("audit-project"),
+		Name:      "Audit Test Project",
+		Slug:      "audit-project",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -245,12 +244,11 @@ func TestExplainAPI_SuperAdmin(t *testing.T) {
 	// Create a project
 	ctx := context.Background()
 	project := &store.Project{
-		ID:         tid("explain-project"),
-		Name:       "Explain Test",
-		Slug:       "explain-test",
-		Visibility: "private",
-		CreatedBy:  DevUserID,
-		OwnerID:    DevUserID,
+		ID:        tid("explain-project"),
+		Name:      "Explain Test",
+		Slug:      "explain-test",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -312,12 +310,11 @@ func TestExplainAPI_Self(t *testing.T) {
 
 	ctx := context.Background()
 	project := &store.Project{
-		ID:         tid("explain-self-project"),
-		Name:       "Explain Self Test",
-		Slug:       "explain-self",
-		Visibility: "private",
-		CreatedBy:  DevUserID,
-		OwnerID:    DevUserID,
+		ID:        tid("explain-self-project"),
+		Name:      "Explain Self Test",
+		Slug:      "explain-self",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -433,7 +430,7 @@ func TestExplainAPI_SuperAdminCanExplainForOthersViaDecide(t *testing.T) {
 
 	project := &store.Project{
 		ID: tid("explain-decide-project"), Name: "Explain Decide Test", Slug: "explain-decide",
-		Visibility: "private", CreatedBy: DevUserID, OwnerID: DevUserID,
+		CreatedBy: DevUserID, OwnerID: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -456,12 +453,11 @@ func TestExplainAPI_NoSecretLeakage(t *testing.T) {
 
 	ctx := context.Background()
 	project := &store.Project{
-		ID:         tid("explain-leak-project"),
-		Name:       "Leak Test",
-		Slug:       "leak-test",
-		Visibility: "private",
-		CreatedBy:  DevUserID,
-		OwnerID:    DevUserID,
+		ID:        tid("explain-leak-project"),
+		Name:      "Leak Test",
+		Slug:      "leak-test",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -500,12 +496,11 @@ func TestExplainAPI_TraceContainsDecidingPolicy(t *testing.T) {
 
 	ctx := context.Background()
 	project := &store.Project{
-		ID:         tid("trace-policy-project"),
-		Name:       "Trace Policy Test",
-		Slug:       "trace-policy",
-		Visibility: "private",
-		CreatedBy:  DevUserID,
-		OwnerID:    DevUserID,
+		ID:        tid("trace-policy-project"),
+		Name:      "Trace Policy Test",
+		Slug:      "trace-policy",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -610,12 +605,11 @@ func TestMutationAudit_CredentialRevocation(t *testing.T) {
 
 	// Create a UAT for the dev user first
 	project := &store.Project{
-		ID:         tid("revoke-project"),
-		Name:       "Revoke Test",
-		Slug:       "revoke-test",
-		Visibility: "private",
-		CreatedBy:  DevUserID,
-		OwnerID:    DevUserID,
+		ID:        tid("revoke-project"),
+		Name:      "Revoke Test",
+		Slug:      "revoke-test",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)

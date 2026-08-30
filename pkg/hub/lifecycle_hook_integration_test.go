@@ -138,12 +138,11 @@ func TestLifecycleHookIntegration_RegisterDeregisterFlow(t *testing.T) {
 	// --- Seed project, SA, and agent ---
 	projectID := uuid.New().String()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "integration-project",
-		Slug:       "integration-project",
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      projectID,
+		Name:    "integration-project",
+		Slug:    "integration-project",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	saID := uuid.New().String()
@@ -330,12 +329,11 @@ func TestLifecycleHookIntegration_SuspendedAndErrorDeregister(t *testing.T) {
 	// --- Seed project, SA ---
 	projectID := uuid.New().String()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "suspend-project",
-		Slug:       "suspend-project",
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      projectID,
+		Name:    "suspend-project",
+		Slug:    "suspend-project",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	saID := uuid.New().String()
@@ -476,12 +474,11 @@ func TestLifecycleHookIntegration_AgentRegistryA2AFlow(t *testing.T) {
 	projectSlug := "my-scion-project"
 	projectID := uuid.New().String()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "My Scion Project",
-		Slug:       projectSlug,
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      projectID,
+		Name:    "My Scion Project",
+		Slug:    projectSlug,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}))
 
 	saID := uuid.New().String()

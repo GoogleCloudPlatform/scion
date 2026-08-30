@@ -49,10 +49,9 @@ func setupMessageTestAgent(t *testing.T, s store.Store, phase string) (projectID
 	}
 
 	project := &store.Project{
-		ID:         tid("msg-project"),
-		Slug:       "msg-project",
-		Name:       "msg-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   tid("msg-project"),
+		Slug: "msg-project",
+		Name: "msg-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -118,7 +117,6 @@ func TestHandleAgentMessage_StoppedReturns409(t *testing.T) {
 	_ = s.CreateRuntimeBroker(ctx, broker)
 	project := &store.Project{
 		ID: tid("msg-project-stop"), Slug: "msg-project-stop", Name: "msg-project-stop",
-		Visibility: store.VisibilityPrivate,
 	}
 	_ = s.CreateProject(ctx, project)
 	agent := &store.Agent{
@@ -162,7 +160,6 @@ func TestHandleAgentMessage_ErrorReturns409(t *testing.T) {
 	_ = s.CreateRuntimeBroker(ctx, broker)
 	project := &store.Project{
 		ID: tid("msg-project-err"), Slug: "msg-project-err", Name: "msg-project-err",
-		Visibility: store.VisibilityPrivate,
 	}
 	_ = s.CreateProject(ctx, project)
 	agent := &store.Agent{
@@ -206,7 +203,6 @@ func TestHandleAgentMessage_ProvisioningReturns409(t *testing.T) {
 	_ = s.CreateRuntimeBroker(ctx, broker)
 	project := &store.Project{
 		ID: tid("msg-project-prov"), Slug: "msg-project-prov", Name: "msg-project-prov",
-		Visibility: store.VisibilityPrivate,
 	}
 	_ = s.CreateProject(ctx, project)
 	agent := &store.Agent{
@@ -287,7 +283,6 @@ func TestHandleProjectBroadcast_Returns202WithTargeting(t *testing.T) {
 	_ = s.CreateRuntimeBroker(ctx, broker)
 	project := &store.Project{
 		ID: tid("bcast-project"), Slug: "bcast-project", Name: "bcast-project",
-		Visibility: store.VisibilityPrivate,
 	}
 	_ = s.CreateProject(ctx, project)
 
@@ -364,7 +359,6 @@ func TestHandleProjectBroadcast_AllRunning(t *testing.T) {
 	_ = s.CreateRuntimeBroker(ctx, broker)
 	project := &store.Project{
 		ID: tid("bcast-project-all"), Slug: "bcast-project-all", Name: "bcast-project-all",
-		Visibility: store.VisibilityPrivate,
 	}
 	_ = s.CreateProject(ctx, project)
 
@@ -412,7 +406,6 @@ func TestHandleProjectBroadcast_NoAgents(t *testing.T) {
 	ctx := context.Background()
 	project := &store.Project{
 		ID: tid("bcast-project-empty"), Slug: "bcast-project-empty", Name: "bcast-project-empty",
-		Visibility: store.VisibilityPrivate,
 	}
 	_ = s.CreateProject(ctx, project)
 

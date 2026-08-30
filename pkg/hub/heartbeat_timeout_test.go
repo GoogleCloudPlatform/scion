@@ -84,10 +84,9 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 
 	// Create project
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Test Project",
-		Slug:       "test-project-hb",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Test Project",
+		Slug: "test-project-hb",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -174,10 +173,9 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Recovery Project",
-		Slug:       "recovery-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Recovery Project",
+		Slug: "recovery-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)

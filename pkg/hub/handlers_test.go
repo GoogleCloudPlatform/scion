@@ -1838,12 +1838,11 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:         tid("project_localpath_test"),
-		Name:       "Local Path Test Project",
-		Slug:       "local-path-test",
-		Visibility: store.VisibilityPrivate,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("project_localpath_test"),
+		Name:    "Local Path Test Project",
+		Slug:    "local-path-test",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -2985,10 +2984,9 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "msg-project",
-		Slug:       "msg-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "msg-project",
+		Slug: "msg-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)

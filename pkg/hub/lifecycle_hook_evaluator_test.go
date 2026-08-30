@@ -153,12 +153,11 @@ func testEvaluatorStore(t *testing.T) store.Store {
 func seedHookProject(t *testing.T, s store.Store, name string) string {
 	t.Helper()
 	p := &store.Project{
-		ID:         uuid.New().String(),
-		Name:       name,
-		Slug:       name,
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      uuid.New().String(),
+		Name:    name,
+		Slug:    name,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(context.Background(), p))
 	return p.ID

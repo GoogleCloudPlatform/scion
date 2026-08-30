@@ -73,10 +73,9 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "flood-project",
-		Slug:       "flood-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "flood-project",
+		Slug: "flood-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -156,10 +155,9 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "type-project",
-		Slug:       "type-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "type-project",
+		Slug: "type-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -208,10 +206,9 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "mirror-project",
-		Slug:       "mirror-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "mirror-project",
+		Slug: "mirror-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -279,10 +276,9 @@ func TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T)
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "b5-security-project",
-		Slug:       "b5-security-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "b5-security-project",
+		Slug: "b5-security-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -409,7 +405,6 @@ func TestBroadcast_B5F1_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T) 
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "b5-f1-broadcast", Slug: "b5-f1-broadcast",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -536,7 +531,6 @@ func TestBroadcast_B5F1b_BroadcastedForcedTrueServerSide(t *testing.T) {
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "b5-bcast-flag", Slug: "b5-bcast-flag",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -633,7 +627,6 @@ func TestBroadcast_R1_BroadcastingAgentDoesNotReceiveOwnMessage(t *testing.T) {
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "r1-selfskip", Slug: "r1-selfskip",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -739,7 +732,6 @@ func TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity(t *testing.T) {
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "b5-f1a", Slug: "b5-f1a",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -844,7 +836,6 @@ func TestBroadcast_B5F1c_SelfSkipUsesAuthNotSender(t *testing.T) {
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "b5-f1c", Slug: "b5-f1c",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -932,7 +923,6 @@ func TestBroker_R2_FanOutGlobalSelfSkipBySenderID(t *testing.T) {
 
 	projectA := &store.Project{
 		ID: api.NewUUID(), Name: "r2-pa", Slug: "r2-pa",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, projectA); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -1018,7 +1008,6 @@ func TestBroker_R3b_WarnOnEmptySenderID(t *testing.T) {
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "r3b", Slug: "r3b",
-		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -1105,10 +1094,9 @@ func def11Setup(t *testing.T) (srv *Server, s store.Store, projectID, agentSlug,
 	agentSlug = "def11-agent"
 
 	if err := s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "def11-project",
-		Slug:       "def11-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   projectID,
+		Name: "def11-project",
+		Slug: "def11-project",
 	}); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -1331,10 +1319,9 @@ func TestDEF19_GroupRecipient_FullHandlerPath(t *testing.T) {
 	anchorSlug := agentSlugA
 
 	if err := s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "def19-project",
-		Slug:       "def19-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   projectID,
+		Name: "def19-project",
+		Slug: "def19-project",
 	}); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -1519,10 +1506,9 @@ func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, tar
 
 	projectID = tid("def49-project")
 	if err := s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "def49-project",
-		Slug:       "def49-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   projectID,
+		Name: "def49-project",
+		Slug: "def49-project",
 	}); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -1678,10 +1664,9 @@ func TestDEF49_CrossProject_GroupConversation(t *testing.T) {
 	// Create a second project that the target agent does NOT belong to.
 	otherProjectID := tid("def49-other-project")
 	if err := s.CreateProject(ctx, &store.Project{
-		ID:         otherProjectID,
-		Name:       "def49-other-project",
-		Slug:       "def49-other-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   otherProjectID,
+		Name: "def49-other-project",
+		Slug: "def49-other-project",
 	}); err != nil {
 		t.Fatalf("CreateProject (other): %v", err)
 	}

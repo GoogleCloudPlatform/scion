@@ -542,11 +542,10 @@ func setupPreStartHookStampingTest(t *testing.T) (*Server, store.Store, *store.P
 
 	srv, s := testServer(t)
 	project := &store.Project{
-		ID:         tid("psh-stamp-" + t.Name()),
-		Name:       "PSH Stamping Project",
-		Slug:       "psh-stamp-" + strings.ToLower(t.Name()),
-		Visibility: "private",
-		OwnerID:    "dev@localhost",
+		ID:      tid("psh-stamp-" + t.Name()),
+		Name:    "PSH Stamping Project",
+		Slug:    "psh-stamp-" + strings.ToLower(t.Name()),
+		OwnerID: "dev@localhost",
 	}
 	require.NoError(t, s.CreateProject(t.Context(), project))
 	return srv, s, project

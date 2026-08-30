@@ -57,10 +57,9 @@ func TestValidateAttributed_LegacyPath_ConversationIDStamped(t *testing.T) {
 	agentSlug := "d4-agent"
 
 	if err := s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "d4-project",
-		Slug:       "d4-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   projectID,
+		Name: "d4-project",
+		Slug: "d4-project",
 	}); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}

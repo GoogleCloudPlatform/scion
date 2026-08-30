@@ -121,7 +121,7 @@ func TestReconcileBroker_SkipsPendingMessages(t *testing.T) {
 		func(context.Context, *store.Message) error { atomic.AddInt32(&deliverN, 1); return nil })
 
 	broker := uuid.NewString()
-	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString()}
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], OwnerID: uuid.NewString()}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 	_, err := client.Agent.Create().
 		SetSlug("a-" + uuid.NewString()[:8]).SetName("a").
@@ -141,7 +141,7 @@ func TestDeliverMessage_TunnelsViaDispatcher(t *testing.T) {
 	client := enttest.NewClient(t)
 	cs := entadapter.NewCompositeStore(client)
 
-	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString()}
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], OwnerID: uuid.NewString()}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 
 	brokerID := uuid.NewString()

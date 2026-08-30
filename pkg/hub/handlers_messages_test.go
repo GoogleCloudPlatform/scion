@@ -111,8 +111,7 @@ func setupMessagePrivacyTest(t *testing.T) (
 	agentID = tid("agent-msg-priv")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Slug: "agent-msg-priv", Name: "Privacy Agent",
-		ProjectID: project.ID, OwnerID: alice.ID, Visibility: store.VisibilityPrivate,
-		Created: time.Now(), Updated: time.Now(),
+		ProjectID: project.ID, OwnerID: alice.ID, Created: time.Now(), Updated: time.Now(),
 	}))
 
 	// --- give bob read-only access on agents ---
