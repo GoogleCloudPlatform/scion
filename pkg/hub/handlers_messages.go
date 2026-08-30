@@ -288,7 +288,7 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 		threadID := q.Get("thread_id")
 		// G3-f: threadID is the primary discriminator. A thread request must
 		// never fall through to the DM branch — that serves wrong data with a
-		// 200 and no signal. Before G3-f, threadID="" && agent.ProjectID==""
+		// 200 and no signal. Before G3-f, threadID!="" && agent.ProjectID==""
 		// with channel="web" silently took the DM path.
 		if threadID != "" {
 			if agent.ProjectID == "" || agent.ProjectID == uuid.Nil.String() {
