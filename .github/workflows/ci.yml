@@ -231,3 +231,62 @@ jobs:
             echo "::error::shellcheck reported issues in ${failed} file(s)"
             exit 1
           fi
+
+  lint-method-not-allowed:
+    name: Lint 405 Allow header (reporting only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check for bare MethodNotAllowed calls
+        run: |
+          echo "## 405 Allow Header Lint" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Checking for MethodNotAllowed(w) calls without allowed methods." >> $GITHUB_STEP_SUMMARY
+          echo "Per RFC 9110 section 15.5.6, 405 responses MUST include an Allow header." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Find bare MethodNotAllowed(w) calls (no allowed methods argument)
+          # Exclude: function definition, test files (test files may legitimately test the bare call)
+          VIOLATIONS=$(grep -rn 'MethodNotAllowed(w)$' --include='*.go' pkg/hub/ \
+            | grep -v '_test.go' \
+            | grep -v 'func MethodNotAllowed' \
+            || true)
+
+          COUNT=$(echo "$VIOLATIONS" | grep -c '.' 2>/dev/null || echo 0)
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "**Found ${COUNT} bare MethodNotAllowed(w) calls missing Allow header.**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Each of these should specify allowed methods:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "MethodNotAllowed(w, http.MethodGet)           // single method" >> $GITHUB_STEP_SUMMARY
+            echo "MethodNotAllowed(w, http.MethodGet, http.MethodPost)  // multiple" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "<details>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Violations (click to expand)</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$VIOLATIONS" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "All MethodNotAllowed calls include allowed methods. RFC 9110 compliant." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "_This is a reporting-only check. It does not block CI._" >> $GITHUB_STEP_SUMMARY
+          echo "_See PR #1413 for context on the Allow header requirement._" >> $GITHUB_STEP_SUMMARY
+
+          # Exit with count for visibility (continue-on-error means it won't block)
+          if [ "$COUNT" -gt 0 ]; then
+            echo ""
+            echo "Found ${COUNT} bare MethodNotAllowed(w) calls without Allow header."
+            echo "See step summary for details."
+            exit 1
+          fi
