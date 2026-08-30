@@ -1714,6 +1714,9 @@ type RoleStore interface {
 	//
 	// If scopeTypes is non-empty, only bindings with a matching scope_type are returned.
 	// If scopeIDs is non-empty, only bindings with a matching scope_id are returned.
+	// When scopeIDs is provided, system-scoped bindings (scope_type="system") are
+	// always included regardless of the scope_id values — callers do not need to
+	// pass "" to match system bindings.
 	// Both filters are optional; passing nil/empty returns all scopes.
 	ListRoleBindingsForPrincipals(ctx context.Context, principals []PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*RoleBinding, error)
 

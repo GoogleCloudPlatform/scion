@@ -305,9 +305,9 @@ func (r *RoleStore) ListRoleBindingsForScope(ctx context.Context, scopeType, sco
 
 // directUserOnlyRoles lists role names that require a direct user principal.
 // Group and agent principals are not allowed for these roles.
-var directUserOnlyRoles = map[string]bool{
-	store.SystemRoleSuperAdmin: true,
-	store.ProjectRoleOwner:     true,
+var directUserOnlyRoles = map[string]struct{}{
+	store.SystemRoleSuperAdmin: {},
+	store.ProjectRoleOwner:     {},
 }
 
 // CreateRoleBinding creates a new role binding.
@@ -352,7 +352,7 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 	}
 
 	// Direct-user-only guard: super-admin and project-owner reject non-user principals.
-	if directUserOnlyRoles[rd.Name] && rb.PrincipalType != store.RoleBindingPrincipalUser {
+	if _, ok := directUserOnlyRoles[rd.Name]; ok && rb.PrincipalType != store.RoleBindingPrincipalUser {
 		return nil, fmt.Errorf("%w: role %q is direct-user-only", store.ErrDirectUserOnly, rd.Name)
 	}
 
@@ -432,8 +432,13 @@ func (r *RoleStore) ListRoleBindingsForPrincipals(ctx context.Context, principal
 	}
 
 	// Optional scope ID filter.
+	// If scopeIDs filter is present, always include system-scoped bindings
+	// (they use scope_id="" by convention; callers should not need to know this).
 	if len(scopeIDs) > 0 {
-		query = query.Where(rolebinding.ScopeIDIn(scopeIDs...))
+		query = query.Where(rolebinding.Or(
+			rolebinding.ScopeIDIn(scopeIDs...),
+			rolebinding.ScopeTypeEQ(rolebinding.ScopeType("system")),
+		))
 	}
 
 	rbs, err := query.All(ctx)
@@ -452,6 +457,9 @@ func (r *RoleStore) ListRoleBindingsForPrincipals(ctx context.Context, principal
 // principal is the bound principal. Returns the number of deleted bindings.
 // Used for cascade delete when a group is deleted.
 func (r *RoleStore) DeleteRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) (int, error) {
+	if principalID == "" {
+		return 0, fmt.Errorf("%w: principalID must not be empty", store.ErrInvalidInput)
+	}
 	n, err := r.client.RoleBinding.Delete().
 		Where(
 			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(principalType)),
@@ -468,6 +476,9 @@ func (r *RoleStore) DeleteRoleBindingsForPrincipal(ctx context.Context, principa
 // scope type and ID. Returns the number of deleted bindings.
 // Used for cascade delete when a project is deleted.
 func (r *RoleStore) DeleteRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) (int, error) {
+	if scopeID == "" {
+		return 0, fmt.Errorf("%w: scopeID must not be empty", store.ErrInvalidInput)
+	}
 	n, err := r.client.RoleBinding.Delete().
 		Where(
 			rolebinding.ScopeTypeEQ(rolebinding.ScopeType(scopeType)),

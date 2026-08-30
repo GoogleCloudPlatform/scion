@@ -964,6 +964,15 @@ func TestListRoleBindingsForPrincipals_CombinedScopeFilters(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Len(t, results, 2, "should return both system (scopeID='') and project bindings")
+
+	// Verify system bindings are included even when "" is NOT in scopeIDs.
+	// Callers should not need to know that system bindings use scope_id="".
+	results2, err := env.roleStore.ListRoleBindingsForPrincipals(ctx, principals,
+		[]string{store.RoleScopeSystem, store.RoleScopeProject},
+		[]string{env.projectID},
+	)
+	require.NoError(t, err)
+	assert.Len(t, results2, 2, "system bindings should be included even without '' in scopeIDs")
 }
 
 func TestCreateRoleBinding_GroupPrincipal_ProjectScoped(t *testing.T) {
