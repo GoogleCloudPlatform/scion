@@ -595,6 +595,10 @@ func backfillHubAdminRolePermissions(ctx context.Context, s store.Store) {
 		slog.Warn("failed to look up hub-admin role definition for permission backfill", "error", err)
 		return
 	}
+	if rd == nil {
+		slog.Warn("hub-admin role definition is nil for permission backfill")
+		return
+	}
 
 	desired := hubAdminPermissionIDs()
 

@@ -93,6 +93,11 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 			writeForbidden(w, "")
 			return false
 		}
+		if s.authzService == nil {
+			logAuthzDenial(r, identity, resource, action, "authorization service is uninitialized")
+			writeForbidden(w, "")
+			return false
+		}
 		// Pass the canonical permission ID so the role-binding check (step 3
 		// in checkAccessForUser) fires for hub-admin users who hold
 		// scheduled_event permissions through their system-scoped role.
