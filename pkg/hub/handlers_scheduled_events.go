@@ -58,6 +58,72 @@ type ListScheduledEventsResponse struct {
 	ServerTime time.Time              `json:"serverTime"`
 }
 
+// authorizeScheduledEventAccess gates access to scheduled-event and recurring-
+// schedule operations for every caller kind. Exhaustive and fail-closed.
+//
+// Agent identities are authorized by the caller: the existing checkAgentReadScope
+// and project isolation checks in the dispatcher are sufficient for agents.
+// User identities are authorized via s.authzService.Decide (with a canonical
+// permission ID for role-binding resolution) against a project-scoped
+// scheduled_event resource.
+func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Request, projectID string, action Action) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+
+	resource := Resource{
+		Type:       "scheduled_event",
+		ParentType: "project",
+		ParentID:   projectID,
+	}
+
+	switch identity.Type() {
+	case "agent":
+		// Agent authorization is handled by checkAgentReadScope and project
+		// isolation in the dispatcher. If we reach here, those passed.
+		return true
+
+	case "user", "dev", "federated_user":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			logAuthzDenial(r, identity, resource, action, "invalid user identity")
+			writeForbidden(w, "")
+			return false
+		}
+		if s.authzService == nil {
+			logAuthzDenial(r, identity, resource, action, "authorization service is uninitialized")
+			writeForbidden(w, "")
+			return false
+		}
+		// Pass the canonical permission ID so the role-binding check (step 3
+		// in checkAccessForUser) fires for hub-admin users who hold
+		// scheduled_event permissions through their system-scoped role.
+		permissionID := "scheduled_event." + string(action)
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   resource,
+			Action:     action,
+			Permission: permissionID,
+		})
+		if !decision.Allowed {
+			logAuthzDenial(r, identity, resource, action, decision.Reason)
+			writeForbidden(w, "You don't have permission to access scheduled events in this project")
+			return false
+		}
+		return true
+
+	default:
+		logAuthzDenial(r, identity, resource, action,
+			"identity type may not access scheduled events")
+		writeForbidden(w, "")
+		return false
+	}
+}
+
 // handleScheduledEvents routes requests under /api/v1/projects/{projectId}/scheduled-events[/{id}]
 func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, projectID, eventPath string) {
 	// Require authentication
@@ -79,15 +145,43 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
+	// Determine the action for authorization based on method and path.
+	var action Action
 	if eventPath == "" {
-		// Collection endpoint
+		switch r.Method {
+		case http.MethodGet:
+			action = ActionList
+		case http.MethodPost:
+			action = ActionCreate
+		default:
+			MethodNotAllowed(w)
+			return
+		}
+	} else {
+		switch r.Method {
+		case http.MethodGet:
+			action = ActionRead
+		case http.MethodDelete:
+			action = ActionDelete
+		default:
+			MethodNotAllowed(w)
+			return
+		}
+	}
+
+	// Authorize access — fail closed for all identity types.
+	if !s.authorizeScheduledEventAccess(w, r, projectID, action) {
+		return
+	}
+
+	// Dispatch to handler — method filtering is done in the authorization
+	// block above; only valid methods reach this point.
+	if eventPath == "" {
 		switch r.Method {
 		case http.MethodGet:
 			s.listScheduledEvents(w, r, projectID)
 		case http.MethodPost:
 			s.createScheduledEvent(w, r, projectID)
-		default:
-			MethodNotAllowed(w)
 		}
 		return
 	}
@@ -99,8 +193,6 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		s.getScheduledEvent(w, r, projectID, eventID)
 	case http.MethodDelete:
 		s.cancelScheduledEvent(w, r, projectID, eventID)
-	default:
-		MethodNotAllowed(w)
 	}
 }
 

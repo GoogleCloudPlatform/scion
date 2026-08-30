@@ -326,6 +326,157 @@ func TestSchedule_History(t *testing.T) {
 	assert.Equal(t, 3, resp.TotalCount)
 }
 
+// doScheduleUserRequest makes a request with the given user identity
+// and calls handleSchedules directly (bypasses router auth middleware).
+func doScheduleUserRequest(t *testing.T, srv *Server, identity Identity, method, projectID, schedulePath string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	urlPath := "/api/v1/projects/" + projectID + "/schedules"
+	if schedulePath != "" {
+		urlPath += "/" + schedulePath
+	}
+	req := httptest.NewRequest(method, urlPath, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if identity != nil {
+		req = req.WithContext(contextWithIdentity(req.Context(), identity))
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleSchedules(rec, req, projectID, schedulePath)
+	return rec
+}
+
+func TestSchedule_NonMemberUserDenied(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	// Create a non-member user with a valid UUID
+	nonMemberID := tid("sched-non-member")
+	nonMember := NewAuthenticatedUser(nonMemberID, "schednonmember@test.com", "Non Member", "member", "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          nonMemberID,
+		Email:       nonMember.Email(),
+		DisplayName: nonMember.DisplayName(),
+		Role:        "member",
+		Status:      "active",
+	}))
+
+	// Create a schedule via the admin user to test get/update/delete on
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
+		CreateScheduleRequest{
+			Name: "authz-test-sched", CronExpr: "0 * * * *", EventType: "message",
+			AgentName: "worker", Message: "hello",
+		})
+	require.Equal(t, http.StatusCreated, createRec.Code)
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	t.Run("list denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodGet, projectID, "", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("get denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodGet, projectID, created.ID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("create denied", func(t *testing.T) {
+		req := CreateScheduleRequest{
+			Name: "denied", CronExpr: "0 * * * *", EventType: "message",
+			AgentName: "worker", Message: "hello",
+		}
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("update denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodPatch, projectID, created.ID,
+			UpdateScheduleRequest{Name: "hacked"})
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("delete denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodDelete, projectID, created.ID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("pause denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodPost, projectID, created.ID+"/pause", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("resume denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodPost, projectID, created.ID+"/resume", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("history denied", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, nonMember, http.MethodGet, projectID, created.ID+"/history", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+}
+
+func TestSchedule_AdminUserAllowed(t *testing.T) {
+	srv, _, projectID := setupScheduleTest(t)
+
+	// Admin user via dev token — all operations should succeed
+	t.Run("list allowed", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules", nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("create allowed", func(t *testing.T) {
+		req := CreateScheduleRequest{
+			Name: "admin-test", CronExpr: "0 * * * *", EventType: "message",
+			AgentName: "worker", Message: "hello",
+		}
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", req)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+	})
+}
+
+func TestSchedule_ProjectOwnerAllowed(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	// Create an owner user for the project with a valid UUID
+	ownerUserID := tid("sched-owner-user")
+	ownerUser := NewAuthenticatedUser(ownerUserID, "schedowner@test.com", "Owner", "member", "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          ownerUserID,
+		Email:       ownerUser.Email(),
+		DisplayName: ownerUser.DisplayName(),
+		Role:        "member",
+		Status:      "active",
+	}))
+
+	// Create a project-owner role binding — isProjectOwnerOrAdmin checks role
+	// bindings, not group membership.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, ownerUserID))
+
+	t.Run("list allowed", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, ownerUser, http.MethodGet, projectID, "", nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("create allowed", func(t *testing.T) {
+		req := CreateScheduleRequest{
+			Name: "owner-test", CronExpr: "0 * * * *", EventType: "message",
+			AgentName: "worker", Message: "hello",
+		}
+		rec := doScheduleUserRequest(t, srv, ownerUser, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+	})
+}
+
 func TestSchedule_ProjectIsolation(t *testing.T) {
 	srv, _, projectID := setupScheduleTest(t)
 	ctx := context.Background()
