@@ -30,6 +30,7 @@ type divergenceBoardCaveats struct {
 	MismatchComposition       string `json:"mismatch_composition"`
 	ConsistencyCheckFailsOpen string `json:"consistency_check_fails_open"`
 	UnbackfilledBlindSpot     string `json:"unbackfilled_blind_spot"`
+	SamplingWindow            string `json:"sampling_window"`
 	NotGoNoGo                 string `json:"not_go_no_go"`
 	CounterSnapshot           string `json:"counter_snapshot"`
 }
@@ -70,6 +71,13 @@ var divergenceCaveats = divergenceBoardCaveats{
 		"consistent — it means the board cannot see that history at all. " +
 		"Only messages written after the dual-write path began populating " +
 		"ConversationID contribute to the mismatch signal.",
+	SamplingWindow: "The consistency check examines a bounded sample of " +
+		"prior messages, not a full census: 50 rows by thread_id, or " +
+		"25 rows in each direction for sender/recipient DM lookups " +
+		"(divergence.go:267, :282, :291). A mismatch count of zero means " +
+		"zero mismatches were found in the sample — not that zero " +
+		"mismatches exist. The reported mismatch count is a lower bound " +
+		"on a sample, not a measurement of the population.",
 	NotGoNoGo: "This board is NOT the Tranche G go/no-go input. " +
 		"The offline recomputation report is the artifact that answers " +
 		"the go/no-go question.",

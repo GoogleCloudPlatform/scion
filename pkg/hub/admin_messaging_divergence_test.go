@@ -142,6 +142,7 @@ func TestHandleAdminMessagingDivergence_CaveatKeysPresent(t *testing.T) {
 		"mismatch_composition",
 		"consistency_check_fails_open",
 		"unbackfilled_blind_spot",
+		"sampling_window",
 		"not_go_no_go",
 		"counter_snapshot",
 	}

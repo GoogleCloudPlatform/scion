@@ -48,6 +48,26 @@ import (
 // standard user-to-agent message must traverse.  If a step is added,
 // removed, or reordered in the production code, this list must be
 // updated — which forces the change to be reviewed.
+//
+// COVERAGE BOUNDARY — paths NOT traced by this test:
+//
+//   - Agent-scoped route (/api/v1/agents/{id}/message via handleAgentAction
+//     in handlers_agents_core.go). Same handler, different authorization
+//     dispatch path.
+//   - Agent-to-agent messaging (sender is an AgentIdentity, not a
+//     UserIdentity). The identity-extraction branch differs.
+//   - Broker-inbound path (handleBrokerInbound in handlers_broker_inbound.go).
+//     Entirely separate handler with its own validation and conversation
+//     resolution sequence.
+//   - Group-message fan-out (handleGroupMessage, entered when the recipient
+//     matches messages.IsGroupRecipient). Short-circuits before agent load.
+//   - Managed-agent path (isManagedAgentRuntime branch inside
+//     handleAgentMessage). Bypasses the broker dispatch step entirely.
+//   - handleAgentOutboundMessage (agent→user outbound path). Separate
+//     handler, separate step sequence.
+//
+// A green result here means the user→agent DM path via the project-scoped
+// route is pinned. It says nothing about the paths listed above.
 var expectedPathSteps = []string{
 	"message_authorized",
 	"handle_agent_message_enter",
