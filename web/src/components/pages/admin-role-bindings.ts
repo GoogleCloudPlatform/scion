@@ -32,12 +32,11 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
 import '../shared/principal-picker.js';
 import {
-  SYSTEM_SYSTEM_DIRECT_USER_ONLY_ROLES,
+  SYSTEM_DIRECT_USER_ONLY_ROLES,
   getLifecycleStatus,
   formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
-import type { LifecycleStatus } from '../shared/role-binding-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -98,7 +97,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
   // Form fields
   @state() private formPrincipalType = 'user';
   @state() private formPrincipalId = '';
-  @state() private formPrincipalDisplayLabel = '';
   @state() private formRoleId = '';
   @state() private formScopeType = 'system';
   @state() private formScopeId = '';
@@ -601,7 +599,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
   private openCreateDialog(): void {
     this.formPrincipalType = 'user';
     this.formPrincipalId = '';
-    this.formPrincipalDisplayLabel = '';
     this.formRoleId = '';
     this.formScopeType = 'system';
     this.formScopeId = '';
@@ -1003,7 +1000,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
             @sl-change=${(e: Event) => {
               this.formPrincipalType = (e.target as HTMLSelectElement).value;
               this.formPrincipalId = '';
-              this.formPrincipalDisplayLabel = '';
               this.updateValidation();
             }}
           >
@@ -1026,7 +1022,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
             .principalType=${this.formPrincipalType as 'user' | 'agent' | 'group'}
             @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
               this.formPrincipalId = e.detail.principalId;
-              this.formPrincipalDisplayLabel = e.detail.displayLabel;
             }}
           ></scion-principal-picker>
         </div>

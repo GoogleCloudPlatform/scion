@@ -38,7 +38,7 @@ import type { PrincipalChangeDetail } from './principal-picker.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
 import {
-  PROJECT_PROJECT_DIRECT_USER_ONLY_ROLES,
+  PROJECT_DIRECT_USER_ONLY_ROLES,
   PROJECT_OWNER_ROLE_NAMES,
   getPrincipalIcon,
 } from './role-binding-utils.js';
@@ -103,7 +103,6 @@ export class ScionProjectMembersEditor extends LitElement {
   @state() private addDialogOpen = false;
   @state() private addPrincipalType = 'user';
   @state() private addPrincipalId = '';
-  @state() private addPrincipalDisplayLabel = '';
   @state() private addRoleId = '';
   @state() private addLoading = false;
   @state() private addError: string | null = null;
@@ -623,7 +622,6 @@ export class ScionProjectMembersEditor extends LitElement {
   private openAddDialog(): void {
     this.addPrincipalType = 'user';
     this.addPrincipalId = '';
-    this.addPrincipalDisplayLabel = '';
     this.addRoleId = this.projectRoles.length > 0 ? this.projectRoles[0].id : '';
     this.addError = null;
     this.addDialogOpen = true;
@@ -1072,7 +1070,6 @@ export class ScionProjectMembersEditor extends LitElement {
             @sl-change=${(e: Event) => {
               this.addPrincipalType = (e.target as HTMLSelectElement).value;
               this.addPrincipalId = '';
-              this.addPrincipalDisplayLabel = '';
             }}
           >
             <sl-option value="user">
@@ -1095,7 +1092,6 @@ export class ScionProjectMembersEditor extends LitElement {
             .principalType=${this.addPrincipalType as 'user' | 'agent' | 'group'}
             @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
               this.addPrincipalId = e.detail.principalId;
-              this.addPrincipalDisplayLabel = e.detail.displayLabel;
             }}
           ></scion-principal-picker>
         </div>
