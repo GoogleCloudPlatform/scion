@@ -1778,6 +1778,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
 	// conversation and query by ConversationID instead of Channel+ThreadID.
+	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
+	// return a typed 409 error so failures are observable, not silent.
 	var filter store.MessageFilter
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
 		var convResult *messaging.ConversationResult
@@ -1787,9 +1789,17 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// derivation path. A 7-part key silently deriving from the first 5
 			// would be an access path error after the S4 read-switch.
 			parts := strings.Split(key, ":")
-			if len(parts) == 5 {
-				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			if len(parts) != 5 {
+				// G3 / AC-G3-4: a DM key with a part count other than 5 is
+				// a parse failure, not a cache miss. Return a distinct error.
+				slog.Warn("read-switch: DM key has invalid part count",
+					"key", key, "parts", len(parts))
+				writeError(w, http.StatusConflict, ErrCodeInvalidDMKey,
+					fmt.Sprintf("DM key must have exactly 5 colon-separated parts, got %d", len(parts)),
+					nil)
+				return
 			}
+			convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
 		} else {
 			// Thread key — look up the topic to get the projectID for the external_ref.
 			if wcs != nil {
@@ -1803,13 +1813,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				ConversationID: convResult.ConversationID,
 			}
 		} else {
-			// Conversation not found — fall back to old path so we don't
-			// return an empty result for data written before dual-write.
-			messaging.DivergenceMetrics.IncFallback()
-			filter = store.MessageFilter{
-				Channel:  "web",
-				ThreadID: key,
-			}
+			// G3 / AC-G3-2,5: no fallback — return typed error.
+			slog.Warn("read-switch: conversation not resolved, returning error",
+				"key", key, "is_dm", isDM)
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+				"Conversation could not be resolved for this key; the read-switch is ON but no matching conversation record exists",
+				nil)
+			return
 		}
 	} else {
 		filter = store.MessageFilter{

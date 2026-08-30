@@ -83,6 +83,20 @@ const (
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// Conversation resolution error codes (Tranche G read-switch)
+
+	// ErrCodeConversationNotResolved is returned when the read-switch is ON
+	// but the conversation could not be resolved from the request parameters.
+	// This is a client-visible behaviour change: the endpoint returns a typed
+	// error instead of silently falling back to the legacy channel+thread
+	// filter. Status 409 — see G3 brief §3.
+	ErrCodeConversationNotResolved = "conversation_not_resolved"
+
+	// ErrCodeInvalidDMKey is returned when a DM key does not have exactly 5
+	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
+	// because this is a parse failure, not a lookup miss.
+	ErrCodeInvalidDMKey = "invalid_dm_key"
 )
 
 // writeError writes a JSON error response.

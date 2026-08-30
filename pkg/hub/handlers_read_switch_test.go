@@ -296,29 +296,34 @@ func TestReadSwitch_S1_DM_FlagOn_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S1_DM_FlagOn_ConversationNotFound(t *testing.T) {
+	// G3: with fallback removed, an unresolvable conversation returns 409
+	// with code "conversation_not_resolved" instead of falling back to the
+	// legacy channel+thread filter. (AC-G3-2)
 	srv, _ := testServer(t)
 	enableReadSwitch(t, srv)
 
 	agentUUID := tid("s1-agent-notfound")
 	key := makeDMKey(agentUUID, DevUserID)
-	// No conversation seeded → resolve returns nil → legacy fallback.
+	// No conversation seeded → resolve returns nil → typed error.
 
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("flag ON + not found: expected fallback delta 1, got %d", delta)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
 	}
 }
 
 func TestReadSwitch_S1_DM_SevenPartKey_FlagOn(t *testing.T) {
 	// A 7-part DM key must NOT derive a conversation from its first 5.
-	// The code requires len(parts) == 5 (strict parse, B-3). A key with 7
-	// colon-separated parts means convResult stays nil → legacy fallback.
+	// validDMKey's regex rejects keys with more than 5 colon-separated parts
+	// (the $ anchor enforces exactly 5), so the handler returns 400 before
+	// reaching the read-switch block.
 	//
 	// This is an access-control invariant: after the read-switch the DM key
 	// IS the ACL, so a tolerant parse that silently drops trailing parts
@@ -330,28 +335,10 @@ func TestReadSwitch_S1_DM_SevenPartKey_FlagOn(t *testing.T) {
 	// Build a 7-part key: dm:agent:<uuid>:user:<uuid>:extra:data
 	key := makeDMKey(agentUUID, DevUserID) + ":extra:data"
 
-	// The 7-part key still passes validDMKey's regex (which also allows
-	// longer keys), but isDMParticipant only checks parts[1..4], so auth
-	// passes. However, the strict len(parts)==5 check in the read-switch
-	// block means it takes the legacy path.
-	//
-	// Note: if validDMKey rejects 7-part keys, the handler returns 400
-	// before reaching the read-switch. That's also a valid pin — the
-	// important thing is it does NOT enter the conversation-resolve path.
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
-		// Accept either 200 (legacy fallback) or 400 (rejected by validDMKey).
-		if rec.Code != http.StatusOK && rec.Code != http.StatusBadRequest {
-			t.Fatalf("expected 200 or 400, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	// If the request was rejected at 400 before reaching the read-switch,
-	// fallback delta should be 0 (IncFallback never called).
-	// If it reached the read-switch and fell back, delta should be 1.
-	// Either outcome pins that a 7-part key never resolves a conversation.
-	if delta != 0 && delta != 1 {
-		t.Errorf("7-part key: expected fallback delta 0 or 1, got %d", delta)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	// validDMKey rejects the 7-part key → 400 Bad Request.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -413,6 +400,8 @@ func TestReadSwitch_S1_Thread_FlagOn_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S1_Thread_FlagOn_ConversationNotFound(t *testing.T) {
+	// G3: with fallback removed, an unresolvable thread conversation returns
+	// 409 with code "conversation_not_resolved". (AC-G3-2)
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
@@ -424,17 +413,18 @@ func TestReadSwitch_S1_Thread_FlagOn_ConversationNotFound(t *testing.T) {
 		threadKey: {ID: threadKey, ProjectID: projectID, Name: "test-thread"},
 	}}
 	srv.SetWebChatStore(wcs)
-	// No conversation seeded → resolve returns nil → legacy fallback.
+	// No conversation seeded → resolve returns nil → typed error.
 
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+threadKey+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("flag ON thread not found: expected fallback delta 1, got %d", delta)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+threadKey+"/messages", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
 	}
 }
 
@@ -526,22 +516,25 @@ func TestReadSwitch_S2_FlagOn_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S2_FlagOn_ConversationNotFound(t *testing.T) {
+	// G3: with fallback removed, an unresolvable conversation returns 409
+	// with code "conversation_not_resolved". (AC-G3-2)
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
 	projectID := rsProject(t, s, "s2-notfound-project")
 	agentID := rsAgent(t, s, "s2-agent-notfound", projectID)
-	// No conversation seeded → resolve returns nil → IncFallback().
+	// No conversation seeded → resolve returns nil → typed error.
 
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("flag ON + not found: expected fallback delta 1, got %d", delta)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
 	}
 }
 
@@ -725,6 +718,8 @@ func TestReadSwitch_S3_FlagOn_ThreadID_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S3_FlagOn_ThreadID_ConversationNotFound(t *testing.T) {
+	// G3: with fallback removed, an unresolvable thread conversation returns
+	// 409 with code "conversation_not_resolved". (AC-G3-2)
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
@@ -732,18 +727,19 @@ func TestReadSwitch_S3_FlagOn_ThreadID_ConversationNotFound(t *testing.T) {
 	agentID := rsAgent(t, s, "s3-agent-thread-notfound", projectID)
 
 	threadID := "s3-thread-" + tid("s3-thread-notfound")
-	// No conversation seeded → resolve returns nil → IncFallback().
+	// No conversation seeded → resolve returns nil → typed error.
 
-	delta := fallbackDelta(func() {
-		url := fmt.Sprintf("/api/v1/agents/%s/messages?thread_id=%s", agentID, threadID)
-		rec := doRequest(t, srv, http.MethodGet, url, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("flag ON thread not found: expected fallback delta 1, got %d", delta)
+	url := fmt.Sprintf("/api/v1/agents/%s/messages?thread_id=%s", agentID, threadID)
+	rec := doRequest(t, srv, http.MethodGet, url, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
 	}
 }
 
@@ -773,22 +769,25 @@ func TestReadSwitch_S3_FlagOn_DMDefault_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S3_FlagOn_DMDefault_ConversationNotFound(t *testing.T) {
+	// G3: with fallback removed, an unresolvable DM conversation returns
+	// 409 with code "conversation_not_resolved". (AC-G3-2)
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
 	projectID := rsProject(t, s, "s3-dm-notfound-project")
 	agentID := rsAgent(t, s, "s3-agent-dm-notfound", projectID)
-	// No conversation seeded → resolve returns nil → IncFallback().
+	// No conversation seeded → resolve returns nil → typed error.
 
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("flag ON DM not found: expected fallback delta 1, got %d", delta)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
 	}
 }
 
@@ -928,53 +927,21 @@ func TestReadSwitch_S3_FlagOn_Manager_WithExistingDM_LosesVisibility(t *testing.
 	}
 }
 
-func TestReadSwitch_S3_FlagOn_Manager_NoDM_RetainsVisibility(t *testing.T) {
-	// Control for the above test. When no DM conversation exists between
-	// the manager and the agent, ResolveDMConversationForRead returns nil,
-	// triggering IncFallback() and the legacy filter ({AgentID only}).
-	// The manager retains full visibility.
-	//
-	// This pins the intermittency: the defect only bites managers who
-	// already have a DM with the agent. A manager who has never chatted
-	// with the agent gets nil resolution and falls back to correct
-	// behaviour. Without this control, the WithExistingDM test cannot
-	// distinguish "the switch narrows managers" from "the fixture had no
-	// other messages."
+func TestReadSwitch_S3_FlagOn_Manager_NoDM_Returns409(t *testing.T) {
+	// G3 update of the original NoDM control. With fallback removed, a
+	// manager who has never chatted with the agent (no DM conversation row)
+	// now gets a 409 error instead of silently falling back to the legacy
+	// filter. This is the intended G3 behaviour: the fallback is gone, so
+	// BOTH the "with DM" and "without DM" cases surface an explicit signal
+	// rather than returning potentially wrong results. (AC-G3-2)
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
 	projectID := rsProject(t, s, "s3-mgr-nodm-project")
 	agentID := rsAgent(t, s, "s3-agent-mgr-nodm", projectID)
 
-	// Create another user who messages this agent.
-	otherUserID := tid("s3-other-user-nodm")
-	if err := s.CreateUser(context.Background(), &store.User{
-		ID: otherUserID, Email: "other-nodm@test.com", DisplayName: "Other NoDM",
-		Role: "member", Status: "active",
-	}); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
-
-	// Create a message from the other user to this agent.
-	otherMsg := &store.Message{
-		ID:          tid("s3-mgr-nodm-msg"),
-		ProjectID:   projectID,
-		Sender:      "user:" + otherUserID,
-		SenderID:    otherUserID,
-		Recipient:   "agent:" + agentID,
-		RecipientID: agentID,
-		AgentID:     agentID,
-		Msg:         "message from other user (no DM control)",
-		Type:        "instruction",
-		Channel:     "web",
-	}
-	if err := s.CreateMessage(context.Background(), otherMsg); err != nil {
-		t.Fatalf("CreateMessage (other): %v", err)
-	}
-
 	// Positive control: verify the dev user actually has manage on this
-	// agent — same guard as #22. Without this, an authz change could
-	// silently convert this into a non-manager test.
+	// agent — same guard as the sibling test.
 	agent, err := s.GetAgent(context.Background(), agentID)
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
@@ -983,41 +950,194 @@ func TestReadSwitch_S3_FlagOn_Manager_NoDM_RetainsVisibility(t *testing.T) {
 	manageDecision := srv.authzService.CheckAccess(context.Background(), devUser, agentResource(agent), ActionManage)
 	if !manageDecision.Allowed {
 		t.Fatalf("precondition failed: dev user does not have manage on agent — "+
-			"this test requires a manager caller to exercise DEF-64 (reason: %s)", manageDecision.Reason)
+			"this test requires a manager caller (reason: %s)", manageDecision.Reason)
 	}
 
-	// Do NOT seed a DM conversation for the manager. This is the control:
-	// without a DM row, ResolveDMConversationForRead returns nil, the code
-	// calls IncFallback, and falls back to the legacy filter that shows
-	// everything.
+	// Do NOT seed a DM conversation for the manager. G3: no DM → nil
+	// resolution → typed 409 error (no more fallback to legacy filter).
 
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
+	}
+}
 
-		var result store.ListResult[store.Message]
-		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
+// ==========================================================================
+// G3 Acceptance-Criteria Tests
+// ==========================================================================
 
-		// With no DM → fallback → legacy filter → manager sees everything.
-		found := false
-		for _, m := range result.Items {
-			if m.ID == otherMsg.ID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("control: manager should see other user's message " +
-				"when no DM exists (fallback to legacy filter), but did not")
-		}
-	})
+// AC-G3-1 — Regression: switch ON + resolvable conversation returns messages.
+// The per-site "Resolved" tests above already pin this for all three sites.
+// This dedicated test creates a message, resolves the conversation, and
+// verifies the message is returned unchanged.
+func TestG3_AC1_Regression_SwitchOn_Resolvable(t *testing.T) {
+	srv, s := testServer(t)
+	enableReadSwitch(t, srv)
 
-	// Fallback should fire: no DM → nil resolution → IncFallback.
-	if delta != 1 {
-		t.Errorf("no-DM control: expected fallback delta 1, got %d", delta)
+	projectID := rsProject(t, s, "g3-ac1-project")
+	agentID := rsAgent(t, s, "g3-ac1-agent", projectID)
+
+	// Seed a DM conversation and a message in it.
+	key := makeDMKey(agentID, DevUserID)
+	convID := seedConversation(t, s, "native", key, "direct")
+
+	msg := &store.Message{
+		ID:             tid("g3-ac1-msg"),
+		ProjectID:      projectID,
+		Sender:         "agent:" + agentID,
+		SenderID:       agentID,
+		Recipient:      "user:" + DevUserID,
+		RecipientID:    DevUserID,
+		AgentID:        agentID,
+		Msg:            "regression test message",
+		Type:           "output",
+		Channel:        "web",
+		ThreadID:       key,
+		ConversationID: convID,
+	}
+	if err := s.CreateMessage(context.Background(), msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// S1: conversation history
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("S1: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var histResp chatHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &histResp); err != nil {
+		t.Fatalf("S1: unmarshal: %v", err)
+	}
+	if len(histResp.Messages) == 0 {
+		t.Error("S1: expected at least 1 message, got 0")
+	}
+
+	// S2: messages by agent
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("S2: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// S3: agent messages
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("S3: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// AC-G3-3 — Switch OFF: behaviour is byte-for-byte unchanged.
+// With no OperationalSettings, all three sites use the legacy filter.
+func TestG3_AC3_SwitchOff_Unchanged(t *testing.T) {
+	srv, s := testServer(t)
+	// No enableReadSwitch → flag OFF.
+
+	projectID := rsProject(t, s, "g3-ac3-project")
+	agentID := rsAgent(t, s, "g3-ac3-agent", projectID)
+
+	// Create a message with the old-style filter fields.
+	key := makeDMKey(agentID, DevUserID)
+	msg := &store.Message{
+		ID:          tid("g3-ac3-msg"),
+		ProjectID:   projectID,
+		Sender:      "agent:" + agentID,
+		SenderID:    agentID,
+		Recipient:   "user:" + DevUserID,
+		RecipientID: DevUserID,
+		AgentID:     agentID,
+		Msg:         "switch-off test message",
+		Type:        "output",
+		Channel:     "web",
+		ThreadID:    key,
+	}
+	if err := s.CreateMessage(context.Background(), msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// S1: conversation history — old path (Channel=web, ThreadID=key).
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("S1 flag OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var histResp chatHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &histResp); err != nil {
+		t.Fatalf("S1: unmarshal: %v", err)
+	}
+	found := false
+	for _, m := range histResp.Messages {
+		if m.ID == msg.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("S1 flag OFF: expected to find the test message via legacy filter")
+	}
+
+	// S2: messages by agent — old path (no ConversationID in filter).
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("S2 flag OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// S3: agent messages — old path.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("S3 flag OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// AC-G3-4 — DM key with a part count other than 5 produces an explicit error
+// distinguishable from "no such conversation". validDMKey's regex catches
+// non-5-part keys at the HTTP layer (400 Bad Request), which is distinguishable
+// from the 409 conversation_not_resolved error. Test both too-few and too-many.
+func TestG3_AC4_DMKey_TooFewParts(t *testing.T) {
+	srv, _ := testServer(t)
+	enableReadSwitch(t, srv)
+
+	// 3-part key: dm:agent:<uuid> — missing the second participant.
+	key := "dm:agent:" + tid("g3-ac4-few")
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("too-few parts: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Verify the error is NOT conversation_not_resolved — it's a different
+	// failure mode (parse, not lookup).
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errResp.Error.Code == ErrCodeConversationNotResolved {
+		t.Errorf("too-few parts: error code should NOT be %q — this is a parse failure, not a lookup miss",
+			ErrCodeConversationNotResolved)
+	}
+}
+
+func TestG3_AC4_DMKey_TooManyParts(t *testing.T) {
+	srv, _ := testServer(t)
+	enableReadSwitch(t, srv)
+
+	// 7-part key: dm:agent:<uuid>:user:<uuid>:extra:data
+	key := makeDMKey(tid("g3-ac4-many"), DevUserID) + ":extra:data"
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("too-many parts: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Verify the error is NOT conversation_not_resolved.
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errResp.Error.Code == ErrCodeConversationNotResolved {
+		t.Errorf("too-many parts: error code should NOT be %q — this is a parse failure, not a lookup miss",
+			ErrCodeConversationNotResolved)
 	}
 }
