@@ -504,10 +504,9 @@ const agentDomainProjectID = "30000000-0000-0000-0000-0000000000d1"
 func seedAgentProject(t *testing.T, ctx context.Context, s store.Store) {
 	t.Helper()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:         agentDomainProjectID,
-		Name:       "agent-oracle-project",
-		Slug:       "agent-oracle-" + agentDomainProjectID[:8],
-		Visibility: "private",
+		ID:   agentDomainProjectID,
+		Name: "agent-oracle-project",
+		Slug: "agent-oracle-" + agentDomainProjectID[:8],
 	}))
 }
 

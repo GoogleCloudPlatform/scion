@@ -306,9 +306,8 @@ type Project struct {
 	Updated time.Time `json:"updated"`
 
 	// Ownership
-	CreatedBy  string `json:"createdBy,omitempty"`
-	OwnerID    string `json:"ownerId,omitempty"`
-	Visibility string `json:"visibility"` // private, team, public
+	CreatedBy string `json:"createdBy,omitempty"`
+	OwnerID   string `json:"ownerId,omitempty"`
 
 	// Configuration (stored as JSON)
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
@@ -2081,9 +2080,8 @@ func (g *Project) ToAPI() *api.ProjectInfo {
 		Updated: g.Updated,
 
 		// Ownership
-		CreatedBy:  g.CreatedBy,
-		OwnerID:    g.OwnerID,
-		Visibility: g.Visibility,
+		CreatedBy: g.CreatedBy,
+		OwnerID:   g.OwnerID,
 
 		// Metadata
 		Labels:      g.Labels,

@@ -108,7 +108,6 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		Updated:     p.Updated,
 		CreatedBy:   p.CreatedBy,
 		OwnerID:     p.OwnerID,
-		Visibility:  p.Visibility,
 	}
 	if p.GitRemote != nil {
 		sp.GitRemote = *p.GitRemote
@@ -153,9 +152,6 @@ func (s *ProjectStore) CreateProject(ctx context.Context, p *store.Project) erro
 		SetCreatedBy(p.CreatedBy).
 		SetOwnerID(p.OwnerID)
 
-	if p.Visibility != "" {
-		create.SetVisibility(p.Visibility)
-	}
 	if p.GitRemote != "" {
 		create.SetGitRemote(p.GitRemote)
 	}
@@ -191,9 +187,6 @@ func (s *ProjectStore) CreateProject(ctx context.Context, p *store.Project) erro
 
 	p.Created = created.Created
 	p.Updated = created.Updated
-	if p.Visibility == "" {
-		p.Visibility = created.Visibility
-	}
 	return nil
 }
 
@@ -295,8 +288,7 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 	update := s.client.Project.UpdateOneID(uid).
 		SetName(p.Name).
 		SetSlug(p.Slug).
-		SetOwnerID(p.OwnerID).
-		SetVisibility(p.Visibility)
+		SetOwnerID(p.OwnerID)
 
 	if p.GitRemote != "" {
 		update.SetGitRemote(p.GitRemote)
@@ -393,9 +385,6 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 
 	if filter.ExcludeOwnerID != "" {
 		query.Where(project.OwnerIDNEQ(filter.ExcludeOwnerID))
-	}
-	if filter.Visibility != "" {
-		query.Where(project.VisibilityEQ(filter.Visibility))
 	}
 	if filter.GitRemote != "" {
 		query.Where(project.GitRemoteEQ(filter.GitRemote))

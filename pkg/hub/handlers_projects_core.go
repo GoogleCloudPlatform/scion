@@ -52,7 +52,6 @@ type CreateProjectRequest struct {
 	Name          string            `json:"name"`
 	GitRemote     string            `json:"gitRemote,omitempty"`
 	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared", "worktree-per-agent", or "per-agent" (default); only meaningful when gitRemote is set
-	Visibility    string            `json:"visibility,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubToken   string            `json:"githubToken,omitempty"`
 }
@@ -138,12 +137,11 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.ProjectFilter{
-		OwnerID:    query.Get("ownerId"),
-		Visibility: query.Get("visibility"),
-		GitRemote:  util.NormalizeGitRemote(query.Get("gitRemote")),
-		BrokerID:   query.Get("brokerId"),
-		Name:       query.Get("name"),
-		Slug:       query.Get("slug"),
+		OwnerID:   query.Get("ownerId"),
+		GitRemote: util.NormalizeGitRemote(query.Get("gitRemote")),
+		BrokerID:  query.Get("brokerId"),
+		Name:      query.Get("name"),
+		Slug:      query.Get("slug"),
 	}
 
 	// Template filtering: default to excluding template projects.
@@ -368,16 +366,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := &store.Project{
-		ID:         projectID,
-		Name:       displayName,
-		Slug:       slug,
-		GitRemote:  normalizedRemote,
-		Labels:     req.Labels,
-		Visibility: req.Visibility,
-	}
-
-	if project.Visibility == "" {
-		project.Visibility = store.VisibilityPrivate
+		ID:        projectID,
+		Name:      displayName,
+		Slug:      slug,
+		GitRemote: normalizedRemote,
+		Labels:    req.Labels,
 	}
 
 	// Set ownership from authenticated user
@@ -1380,12 +1373,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		project = &store.Project{
-			ID:         projectID,
-			Name:       displayName,
-			Slug:       slug,
-			GitRemote:  normalizedRemote,
-			Labels:     req.Labels,
-			Visibility: store.VisibilityPrivate,
+			ID:        projectID,
+			Name:      displayName,
+			Slug:      slug,
+			GitRemote: normalizedRemote,
+			Labels:    req.Labels,
 		}
 
 		// Set ownership from authenticated user
@@ -2569,7 +2561,6 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		Name                   string            `json:"name,omitempty"`
 		Slug                   string            `json:"slug,omitempty"`
 		Labels                 map[string]string `json:"labels,omitempty"`
-		Visibility             string            `json:"visibility,omitempty"`
 		DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
 	}
 
@@ -2605,9 +2596,6 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	}
 	if updates.Labels != nil {
 		project.Labels = updates.Labels
-	}
-	if updates.Visibility != "" {
-		project.Visibility = updates.Visibility
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID

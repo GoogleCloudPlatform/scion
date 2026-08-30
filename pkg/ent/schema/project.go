@@ -71,8 +71,6 @@ func (Project) Fields() []ent.Field {
 			Optional(),
 		field.String("owner_id").
 			Optional(),
-		field.String("visibility").
-			Default("private"),
 		field.Int64("github_installation_id").
 			Optional().
 			Nillable(),

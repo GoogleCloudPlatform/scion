@@ -33,11 +33,10 @@ func ProjectDomain() Domain[store.Project] {
 		Make: func(seq int) *store.Project {
 			id := uuid.NewString()
 			return &store.Project{
-				ID:         id,
-				Name:       fmt.Sprintf("Project %d", seq),
-				Slug:       fmt.Sprintf("project-%d-%s", seq, id[:8]),
-				Visibility: store.VisibilityPrivate,
-				Labels:     map[string]string{"seq": fmt.Sprintf("%d", seq)},
+				ID:     id,
+				Name:   fmt.Sprintf("Project %d", seq),
+				Slug:   fmt.Sprintf("project-%d-%s", seq, id[:8]),
+				Labels: map[string]string{"seq": fmt.Sprintf("%d", seq)},
 			}
 		},
 		GetID: func(p *store.Project) string { return p.ID },
@@ -54,39 +53,19 @@ func ProjectDomain() Domain[store.Project] {
 			assert.Equal(t, want.ID, got.ID)
 			assert.Equal(t, want.Name, got.Name)
 			assert.Equal(t, want.Slug, got.Slug)
-			assert.Equal(t, want.Visibility, got.Visibility)
 			assert.False(t, got.Created.IsZero(), "Created timestamp should be set")
 		},
 		Mutate: func(p *store.Project) {
 			p.Name = "Renamed " + p.Name
-			p.Visibility = "public"
 		},
 		Update: func(ctx context.Context, s store.Store, p *store.Project) error {
 			return s.UpdateProject(ctx, p)
 		},
 		VerifyMutated: func(t *testing.T, got *store.Project) {
 			assert.Contains(t, got.Name, "Renamed ")
-			assert.Equal(t, "public", got.Visibility)
 		},
 		Delete: func(ctx context.Context, s store.Store, id string) error {
 			return s.DeleteProject(ctx, id)
-		},
-		Filters: []FilterCase[store.Project]{
-			{
-				Name: "ByVisibility",
-				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
-					require.NoError(t, s.CreateProject(ctx, &store.Project{
-						ID: uuid.NewString(), Name: "Public", Slug: "public-" + uuid.NewString()[:8], Visibility: "public",
-					}))
-					require.NoError(t, s.CreateProject(ctx, &store.Project{
-						ID: uuid.NewString(), Name: "Private", Slug: "private-" + uuid.NewString()[:8], Visibility: store.VisibilityPrivate,
-					}))
-				},
-				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Project], error) {
-					return s.ListProjects(ctx, store.ProjectFilter{Visibility: "public"}, store.ListOptions{})
-				},
-				WantCount: 1,
-			},
 		},
 	}
 }

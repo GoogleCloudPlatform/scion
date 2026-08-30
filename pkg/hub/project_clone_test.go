@@ -226,9 +226,6 @@ func TestProjectClone_HappyPath(t *testing.T) {
 	assert.Equal(t, DevUserID, clone.OwnerID)
 	assert.Equal(t, DevUserID, clone.CreatedBy)
 
-	// Visibility resets to private
-	assert.Equal(t, store.VisibilityPrivate, clone.Visibility)
-
 	// Settings annotations copied
 	assert.Equal(t, "claude-sonnet", clone.Annotations["scion.io/default-model"])
 	assert.Equal(t, "100", clone.Annotations["scion.io/default-max-turns"])
@@ -678,9 +675,6 @@ func TestProjectClone_AsTemplate_AdminOnly(t *testing.T) {
 
 	// Assert clone has scion.io/template: "true" label
 	assert.Equal(t, "true", clone.Labels[store.LabelTemplate])
-
-	// Assert clone visibility is "team"
-	assert.Equal(t, store.VisibilityTeam, clone.Visibility)
 }
 
 func TestProjectClone_AsTemplate_ScionIOLabelsStripped_WhenNoAsTemplate(t *testing.T) {
@@ -716,8 +710,6 @@ func TestProjectClone_AsTemplate_ScionIOLabelsStripped_WhenNoAsTemplate(t *testi
 	// Assert non-system label IS preserved
 	assert.Equal(t, "backend", clone.Labels["team"])
 
-	// Assert visibility resets to private (not inherited from source)
-	assert.Equal(t, store.VisibilityPrivate, clone.Visibility)
 }
 
 func TestProjectClone_StorageFilesCopied(t *testing.T) {

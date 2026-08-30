@@ -1160,10 +1160,6 @@ func init() {
 	project.DefaultUpdated = projectDescUpdated.Default.(func() time.Time)
 	// project.UpdateDefaultUpdated holds the default value on update for the updated field.
 	project.UpdateDefaultUpdated = projectDescUpdated.UpdateDefault.(func() time.Time)
-	// projectDescVisibility is the schema descriptor for visibility field.
-	projectDescVisibility := projectFields[12].Descriptor()
-	// project.DefaultVisibility holds the default value on creation for the visibility field.
-	project.DefaultVisibility = projectDescVisibility.Default.(string)
 	// projectDescID is the schema descriptor for id field.
 	projectDescID := projectFields[0].Descriptor()
 	// project.DefaultID holds the default value on creation for the id field.

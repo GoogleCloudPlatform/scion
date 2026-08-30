@@ -86,13 +86,12 @@ type projectService struct {
 
 // ListProjectsOptions configures project list filtering.
 type ListProjectsOptions struct {
-	Visibility string // Filter by visibility
-	GitRemote  string // Filter by git remote (exact or prefix)
-	BrokerID   string // Filter by contributing broker
-	Name       string // Filter by exact name (case-insensitive)
-	Slug       string // Filter by exact slug (case-insensitive)
-	Labels     map[string]string
-	Page       apiclient.PageOptions
+	GitRemote string // Filter by git remote (exact or prefix)
+	BrokerID  string // Filter by contributing broker
+	Name      string // Filter by exact name (case-insensitive)
+	Slug      string // Filter by exact slug (case-insensitive)
+	Labels    map[string]string
+	Page      apiclient.PageOptions
 }
 
 // ListProjectsResponse is the response from listing projects.
@@ -156,12 +155,11 @@ type ProjectMatch struct {
 
 // CreateProjectRequest is the request for creating a project without a broker.
 type CreateProjectRequest struct {
-	ID         string            `json:"id,omitempty"`
-	Slug       string            `json:"slug,omitempty"`
-	Name       string            `json:"name"`
-	GitRemote  string            `json:"gitRemote,omitempty"`
-	Visibility string            `json:"visibility,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	ID        string            `json:"id,omitempty"`
+	Slug      string            `json:"slug,omitempty"`
+	Name      string            `json:"name"`
+	GitRemote string            `json:"gitRemote,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 // UpdateProjectRequest is the request for updating a project.
@@ -170,7 +168,6 @@ type UpdateProjectRequest struct {
 	Slug                   string            `json:"slug,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 	Annotations            map[string]string `json:"annotations,omitempty"`
-	Visibility             string            `json:"visibility,omitempty"`
 	DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
 }
 
@@ -214,9 +211,6 @@ type AddProviderResponse struct {
 func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*ListProjectsResponse, error) {
 	query := url.Values{}
 	if opts != nil {
-		if opts.Visibility != "" {
-			query.Set("visibility", opts.Visibility)
-		}
 		if opts.GitRemote != "" {
 			query.Set("gitRemote", opts.GitRemote)
 		}

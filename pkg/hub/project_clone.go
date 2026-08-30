@@ -124,7 +124,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		Slug:                   slug,
 		GitRemote:              src.GitRemote,
 		DefaultRuntimeBrokerID: src.DefaultRuntimeBrokerID,
-		Visibility:             store.VisibilityPrivate,
 		CreatedBy:              callerID,
 		OwnerID:                callerID,
 		SharedDirs:             src.SharedDirs,
@@ -208,7 +207,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			clone.Labels = make(map[string]string)
 		}
 		clone.Labels[store.LabelTemplate] = "true"
-		clone.Visibility = store.VisibilityTeam
 	}
 
 	// ── Rollback stack ───────────────────────────────────────────────────

@@ -39,11 +39,10 @@ func newTestProjectStore(t *testing.T) *ProjectStore {
 func newProject(seq int) *store.Project {
 	id := uuid.NewString()
 	return &store.Project{
-		ID:         id,
-		Name:       "Project " + id[:8],
-		Slug:       "project-" + id[:8],
-		Visibility: store.VisibilityPrivate,
-		Labels:     map[string]string{"seq": id[:4]},
+		ID:     id,
+		Name:   "Project " + id[:8],
+		Slug:   "project-" + id[:8],
+		Labels: map[string]string{"seq": id[:4]},
 	}
 }
 
@@ -210,23 +209,15 @@ func TestProject_ListFilters(t *testing.T) {
 
 	owner := uuid.NewString()
 	pub := newProject(1)
-	pub.Visibility = "public"
 	pub.OwnerID = owner
 	require.NoError(t, ps.CreateProject(ctx, pub))
 
 	priv := newProject(2)
-	priv.Visibility = store.VisibilityPrivate
 	require.NoError(t, ps.CreateProject(ctx, priv))
 
 	all, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, all.TotalCount)
-
-	byVis, err := ps.ListProjects(ctx, store.ProjectFilter{Visibility: "public"}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, 1, byVis.TotalCount)
-	require.Len(t, byVis.Items, 1)
-	assert.Equal(t, pub.ID, byVis.Items[0].ID)
 
 	byOwner, err := ps.ListProjects(ctx, store.ProjectFilter{OwnerID: owner}, store.ListOptions{})
 	require.NoError(t, err)

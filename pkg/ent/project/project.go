@@ -37,8 +37,6 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
 	FieldOwnerID = "owner_id"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldGithubInstallationID holds the string denoting the github_installation_id field in the database.
 	FieldGithubInstallationID = "github_installation_id"
 	// FieldGithubPermissions holds the string denoting the github_permissions field in the database.
@@ -74,7 +72,6 @@ var Columns = []string{
 	FieldUpdated,
 	FieldCreatedBy,
 	FieldOwnerID,
-	FieldVisibility,
 	FieldGithubInstallationID,
 	FieldGithubPermissions,
 	FieldGithubAppStatus,
@@ -102,8 +99,6 @@ var (
 	DefaultUpdated func() time.Time
 	// UpdateDefaultUpdated holds the default value on update for the "updated" field.
 	UpdateDefaultUpdated func() time.Time
-	// DefaultVisibility holds the default value on creation for the "visibility" field.
-	DefaultVisibility string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -159,11 +154,6 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByOwnerID orders the results by the owner_id field.
 func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOwnerID, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByGithubInstallationID orders the results by the github_installation_id field.
