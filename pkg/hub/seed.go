@@ -821,6 +821,12 @@ func hubAdminPermissionIDs() []string {
 		"hub.project_defaults.update": true,
 		"hub.scheduler.read":          true,
 		"hub.scheduler.update":        true,
+		// Scheduled event management (hub-wide visibility and control)
+		"scheduled_event.read":   true,
+		"scheduled_event.list":   true,
+		"scheduled_event.create": true,
+		"scheduled_event.delete": true,
+		"scheduled_event.update": true,
 		"hub.federation.read":         true,
 		"hub.federation.update":       true,
 		"hub.teams_manifest.read":     true,

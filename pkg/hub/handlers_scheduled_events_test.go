@@ -468,6 +468,55 @@ func TestScheduledEvent_AdminUserAllowed(t *testing.T) {
 	})
 }
 
+func TestScheduledEvent_HubAdminCrossProjectAllowed(t *testing.T) {
+	srv, s, projectID := setupScheduledEventTest(t)
+	ctx := context.Background()
+
+	// Seed role definitions so the hub-admin role exists with the
+	// scheduled_event permissions we added to hubAdminPermissionIDs().
+	seedRoleDefinitions(ctx, s)
+
+	// Create a hub-admin user (role="member", not "admin") who is NOT a
+	// member of the target project. The only authority this user has over
+	// the project's scheduled events comes from the hub-admin role binding.
+	hubAdminUserID := tid("sched-hub-admin")
+	hubAdminUser := NewAuthenticatedUser(hubAdminUserID, "hubadmin@test.com", "Hub Admin", "member", "api")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          hubAdminUserID,
+		Email:       hubAdminUser.Email(),
+		DisplayName: hubAdminUser.DisplayName(),
+		Role:        "member",
+		Status:      "active",
+	}))
+
+	// Give the user a system-scoped hub-admin role binding.
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "hub-admin role definition must exist after seeding")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      hubAdminUserID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	require.NoError(t, err)
+
+	t.Run("list allowed", func(t *testing.T) {
+		rec := doScheduledEventUserRequest(t, srv, hubAdminUser, http.MethodGet, projectID, "", nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("create allowed", func(t *testing.T) {
+		req := CreateScheduledEventRequest{
+			EventType: "message",
+			FireIn:    "30m",
+			AgentName: "test-agent",
+			Message:   "Hello from hub admin",
+		}
+		rec := doScheduledEventUserRequest(t, srv, hubAdminUser, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+	})
+}
+
 func TestScheduledEvent_ProjectOwnerAllowed(t *testing.T) {
 	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()

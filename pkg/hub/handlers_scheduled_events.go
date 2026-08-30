@@ -92,7 +92,17 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 			writeForbidden(w, "")
 			return false
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, action)
+		// Pass the canonical permission ID so the role-binding check (step 3
+		// in checkAccessForUser) fires for hub-admin users who hold
+		// scheduled_event permissions through their system-scoped role.
+		permissionID := "scheduled_event." + string(action)
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   resource,
+			Action:     action,
+			Permission: permissionID,
+		})
 		if !decision.Allowed {
 			logAuthzDenial(r, identity, resource, action, decision.Reason)
 			writeForbidden(w, "You don't have permission to access scheduled events in this project")
