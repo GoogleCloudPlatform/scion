@@ -730,10 +730,23 @@ export class ScionProjectMembersEditor extends LitElement {
           this.changeMember.id &&
           !this.changeMember.id.includes('/')
         ) {
-          await apiFetch(
+          const deleteRes = await apiFetch(
             `/api/v1/admin/role-bindings/${this.changeMember.id}`,
             { method: 'DELETE' }
           );
+          if (!deleteRes.ok) {
+            // The new role is already active; warn but don't fail.
+            console.warn('Failed to delete old binding:', deleteRes.status);
+            this.actionFeedback = {
+              message:
+                'Role updated but the old binding could not be removed. You may need to remove it manually.',
+              variant: 'warning',
+            };
+            this.changeDialogOpen = false;
+            this.changeMember = null;
+            void this.loadData();
+            return;
+          }
         }
       }
 
@@ -1031,7 +1044,7 @@ export class ScionProjectMembersEditor extends LitElement {
                       ></sl-icon-button>
                       ${lastOwner
                         ? html`<sl-tooltip
-                            content="Last direct owner — cannot remove"
+                            content="Last direct owner — cannot change role or remove"
                           >
                             <sl-icon
                               name="shield-lock"
