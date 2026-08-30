@@ -867,6 +867,23 @@ func TestReadSwitch_S3_FlagOn_Manager_WithExistingDM_LosesVisibility(t *testing.
 		t.Fatalf("CreateMessage (other): %v", err)
 	}
 
+	// Positive control: verify the dev user actually has manage on this
+	// agent. If this fails, the visibility assertions below are testing a
+	// non-manager path and proving nothing about DEF-64. An unrelated
+	// change to admin role resolution would silently convert this test
+	// into a non-manager test without any assertion failing — this guard
+	// prevents that.
+	agent, err := s.GetAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("GetAgent: %v", err)
+	}
+	devUser := NewDevUser(DevUserConfig{})
+	manageDecision := srv.authzService.CheckAccess(context.Background(), devUser, agentResource(agent), ActionManage)
+	if !manageDecision.Allowed {
+		t.Fatalf("precondition failed: dev user does not have manage on agent — "+
+			"this test requires a manager caller to exercise DEF-64 (reason: %s)", manageDecision.Reason)
+	}
+
 	// Seed the manager's (dev user's) DM conversation with this agent.
 	// This is the trigger: without this row, the resolve returns nil and
 	// falls back to the correct (unscoped) behaviour.
@@ -948,6 +965,20 @@ func TestReadSwitch_S3_FlagOn_Manager_NoDM_RetainsVisibility(t *testing.T) {
 	}
 	if err := s.CreateMessage(context.Background(), otherMsg); err != nil {
 		t.Fatalf("CreateMessage (other): %v", err)
+	}
+
+	// Positive control: verify the dev user actually has manage on this
+	// agent — same guard as #22. Without this, an authz change could
+	// silently convert this into a non-manager test.
+	agent, err := s.GetAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("GetAgent: %v", err)
+	}
+	devUser := NewDevUser(DevUserConfig{})
+	manageDecision := srv.authzService.CheckAccess(context.Background(), devUser, agentResource(agent), ActionManage)
+	if !manageDecision.Allowed {
+		t.Fatalf("precondition failed: dev user does not have manage on agent — "+
+			"this test requires a manager caller to exercise DEF-64 (reason: %s)", manageDecision.Reason)
 	}
 
 	// Do NOT seed a DM conversation for the manager. This is the control:
