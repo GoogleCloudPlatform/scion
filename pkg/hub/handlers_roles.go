@@ -592,8 +592,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 }
 
 func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
+	ctx := r.Context()
+
 	// Verify the binding exists before deleting.
-	_, err := s.store.GetRoleBinding(r.Context(), id)
+	binding, err := s.store.GetRoleBinding(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
@@ -603,7 +605,25 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	if err := s.store.DeleteRoleBinding(r.Context(), id); err != nil {
+	// PM1: last-owner protection — cannot delete the last direct-user
+	// project-owner binding. Every project must retain at least one.
+	if binding.ScopeType == store.RoleScopeProject && binding.PrincipalType == store.RoleBindingPrincipalUser {
+		roleDef, rdErr := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		if rdErr == nil && binding.RoleDefinitionID == roleDef.ID {
+			ownerCount, countErr := s.countDirectOwnerBindings(ctx, binding.ScopeID)
+			if countErr != nil {
+				writeErrorFromErr(w, countErr, "")
+				return
+			}
+			if ownerCount <= 1 {
+				writeError(w, http.StatusConflict, "LAST_OWNER",
+					"Cannot remove the last project owner — every project must retain at least one direct user owner", nil)
+				return
+			}
+		}
+	}
+
+	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
 			return
