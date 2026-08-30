@@ -165,6 +165,24 @@ func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	return entRoleDefinitionToStore(updated), nil
 }
 
+// UpdateSystemRoleDefinitionPermissions updates the permissions list of a
+// system role definition. Unlike UpdateRoleDefinition, this method bypasses
+// the system-role guard and is intended for startup backfill operations.
+func (r *RoleStore) UpdateSystemRoleDefinitionPermissions(ctx context.Context, id string, permissions []string) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.client.RoleDefinition.UpdateOneID(uid).
+		SetPermissions(permissions).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // DeleteRoleDefinition deletes a role definition by ID.
 // System roles (System == true) cannot be deleted.
 // Returns an error if any bindings reference the role.

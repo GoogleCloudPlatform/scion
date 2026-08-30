@@ -1385,6 +1385,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
 	seedRoleDefinitions(ctx, s)
 
+	// Backfill hub-admin role permissions. Existing deployments may have a
+	// hub-admin role definition that predates the scheduled_event.* permissions.
+	// Must run after seedRoleDefinitions so the role definition exists.
+	backfillHubAdminRolePermissions(ctx, s)
+
 	// Seed system limit definitions for the quota/limits subsystem (Phase 2B).
 	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.
 	seedLimitDefinitions(ctx, s)

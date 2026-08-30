@@ -582,6 +582,51 @@ func ensureProjectScheduledEventPolicy(ctx context.Context, s store.Store, proje
 			"project_id", project.ID, "policy", name, "error", err.Error())
 	}
 }
+
+// backfillHubAdminRolePermissions ensures the hub-admin role definition
+// includes all permissions from hubAdminPermissionIDs(). Existing deployments
+// may have a hub-admin role that predates the scheduled_event.* permissions;
+// this backfill adds them without removing any permissions an operator may have
+// customised. It is idempotent and follows the log-and-continue pattern used by
+// backfillProjectAssignPolicies.
+func backfillHubAdminRolePermissions(ctx context.Context, s store.Store) {
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	if err != nil {
+		slog.Warn("failed to look up hub-admin role definition for permission backfill", "error", err)
+		return
+	}
+
+	desired := hubAdminPermissionIDs()
+
+	// Build a set of current permissions for O(1) lookup.
+	current := make(map[string]bool, len(rd.Permissions))
+	for _, p := range rd.Permissions {
+		current[p] = true
+	}
+
+	// Compute missing permissions (additive only — never remove).
+	var missing []string
+	for _, p := range desired {
+		if !current[p] {
+			missing = append(missing, p)
+		}
+	}
+
+	if len(missing) == 0 {
+		return // nothing to do
+	}
+
+	updated := make([]string, len(rd.Permissions), len(rd.Permissions)+len(missing))
+	copy(updated, rd.Permissions)
+	updated = append(updated, missing...)
+
+	if err := s.UpdateSystemRoleDefinitionPermissions(ctx, rd.ID, updated); err != nil {
+		slog.Warn("failed to backfill hub-admin role permissions", "error", err)
+		return
+	}
+	slog.Info("backfilled hub-admin role permissions", "added", missing)
+}
+
 // seedPolicyTombstoneKey returns the hub-setting key used to record that a
 // seeded policy was intentionally deleted by an operator.
 func seedPolicyTombstoneKey(policyName string) string {

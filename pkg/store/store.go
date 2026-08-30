@@ -1712,6 +1712,12 @@ type RoleStore interface {
 	// Returns ErrNotFound if the role definition doesn't exist.
 	UpdateRoleDefinition(ctx context.Context, rd *RoleDefinition) (*RoleDefinition, error)
 
+	// UpdateSystemRoleDefinitionPermissions updates only the permissions list of
+	// a system role definition. Unlike UpdateRoleDefinition, this method allows
+	// modifying system roles and is intended for startup backfill operations.
+	// Returns ErrNotFound if the role definition doesn't exist.
+	UpdateSystemRoleDefinitionPermissions(ctx context.Context, id string, permissions []string) error
+
 	// DeleteRoleDefinition deletes a role definition by ID.
 	// Returns ErrNotFound if the role definition doesn't exist.
 	DeleteRoleDefinition(ctx context.Context, id string) error
