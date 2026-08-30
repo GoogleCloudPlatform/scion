@@ -48,7 +48,6 @@ func seedBackfillProject(t *testing.T, ctx context.Context, s store.Store) strin
 		ID:         projectID,
 		Name:       "backfill-test",
 		Slug:       "backfill-test-" + projectID[:8],
-		Visibility: "private",
 	})
 	require.NoError(t, err)
 	return projectID
