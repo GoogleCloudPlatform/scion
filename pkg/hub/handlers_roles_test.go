@@ -629,6 +629,53 @@ func TestRolesAPI_CreateRoleBinding_GroupPrincipal_NotFound(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "group not found")
 }
 
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal_BySlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create a group with a known slug.
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("slug-resolve-group"), Slug: "my-team-slug", Name: "Slug Resolve Group",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "slug-resolve-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Use the slug as principalId — should resolve to the UUID.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      "my-team-slug",
+		ScopeType:        "system",
+	})
+
+	assert.Equal(t, "group", binding.PrincipalType)
+	assert.Equal(t, tid("slug-resolve-group"), binding.PrincipalID, "principalId should be resolved to UUID")
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal_NeitherUUIDNorSlug(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "neither-uuid-nor-slug-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// A non-UUID string that also doesn't match any slug.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      "nonexistent-slug",
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "group not found")
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Update role definition with invalid permissions
 // ---------------------------------------------------------------------------

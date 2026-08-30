@@ -1156,8 +1156,10 @@ func (a *AuthzService) getAllRoleBindings(ctx context.Context, principalType, pr
 		return bindings, nil
 	}
 	if err != nil {
-		a.logger.Warn("failed to get effective groups for role binding expansion",
-			"principalType", principalType, "principalID", principalID, "error", err)
+		if !errors.Is(err, store.ErrNotFound) {
+			a.logger.Warn("failed to get effective groups for role binding expansion",
+				"principalType", principalType, "principalID", principalID, "error", err)
+		}
 		return bindings, nil // Fall back to direct bindings only.
 	}
 
