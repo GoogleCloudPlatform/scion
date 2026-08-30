@@ -25,12 +25,12 @@ import (
 // every divergence board response. They are constant — the board's structural
 // limitations do not change at runtime.
 type divergenceBoardCaveats struct {
-	Scope                      string `json:"scope"`
-	ScopeDetail                string `json:"scope_detail"`
-	MismatchComposition        string `json:"mismatch_composition"`
-	ConsistencyCheckFailsOpen  string `json:"consistency_check_fails_open"`
-	NotGoNoGo                  string `json:"not_go_no_go"`
-	CounterSnapshot            string `json:"counter_snapshot"`
+	Scope                     string `json:"scope"`
+	ScopeDetail               string `json:"scope_detail"`
+	MismatchComposition       string `json:"mismatch_composition"`
+	ConsistencyCheckFailsOpen string `json:"consistency_check_fails_open"`
+	NotGoNoGo                 string `json:"not_go_no_go"`
+	CounterSnapshot           string `json:"counter_snapshot"`
 }
 
 // divergenceBoardResponse is the JSON shape returned by
