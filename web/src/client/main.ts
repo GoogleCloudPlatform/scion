@@ -32,6 +32,12 @@ import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-route
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
+import {
+  type AdminStatus,
+  hasAnyPermission,
+  ROUTE_PERMISSION_MAP,
+  SUPERADMIN_ROUTES,
+} from '../lib/admin-permissions.js';
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -129,19 +135,25 @@ let ssrPageData: PageData | null = null;
  * Cached admin-status flags, fetched once on init from
  * GET /api/v1/auth/admin-status. Used by the route guard to allow
  * hub-admin users (not just super-admins) to access admin pages.
+ * Includes the permissions array for per-route permission checks.
  */
-let cachedAdminStatus: { isAdmin: boolean; isSuperAdmin: boolean } | null = null;
+let cachedAdminStatus: AdminStatus | null = null;
 
 /**
  * Fetch the current user's admin status from the backend.
  * Returns null when the user is not authenticated or the fetch fails.
+ * Includes the permissions array for per-resource permission checks.
  */
-async function fetchAdminStatus(): Promise<{ isAdmin: boolean; isSuperAdmin: boolean } | null> {
+async function fetchAdminStatus(): Promise<AdminStatus | null> {
   try {
     const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
     if (!res.ok) return null;
     const data = await res.json();
-    return { isAdmin: data.isAdmin === true, isSuperAdmin: data.isSuperAdmin === true };
+    return {
+      isAdmin: data.isAdmin === true,
+      isSuperAdmin: data.isSuperAdmin === true,
+      permissions: Array.isArray(data.permissions) ? data.permissions : [],
+    };
   } catch {
     return null;
   }
@@ -807,11 +819,24 @@ async function renderRoute(path: string): Promise<void> {
   // than being cached for the entire SPA lifetime. The init-time fetch
   // remains for nav.ts's initial render; this call replaces the cache so
   // the route guard always uses a fresh result.
+  //
+  // Per-route permission checks: super-admin-only routes (Diagnostics,
+  // Maintenance) require isSuperAdmin; other admin routes require at least
+  // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
     cachedAdminStatus = await fetchAdminStatus();
-    if (!(cachedAdminStatus?.isAdmin)) {
-      navigateTo('/');
-      return;
+
+    if (SUPERADMIN_ROUTES.has(tag)) {
+      if (!cachedAdminStatus?.isSuperAdmin) {
+        navigateTo('/');
+        return;
+      }
+    } else {
+      const requiredPerms = ROUTE_PERMISSION_MAP[tag];
+      if (!requiredPerms || !hasAnyPermission(cachedAdminStatus, requiredPerms)) {
+        navigateTo('/');
+        return;
+      }
     }
   }
 
