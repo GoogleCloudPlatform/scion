@@ -18,6 +18,8 @@ import (
 	"math/rand"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -1080,5 +1082,308 @@ func TestConstraintAllowsPermission(t *testing.T) {
 	}
 	if _, ok := set["agent.delete"]; ok {
 		t.Fatal("agent.delete should not be in permission set")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lockout prevention: userBlockedByConstraints tests
+// ---------------------------------------------------------------------------
+
+func TestConstraint_UserBlockedByConstraints(t *testing.T) {
+	s := &Server{} // zero-value; userBlockedByConstraints doesn't use server fields
+
+	ptrS := func(s string) *string { return &s }
+
+	cases := []struct {
+		name        string
+		user        adminUserInfo
+		constraints []*store.AccessConstraint
+		blocked     bool
+	}{
+		{
+			name:        "no restricting constraints",
+			user:        adminUserInfo{userID: "user1"},
+			constraints: nil,
+			blocked:     false,
+		},
+		{
+			name: "all_principals blocks everyone",
+			user: adminUserInfo{userID: "user1"},
+			constraints: []*store.AccessConstraint{
+				{SubjectKind: store.ConstraintSubjectAllPrincipals},
+			},
+			blocked: true,
+		},
+		{
+			name: "principal constraint targeting this user",
+			user: adminUserInfo{userID: "user1"},
+			constraints: []*store.AccessConstraint{
+				{
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: ptrS("user"),
+					SubjectPrincipalID:   ptrS("user1"),
+				},
+			},
+			blocked: true,
+		},
+		{
+			name: "principal constraint targeting different user",
+			user: adminUserInfo{userID: "user1"},
+			constraints: []*store.AccessConstraint{
+				{
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: ptrS("user"),
+					SubjectPrincipalID:   ptrS("user2"),
+				},
+			},
+			blocked: false,
+		},
+		{
+			name: "group_closure targeting user's group",
+			user: adminUserInfo{userID: "user1", groupIDs: []string{"admins-group"}},
+			constraints: []*store.AccessConstraint{
+				{
+					SubjectKind:    store.ConstraintSubjectGroupClosure,
+					SubjectGroupID: ptrS("admins-group"),
+				},
+			},
+			blocked: true,
+		},
+		{
+			name: "group_closure targeting different group",
+			user: adminUserInfo{userID: "user1", groupIDs: []string{"admins-group"}},
+			constraints: []*store.AccessConstraint{
+				{
+					SubjectKind:    store.ConstraintSubjectGroupClosure,
+					SubjectGroupID: ptrS("other-group"),
+				},
+			},
+			blocked: false,
+		},
+		{
+			name: "principal targeting group in user's closure",
+			user: adminUserInfo{userID: "user1", groupIDs: []string{"admins-group"}},
+			constraints: []*store.AccessConstraint{
+				{
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: ptrS("group"),
+					SubjectPrincipalID:   ptrS("admins-group"),
+				},
+			},
+			blocked: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := s.userBlockedByConstraints(nil, tc.user, tc.constraints)
+			if got != tc.blocked {
+				t.Fatalf("userBlockedByConstraints() = %v, want %v", got, tc.blocked)
+			}
+		})
+	}
+}
+
+// TestConstraint_LockoutScenario_PrincipalTargetingSoleAdmin verifies that
+// a principal-kind constraint targeting the sole constraint-admin user is
+// detected as a lockout (R1 scenario 1).
+func TestConstraint_LockoutScenario_PrincipalTargetingSoleAdmin(t *testing.T) {
+	s := &Server{}
+	ptrS := func(s string) *string { return &s }
+
+	// Sole admin user.
+	admin := adminUserInfo{userID: "sole-admin"}
+
+	// Constraint targets that sole admin and removes constraint-admin.
+	constraints := []*store.AccessConstraint{
+		{
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: ptrS("user"),
+			SubjectPrincipalID:   ptrS("sole-admin"),
+		},
+	}
+
+	// The admin should be blocked.
+	if !s.userBlockedByConstraints(nil, admin, constraints) {
+		t.Fatal("sole admin should be blocked by principal constraint targeting them")
+	}
+}
+
+// TestConstraint_LockoutScenario_GroupClosureAllAdmins verifies that a
+// group_closure constraint targeting a group containing all admin users
+// is detected as a lockout (R1 scenario 2).
+func TestConstraint_LockoutScenario_GroupClosureAllAdmins(t *testing.T) {
+	s := &Server{}
+	ptrS := func(s string) *string { return &s }
+
+	// Both admins are in the same group.
+	admin1 := adminUserInfo{userID: "admin1", groupIDs: []string{"ops-team"}}
+	admin2 := adminUserInfo{userID: "admin2", groupIDs: []string{"ops-team"}}
+
+	// Constraint targets the group containing all admins.
+	constraints := []*store.AccessConstraint{
+		{
+			SubjectKind:    store.ConstraintSubjectGroupClosure,
+			SubjectGroupID: ptrS("ops-team"),
+		},
+	}
+
+	// Both admins should be blocked.
+	if !s.userBlockedByConstraints(nil, admin1, constraints) {
+		t.Fatal("admin1 should be blocked by group_closure targeting ops-team")
+	}
+	if !s.userBlockedByConstraints(nil, admin2, constraints) {
+		t.Fatal("admin2 should be blocked by group_closure targeting ops-team")
+	}
+}
+
+// TestConstraint_LockoutScenario_CombinedPrincipalConstraints verifies that
+// a combination of principal constraints blocking all admins is detected
+// (R1 scenario 3).
+func TestConstraint_LockoutScenario_CombinedPrincipalConstraints(t *testing.T) {
+	s := &Server{}
+	ptrS := func(s string) *string { return &s }
+
+	admin1 := adminUserInfo{userID: "admin1"}
+	admin2 := adminUserInfo{userID: "admin2"}
+	admins := []adminUserInfo{admin1, admin2}
+
+	// Two separate constraints, each targeting one admin.
+	constraints := []*store.AccessConstraint{
+		{
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: ptrS("user"),
+			SubjectPrincipalID:   ptrS("admin1"),
+		},
+		{
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: ptrS("user"),
+			SubjectPrincipalID:   ptrS("admin2"),
+		},
+	}
+
+	// Both admins should be blocked individually.
+	allBlocked := true
+	for _, admin := range admins {
+		if !s.userBlockedByConstraints(nil, admin, constraints) {
+			allBlocked = false
+			break
+		}
+	}
+	if !allBlocked {
+		t.Fatal("all admins should be blocked by combined principal constraints")
+	}
+}
+
+// TestConstraint_LockoutSurvival_OneAdminUnaffected verifies that when
+// multiple admins exist and only some are targeted, the operation is allowed.
+func TestConstraint_LockoutSurvival_OneAdminUnaffected(t *testing.T) {
+	s := &Server{}
+	ptrS := func(s string) *string { return &s }
+
+	admin1 := adminUserInfo{userID: "admin1"}
+	admin2 := adminUserInfo{userID: "admin2"}
+
+	// Only admin1 is targeted.
+	constraints := []*store.AccessConstraint{
+		{
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: ptrS("user"),
+			SubjectPrincipalID:   ptrS("admin1"),
+		},
+	}
+
+	// admin1 is blocked, but admin2 survives.
+	if !s.userBlockedByConstraints(nil, admin1, constraints) {
+		t.Fatal("admin1 should be blocked")
+	}
+	if s.userBlockedByConstraints(nil, admin2, constraints) {
+		t.Fatal("admin2 should NOT be blocked")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Blast-radius preview: ConstraintPreview type tests
+// ---------------------------------------------------------------------------
+
+func TestConstraintPreview_Truncated(t *testing.T) {
+	// Verify the Truncated field exists and works as expected.
+	preview := ConstraintPreview{
+		ConstraintID:   "c1",
+		ConstraintName: "test",
+		AffectedPrincipals: []AffectedPrincipal{
+			{
+				PrincipalType: "all",
+				PrincipalID:   "*",
+				DisplayName:   "All principals",
+			},
+		},
+		RestrictedPermissions: []string{"agent.create"},
+		Truncated:             true,
+	}
+
+	if !preview.Truncated {
+		t.Fatal("expected Truncated to be true")
+	}
+}
+
+func TestAffectedPrincipal_PermissionDelta(t *testing.T) {
+	// Verify the AffectedPrincipal fields compute correctly.
+	ap := AffectedPrincipal{
+		PrincipalType:      "user",
+		PrincipalID:        "user1",
+		CurrentPermissions: []string{"agent.read", "agent.create", "agent.delete"},
+		ProposedPermissions: []string{"agent.read"},
+		RemovedPermissions:  []string{"agent.create", "agent.delete"},
+	}
+
+	// Verify proposed is a subset of current.
+	currentSet := make(map[string]bool)
+	for _, p := range ap.CurrentPermissions {
+		currentSet[p] = true
+	}
+	for _, p := range ap.ProposedPermissions {
+		if !currentSet[p] {
+			t.Fatalf("proposed permission %q not in current set", p)
+		}
+	}
+
+	// Verify removed = current - proposed.
+	proposedSet := make(map[string]bool)
+	for _, p := range ap.ProposedPermissions {
+		proposedSet[p] = true
+	}
+	for _, p := range ap.RemovedPermissions {
+		if proposedSet[p] {
+			t.Fatalf("removed permission %q is also in proposed set", p)
+		}
+		if !currentSet[p] {
+			t.Fatalf("removed permission %q not in current set", p)
+		}
+	}
+
+	// Verify no permission is missing.
+	accounted := len(ap.ProposedPermissions) + len(ap.RemovedPermissions)
+	if accounted != len(ap.CurrentPermissions) {
+		t.Fatalf("proposed (%d) + removed (%d) != current (%d)",
+			len(ap.ProposedPermissions), len(ap.RemovedPermissions), len(ap.CurrentPermissions))
+	}
+}
+
+// TestConstraint_StoreAllowsPermission tests the constraintAllowsPermission
+// helper against the store model.
+func TestConstraint_StoreAllowsPermission(t *testing.T) {
+	c := &store.AccessConstraint{
+		MaximumPermissions: []string{"agent.read", "access_constraint.admin"},
+	}
+
+	if !constraintAllowsPermission(c, "access_constraint.admin") {
+		t.Fatal("should allow access_constraint.admin")
+	}
+	if !constraintAllowsPermission(c, "agent.read") {
+		t.Fatal("should allow agent.read")
+	}
+	if constraintAllowsPermission(c, "agent.create") {
+		t.Fatal("should NOT allow agent.create")
 	}
 }

@@ -284,6 +284,11 @@ type ConstraintPreview struct {
 	// RestrictedPermissions lists permissions that would be removed from
 	// at least one principal's effective set.
 	RestrictedPermissions []string `json:"restrictedPermissions"`
+
+	// Truncated is true when the affected principals list is incomplete
+	// (e.g., for all_principals constraints where enumerating every
+	// principal is not feasible).
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // AffectedPrincipal describes how a constraint affects one principal.

@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -247,7 +249,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 
 	// Lockout prevention: after this constraint is created, at least one active
 	// direct user must retain constraint-admin permission at this scope.
-	if err := s.checkConstraintLockout(r, sc, false); err != nil {
+	if err := s.checkConstraintLockout(r, sc); err != nil {
 		writeForbidden(w, "lockout prevention: "+err.Error())
 		return
 	}
@@ -337,7 +339,11 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		existing.ScopeID = scope.ID
 	}
 
-	if len(req.MaximumPermissions) > 0 {
+	if req.MaximumPermissions != nil {
+		if len(req.MaximumPermissions) == 0 {
+			BadRequest(w, "maximumPermissions must contain at least one permission")
+			return
+		}
 		if err := validatePermissionIDs(req.MaximumPermissions); err != nil {
 			BadRequest(w, err.Error())
 			return
@@ -351,7 +357,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Lockout prevention check.
-	if err := s.checkConstraintLockout(r, existing, false); err != nil {
+	if err := s.checkConstraintLockout(r, existing); err != nil {
 		writeForbidden(w, "lockout prevention: "+err.Error())
 		return
 	}
@@ -442,21 +448,45 @@ func (s *Server) requireConstraintAdminPermission(w http.ResponseWriter, r *http
 // at least one active direct user retains constraint-admin permission at the
 // relevant scope.
 //
-// The check evaluates time conditions in their most restrictive state: a
-// scheduled constraint that is not yet active is treated as if it were active,
-// because it will eventually become active and the lockout check must account
-// for that future state.
-func (s *Server) checkConstraintLockout(r *http.Request, proposed *store.AccessConstraint, isDelete bool) error {
-	// If the proposed constraint does not restrict the constraint-admin
-	// permission, it cannot cause a lockout.
-	if !isDelete {
-		if constraintAllowsPermission(proposed, PermissionConstraintAdmin) {
-			return nil
-		}
+// The algorithm:
+//  1. Resolve all direct users who currently hold access_constraint.admin at
+//     this scope via role bindings (including group-expanded bindings).
+//  2. Load all constraints at this scope, merge in the proposed change.
+//  3. For each admin user, simulate the full constraint set against that
+//     user's principal closure. If any constraint (in its most-restrictive
+//     time state) would remove access_constraint.admin, the user is blocked.
+//  4. If at least one admin user survives unconstrained, the operation is
+//     allowed. If none survive, reject.
+func (s *Server) checkConstraintLockout(r *http.Request, proposed *store.AccessConstraint) error {
+	ctx := r.Context()
+
+	// Fast path: if the proposed constraint allows constraint-admin, it
+	// cannot cause a lockout by itself. We still need to check combined
+	// state though — another existing constraint might already be blocking
+	// admin, and this change could close the last remaining gap.
+	// However, if the proposed constraint allows admin AND is a new creation
+	// (ID is empty), it strictly cannot make things worse. Skip.
+	if proposed.ID == "" && constraintAllowsPermission(proposed, PermissionConstraintAdmin) {
+		return nil
 	}
 
-	// Load all constraints at this scope to compute the combined state.
-	constraints, err := s.store.ListConstraintsForScope(r.Context(), proposed.ScopeType, proposed.ScopeID)
+	// Step 1: Find all direct users with constraint-admin at this scope.
+	adminUsers, err := s.resolveConstraintAdminUsers(ctx, proposed.ScopeType, proposed.ScopeID)
+	if err != nil {
+		slog.Warn("lockout check: failed to resolve admin users", "error", err)
+		return errors.New("failed to resolve constraint admin users for lockout check")
+	}
+
+	if len(adminUsers) == 0 {
+		// No admin users found — this is already a degraded state.
+		// Allow the operation rather than blocking everything.
+		slog.Warn("lockout check: no constraint admin users found at scope",
+			"scopeType", proposed.ScopeType, "scopeID", proposed.ScopeID)
+		return nil
+	}
+
+	// Step 2: Load all constraints at this scope and merge proposed change.
+	constraints, err := s.store.ListConstraintsForScope(ctx, proposed.ScopeType, proposed.ScopeID)
 	if err != nil {
 		return errors.New("failed to load existing constraints for lockout check")
 	}
@@ -470,19 +500,18 @@ func (s *Server) checkConstraintLockout(r *http.Request, proposed *store.AccessC
 			break
 		}
 	}
-	if !found && !isDelete {
+	if !found {
 		constraints = append(constraints, proposed)
 	}
 
-	// Check if any constraint with an all_principals subject would remove
-	// constraint-admin. This is the lockout scenario.
+	// Filter to constraints that would be active in most-restrictive state
+	// and that remove constraint-admin.
 	now := time.Now()
+	var restrictingConstraints []*store.AccessConstraint
 	for _, c := range constraints {
 		if c.Disabled {
 			continue
 		}
-
-		// Check most restrictive state for time conditions.
 		condition := ConstraintCondition{}
 		if c.NotBefore != nil {
 			condition.NotBefore = *c.NotBefore
@@ -493,19 +522,155 @@ func (s *Server) checkConstraintLockout(r *http.Request, proposed *store.AccessC
 		if !condition.IsActiveInMostRestrictiveState(now) {
 			continue
 		}
-
-		// Check if this constraint removes constraint-admin.
 		if constraintAllowsPermission(c, PermissionConstraintAdmin) {
-			continue // Constraint allows admin — no lockout risk from this one.
+			continue // This constraint does not restrict admin.
 		}
+		restrictingConstraints = append(restrictingConstraints, c)
+	}
 
-		// This constraint removes constraint-admin. Check if it targets everyone.
-		if c.SubjectKind == store.ConstraintSubjectAllPrincipals {
-			return errors.New("constraint would remove constraint-admin permission from all principals at this scope; at least one direct user must retain it")
+	// If no constraints restrict admin, no lockout is possible.
+	if len(restrictingConstraints) == 0 {
+		return nil
+	}
+
+	// Step 3: For each admin user, check if any restricting constraint
+	// applies to them. If ALL admin users are blocked, reject.
+	for _, au := range adminUsers {
+		if !s.userBlockedByConstraints(ctx, au, restrictingConstraints) {
+			return nil // At least one admin user survives.
 		}
 	}
 
-	return nil
+	// Step 4: All admin users are blocked.
+	return errors.New("constraint would remove constraint-admin permission from all users who currently hold it at this scope; at least one direct user must retain it")
+}
+
+// adminUserInfo holds identity data for a user with constraint-admin.
+type adminUserInfo struct {
+	userID   string
+	groupIDs []string // effective group membership (for group_closure matching)
+}
+
+// resolveConstraintAdminUsers finds all direct users who hold the
+// access_constraint.admin permission at the given scope via role bindings.
+func (s *Server) resolveConstraintAdminUsers(ctx context.Context, scopeType, scopeID string) ([]adminUserInfo, error) {
+	// Get all role bindings at this scope.
+	bindings, err := s.store.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+	if err != nil {
+		return nil, fmt.Errorf("list role bindings for scope: %w", err)
+	}
+
+	// Also include system-scope bindings if we're checking a project scope,
+	// because system-scoped roles apply everywhere.
+	if scopeType == ScopeTypeProject {
+		sysBindings, err := s.store.ListRoleBindingsForScope(ctx, ScopeTypeSystem, "")
+		if err != nil {
+			return nil, fmt.Errorf("list system role bindings: %w", err)
+		}
+		bindings = append(bindings, sysBindings...)
+	}
+
+	// Resolve which role definitions grant constraint-admin.
+	roleDefs, err := s.store.ListRoleDefinitions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list role definitions: %w", err)
+	}
+	adminRoleIDs := make(map[string]bool)
+	for _, rd := range roleDefs {
+		for _, p := range rd.Permissions {
+			if p == PermissionConstraintAdmin {
+				adminRoleIDs[rd.ID] = true
+				break
+			}
+		}
+	}
+
+	// Collect direct user principals with admin role bindings.
+	// Also track groups that have admin bindings (for group-expanded resolution).
+	directUserIDs := make(map[string]bool)
+	adminGroupIDs := make(map[string]bool)
+	for _, b := range bindings {
+		if !adminRoleIDs[b.RoleDefinitionID] {
+			continue
+		}
+		switch b.PrincipalType {
+		case store.RoleBindingPrincipalUser:
+			directUserIDs[b.PrincipalID] = true
+		case store.RoleBindingPrincipalGroup:
+			adminGroupIDs[b.PrincipalID] = true
+		}
+	}
+
+	// Expand group memberships to find users who get admin via groups.
+	for gid := range adminGroupIDs {
+		members, err := s.store.GetGroupMembers(ctx, gid)
+		if err != nil {
+			slog.Warn("lockout check: failed to get group members", "groupID", gid, "error", err)
+			continue
+		}
+		for _, m := range members {
+			if m.MemberType == store.GroupMemberTypeUser {
+				directUserIDs[m.MemberID] = true
+			}
+		}
+	}
+
+	// Build admin user info with group closure for each user.
+	var result []adminUserInfo
+	for uid := range directUserIDs {
+		groupIDs, err := s.store.GetEffectiveGroups(ctx, uid)
+		if err != nil {
+			slog.Warn("lockout check: failed to get effective groups for user",
+				"userID", uid, "error", err)
+			groupIDs = nil
+		}
+		result = append(result, adminUserInfo{
+			userID:   uid,
+			groupIDs: groupIDs,
+		})
+	}
+
+	return result, nil
+}
+
+// userBlockedByConstraints returns true if all of the given restricting
+// constraints (which remove constraint-admin) apply to this user.
+// The user is blocked if ANY restricting constraint matches them.
+func (s *Server) userBlockedByConstraints(_ context.Context, user adminUserInfo, constraints []*store.AccessConstraint) bool {
+	// Build the user's principal closure: user ID + all group IDs.
+	closure := make(map[string]struct{}, 1+len(user.groupIDs))
+	closure[user.userID] = struct{}{}
+	for _, gid := range user.groupIDs {
+		closure[gid] = struct{}{}
+	}
+
+	for _, c := range constraints {
+		switch c.SubjectKind {
+		case store.ConstraintSubjectAllPrincipals:
+			return true // all_principals blocks everyone
+		case store.ConstraintSubjectPrincipal:
+			if c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == "user" &&
+				c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == user.userID {
+				return true
+			}
+			// A principal-kind constraint targeting a group also blocks users
+			// whose closure includes that group.
+			if c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == "group" &&
+				c.SubjectPrincipalID != nil {
+				if _, ok := closure[*c.SubjectPrincipalID]; ok {
+					return true
+				}
+			}
+		case store.ConstraintSubjectGroupClosure:
+			if c.SubjectGroupID != nil {
+				if _, ok := closure[*c.SubjectGroupID]; ok {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // constraintAllowsPermission checks whether a constraint's maximum permissions
@@ -523,8 +688,14 @@ func constraintAllowsPermission(c *store.AccessConstraint, permissionID string) 
 // Blast-radius preview
 // ---------------------------------------------------------------------------
 
-// buildConstraintPreview builds a preview of the constraint's blast radius.
+// maxPreviewMembers caps group_closure expansion to avoid expensive queries.
+const maxPreviewMembers = 50
+
+// buildConstraintPreview builds a preview of the constraint's blast radius,
+// including per-principal permission deltas.
 func (s *Server) buildConstraintPreview(r *http.Request, sc *store.AccessConstraint) *ConstraintPreview {
+	ctx := r.Context()
+
 	maxPerms := make(map[string]struct{}, len(sc.MaximumPermissions))
 	for _, p := range sc.MaximumPermissions {
 		maxPerms[p] = struct{}{}
@@ -545,30 +716,50 @@ func (s *Server) buildConstraintPreview(r *http.Request, sc *store.AccessConstra
 		RestrictedPermissions: restricted,
 	}
 
-	// Resolve affected principals based on subject kind.
+	// Resolve affected principals and compute per-principal permission deltas.
 	switch sc.SubjectKind {
 	case store.ConstraintSubjectPrincipal:
 		if sc.SubjectPrincipalType != nil && sc.SubjectPrincipalID != nil {
-			displayName := s.resolveGroupMemberDisplayName(r.Context(), *sc.SubjectPrincipalType, *sc.SubjectPrincipalID)
-			preview.AffectedPrincipals = []AffectedPrincipal{
-				{
-					PrincipalType: *sc.SubjectPrincipalType,
-					PrincipalID:   *sc.SubjectPrincipalID,
-					DisplayName:   displayName,
-				},
-			}
+			ap := s.buildAffectedPrincipal(ctx, *sc.SubjectPrincipalType, *sc.SubjectPrincipalID,
+				sc.ScopeType, sc.ScopeID, maxPerms)
+			preview.AffectedPrincipals = []AffectedPrincipal{ap}
 		}
+
 	case store.ConstraintSubjectGroupClosure:
 		if sc.SubjectGroupID != nil {
-			displayName := s.resolveGroupMemberDisplayName(r.Context(), "group", *sc.SubjectGroupID)
-			preview.AffectedPrincipals = []AffectedPrincipal{
-				{
-					PrincipalType: "group",
-					PrincipalID:   *sc.SubjectGroupID,
-					DisplayName:   displayName + " (and all effective members)",
-				},
+			// Include the group entity itself.
+			groupDisplayName := s.resolveGroupMemberDisplayName(ctx, "group", *sc.SubjectGroupID)
+			groupEntry := AffectedPrincipal{
+				PrincipalType: "group",
+				PrincipalID:   *sc.SubjectGroupID,
+				DisplayName:   groupDisplayName + " (group closure)",
+			}
+			preview.AffectedPrincipals = []AffectedPrincipal{groupEntry}
+
+			// Expand group members and compute per-member deltas.
+			members, err := s.store.GetGroupMembers(ctx, *sc.SubjectGroupID)
+			if err != nil {
+				slog.Warn("preview: failed to get group members",
+					"groupID", *sc.SubjectGroupID, "error", err)
+				break
+			}
+
+			count := 0
+			for _, m := range members {
+				if m.MemberType != store.GroupMemberTypeUser {
+					continue
+				}
+				if count >= maxPreviewMembers {
+					preview.Truncated = true
+					break
+				}
+				ap := s.buildAffectedPrincipal(ctx, m.MemberType, m.MemberID,
+					sc.ScopeType, sc.ScopeID, maxPerms)
+				preview.AffectedPrincipals = append(preview.AffectedPrincipals, ap)
+				count++
 			}
 		}
+
 	case store.ConstraintSubjectAllPrincipals:
 		preview.AffectedPrincipals = []AffectedPrincipal{
 			{
@@ -577,7 +768,52 @@ func (s *Server) buildConstraintPreview(r *http.Request, sc *store.AccessConstra
 				DisplayName:   "All principals",
 			},
 		}
+		preview.Truncated = true
 	}
 
 	return preview
+}
+
+// buildAffectedPrincipal resolves a single principal's effective permissions
+// at the given scope and computes the permission delta against the constraint.
+func (s *Server) buildAffectedPrincipal(
+	ctx context.Context,
+	principalType, principalID string,
+	scopeType, scopeID string,
+	maxPerms map[string]struct{},
+) AffectedPrincipal {
+	displayName := s.resolveGroupMemberDisplayName(ctx, principalType, principalID)
+	ap := AffectedPrincipal{
+		PrincipalType: principalType,
+		PrincipalID:   principalID,
+		DisplayName:   displayName,
+	}
+
+	// Resolve effective permissions via the authz service.
+	if s.authzService == nil {
+		return ap
+	}
+
+	currentPerms, err := s.authzService.getEffectivePermissions(ctx, principalType, principalID, scopeType, scopeID)
+	if err != nil {
+		slog.Warn("preview: failed to resolve effective permissions",
+			"principalType", principalType, "principalID", principalID, "error", err)
+		return ap
+	}
+
+	ap.CurrentPermissions = currentPerms
+
+	// Compute proposed (intersection with constraint) and removed (set difference).
+	var proposed, removed []string
+	for _, p := range currentPerms {
+		if _, ok := maxPerms[p]; ok {
+			proposed = append(proposed, p)
+		} else {
+			removed = append(removed, p)
+		}
+	}
+	ap.ProposedPermissions = proposed
+	ap.RemovedPermissions = removed
+
+	return ap
 }
