@@ -728,8 +728,9 @@ func TestIsHubAdmin_ProjectScopedBindingReturnsFalse(t *testing.T) {
 		ID: userID, Email: "projscope@test.com", DisplayName: "ProjScope", Role: "member", Status: "active",
 	}))
 
-	// Create a project-scoped role binding using the hub-admin role definition.
-	// IsHubAdmin must reject non-system-scoped bindings.
+	// Attempt to create a project-scoped role binding using the hub-admin role definition.
+	// The store now enforces scope-type matching, so the binding creation itself
+	// must be rejected — the authz layer never sees it.
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	require.NoError(t, err, "hub-admin role definition must exist")
 
@@ -741,10 +742,12 @@ func TestIsHubAdmin_ProjectScopedBindingReturnsFalse(t *testing.T) {
 		ScopeID:          tid("some-project"),
 		CreatedBy:        "test",
 	})
-	require.NoError(t, err)
+	require.Error(t, err, "store must reject scope-type mismatch")
+	assert.True(t, errors.Is(err, store.ErrScopeMismatch), "expected ErrScopeMismatch, got: %v", err)
 
+	// With no binding created, IsHubAdmin must return false.
 	result := authz.IsHubAdmin(ctx, userID)
-	assert.False(t, result, "should return false for project-scoped hub-admin binding (must be system-scoped)")
+	assert.False(t, result, "should return false when scope-mismatched binding is rejected at the store level")
 }
 
 func TestIsHubAdmin_SuperAdminOnlyReturnsFalse(t *testing.T) {
@@ -859,11 +862,12 @@ func TestIsProjectOwnerOrAdmin_ViaGroup(t *testing.T) {
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	// Get the project-owner role definition
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	// Get the project-admin role definition (project-owner is direct-user-only,
+	// so group bindings use project-admin instead).
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Bind project-owner to the group, scoped to this project
+	// Bind project-admin to the group, scoped to this project
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    store.RoleBindingPrincipalGroup,
@@ -875,7 +879,7 @@ func TestIsProjectOwnerOrAdmin_ViaGroup(t *testing.T) {
 	require.NoError(t, err)
 
 	result := authz.isProjectOwnerOrAdmin(ctx, tid("grp-proj-user"), tid("grp-proj"))
-	assert.True(t, result, "user should be project owner via group membership")
+	assert.True(t, result, "user should be project admin via group membership")
 }
 
 func TestIsProjectOwnerOrAdmin_DirectStillWorks(t *testing.T) {
@@ -931,7 +935,7 @@ func TestIsSystemAdmin_ViaGroup(t *testing.T) {
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	// Bind super-admin role to the group
+	// super-admin is direct-user-only: the store must reject group bindings.
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 
@@ -942,10 +946,12 @@ func TestIsSystemAdmin_ViaGroup(t *testing.T) {
 		ScopeType:        store.RoleScopeSystem,
 		CreatedBy:        store.SystemReconcileCreatedBy,
 	})
-	require.NoError(t, err)
+	require.Error(t, err, "store must reject super-admin group binding (direct-user-only)")
+	assert.True(t, errors.Is(err, store.ErrDirectUserOnly), "expected ErrDirectUserOnly, got: %v", err)
 
+	// With no binding created, IsSystemAdmin must return false.
 	result := authz.IsSystemAdmin(ctx, tid("grp-sysadmin-user"))
-	assert.True(t, result, "user should be system admin via group membership")
+	assert.False(t, result, "user must NOT be system admin when group binding is blocked by direct-user-only constraint")
 }
 
 func TestIsHubAdmin_ViaGroup(t *testing.T) {
@@ -1104,8 +1110,9 @@ func TestRealTimeGroupExpansion(t *testing.T) {
 		ID: tid("realtime-group"), Slug: "realtime-group", Name: "Realtime Group",
 	}))
 
-	// Bind the project-owner role to the group BEFORE the user joins
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	// Bind the project-admin role to the group BEFORE the user joins
+	// (project-owner is direct-user-only, so group bindings use project-admin).
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID,
@@ -1117,9 +1124,9 @@ func TestRealTimeGroupExpansion(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify user is NOT project owner yet (no group membership)
+	// Verify user is NOT project admin yet (no group membership)
 	result := authz.isProjectOwnerOrAdmin(ctx, tid("realtime-user"), tid("realtime-proj"))
-	assert.False(t, result, "user should NOT be project owner before joining the group")
+	assert.False(t, result, "user should NOT be project admin before joining the group")
 
 	// NOW add the user to the group
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
@@ -1129,9 +1136,9 @@ func TestRealTimeGroupExpansion(t *testing.T) {
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	// Verify user IS project owner now (real-time — no restart needed)
+	// Verify user IS project admin now (real-time — no restart needed)
 	result = authz.isProjectOwnerOrAdmin(ctx, tid("realtime-user"), tid("realtime-proj"))
-	assert.True(t, result, "user should IMMEDIATELY be project owner after joining group (real-time expansion)")
+	assert.True(t, result, "user should IMMEDIATELY be project admin after joining group (real-time expansion)")
 }
 
 // createTestRoleDefinition creates a custom role definition for tests.
