@@ -129,14 +129,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 3 msg-authz: Enforce authorizeAgentMessage for user-identity senders.
-	// System/infrastructure senders (not user: or agent:) are system-plane
-	// messages (D8) — scheduled events, internal hub triggers relayed through
-	// broker transport. These bypass mode checks unconditionally; broker HMAC
-	// trust covers the infrastructure transport layer.
-	// Agent-to-agent via broker: documented as a known gap for follow-up — the
-	// broker path for agent-to-agent is less common than the direct API, and
-	// constructing an AgentIdentity from the broker request is non-trivial.
+	// Authorize the sender. Identity is resolved from the sender prefix:
+	// "user:" senders are looked up in the store; all other senders use the
+	// broker identity, whose Type()="broker" does not match any allowed
+	// sender type and is denied.
+	var senderIdentity Identity
 	if strings.HasPrefix(req.Message.Sender, "user:") {
 		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
 		senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
@@ -157,26 +154,27 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// Cache the resolved user ID so downstream DM-ownership and
 		// persistence blocks can reuse it without redundant DB lookups.
 		req.Message.SenderID = senderUser.ID
-
-		userIdent := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
-		allowed, reason := s.authorizeAgentMessage(r.Context(), userIdent, agent, false)
-		if !allowed {
-			log.Warn("broker inbound message authorization denied",
-				"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", reason)
-			writeError(w, http.StatusForbidden, ErrCodeMessageDenied,
-				"Message delivery denied", map[string]interface{}{
-					"reason":        mapReasonToCode(reason),
-					"senderMode":    "user",
-					"recipientMode": agent.MessageMode,
-					"sender":        req.Message.Sender,
-					"agent_slug":    agentSlug,
-				})
-			return
-		}
+		senderIdentity = NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
+	} else {
+		// Non-user senders use the broker identity (non-nil by the HMAC
+		// check above). Its Type()="broker" is not an allowed sender type,
+		// so authorizeAgentMessage denies it.
+		senderIdentity = broker
 	}
-	// else: system-plane (D8) or agent-sender — no authorizeAgentMessage check.
-	// System messages are unconditionally exempt. Agent-to-agent via broker
-	// relies on broker HMAC trust (known gap documented above).
+	allowed, reason := s.authorizeAgentMessage(r.Context(), senderIdentity, agent, false)
+	if !allowed {
+		log.Warn("broker inbound message authorization denied",
+			"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", reason)
+		writeError(w, http.StatusForbidden, ErrCodeMessageDenied,
+			"Message delivery denied", map[string]interface{}{
+				"reason":        mapReasonToCode(reason),
+				"senderMode":    senderIdentity.Type(),
+				"recipientMode": agent.MessageMode,
+				"sender":        req.Message.Sender,
+				"agent_slug":    agentSlug,
+			})
+		return
+	}
 
 	// Ownership check: verify the DM key IDs match the actual participants.
 	// The agent in the DM key must match the resolved agent; the user must
