@@ -131,6 +131,26 @@ export const ROUTE_PERMISSION_MAP: Record<string, string[]> = {
 };
 
 // ---------------------------------------------------------------------------
+// Settings tab gate permissions
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps each settings tab panel name to the gate permissions that control
+ * its visibility. A tab is shown when the user holds ANY of its gate
+ * permissions (OR logic). Super-admin users see all tabs.
+ */
+export const TAB_PERMISSION_MAP: Record<string, string[]> = {
+  'env-vars': ['hub.settings.read'],
+  secrets: ['hub.settings.read'],
+  templates: ['template.list', 'template.read'],
+  'harness-configs': ['harness_config.list', 'harness_config.read'],
+  'pre-start-hooks': ['hub.lifecycle_hooks.read'],
+  'service-accounts': ['gcp_service_account.list', 'gcp_service_account.read'],
+  skills: ['skill.list', 'skill.read'],
+  'project-templates': ['hub.project_defaults.read'],
+};
+
+// ---------------------------------------------------------------------------
 // Super-admin-only routes
 // ---------------------------------------------------------------------------
 
