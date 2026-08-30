@@ -454,7 +454,13 @@ export class ScionNav extends LitElement {
             </div>
           `
         )}
-        ${this.adminStatus?.isAdmin
+        ${this.adminStatus?.isAdmin &&
+        (isSuperAdmin ||
+          ADMIN_SCOPEABLE_ITEMS.some(
+            (item) =>
+              NAV_PERMISSION_MAP[item.path] &&
+              hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
+          ))
           ? html`
               <div class="nav-section admin-section">
                 <div class="nav-section-title">Admin</div>
