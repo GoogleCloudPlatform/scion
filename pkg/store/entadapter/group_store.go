@@ -848,9 +848,15 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 	return result, nil
 }
 
+// maxParentGroupDepth caps the BFS depth when walking ancestor groups.
+// This is a safety limit to bound query cost in pathological hierarchies;
+// in practice group nesting should be shallow.
+const maxParentGroupDepth = 32
+
 // GetParentGroups returns all ancestor groups of the given group — groups that
 // transitively contain this group as a child — via BFS through the
 // parent_groups edge. The group itself is NOT included in the result.
+// BFS is capped at maxParentGroupDepth levels.
 func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
 	uid, err := parseUUID(groupID)
 	if err != nil {
@@ -862,25 +868,26 @@ func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]str
 	var result []string
 	queue := []uuid.UUID{uid}
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for depth := 0; len(queue) > 0 && depth < maxParentGroupDepth; depth++ {
+		nextQueue := make([]uuid.UUID, 0)
+		for _, current := range queue {
+			parents, err := s.client.Group.Query().
+				Where(group.IDEQ(current)).
+				QueryParentGroups().
+				All(ctx)
+			if err != nil {
+				return nil, err
+			}
 
-		parents, err := s.client.Group.Query().
-			Where(group.IDEQ(current)).
-			QueryParentGroups().
-			All(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, p := range parents {
-			if !visited[p.ID] {
-				visited[p.ID] = true
-				result = append(result, p.ID.String())
-				queue = append(queue, p.ID)
+			for _, p := range parents {
+				if !visited[p.ID] {
+					visited[p.ID] = true
+					result = append(result, p.ID.String())
+					nextQueue = append(nextQueue, p.ID)
+				}
 			}
 		}
+		queue = nextQueue
 	}
 
 	return result, nil

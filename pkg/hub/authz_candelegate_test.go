@@ -230,12 +230,8 @@ func TestCanDelegate_GroupMembership_SuperAdminCanAddAnyRole(t *testing.T) {
 	admin := NewAuthenticatedUser(adminID, "admin@test.com", "Admin", "admin", "api")
 
 	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("group-gm2"),
-		GroupRole: store.GroupMemberRoleOwner,
-		ProjectID: tid("any-project"),
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   tid("any-project"),
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("group-gm2"),
 	})
 	assert.True(t, decision.Allowed, "super-admin should be able to add any group role")
 }
@@ -253,12 +249,8 @@ func TestCanDelegate_GroupMembership_AdminCanAddMember(t *testing.T) {
 	projAdmin := NewAuthenticatedUser(adminUserID, "projadmin@test.com", "ProjAdmin", "member", "api")
 
 	decision := authz.CanDelegate(ctx, projAdmin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("group-gm3"),
-		GroupRole: store.GroupMemberRoleMember,
-		ProjectID: projectID,
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   projectID,
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("group-gm3"),
 	})
 	assert.True(t, decision.Allowed, "project-admin should be able to add group member")
 }
@@ -325,12 +317,8 @@ func TestCanDelegate_GroupMembership_OwnerCanAddGroupAsMember(t *testing.T) {
 	// A project-owner adding a group with member role — owner has sufficient
 	// authority to delegate member-level access.
 	decision := authz.CanDelegate(ctx, owner, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("nested-group-2"),
-		GroupRole: store.GroupMemberRoleMember,
-		ProjectID: projectID,
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   projectID,
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("nested-group-2"),
 	})
 	assert.True(t, decision.Allowed, "project-owner should be able to add a group as member")
 }
@@ -345,12 +333,8 @@ func TestCanDelegate_GroupMembership_SuperAdminCanAddGroupWithAnyRole(t *testing
 
 	// Super-admin can add a group with any role, including owner.
 	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("nested-group-3"),
-		GroupRole: store.GroupMemberRoleOwner,
-		ProjectID: tid("any-project-nest"),
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   tid("any-project-nest"),
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("nested-group-3"),
 	})
 	assert.True(t, decision.Allowed, "super-admin should be able to add a group with any role")
 }

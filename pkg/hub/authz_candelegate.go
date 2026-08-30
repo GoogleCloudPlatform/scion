@@ -59,9 +59,8 @@ type GrantDescriptor struct {
 	RoleDefinitionID string
 	RolePermissions  []string // resolved permissions if available
 
-	// For group membership: the group and role being granted.
-	GroupID   string
-	GroupRole string // "owner", "admin", "member"
+	// For group membership: the target group.
+	GroupID string
 
 	// For agent delegation: the role/scopes being delegated.
 	AgentRole   string
@@ -234,14 +233,20 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		scopeID   string
 	}
 	permsByScope := make(map[scopeKey]map[string]struct{})
+	rdCache := make(map[string]*store.RoleDefinition) // dedup GetRoleDefinition calls
 
 	for _, b := range bindings {
-		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if rdErr != nil {
-			a.logger.Warn("failed to resolve role definition for group binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-			// Fail closed: an unresolvable role definition must deny, not skip.
-			return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
+		rd, ok := rdCache[b.RoleDefinitionID]
+		if !ok {
+			var rdErr error
+			rd, rdErr = a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			if rdErr != nil {
+				a.logger.Warn("failed to resolve role definition for group binding",
+					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
+				// Fail closed: an unresolvable role definition must deny, not skip.
+				return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
+			}
+			rdCache[b.RoleDefinitionID] = rd
 		}
 		sk := scopeKey{scopeType: b.ScopeType, scopeID: b.ScopeID}
 		if permsByScope[sk] == nil {
