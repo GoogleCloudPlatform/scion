@@ -6,6 +6,9 @@ import (
 	"entgo.io/ent/dialect/sql"
 )
 
+// AccessConstraint is the predicate function for accessconstraint builders.
+type AccessConstraint func(*sql.Selector)
+
 // AccessPolicy is the predicate function for accesspolicy builders.
 type AccessPolicy func(*sql.Selector)
 

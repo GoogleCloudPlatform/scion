@@ -793,6 +793,20 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Hub admin: Access Constraints (AC1)
+	// -------------------------------------------------------------------------
+	"/api/v1/admin/access-constraints": {
+		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
+		Classification: RouteHubAdmin,
+		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+	},
+	"/api/v1/admin/access-constraints/": {
+		Pattern: "/api/v1/admin/access-constraints/", RouteID: "admin.accessConstraints.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+	},
+
+	// -------------------------------------------------------------------------
 	// Authenticated: Usage self-service
 	// -------------------------------------------------------------------------
 	"/api/v1/usage/me": {

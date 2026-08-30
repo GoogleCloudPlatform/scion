@@ -2711,3 +2711,34 @@ const (
 	LimitMaxProjectsPerUser  = "max_projects_per_user"
 	LimitMaxMembersPerGroup  = "max_members_per_group"
 )
+
+// =============================================================================
+// Access Constraints (AC1 — Operator Access Constraint Backend)
+// =============================================================================
+
+// AccessConstraint is a named maximum-permissions boundary. It can only
+// reduce otherwise granted authority — it cannot create authority.
+type AccessConstraint struct {
+	ID                   string     `json:"id"`
+	Name                 string     `json:"name"`
+	SubjectKind          string     `json:"subjectKind"`          // "principal", "group_closure", "all_principals"
+	SubjectPrincipalType *string    `json:"subjectPrincipalType"` // "user", "agent", "group" (when subjectKind=principal)
+	SubjectPrincipalID   *string    `json:"subjectPrincipalId"`   // Principal ID (when subjectKind=principal)
+	SubjectGroupID       *string    `json:"subjectGroupId"`       // Group ID (when subjectKind=group_closure)
+	ScopeType            string     `json:"scopeType"`            // "system" or "project"
+	ScopeID              string     `json:"scopeId"`              // "" for system, project ID for project
+	MaximumPermissions   []string   `json:"maximumPermissions"`   // Allowlist of permission IDs
+	NotBefore            *time.Time `json:"notBefore"`            // Constraint inactive before this time
+	ExpiresAt            *time.Time `json:"expiresAt"`            // Constraint inactive after this time
+	Disabled             bool       `json:"disabled"`             // True when deactivated by offline recovery
+	CreatedBy            string     `json:"createdBy"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// AccessConstraint subject kinds
+const (
+	ConstraintSubjectPrincipal    = "principal"
+	ConstraintSubjectGroupClosure = "group_closure"
+	ConstraintSubjectAllPrincipals = "all_principals"
+)

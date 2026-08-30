@@ -188,6 +188,9 @@ type Store interface {
 
 	// Quota operations (Permissions Phase 2B — Limits/Quotas)
 	QuotaStore
+
+	// Access Constraint operations (AC1 — Operator Access Constraint Backend)
+	AccessConstraintStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1962,4 +1965,54 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+}
+
+// =============================================================================
+// Access Constraint Store (AC1 — Operator Access Constraint Backend)
+// =============================================================================
+
+// AccessConstraintStore defines persistence operations for access constraints.
+type AccessConstraintStore interface {
+	// CreateAccessConstraint creates a new access constraint.
+	// Returns ErrAlreadyExists if a constraint with the same name and scope exists.
+	CreateAccessConstraint(ctx context.Context, c *AccessConstraint) (*AccessConstraint, error)
+
+	// GetAccessConstraint retrieves an access constraint by ID.
+	// Returns ErrNotFound if the constraint doesn't exist.
+	GetAccessConstraint(ctx context.Context, id string) (*AccessConstraint, error)
+
+	// UpdateAccessConstraint updates an existing access constraint.
+	// Returns ErrNotFound if the constraint doesn't exist.
+	UpdateAccessConstraint(ctx context.Context, c *AccessConstraint) (*AccessConstraint, error)
+
+	// DeleteAccessConstraint deletes an access constraint by ID.
+	// Returns ErrNotFound if the constraint doesn't exist.
+	DeleteAccessConstraint(ctx context.Context, id string) error
+
+	// ListAccessConstraints returns all access constraints with pagination.
+	// limit of 0 defaults to 100. Maximum allowed limit is 1000.
+	ListAccessConstraints(ctx context.Context, limit, offset int) ([]*AccessConstraint, error)
+
+	// CountAccessConstraints returns the total number of access constraints.
+	CountAccessConstraints(ctx context.Context) (int, error)
+
+	// ResolveApplicableConstraints returns all constraints that may apply to
+	// the given set of principals and scopes. The caller should further filter
+	// by subject matching and time window evaluation.
+	//
+	// This is a batched lookup: it returns constraints where:
+	// - subject_kind is "all_principals", OR
+	// - subject_kind is "principal" and the principal matches one of the given principals, OR
+	// - subject_kind is "group_closure" and the group matches one of the given principals.
+	//
+	// AND the scope matches one of the given scopes (system matches everything,
+	// project matches the specific project).
+	ResolveApplicableConstraints(ctx context.Context, principals []PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*AccessConstraint, error)
+
+	// ListConstraintsForScope returns all constraints scoped to the given scope.
+	ListConstraintsForScope(ctx context.Context, scopeType, scopeID string) ([]*AccessConstraint, error)
+
+	// DisableAccessConstraint disables a constraint (for offline recovery).
+	// Returns ErrNotFound if the constraint doesn't exist.
+	DisableAccessConstraint(ctx context.Context, id string) error
 }

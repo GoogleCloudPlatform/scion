@@ -9,6 +9,52 @@ import (
 )
 
 var (
+	// AccessConstraintsColumns holds the columns for the "access_constraints" table.
+	AccessConstraintsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "subject_kind", Type: field.TypeEnum, Enums: []string{"principal", "group_closure", "all_principals"}},
+		{Name: "subject_principal_type", Type: field.TypeString, Nullable: true},
+		{Name: "subject_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "subject_group_id", Type: field.TypeString, Nullable: true},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "maximum_permissions", Type: field.TypeJSON},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "disabled", Type: field.TypeBool, Default: false},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// AccessConstraintsTable holds the schema information for the "access_constraints" table.
+	AccessConstraintsTable = &schema.Table{
+		Name:       "access_constraints",
+		Columns:    AccessConstraintsColumns,
+		PrimaryKey: []*schema.Column{AccessConstraintsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "accessconstraint_name_scope_type_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{AccessConstraintsColumns[1], AccessConstraintsColumns[6], AccessConstraintsColumns[7]},
+			},
+			{
+				Name:    "accessconstraint_subject_kind_scope_type_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintsColumns[2], AccessConstraintsColumns[6], AccessConstraintsColumns[7]},
+			},
+			{
+				Name:    "accessconstraint_subject_principal_type_subject_principal_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintsColumns[3], AccessConstraintsColumns[4]},
+			},
+			{
+				Name:    "accessconstraint_subject_group_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintsColumns[5]},
+			},
+		},
+	}
 	// AccessPoliciesColumns holds the columns for the "access_policies" table.
 	AccessPoliciesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1985,6 +2031,7 @@ var (
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
+		AccessConstraintsTable,
 		AccessPoliciesTable,
 		AgentsTable,
 		AgentCredentialsTable,

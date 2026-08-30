@@ -12,6 +12,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -84,6 +85,7 @@ const (
 	OpUpdateOne = ent.OpUpdateOne
 
 	// Node types.
+	TypeAccessConstraint         = "AccessConstraint"
 	TypeAccessPolicy             = "AccessPolicy"
 	TypeAgent                    = "Agent"
 	TypeAgentCredential          = "AgentCredential"
@@ -142,6 +144,1173 @@ const (
 	TypeUser                     = "User"
 	TypeUserAccessToken          = "UserAccessToken"
 )
+
+// AccessConstraintMutation represents an operation that mutates the AccessConstraint nodes in the graph.
+type AccessConstraintMutation struct {
+	config
+	op                        Op
+	typ                       string
+	id                        *uuid.UUID
+	name                      *string
+	subject_kind              *accessconstraint.SubjectKind
+	subject_principal_type    *string
+	subject_principal_id      *string
+	subject_group_id          *string
+	scope_type                *accessconstraint.ScopeType
+	scope_id                  *string
+	maximum_permissions       *[]string
+	appendmaximum_permissions []string
+	not_before                *time.Time
+	expires_at                *time.Time
+	disabled                  *bool
+	created_by                *string
+	created                   *time.Time
+	updated                   *time.Time
+	clearedFields             map[string]struct{}
+	done                      bool
+	oldValue                  func(context.Context) (*AccessConstraint, error)
+	predicates                []predicate.AccessConstraint
+}
+
+var _ ent.Mutation = (*AccessConstraintMutation)(nil)
+
+// accessconstraintOption allows management of the mutation configuration using functional options.
+type accessconstraintOption func(*AccessConstraintMutation)
+
+// newAccessConstraintMutation creates new mutation for the AccessConstraint entity.
+func newAccessConstraintMutation(c config, op Op, opts ...accessconstraintOption) *AccessConstraintMutation {
+	m := &AccessConstraintMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAccessConstraint,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAccessConstraintID sets the ID field of the mutation.
+func withAccessConstraintID(id uuid.UUID) accessconstraintOption {
+	return func(m *AccessConstraintMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AccessConstraint
+		)
+		m.oldValue = func(ctx context.Context) (*AccessConstraint, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AccessConstraint.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAccessConstraint sets the old AccessConstraint of the mutation.
+func withAccessConstraint(node *AccessConstraint) accessconstraintOption {
+	return func(m *AccessConstraintMutation) {
+		m.oldValue = func(context.Context) (*AccessConstraint, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AccessConstraintMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AccessConstraintMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AccessConstraint entities.
+func (m *AccessConstraintMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AccessConstraintMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AccessConstraintMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AccessConstraint.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *AccessConstraintMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *AccessConstraintMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *AccessConstraintMutation) ResetName() {
+	m.name = nil
+}
+
+// SetSubjectKind sets the "subject_kind" field.
+func (m *AccessConstraintMutation) SetSubjectKind(ak accessconstraint.SubjectKind) {
+	m.subject_kind = &ak
+}
+
+// SubjectKind returns the value of the "subject_kind" field in the mutation.
+func (m *AccessConstraintMutation) SubjectKind() (r accessconstraint.SubjectKind, exists bool) {
+	v := m.subject_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectKind returns the old "subject_kind" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldSubjectKind(ctx context.Context) (v accessconstraint.SubjectKind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectKind: %w", err)
+	}
+	return oldValue.SubjectKind, nil
+}
+
+// ResetSubjectKind resets all changes to the "subject_kind" field.
+func (m *AccessConstraintMutation) ResetSubjectKind() {
+	m.subject_kind = nil
+}
+
+// SetSubjectPrincipalType sets the "subject_principal_type" field.
+func (m *AccessConstraintMutation) SetSubjectPrincipalType(s string) {
+	m.subject_principal_type = &s
+}
+
+// SubjectPrincipalType returns the value of the "subject_principal_type" field in the mutation.
+func (m *AccessConstraintMutation) SubjectPrincipalType() (r string, exists bool) {
+	v := m.subject_principal_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectPrincipalType returns the old "subject_principal_type" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldSubjectPrincipalType(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectPrincipalType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectPrincipalType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectPrincipalType: %w", err)
+	}
+	return oldValue.SubjectPrincipalType, nil
+}
+
+// ClearSubjectPrincipalType clears the value of the "subject_principal_type" field.
+func (m *AccessConstraintMutation) ClearSubjectPrincipalType() {
+	m.subject_principal_type = nil
+	m.clearedFields[accessconstraint.FieldSubjectPrincipalType] = struct{}{}
+}
+
+// SubjectPrincipalTypeCleared returns if the "subject_principal_type" field was cleared in this mutation.
+func (m *AccessConstraintMutation) SubjectPrincipalTypeCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldSubjectPrincipalType]
+	return ok
+}
+
+// ResetSubjectPrincipalType resets all changes to the "subject_principal_type" field.
+func (m *AccessConstraintMutation) ResetSubjectPrincipalType() {
+	m.subject_principal_type = nil
+	delete(m.clearedFields, accessconstraint.FieldSubjectPrincipalType)
+}
+
+// SetSubjectPrincipalID sets the "subject_principal_id" field.
+func (m *AccessConstraintMutation) SetSubjectPrincipalID(s string) {
+	m.subject_principal_id = &s
+}
+
+// SubjectPrincipalID returns the value of the "subject_principal_id" field in the mutation.
+func (m *AccessConstraintMutation) SubjectPrincipalID() (r string, exists bool) {
+	v := m.subject_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectPrincipalID returns the old "subject_principal_id" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldSubjectPrincipalID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectPrincipalID: %w", err)
+	}
+	return oldValue.SubjectPrincipalID, nil
+}
+
+// ClearSubjectPrincipalID clears the value of the "subject_principal_id" field.
+func (m *AccessConstraintMutation) ClearSubjectPrincipalID() {
+	m.subject_principal_id = nil
+	m.clearedFields[accessconstraint.FieldSubjectPrincipalID] = struct{}{}
+}
+
+// SubjectPrincipalIDCleared returns if the "subject_principal_id" field was cleared in this mutation.
+func (m *AccessConstraintMutation) SubjectPrincipalIDCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldSubjectPrincipalID]
+	return ok
+}
+
+// ResetSubjectPrincipalID resets all changes to the "subject_principal_id" field.
+func (m *AccessConstraintMutation) ResetSubjectPrincipalID() {
+	m.subject_principal_id = nil
+	delete(m.clearedFields, accessconstraint.FieldSubjectPrincipalID)
+}
+
+// SetSubjectGroupID sets the "subject_group_id" field.
+func (m *AccessConstraintMutation) SetSubjectGroupID(s string) {
+	m.subject_group_id = &s
+}
+
+// SubjectGroupID returns the value of the "subject_group_id" field in the mutation.
+func (m *AccessConstraintMutation) SubjectGroupID() (r string, exists bool) {
+	v := m.subject_group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubjectGroupID returns the old "subject_group_id" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldSubjectGroupID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubjectGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubjectGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubjectGroupID: %w", err)
+	}
+	return oldValue.SubjectGroupID, nil
+}
+
+// ClearSubjectGroupID clears the value of the "subject_group_id" field.
+func (m *AccessConstraintMutation) ClearSubjectGroupID() {
+	m.subject_group_id = nil
+	m.clearedFields[accessconstraint.FieldSubjectGroupID] = struct{}{}
+}
+
+// SubjectGroupIDCleared returns if the "subject_group_id" field was cleared in this mutation.
+func (m *AccessConstraintMutation) SubjectGroupIDCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldSubjectGroupID]
+	return ok
+}
+
+// ResetSubjectGroupID resets all changes to the "subject_group_id" field.
+func (m *AccessConstraintMutation) ResetSubjectGroupID() {
+	m.subject_group_id = nil
+	delete(m.clearedFields, accessconstraint.FieldSubjectGroupID)
+}
+
+// SetScopeType sets the "scope_type" field.
+func (m *AccessConstraintMutation) SetScopeType(at accessconstraint.ScopeType) {
+	m.scope_type = &at
+}
+
+// ScopeType returns the value of the "scope_type" field in the mutation.
+func (m *AccessConstraintMutation) ScopeType() (r accessconstraint.ScopeType, exists bool) {
+	v := m.scope_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeType returns the old "scope_type" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldScopeType(ctx context.Context) (v accessconstraint.ScopeType, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeType: %w", err)
+	}
+	return oldValue.ScopeType, nil
+}
+
+// ResetScopeType resets all changes to the "scope_type" field.
+func (m *AccessConstraintMutation) ResetScopeType() {
+	m.scope_type = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *AccessConstraintMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *AccessConstraintMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *AccessConstraintMutation) ResetScopeID() {
+	m.scope_id = nil
+}
+
+// SetMaximumPermissions sets the "maximum_permissions" field.
+func (m *AccessConstraintMutation) SetMaximumPermissions(s []string) {
+	m.maximum_permissions = &s
+	m.appendmaximum_permissions = nil
+}
+
+// MaximumPermissions returns the value of the "maximum_permissions" field in the mutation.
+func (m *AccessConstraintMutation) MaximumPermissions() (r []string, exists bool) {
+	v := m.maximum_permissions
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaximumPermissions returns the old "maximum_permissions" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldMaximumPermissions(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaximumPermissions is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaximumPermissions requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaximumPermissions: %w", err)
+	}
+	return oldValue.MaximumPermissions, nil
+}
+
+// AppendMaximumPermissions adds s to the "maximum_permissions" field.
+func (m *AccessConstraintMutation) AppendMaximumPermissions(s []string) {
+	m.appendmaximum_permissions = append(m.appendmaximum_permissions, s...)
+}
+
+// AppendedMaximumPermissions returns the list of values that were appended to the "maximum_permissions" field in this mutation.
+func (m *AccessConstraintMutation) AppendedMaximumPermissions() ([]string, bool) {
+	if len(m.appendmaximum_permissions) == 0 {
+		return nil, false
+	}
+	return m.appendmaximum_permissions, true
+}
+
+// ResetMaximumPermissions resets all changes to the "maximum_permissions" field.
+func (m *AccessConstraintMutation) ResetMaximumPermissions() {
+	m.maximum_permissions = nil
+	m.appendmaximum_permissions = nil
+}
+
+// SetNotBefore sets the "not_before" field.
+func (m *AccessConstraintMutation) SetNotBefore(t time.Time) {
+	m.not_before = &t
+}
+
+// NotBefore returns the value of the "not_before" field in the mutation.
+func (m *AccessConstraintMutation) NotBefore() (r time.Time, exists bool) {
+	v := m.not_before
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotBefore returns the old "not_before" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldNotBefore(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotBefore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotBefore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotBefore: %w", err)
+	}
+	return oldValue.NotBefore, nil
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (m *AccessConstraintMutation) ClearNotBefore() {
+	m.not_before = nil
+	m.clearedFields[accessconstraint.FieldNotBefore] = struct{}{}
+}
+
+// NotBeforeCleared returns if the "not_before" field was cleared in this mutation.
+func (m *AccessConstraintMutation) NotBeforeCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldNotBefore]
+	return ok
+}
+
+// ResetNotBefore resets all changes to the "not_before" field.
+func (m *AccessConstraintMutation) ResetNotBefore() {
+	m.not_before = nil
+	delete(m.clearedFields, accessconstraint.FieldNotBefore)
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *AccessConstraintMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *AccessConstraintMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *AccessConstraintMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[accessconstraint.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *AccessConstraintMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *AccessConstraintMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, accessconstraint.FieldExpiresAt)
+}
+
+// SetDisabled sets the "disabled" field.
+func (m *AccessConstraintMutation) SetDisabled(b bool) {
+	m.disabled = &b
+}
+
+// Disabled returns the value of the "disabled" field in the mutation.
+func (m *AccessConstraintMutation) Disabled() (r bool, exists bool) {
+	v := m.disabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDisabled returns the old "disabled" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldDisabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDisabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDisabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDisabled: %w", err)
+	}
+	return oldValue.Disabled, nil
+}
+
+// ResetDisabled resets all changes to the "disabled" field.
+func (m *AccessConstraintMutation) ResetDisabled() {
+	m.disabled = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *AccessConstraintMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *AccessConstraintMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *AccessConstraintMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[accessconstraint.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *AccessConstraintMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *AccessConstraintMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, accessconstraint.FieldCreatedBy)
+}
+
+// SetCreated sets the "created" field.
+func (m *AccessConstraintMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *AccessConstraintMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *AccessConstraintMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *AccessConstraintMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *AccessConstraintMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *AccessConstraintMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the AccessConstraintMutation builder.
+func (m *AccessConstraintMutation) Where(ps ...predicate.AccessConstraint) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AccessConstraintMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AccessConstraintMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AccessConstraint, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AccessConstraintMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AccessConstraintMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AccessConstraint).
+func (m *AccessConstraintMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AccessConstraintMutation) Fields() []string {
+	fields := make([]string, 0, 14)
+	if m.name != nil {
+		fields = append(fields, accessconstraint.FieldName)
+	}
+	if m.subject_kind != nil {
+		fields = append(fields, accessconstraint.FieldSubjectKind)
+	}
+	if m.subject_principal_type != nil {
+		fields = append(fields, accessconstraint.FieldSubjectPrincipalType)
+	}
+	if m.subject_principal_id != nil {
+		fields = append(fields, accessconstraint.FieldSubjectPrincipalID)
+	}
+	if m.subject_group_id != nil {
+		fields = append(fields, accessconstraint.FieldSubjectGroupID)
+	}
+	if m.scope_type != nil {
+		fields = append(fields, accessconstraint.FieldScopeType)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, accessconstraint.FieldScopeID)
+	}
+	if m.maximum_permissions != nil {
+		fields = append(fields, accessconstraint.FieldMaximumPermissions)
+	}
+	if m.not_before != nil {
+		fields = append(fields, accessconstraint.FieldNotBefore)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, accessconstraint.FieldExpiresAt)
+	}
+	if m.disabled != nil {
+		fields = append(fields, accessconstraint.FieldDisabled)
+	}
+	if m.created_by != nil {
+		fields = append(fields, accessconstraint.FieldCreatedBy)
+	}
+	if m.created != nil {
+		fields = append(fields, accessconstraint.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, accessconstraint.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AccessConstraintMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case accessconstraint.FieldName:
+		return m.Name()
+	case accessconstraint.FieldSubjectKind:
+		return m.SubjectKind()
+	case accessconstraint.FieldSubjectPrincipalType:
+		return m.SubjectPrincipalType()
+	case accessconstraint.FieldSubjectPrincipalID:
+		return m.SubjectPrincipalID()
+	case accessconstraint.FieldSubjectGroupID:
+		return m.SubjectGroupID()
+	case accessconstraint.FieldScopeType:
+		return m.ScopeType()
+	case accessconstraint.FieldScopeID:
+		return m.ScopeID()
+	case accessconstraint.FieldMaximumPermissions:
+		return m.MaximumPermissions()
+	case accessconstraint.FieldNotBefore:
+		return m.NotBefore()
+	case accessconstraint.FieldExpiresAt:
+		return m.ExpiresAt()
+	case accessconstraint.FieldDisabled:
+		return m.Disabled()
+	case accessconstraint.FieldCreatedBy:
+		return m.CreatedBy()
+	case accessconstraint.FieldCreated:
+		return m.Created()
+	case accessconstraint.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AccessConstraintMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case accessconstraint.FieldName:
+		return m.OldName(ctx)
+	case accessconstraint.FieldSubjectKind:
+		return m.OldSubjectKind(ctx)
+	case accessconstraint.FieldSubjectPrincipalType:
+		return m.OldSubjectPrincipalType(ctx)
+	case accessconstraint.FieldSubjectPrincipalID:
+		return m.OldSubjectPrincipalID(ctx)
+	case accessconstraint.FieldSubjectGroupID:
+		return m.OldSubjectGroupID(ctx)
+	case accessconstraint.FieldScopeType:
+		return m.OldScopeType(ctx)
+	case accessconstraint.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case accessconstraint.FieldMaximumPermissions:
+		return m.OldMaximumPermissions(ctx)
+	case accessconstraint.FieldNotBefore:
+		return m.OldNotBefore(ctx)
+	case accessconstraint.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case accessconstraint.FieldDisabled:
+		return m.OldDisabled(ctx)
+	case accessconstraint.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case accessconstraint.FieldCreated:
+		return m.OldCreated(ctx)
+	case accessconstraint.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown AccessConstraint field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AccessConstraintMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case accessconstraint.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case accessconstraint.FieldSubjectKind:
+		v, ok := value.(accessconstraint.SubjectKind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectKind(v)
+		return nil
+	case accessconstraint.FieldSubjectPrincipalType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectPrincipalType(v)
+		return nil
+	case accessconstraint.FieldSubjectPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectPrincipalID(v)
+		return nil
+	case accessconstraint.FieldSubjectGroupID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubjectGroupID(v)
+		return nil
+	case accessconstraint.FieldScopeType:
+		v, ok := value.(accessconstraint.ScopeType)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeType(v)
+		return nil
+	case accessconstraint.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case accessconstraint.FieldMaximumPermissions:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaximumPermissions(v)
+		return nil
+	case accessconstraint.FieldNotBefore:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotBefore(v)
+		return nil
+	case accessconstraint.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case accessconstraint.FieldDisabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDisabled(v)
+		return nil
+	case accessconstraint.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case accessconstraint.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case accessconstraint.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraint field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AccessConstraintMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AccessConstraintMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AccessConstraintMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown AccessConstraint numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AccessConstraintMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(accessconstraint.FieldSubjectPrincipalType) {
+		fields = append(fields, accessconstraint.FieldSubjectPrincipalType)
+	}
+	if m.FieldCleared(accessconstraint.FieldSubjectPrincipalID) {
+		fields = append(fields, accessconstraint.FieldSubjectPrincipalID)
+	}
+	if m.FieldCleared(accessconstraint.FieldSubjectGroupID) {
+		fields = append(fields, accessconstraint.FieldSubjectGroupID)
+	}
+	if m.FieldCleared(accessconstraint.FieldNotBefore) {
+		fields = append(fields, accessconstraint.FieldNotBefore)
+	}
+	if m.FieldCleared(accessconstraint.FieldExpiresAt) {
+		fields = append(fields, accessconstraint.FieldExpiresAt)
+	}
+	if m.FieldCleared(accessconstraint.FieldCreatedBy) {
+		fields = append(fields, accessconstraint.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AccessConstraintMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AccessConstraintMutation) ClearField(name string) error {
+	switch name {
+	case accessconstraint.FieldSubjectPrincipalType:
+		m.ClearSubjectPrincipalType()
+		return nil
+	case accessconstraint.FieldSubjectPrincipalID:
+		m.ClearSubjectPrincipalID()
+		return nil
+	case accessconstraint.FieldSubjectGroupID:
+		m.ClearSubjectGroupID()
+		return nil
+	case accessconstraint.FieldNotBefore:
+		m.ClearNotBefore()
+		return nil
+	case accessconstraint.FieldExpiresAt:
+		m.ClearExpiresAt()
+		return nil
+	case accessconstraint.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraint nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AccessConstraintMutation) ResetField(name string) error {
+	switch name {
+	case accessconstraint.FieldName:
+		m.ResetName()
+		return nil
+	case accessconstraint.FieldSubjectKind:
+		m.ResetSubjectKind()
+		return nil
+	case accessconstraint.FieldSubjectPrincipalType:
+		m.ResetSubjectPrincipalType()
+		return nil
+	case accessconstraint.FieldSubjectPrincipalID:
+		m.ResetSubjectPrincipalID()
+		return nil
+	case accessconstraint.FieldSubjectGroupID:
+		m.ResetSubjectGroupID()
+		return nil
+	case accessconstraint.FieldScopeType:
+		m.ResetScopeType()
+		return nil
+	case accessconstraint.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case accessconstraint.FieldMaximumPermissions:
+		m.ResetMaximumPermissions()
+		return nil
+	case accessconstraint.FieldNotBefore:
+		m.ResetNotBefore()
+		return nil
+	case accessconstraint.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case accessconstraint.FieldDisabled:
+		m.ResetDisabled()
+		return nil
+	case accessconstraint.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case accessconstraint.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case accessconstraint.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraint field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AccessConstraintMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AccessConstraintMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AccessConstraintMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AccessConstraintMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AccessConstraintMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AccessConstraintMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AccessConstraintMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown AccessConstraint unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AccessConstraintMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown AccessConstraint edge %s", name)
+}
 
 // AccessPolicyMutation represents an operation that mutates the AccessPolicy nodes in the graph.
 type AccessPolicyMutation struct {
