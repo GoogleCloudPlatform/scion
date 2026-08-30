@@ -122,6 +122,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/diagnostics/logs/stream":     "hub-admin:diagnostics",
 	"/api/v1/admin/diagnostics/logs":            "hub-admin:diagnostics",
 	"/api/v1/admin/health/summary":              "hub-admin:health",
+	"/api/v1/admin/messaging/divergence":        "hub-admin:diagnostics",
 	"/api/v1/metrics/":                          "hub-admin:metrics-dashboard",
 	"/api/v1/admin/metrics-dashboard":           "hub-admin:metrics-dashboard",
 	"/api/v1/notifications":                     "authenticated:notifications",
