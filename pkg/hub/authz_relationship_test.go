@@ -209,7 +209,7 @@ func TestRelationshipGrant_ProvenanceFormat(t *testing.T) {
 			assert.Equal(t, string(tt.relType), prov.RoleID, "RoleID must match relationship type")
 			assert.Equal(t, "builtin:relationship:"+string(tt.relType), prov.RoleName,
 				"RoleName must follow builtin:relationship: naming")
-			assert.Equal(t, ScopeTypeSystem, prov.ScopeType)
+			assert.Equal(t, ScopeTypeRelationship, prov.ScopeType)
 			assert.Equal(t, "agent-progeny-1", prov.PrincipalID)
 			assert.Equal(t, "agent", prov.PrincipalType)
 			assert.Equal(t, []string{"agent-progeny-1"}, prov.MembershipPath)
@@ -482,26 +482,25 @@ func TestIsInAncestry(t *testing.T) {
 }
 
 // =============================================================================
-// Merge gate: No Policy or PolicyBinding rows created
+// Resolver operates independently of Policy rows
 // =============================================================================
-// This is verified by the handler conversion: ensureProgenyPolicy,
-// ensureEnvVarProgenyPolicy, and ensureSkillProgenyPolicy are now no-ops.
-// The following test confirms the functions exist and don't panic.
+// The pure evaluation function (EvaluateProgenyGrant) produces correct access
+// decisions using only the resource metadata (AllowProgeny, CreatedBy) and the
+// agent's ancestry chain — no Policy or PolicyBinding lookups are involved.
+// Handler-level Policy creation is retained until CO1 cutover wires the resolver
+// into the evaluator; this test verifies the resolver's independent operation.
 
-func TestRelationshipGrant_HandlersAreNoOps(t *testing.T) {
-	// Verify that the converted handler functions don't panic
-	// and don't create any Policy rows (they're no-ops).
-	// We can't easily test the handler functions directly here since they
-	// require a Server instance, but we can verify the relationship grant
-	// resolver produces the correct decisions without any Policy involvement.
-
+func TestRelationshipGrant_ResolverIndependentOfPolicies(t *testing.T) {
+	// The pure evaluation function operates without any store or policy lookup.
+	// It demonstrates that the resolver can produce a correct decision using
+	// only resource metadata and agent ancestry, which is the target model
+	// for CO1 cutover.
 	agent := &testRelAgentIdentity{
 		id:        "agent-test",
 		projectID: "project-1",
 		ancestry:  []string{"user-creator"},
 	}
 
-	// The pure evaluation function operates without any store or policy lookup
 	result := EvaluateProgenyGrant(
 		agent, RelProgenySecretRead, "secret-1", "secret",
 		"user-creator", true,

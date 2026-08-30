@@ -21,6 +21,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// ScopeTypeRelationship is the scope type used in provenance output for
+// relationship-derived grants. Distinguished from ScopeTypeSystem and
+// ScopeTypeProject because relationship grants are inherently user-scoped
+// (they derive from a user's creation of a resource with AllowProgeny),
+// not system-wide role bindings.
+const ScopeTypeRelationship = "relationship"
+
 // RelationshipType identifies the kind of progeny relationship grant.
 type RelationshipType string
 
@@ -253,7 +260,7 @@ func allowRelationship(relType RelationshipType, resourceType, resourceID, agent
 			BindingID:      fmt.Sprintf("relationship:%s:%s", relType, resourceID),
 			RoleID:         string(relType),
 			RoleName:       relationshipRoleName(relType),
-			ScopeType:      ScopeTypeSystem,
+			ScopeType:      ScopeTypeRelationship,
 			PrincipalID:    agentID,
 			PrincipalType:  "agent",
 			MembershipPath: []string{agentID},
