@@ -1365,10 +1365,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// and the hub-member-create-projects policy with a single role binding.
 	seedDefaultGroupsAndBindings(ctx, s)
 
-	// Legacy policy backfills — these remain for compatibility with existing
-	// project-scoped policies until PM1 converts project membership. The per-
-	// project policies are still consumed by the current evaluator alongside
-	// the new role bindings.
+	// CO1: Legacy policy backfills are no-ops. All authorization uses
+	// RoleBindings and the AK1 kernel.
 	backfillProjectAssignPolicies(ctx, s)
 	backfillProjectMessageAction(ctx, s)
 	backfillProjectMemberReadPolicies(ctx, s)
@@ -3787,7 +3785,7 @@ func (s *Server) registerRoutes() {
 	// Groups and Policies (Hub Permissions System)
 	s.mux.HandleFunc("/api/v1/groups", s.guarded("/api/v1/groups", s.handleGroups))
 	s.mux.HandleFunc("/api/v1/groups/", s.guarded("/api/v1/groups/", s.handleGroupRoutes))
-	// Policy routes: declarative guard enforces hub-admin; handler-local checks remain as defense-in-depth.
+	// CO1: Policy routes return 410 Gone. Authorization uses RoleBindings.
 	s.mux.HandleFunc("/api/v1/policies", s.guarded("/api/v1/policies", s.handlePolicies))
 	s.mux.HandleFunc("/api/v1/policies/", s.guarded("/api/v1/policies/", s.handlePolicyRoutes))
 

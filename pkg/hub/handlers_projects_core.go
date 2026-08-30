@@ -897,103 +897,17 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	}
 
 	// ── Legacy policy bridge (pre-CO1) ──────────────────────────────────
-	// The evaluator (authz.go) still consults policies for member-level
-	// authorization. These policies are a compatibility bridge that will be
-	// removed when CO1 rewires the evaluator to use RoleBinding permissions
-	// directly. PM1 moves the source of truth to RoleBindings; these
-	// policies mirror that authority until the evaluator catches up.
-	s.ensureLegacyProjectPolicies(ctx, project, membersGroup.ID)
+	// CO1 cutover: legacy project policies are no longer needed.
+	// All authorization routes through AK1 kernel using RoleBindings.
 }
 
-// ensureLegacyProjectPolicies creates the project-scoped policies that the
-// current evaluator (authz.go) requires for member-level authorization.
-// These are a pre-CO1 compatibility bridge — the canonical authority is now
-// project-scoped RoleBindings. Once CO1 rewires the evaluator, these policies
-// and this function should be removed.
-func (s *Server) ensureLegacyProjectPolicies(ctx context.Context, project *store.Project, membersGroupID string) {
-	// 1. Agent create/stop/message policy for project members.
-	policyName := "project:" + project.Slug + ":member-create-agents"
-	policy := &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         policyName,
-		Description:  "Allow project members to create, stop, and message agents",
-		ScopeType:    "project",
-		ScopeID:      project.ID,
-		ResourceType: "agent",
-		Actions:      []string{"create", "stop_all", "message"},
-		Effect:       "allow",
-	}
-	if err := s.store.CreatePolicy(ctx, policy); err != nil {
-		if !errors.Is(err, store.ErrAlreadyExists) {
-			s.projectsLogger().Warn("failed to create legacy project member policy",
-				"project_id", project.ID, "policy", policyName, "error", err.Error())
-			return
-		}
-		existing, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-		if lookupErr != nil || len(existing.Items) == 0 {
-			return
-		}
-		policy = &existing.Items[0]
-		needsUpdate := false
-		if policy.ScopeID != project.ID {
-			policy.ScopeID = project.ID
-			needsUpdate = true
-		}
-		for _, action := range []string{"stop_all", "message"} {
-			found := false
-			for _, a := range policy.Actions {
-				if a == action {
-					found = true
-					break
-				}
-			}
-			if !found {
-				policy.Actions = append(policy.Actions, action)
-				needsUpdate = true
-			}
-		}
-		if needsUpdate {
-			if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
-				s.projectsLogger().Warn("failed to update legacy project member policy",
-					"project_id", project.ID, "error", updateErr.Error())
-			}
-		}
-	}
+// ensureLegacyProjectPolicies is a no-op after CO1 cutover.
+// All project-scoped authorization is now handled by RoleBindings.
+func (s *Server) ensureLegacyProjectPolicies(_ context.Context, _ *store.Project, _ string) {}
 
-	// Bind policy to the members group.
-	if err := s.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "group",
-		PrincipalID:   membersGroupID,
-	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		s.projectsLogger().Warn("failed to bind legacy project member policy",
-			"project_id", project.ID, "error", err.Error())
-	}
-
-	// 2. Project/agent read+list policy for members (visibility).
-	s.ensureProjectMemberReadPolicy(ctx, project, membersGroupID)
-
-	// 3. Service-account assign policy.
-	ensureProjectAssignPolicy(ctx, s.store, project, membersGroupID)
-
-	// 4. Scheduled-event policy.
-	ensureProjectScheduledEventPolicy(ctx, s.store, project, membersGroupID)
-}
-
-// ensureProjectMemberReadPolicy creates or ensures a project-scoped read+list
-// policy for both "project" and "agent" resource types, bound to the project's
-// members group. This is the mechanism that makes a project visible to its
-// members after the global hub-member-read-all wildcard was narrowed to exclude
-// project/agent/broker resources.
-//
-// "Public" / "everyone" visibility is achieved by adding the hub-members group
-// to the project's members group — the read policy then applies transitively
-// to all hub users.
-func (s *Server) ensureProjectMemberReadPolicy(ctx context.Context, project *store.Project, membersGroupID string) {
-	// Delegate to the standalone function so the same logic is reusable
-	// from both inline handler paths and the startup backfill.
-	ensureProjectMemberReadPolicies(ctx, s.store, project, membersGroupID)
-}
+// ensureProjectMemberReadPolicy is a no-op after CO1 cutover.
+// Member read permissions are now handled by project-scoped RoleBindings.
+func (s *Server) ensureProjectMemberReadPolicy(_ context.Context, _ *store.Project, _ string) {}
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
 // It prefers projects/<slug> and falls back to groves/<slug> for backward compatibility
@@ -2780,37 +2694,9 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			"project_id", project.ID, "old_slug", oldMembersSlug, "error", err)
 	}
 
-	// Migrate the project member policy name.
-	oldPolicyName := "project:" + oldSlug + ":member-create-agents"
-	newPolicyName := "project:" + newSlug + ":member-create-agents"
-	if policies, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1}); err == nil && len(policies.Items) > 0 {
-		policy := &policies.Items[0]
-		policy.Name = newPolicyName
-		if err := s.store.UpdatePolicy(ctx, policy); err != nil {
-			s.projectsLogger().Warn("failed to migrate project member policy name",
-				"project_id", project.ID, "old_policy", oldPolicyName, "new_policy", newPolicyName, "error", err)
-		}
-	} else if err != nil {
-		s.projectsLogger().Warn("failed to retrieve project member policy for migration",
-			"project_id", project.ID, "old_policy", oldPolicyName, "error", err)
-	}
-
-	// Migrate the project member-read-project policy name.
-	for _, suffix := range []string{"member-read-project", "member-read-agent"} {
-		oldReadPolicyName := "project:" + oldSlug + ":" + suffix
-		newReadPolicyName := "project:" + newSlug + ":" + suffix
-		if policies, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldReadPolicyName}, store.ListOptions{Limit: 1}); err == nil && len(policies.Items) > 0 {
-			policy := &policies.Items[0]
-			policy.Name = newReadPolicyName
-			if err := s.store.UpdatePolicy(ctx, policy); err != nil {
-				s.projectsLogger().Warn("failed to migrate project member read policy name",
-					"project_id", project.ID, "old_policy", oldReadPolicyName, "new_policy", newReadPolicyName, "error", err)
-			}
-		} else if err != nil {
-			s.projectsLogger().Warn("failed to retrieve project member read policy for migration",
-				"project_id", project.ID, "old_policy", oldReadPolicyName, "error", err)
-		}
-	}
+	// CO1: Legacy policy migration removed. Policies are no longer the
+	// source of authority; project-scoped RoleBindings are scope-keyed by
+	// project ID (not slug), so no rename is needed.
 
 	// Migrate hub-managed project filesystem paths (best-effort).
 	// Derive newPath from oldPath's parent to preserve the directory type (groves/ vs projects/).
@@ -2895,14 +2781,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 
-	// Clean up project-scoped policies (best-effort)
-	if projectPolicies, err := s.store.ListPolicies(ctx, store.PolicyFilter{ScopeType: "project", ScopeID: id}, store.ListOptions{Limit: 100}); err == nil {
-		for _, p := range projectPolicies.Items {
-			if delErr := s.store.DeletePolicy(ctx, p.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to delete project policy", "project_id", id, "policy", p.ID, "name", p.Name, "error", delErr.Error())
-			}
-		}
-	}
+	// CO1: Legacy policy cleanup removed. Policies are dead data.
 
 	// Cascade-delete all project-scoped role bindings (XL review R1).
 	// This removes all membership (owner/admin/member) bindings and the

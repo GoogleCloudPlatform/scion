@@ -31,9 +31,7 @@ import (
 //   - Group membership: wired in handlers_groups.go:addGroupMember.
 //   - Agent delegation: wired in handlers_agents_core.go:createAgentInProject.
 //   - Scheduled dispatch: wired in server.go:authorizeScheduledAgentCreate.
-//   - Policy create/update/bind: gated by requireAdmin (super-admin only).
-//     CanDelegate enforcement is implicit. If policy routes are ever opened
-//     to scoped admins, explicit CanDelegate checks must be added.
+//   - Policy routes: removed in CO1 cutover.
 //   - Custom role definition create/update: no HTTP handlers exist yet.
 //     Future handlers MUST call CanDelegate to verify the actor holds all
 //     permissions defined in the custom role.
@@ -46,7 +44,6 @@ const (
 	GrantTypeGroupMembership   GrantType = "group_membership"
 	GrantTypeAgentDelegation   GrantType = "agent_delegation"
 	GrantTypeCustomRole        GrantType = "custom_role"
-	GrantTypePolicy            GrantType = "policy"
 	GrantTypeProjectMembership GrantType = "project_membership"
 )
 
@@ -69,11 +66,6 @@ type GrantDescriptor struct {
 
 	// For custom roles: the permissions being defined.
 	CustomRolePermissions []string
-
-	// For policy: the policy being created/bound.
-	PolicyEffect   string // "allow", "deny"
-	PolicyActions  []string
-	PolicyResource string
 
 	// Scope of the grant.
 	ScopeType string // "system", "project"
@@ -117,8 +109,6 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 		return a.canDelegateAgent(ctx, actor, grant)
 	case GrantTypeCustomRole:
 		return a.canDelegateCustomRole(ctx, actor, grant)
-	case GrantTypePolicy:
-		return a.canDelegatePolicy(ctx, actor, grant)
 	case GrantTypeProjectMembership:
 		return a.canDelegateProjectMembership(ctx, actor, grant)
 	default:
@@ -352,17 +342,6 @@ func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity
 	return a.actorHoldsAllPermissions(ctx, actor, grant.CustomRolePermissions, grant.ScopeType, grant.ScopeID)
 }
 
-// canDelegatePolicy checks whether the actor can create/modify policies.
-// Raw policy authoring is super-admin-only for now.
-func (a *AuthzService) canDelegatePolicy(_ context.Context, _ Identity, _ GrantDescriptor) Decision {
-	// Per brief constraint #3: raw policy authoring is super-admin-only.
-	// Super-admin is already handled above, so reaching here means non-admin.
-	return Decision{
-		Allowed: false,
-		Reason:  "policy authoring requires super-admin",
-	}
-}
-
 // canDelegateProjectMembership checks whether the actor can add members to
 // a project. The actor must be a project owner or admin.
 func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
@@ -396,10 +375,8 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 		}
 	}
 
-	// Also check policy-granted permissions: policies bound to the user
-	// or their groups also grant authority the user can delegate.
-	policyPerms := a.getPolicyGrantedPermissions(ctx, actor, scopeType, scopeID)
-	actorPerms = append(actorPerms, policyPerms...)
+	// CO1: Policy-granted permissions removed. All authority now flows
+	// through RoleBindings resolved above.
 
 	actorPermSet := make(map[string]bool, len(actorPerms))
 	for _, p := range actorPerms {
@@ -416,61 +393,6 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 	}
 
 	return Decision{Allowed: true, Reason: "actor holds all required permissions"}
-}
-
-// getPolicyGrantedPermissions resolves permissions granted to the actor via
-// policies (as opposed to role bindings). This ensures that policy-granted
-// authority (e.g., project member policies bound to groups) is considered
-// when checking delegation authority.
-func (a *AuthzService) getPolicyGrantedPermissions(ctx context.Context, actor Identity, scopeType, scopeID string) []string {
-	principals, err := a.authorizationPrincipals(ctx, actor)
-	if err != nil {
-		return nil
-	}
-
-	policies, err := a.store.GetPoliciesForPrincipals(ctx, principals)
-	if err != nil {
-		return nil
-	}
-
-	seen := make(map[string]bool)
-	var result []string
-	for _, policy := range policies {
-		if policy.Effect != "allow" {
-			continue
-		}
-		// Filter by scope
-		if scopeType == store.RoleScopeProject && policy.ScopeType == "project" {
-			if policy.ScopeID != scopeID {
-				continue
-			}
-		}
-		// Map policy actions + resource type to permission IDs
-		for _, action := range policy.Actions {
-			if action == "*" {
-				// Wildcard action — grant all permissions for the resource type
-				for _, p := range permissions.Registry {
-					if policy.ResourceType == "*" || p.Resource == policy.ResourceType {
-						if !seen[p.ID] {
-							seen[p.ID] = true
-							result = append(result, p.ID)
-						}
-					}
-				}
-			} else {
-				// Specific action — find matching permission
-				for _, p := range permissions.Registry {
-					if (policy.ResourceType == "*" || p.Resource == policy.ResourceType) && p.Action == action {
-						if !seen[p.ID] {
-							seen[p.ID] = true
-							result = append(result, p.ID)
-						}
-					}
-				}
-			}
-		}
-	}
-	return result
 }
 
 // scopesToPermissionIDs maps agent token scopes to permission IDs using

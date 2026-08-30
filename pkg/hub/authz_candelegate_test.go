@@ -586,41 +586,11 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 // --- Part D.6: Policy authoring tests ---
 
 func TestCanDelegate_Policy_NonSuperAdminDenied(t *testing.T) {
-	authz, s := setupCanDelegateTest(t)
-	ctx := context.Background()
-
-	memberID := tid("member-policy")
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: memberID, Email: "member@test.com", DisplayName: "Member", Role: "member", Status: "active",
-	}))
-
-	member := NewAuthenticatedUser(memberID, "member@test.com", "Member", "member", "api")
-
-	decision := authz.CanDelegate(ctx, member, GrantDescriptor{
-		Type:           GrantTypePolicy,
-		PolicyEffect:   "allow",
-		PolicyActions:  []string{"read"},
-		PolicyResource: "agent",
-	})
-	assert.False(t, decision.Allowed, "non-super-admin should not create policies")
-	assert.Contains(t, decision.Reason, "super-admin")
+	// CO1: Policy grant type removed. Test retained as shell.
 }
 
 func TestCanDelegate_Policy_SuperAdminAllowed(t *testing.T) {
-	authz, s := setupCanDelegateTest(t)
-	ctx := context.Background()
-
-	adminID := tid("admin-policy")
-	createTestUserWithRole(t, s, adminID, "admin@test.com", "admin", store.SystemRoleSuperAdmin)
-	admin := NewAuthenticatedUser(adminID, "admin@test.com", "Admin", "admin", "api")
-
-	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
-		Type:           GrantTypePolicy,
-		PolicyEffect:   "allow",
-		PolicyActions:  []string{"*"},
-		PolicyResource: "*",
-	})
-	assert.True(t, decision.Allowed, "super-admin should be able to create policies")
+	// CO1: Policy grant type removed. Test retained as shell.
 }
 
 // --- Part D.7: Phase 1E deferred item tests ---

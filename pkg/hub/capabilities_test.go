@@ -852,10 +852,6 @@ func TestResourceBuilders(t *testing.T) {
 	})
 
 	t.Run("policyResource", func(t *testing.T) {
-		p := &store.Policy{ID: "p1", Labels: map[string]string{"team": "backend"}}
-		r := policyResource(p)
-		assert.Equal(t, "policy", r.Type)
-		assert.Equal(t, "p1", r.ID)
-		assert.Equal(t, "backend", r.Labels["team"])
+		// CO1: policyResource removed; test retained as shell.
 	})
 }

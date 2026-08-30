@@ -198,6 +198,16 @@ func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.Pr
 // Scopes returns the agent scopes.
 func (a *agentIdentityWrapper) Scopes() []AgentTokenScope { return a.AgentTokenClaims.Scopes }
 
+// HasScope checks whether this agent identity has a given scope.
+func (a *agentIdentityWrapper) HasScope(scope AgentTokenScope) bool {
+	for _, s := range a.AgentTokenClaims.Scopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
 // Ancestry returns the ordered ancestor chain from the token claims.
 func (a *agentIdentityWrapper) Ancestry() []string { return a.AgentTokenClaims.Ancestry }
 

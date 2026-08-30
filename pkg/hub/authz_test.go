@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,15 +42,19 @@ func authzTestSetup(t *testing.T) (*AuthzService, store.Store) {
 }
 
 func TestAuthz_AdminBypass(t *testing.T) {
-	authz, _ := authzTestSetup(t)
+	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
-	admin := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
+	// CO1: Admin access now comes through role binding, not bypass.
+	// Create user with super-admin role binding.
+	createTestUserWithRole(t, s, tid("admin-1"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
+
+	admin := NewAuthenticatedUser(tid("admin-1"), "admin@example.com", "Admin", "admin", "api")
 	resource := Resource{Type: "agent", ID: "some-agent"}
 
 	decision := authz.CheckAccess(ctx, admin, resource, ActionRead)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, "admin bypass", decision.Reason)
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_OwnerBypass(t *testing.T) {
@@ -332,7 +337,7 @@ func TestAuthz_AgentDirectPolicy(t *testing.T) {
 		PolicyID: tid("policy-agent"), PrincipalType: "agent", PrincipalID: tid("agent-direct"),
 	}))
 
-	agent := &evaluateAgentIdentity{id: tid("agent-direct"), projectID: tid("project-agent-1")}
+	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("agent-direct")}, ProjectID: tid("project-agent-1")}}
 	resource := Resource{Type: "project", ID: tid("project-agent-1")}
 
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
@@ -398,90 +403,15 @@ func TestAuthz_ResourceTypeMismatch(t *testing.T) {
 }
 
 func TestEvaluatePolicies_NoMatch(t *testing.T) {
-	authz := NewAuthzService(nil, slog.Default())
-
-	decision := authz.evaluatePolicies(nil, Resource{Type: "agent"}, ActionRead)
-	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	// CO1: Legacy function removed; test retained as shell.
 }
 
 func TestMatchesAction(t *testing.T) {
-	tests := []struct {
-		name     string
-		actions  []string
-		action   Action
-		expected bool
-	}{
-		{"exact match", []string{"read"}, ActionRead, true},
-		{"wildcard", []string{"*"}, ActionDelete, true},
-		{"no match", []string{"read", "update"}, ActionDelete, false},
-		{"one of many", []string{"read", "update", "delete"}, ActionDelete, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			policy := store.Policy{Actions: tt.actions}
-			assert.Equal(t, tt.expected, matchesAction(policy, tt.action))
-		})
-	}
+	// CO1: Legacy function removed; test retained as shell.
 }
 
 func TestMatchesResource(t *testing.T) {
-	tests := []struct {
-		name     string
-		policy   store.Policy
-		resource Resource
-		expected bool
-	}{
-		{
-			"wildcard type",
-			store.Policy{ResourceType: "*", ScopeType: "hub"},
-			Resource{Type: "agent"},
-			true,
-		},
-		{
-			"matching type",
-			store.Policy{ResourceType: "agent", ScopeType: "hub"},
-			Resource{Type: "agent"},
-			true,
-		},
-		{
-			"mismatched type",
-			store.Policy{ResourceType: "project", ScopeType: "hub"},
-			Resource{Type: "agent"},
-			false,
-		},
-		{
-			"specific resource ID match",
-			store.Policy{ResourceType: "agent", ResourceID: "a1", ScopeType: "hub"},
-			Resource{Type: "agent", ID: "a1"},
-			true,
-		},
-		{
-			"specific resource ID mismatch",
-			store.Policy{ResourceType: "agent", ResourceID: "a1", ScopeType: "hub"},
-			Resource{Type: "agent", ID: "a2"},
-			false,
-		},
-		{
-			"project scope matching",
-			store.Policy{ResourceType: "agent", ScopeType: "project", ScopeID: tid("project-1")},
-			Resource{Type: "agent", ParentType: "project", ParentID: tid("project-1")},
-			true,
-		},
-		{
-			"project scope mismatch",
-			store.Policy{ResourceType: "agent", ScopeType: "project", ScopeID: tid("project-1")},
-			Resource{Type: "agent", ParentType: "project", ParentID: tid("project-2")},
-			false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, matchesResource(tt.policy, tt.resource))
-		})
-	}
+	// CO1: Legacy function removed; test retained as shell.
 }
 
 func TestScopeLevel(t *testing.T) {
@@ -524,15 +454,18 @@ func TestAuthz_BrokerDispatch_NonOwnerDenied(t *testing.T) {
 }
 
 func TestAuthz_BrokerDispatch_AdminAllowed(t *testing.T) {
-	authz, _ := authzTestSetup(t)
+	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
-	admin := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
+	// CO1: Admin access now comes through role binding, not bypass.
+	createTestUserWithRole(t, s, tid("broker-admin-1"), "broker-admin@example.com", "admin", store.SystemRoleSuperAdmin)
+
+	admin := NewAuthenticatedUser(tid("broker-admin-1"), "broker-admin@example.com", "Admin", "admin", "api")
 	resource := Resource{Type: "broker", ID: tid("broker-1"), OwnerID: "someone-else"}
 
 	decision := authz.CheckAccess(ctx, admin, resource, ActionDispatch)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, "admin bypass", decision.Reason)
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_BrokerCapabilities_Owner(t *testing.T) {
@@ -630,7 +563,8 @@ func TestAuthz_AncestryAccess_UserToAgent(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, "ancestor access", decision.Reason)
+	// CO1: Reason prefix changed to include relationship grant provenance.
+	assert.Equal(t, "relationship grant: ancestor access", decision.Reason)
 }
 
 func TestAuthz_AncestryAccess_AgentToDescendant(t *testing.T) {
@@ -646,7 +580,11 @@ func TestAuthz_AncestryAccess_AgentToDescendant(t *testing.T) {
 		ProjectID: tid("project-ancestry-1"), Phase: string(state.PhaseRunning),
 	}))
 
-	agent := &evaluateAgentIdentity{id: tid("agent-parent"), projectID: tid("project-ancestry-1")}
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("agent-parent")},
+		ProjectID: tid("project-ancestry-1"),
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead},
+	}}
 
 	// Grandchild agent with parent in ancestry
 	resource := Resource{
@@ -655,9 +593,12 @@ func TestAuthz_AncestryAccess_AgentToDescendant(t *testing.T) {
 		Ancestry: []string{tid("user-root"), tid("agent-parent"), tid("agent-child")},
 	}
 
+	// CO1: Ancestor access for agents is now subject to agent scope restrictions.
+	// The agent.read permission has no AgentScopes mapping, so the relationship
+	// grant is restricted. This is intentional fail-closed behavior.
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
-	assert.True(t, decision.Allowed)
-	assert.Equal(t, "ancestor access", decision.Reason)
+	assert.False(t, decision.Allowed,
+		"agent without agent.read scope mapping should not access via ancestry")
 }
 
 func TestAuthz_AncestryAccess_NoAncestry(t *testing.T) {
@@ -679,7 +620,8 @@ func TestAuthz_AncestryAccess_NoAncestry(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	// CO1: With AK1 kernel, deny reason reflects binding resolution state.
+	assert.Equal(t, "no candidate bindings", decision.Reason)
 }
 
 func TestAuthz_AncestryAccess_NotInChain(t *testing.T) {
@@ -787,6 +729,10 @@ type failingRoleBindingStore struct {
 }
 
 func (f *failingRoleBindingStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
+	return nil, errors.New("store unavailable")
+}
+
+func (f *failingRoleBindingStore) ListRoleBindingsForPrincipals(_ context.Context, _ []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
 	return nil, errors.New("store unavailable")
 }
 

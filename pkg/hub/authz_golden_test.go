@@ -33,6 +33,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-jose/go-jose/v4/jwt"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -495,13 +497,11 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 			"project admin should have %s access on project agents", action)
 	}
 
-	// CURRENT: Admin can delete agents (via project owner/admin bypass).
-	// POST-CUTOVER: Admin should NOT be able to delete (project-admin excludes
-	// delete action). This is an INTENTIONAL change.
+	// CO1 CUTOVER: Admin cannot delete agents — project-admin role excludes
+	// delete action. This is an INTENTIONAL restriction.
 	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
-	assert.True(t, decision.Allowed,
-		"CURRENT: project admin CAN delete via bypass (will change post-cutover)")
-	// POST-CUTOVER expected: assert.False(t, decision.Allowed)
+	assert.False(t, decision.Allowed,
+		"project admin should NOT have delete access (project-admin role excludes delete)")
 }
 
 // =============================================================================
@@ -655,7 +655,7 @@ func TestGolden_AgentReadOwnProject(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
 
-	agent := &evaluateAgentIdentity{id: f.agentAlpha.ID, projectID: f.projectAlpha.ID}
+	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: f.agentAlpha.ID}, ProjectID: f.projectAlpha.ID}}
 
 	// Agent can read resources in its own project
 	alphaAgentRes := Resource{
@@ -687,7 +687,7 @@ func TestGolden_AgentCrossProjectDenied(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
 
-	agent := &evaluateAgentIdentity{id: f.agentAlpha.ID, projectID: f.projectAlpha.ID}
+	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: f.agentAlpha.ID}, ProjectID: f.projectAlpha.ID}}
 
 	// Agent CANNOT read resources in beta project
 	betaRes := Resource{
@@ -827,10 +827,7 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 	assert.Equal(t, "delegated access", decision.Reason)
 
 	// An agent NOT in the ancestry should be denied
-	outsiderAgent := &evaluateAgentIdentity{
-		id:        tid("golden-outsider-agent"),
-		projectID: f.projectBeta.ID,
-	}
+	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-agent")}, ProjectID: f.projectBeta.ID}}
 	decision = f.authz.CheckAccess(ctx, outsiderAgent, secretRes, ActionRead)
 	assert.False(t, decision.Allowed,
 		"non-progeny agent should NOT access ancestor's secrets")
@@ -866,10 +863,7 @@ func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
 	assert.Equal(t, "delegated access", decision.Reason)
 
 	// Negative case: an agent NOT in the ancestry should be denied
-	outsiderAgent := &evaluateAgentIdentity{
-		id:        tid("golden-outsider-envvar"),
-		projectID: f.projectBeta.ID,
-	}
+	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-envvar")}, ProjectID: f.projectBeta.ID}}
 	decision = f.authz.CheckAccess(ctx, outsiderAgent, envVarRes, ActionRead)
 	assert.False(t, decision.Allowed,
 		"non-progeny agent should NOT access ancestor's env vars")
@@ -905,10 +899,7 @@ func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
 	assert.Equal(t, "delegated access", decision.Reason)
 
 	// Negative case: an agent NOT in the ancestry should be denied
-	outsiderAgent := &evaluateAgentIdentity{
-		id:        tid("golden-outsider-skill"),
-		projectID: f.projectBeta.ID,
-	}
+	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-skill")}, ProjectID: f.projectBeta.ID}}
 	decision = f.authz.CheckAccess(ctx, outsiderAgent, skillRes, ActionRead)
 	assert.False(t, decision.Allowed,
 		"non-progeny agent should NOT access ancestor's skill injections")
@@ -1002,60 +993,54 @@ func TestGolden_OwnerAdminBypassBehavior(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
 
-	t.Run("admin_bypass_is_total_and_unconditional", func(t *testing.T) {
-		// CURRENT: admin bypass at authz.go:490-495 is a total bypass for
-		// users with Role="admin", regardless of resource, action, or scope.
-		// POST-CUTOVER: super-admin RoleDefinition grants all permissions but
-		// passes through constraints. This is an INTENTIONAL change — the
-		// unconditional bypass is a historical accident per design doc §5.
+	t.Run("super_admin_through_standard_evaluation", func(t *testing.T) {
+		// CO1 CUTOVER: super-admin goes through standard kernel evaluation.
+		// The super-admin RoleDefinition grants all permissions. No unconditional
+		// bypass — constraints can still restrict super-admin.
 		admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
 
-		// Admin can do anything, including actions that should be constraint-controlled
+		// Admin can do anything via super-admin role binding
 		decision := f.authz.CheckAccess(ctx, admin, Resource{Type: "anything", ID: "whatever"}, ActionDelete)
-		assert.True(t, decision.Allowed)
-		assert.Equal(t, "admin bypass", decision.Reason,
-			"CURRENT: unconditional admin bypass; POST-CUTOVER: standard evaluation")
+		assert.True(t, decision.Allowed,
+			"super-admin should be allowed via super-admin role binding")
 	})
 
-	t.Run("owner_bypass_grants_all_actions", func(t *testing.T) {
-		// CURRENT: owner bypass at authz.go:510-519 grants ALL actions to the
-		// resource creator, except ActionAssign on hub-scoped gcp_service_account.
-		// POST-CUTOVER: Ownership becomes an explicit RoleBinding or named
-		// relationship grant with specific permissions, not a blanket bypass.
+	t.Run("owner_access_through_relationship_grants", func(t *testing.T) {
+		// CO1 CUTOVER: Resource ownership is handled by relationship grants
+		// (RG1) for progeny access, or by project-scoped role bindings for
+		// project-level resources. Direct ownership alone no longer grants
+		// blanket access.
 		owner := NewAuthenticatedUser(f.projectOwnerID, "proj-owner@golden.test", "Owner", "member", "api")
 		ownedRes := Resource{Type: "agent", ID: "owned-agent", OwnerID: f.projectOwnerID}
 
+		// Without a project scope on the resource, owner has no blanket access.
+		// Project-scoped resources get access through project role bindings.
 		decision := f.authz.CheckAccess(ctx, owner, ownedRes, ActionDelete)
-		assert.True(t, decision.Allowed)
-		assert.Equal(t, "resource owner", decision.Reason,
-			"CURRENT: owner bypass is blanket; POST-CUTOVER: specific owner permissions")
+		// Owner without project role binding for this resource type is denied.
+		// This is intentional — ownership requires explicit grants.
+		assert.False(t, decision.Allowed,
+			"resource owner without project role binding should be denied")
 	})
 
-	t.Run("project_owner_admin_bypass_is_blanket", func(t *testing.T) {
-		// CURRENT: isProjectOwnerOrAdmin at authz.go:533-539 grants ALL actions
-		// on ALL project-scoped resources, regardless of the specific action or
-		// resource type.
-		// POST-CUTOVER: project-owner/admin RoleDefinitions have specific
-		// permission sets. This is an INTENTIONAL narrowing for admin
-		// (loses delete), but owner retains full project permissions.
+	t.Run("project_admin_cannot_delete", func(t *testing.T) {
+		// CO1 CUTOVER: project-admin RoleDefinition has specific permission
+		// sets. Admin intentionally loses delete action. Owner retains full
+		// project permissions.
 		admin := NewAuthenticatedUser(f.projectAdminID, "proj-admin@golden.test", "Admin", "member", "api")
 		projRes := Resource{
 			Type: "agent", ID: f.agentAlpha.ID,
 			ParentType: "project", ParentID: f.projectAlpha.ID,
 		}
 
-		// Admin can currently delete (blanket bypass)
+		// Admin cannot delete (project-admin role excludes delete)
 		decision := f.authz.CheckAccess(ctx, admin, projRes, ActionDelete)
-		assert.True(t, decision.Allowed)
-		assert.Equal(t, "project owner/admin", decision.Reason,
-			"CURRENT: blanket project bypass; POST-CUTOVER: admin cannot delete")
+		assert.False(t, decision.Allowed,
+			"project admin should NOT have delete access (role excludes delete)")
 	})
 
-	t.Run("ancestry_bypass_grants_all_actions", func(t *testing.T) {
-		// CURRENT: ancestry bypass at authz.go:521-527 grants ALL actions if
-		// the principal appears in resource.Ancestry.
-		// POST-CUTOVER: Named relationship grant with the same behavior for
-		// creator access; specific progeny grants for delegation.
+	t.Run("ancestor_access_through_relationship_grants", func(t *testing.T) {
+		// CO1 CUTOVER: Ancestor access is handled by the RelationshipGrantResolver
+		// (RG1). The canAccessAsAncestor check still runs as a relationship grant.
 		user := NewAuthenticatedUser(f.projectOwnerID, "proj-owner@golden.test", "Owner", "member", "api")
 		descendantRes := Resource{
 			Type: "agent", ID: "descendant",
@@ -1063,7 +1048,8 @@ func TestGolden_OwnerAdminBypassBehavior(t *testing.T) {
 		}
 
 		decision := f.authz.CheckAccess(ctx, user, descendantRes, ActionDelete)
-		assert.True(t, decision.Allowed)
+		assert.True(t, decision.Allowed,
+			"ancestor should retain access through relationship grants")
 		assert.Equal(t, "ancestor access", decision.Reason)
 	})
 }
@@ -1095,3 +1081,97 @@ func (a *testProgenyAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (a *testProgenyAgentIdentity) TokenID() string { return "" }
+
+// =============================================================================
+// C1 Regression: Members-group owner cannot escalate to project-owner
+// =============================================================================
+
+// TestGolden_C1_GroupOwnerCannotEscalateToProjectOwner is a regression test for
+// the C1 security fix. It verifies that a user who is the "owner" of a project's
+// members group but has NO project-owner RoleBinding cannot perform owner-level
+// actions (e.g., deleting the project or agents within it).
+//
+// Before C1, backfillProjectRoleBindings() would infer a project-owner RoleBinding
+// from the group membership role, creating a privilege-escalation vector.
+//
+// After C1, project role bindings must be granted explicitly — group membership
+// role has no effect on authorization.
+//
+// Reference: wave2-xl-findings-for-co1.md §C1
+func TestGolden_C1_GroupOwnerCannotEscalateToProjectOwner(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("c1-project")
+	realOwnerID := tid("c1-real-owner")
+	groupOwnerID := tid("c1-group-owner")
+
+	// Create the project
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "C1 Test Project", Slug: "c1-test-project",
+		OwnerID: realOwnerID,
+	}))
+
+	// Create real owner user with project-owner role binding
+	createTestUserWithRole(t, s, realOwnerID, "real-owner@c1.test", "member", store.SystemRoleHubMember)
+	createTestUserWithProjectRole(t, s, realOwnerID, "real-owner@c1.test", projectID, store.ProjectRoleOwner)
+
+	// Create the group-owner user — member of hub but with NO project-level role binding
+	createTestUserWithRole(t, s, groupOwnerID, "group-owner@c1.test", "member", store.SystemRoleHubMember)
+
+	// Create the project members group and make groupOwnerID the "owner" of it
+	membersGroup := &store.Group{
+		ID: api.NewUUID(), Name: "C1 Project Members",
+		Slug: "project:c1-test-project:members", GroupType: store.GroupTypeExplicit,
+		ProjectID: projectID,
+	}
+	require.NoError(t, s.CreateGroup(ctx, membersGroup))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: membersGroup.ID, MemberID: groupOwnerID,
+		MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleOwner,
+	}))
+
+	// Also give the group-owner a project-member role binding (the most they
+	// should get via normal membership assignment).
+	createTestUserWithProjectRole(t, s, groupOwnerID, "group-owner@c1.test", projectID, store.ProjectRoleMember)
+
+	// Create a test agent in the project
+	agentID := tid("c1-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "c1-agent", Name: "C1 Agent",
+		ProjectID: projectID, Phase: "running", OwnerID: realOwnerID,
+	}))
+
+	groupOwnerUser := NewAuthenticatedUser(groupOwnerID, "group-owner@c1.test", "Group Owner", "member", "api")
+
+	// Project resource
+	projectRes := Resource{Type: "project", ID: projectID, OwnerID: realOwnerID}
+
+	// Agent resource
+	agentRes := Resource{
+		Type: "agent", ID: agentID,
+		OwnerID:    realOwnerID,
+		ParentType: "project", ParentID: projectID,
+	}
+
+	// The group-owner should NOT be able to delete the project (owner-only action)
+	decision := authz.CheckAccess(ctx, groupOwnerUser, projectRes, ActionDelete)
+	assert.False(t, decision.Allowed,
+		"C1 regression: members-group owner must NOT escalate to project delete")
+
+	// The group-owner should NOT be able to delete agents (owner-level action)
+	decision = authz.CheckAccess(ctx, groupOwnerUser, agentRes, ActionDelete)
+	assert.False(t, decision.Allowed,
+		"C1 regression: members-group owner must NOT escalate to agent delete")
+
+	// The group-owner SHOULD be able to read (they have project-member role binding)
+	decision = authz.CheckAccess(ctx, groupOwnerUser, agentRes, ActionRead)
+	assert.True(t, decision.Allowed,
+		"C1: members-group owner with member role binding should still read")
+
+	// Verify the real owner CAN do everything (positive control)
+	realOwnerUser := NewAuthenticatedUser(realOwnerID, "real-owner@c1.test", "Real Owner", "member", "api")
+	decision = authz.CheckAccess(ctx, realOwnerUser, projectRes, ActionDelete)
+	assert.True(t, decision.Allowed,
+		"C1 positive control: actual project owner should delete project")
+}

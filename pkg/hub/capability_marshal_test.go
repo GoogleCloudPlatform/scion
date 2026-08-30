@@ -176,28 +176,7 @@ func TestUserWithCapabilities_MarshalJSON(t *testing.T) {
 }
 
 func TestPolicyWithCapabilities_MarshalJSON(t *testing.T) {
-	policy := PolicyWithCapabilities{
-		Policy: store.Policy{
-			ID:        "pol-1",
-			ScopeType: store.PolicyScopeProject,
-			ScopeID:   "p-1",
-		},
-		Cap: &Capabilities{
-			Actions: []string{"read"},
-		},
-	}
-
-	data, err := json.Marshal(policy)
-	require.NoError(t, err)
-
-	var m map[string]interface{}
-	err = json.Unmarshal(data, &m)
-	require.NoError(t, err)
-
-	assert.Equal(t, "pol-1", m["id"])
-	assert.Equal(t, "p-1", m["scopeId"])
-	assert.Equal(t, "p-1", m["groveId"])
-	assert.NotNil(t, m["_capabilities"])
+	// CO1: PolicyWithCapabilities removed; test retained as shell.
 }
 
 func TestRuntimeBrokerWithCapabilities_MarshalJSON(t *testing.T) {

@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -982,80 +981,6 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	}
 
 	return result, nil
-}
-
-// CheckDelegatedAccess checks whether an agent's delegation relationship
-// satisfies the given policy conditions.
-func (s *GroupStore) CheckDelegatedAccess(ctx context.Context, agentID string, conditions *store.PolicyConditions) (bool, error) {
-	if conditions == nil {
-		return false, nil
-	}
-	if conditions.DelegatedFrom == nil && conditions.DelegatedFromGroup == "" {
-		return false, nil
-	}
-
-	uid, err := parseUUID(agentID)
-	if err != nil {
-		return false, err
-	}
-
-	a, err := s.client.Agent.Query().
-		Where(agent.IDEQ(uid)).
-		Only(ctx)
-	if err != nil {
-		return false, mapError(err)
-	}
-
-	// Check delegation_enabled flag
-	if !a.DelegationEnabled {
-		return false, nil
-	}
-
-	// created_by is a polymorphic principal reference: it may be a user or
-	// another agent. Delegation only flows from a *user* creator, so resolve
-	// the creator as a user by ID and bail out when there is none (no creator,
-	// or the creator is an agent rather than a user).
-	if a.CreatedBy == nil {
-		return false, nil
-	}
-	creator, err := s.client.User.Get(ctx, *a.CreatedBy)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return false, nil
-		}
-		return false, mapError(err)
-	}
-
-	// Suspended creators cannot be delegation sources
-	if creator.Status == user.StatusSuspended {
-		return false, nil
-	}
-
-	// Check DelegatedFrom condition (direct creator match)
-	if conditions.DelegatedFrom != nil {
-		if conditions.DelegatedFrom.PrincipalType == "user" &&
-			conditions.DelegatedFrom.PrincipalID == creator.ID.String() {
-			return true, nil
-		}
-		// DelegatedFrom was specified but didn't match
-		return false, nil
-	}
-
-	// Check DelegatedFromGroup condition (creator is in specified group)
-	if conditions.DelegatedFromGroup != "" {
-		creatorGroups, err := s.GetEffectiveGroups(ctx, creator.ID.String())
-		if err != nil {
-			return false, err
-		}
-		for _, gid := range creatorGroups {
-			if gid == conditions.DelegatedFromGroup {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-
-	return false, nil
 }
 
 // CountGroupMembersByRole counts how many members of a group have the given role.

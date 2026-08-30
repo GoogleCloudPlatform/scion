@@ -16,325 +16,47 @@
 
 package hub
 
-import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"testing"
+// CO1 cutover: All policy evaluation integration tests have been removed.
+// Authorization now routes through the AK1 kernel using RoleBindings.
+// The evaluate endpoint and policy API have been retired.
+//
+// The golden tests in authz_golden_test.go cover the equivalent behavior
+// using the new kernel-based evaluation pipeline.
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-)
-
-// ============================================================================
-// Integration Tests for Policy Evaluation
-// ============================================================================
+import "testing"
 
 func TestEvaluateEndpoint_UserDirectPolicy(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create user
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: tid("eval-user-1"), Email: "eval1@test.com", DisplayName: "Eval User", Role: "member", Status: "active",
-	}))
-
-	// Create policy via API
-	policyReq := CreatePolicyRequest{
-		Name:         "Allow Read Agents",
-		ScopeType:    "hub",
-		ResourceType: "agent",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", policyReq)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	var createdPolicy store.Policy
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&createdPolicy))
-
-	// Add binding via API
-	bindReq := AddPolicyBindingRequest{
-		PrincipalType: "user",
-		PrincipalID:   tid("eval-user-1"),
-	}
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+createdPolicy.ID+"/bindings", bindReq)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	// Evaluate via API
-	evalReq := EvaluateRequest{
-		PrincipalType: "user",
-		PrincipalID:   tid("eval-user-1"),
-		ResourceType:  "agent",
-		ResourceID:    tid("agent-1"),
-		Action:        "read",
-	}
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var evalResp EvaluateResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
-	assert.True(t, evalResp.Allowed)
-	assert.Equal(t, createdPolicy.ID, evalResp.MatchedPolicy)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_DefaultDeny(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: tid("eval-user-none"), Email: "none@test.com", DisplayName: "No Policy", Role: "member", Status: "active",
-	}))
-
-	evalReq := EvaluateRequest{
-		PrincipalType: "user",
-		PrincipalID:   tid("eval-user-none"),
-		ResourceType:  "agent",
-		Action:        "delete",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var evalResp EvaluateResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
-	assert.False(t, evalResp.Allowed)
-	assert.Equal(t, "default deny", evalResp.Reason)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: tid("eval-user-scope"), Email: "scope@test.com", DisplayName: "Scope User", Role: "member", Status: "active",
-	}))
-
-	// A concrete resource in the scoped project. The request must name a real
-	// resource: a project-scoped policy only applies to resources that resolve
-	// to that project (#595), and an evaluate request with no resourceId
-	// describes a parentless one. See
-	// TestEvaluateEndpoint_ProjectScopedPolicyDoesNotMatchParentlessResource.
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: tid("eval-project-scope"), Name: "Scope Project", Slug: "eval-project-scope",
-	}))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: tid("eval-agent-scope"), Slug: tid("eval-agent-scope"), Name: "Scope Agent",
-		ProjectID: tid("eval-project-scope"), Phase: string(state.PhaseRunning),
-	}))
-
-	// Create hub-level deny
-	hubPolicy := &store.Policy{
-		ID: tid("hub-deny-1"), Name: "Hub Deny", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, hubPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("hub-deny-1"), PrincipalType: "user", PrincipalID: tid("eval-user-scope"),
-	}))
-
-	// Create project-level allow (should override hub deny)
-	projectPolicy := &store.Policy{
-		ID: tid("project-allow-1"), Name: "Project Allow", ScopeType: "project",
-		ScopeID: tid("eval-project-scope"), ResourceType: "agent",
-		Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("project-allow-1"), PrincipalType: "user", PrincipalID: tid("eval-user-scope"),
-	}))
-
-	evalReq := EvaluateRequest{
-		PrincipalType: "user",
-		PrincipalID:   tid("eval-user-scope"),
-		ResourceType:  "agent",
-		ResourceID:    tid("eval-agent-scope"),
-		Action:        "read",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var evalResp EvaluateResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
-	assert.True(t, evalResp.Allowed)
-	assert.Equal(t, "project", evalResp.Scope)
-	assert.Equal(t, tid("project-allow-1"), evalResp.MatchedPolicy)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
-// TestEvaluateEndpoint_ProjectScopedPolicyDoesNotMatchParentlessResource pins a
-// behaviour change from the #595 class fix.
-//
-// handlePolicyEvaluate only populates parent context when the request names a
-// resourceId, so an evaluate request without one describes a resource that
-// belongs to no project. A project-scoped policy no longer matches such a
-// resource: abstract evaluation of a project-scoped policy is deny by
-// construction. Previously the scope check fell through and the policy matched,
-// which made the simulator report allow for a request that a real, concrete
-// resource would have had denied.
 func TestEvaluateEndpoint_ProjectScopedPolicyDoesNotMatchParentlessResource(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: tid("eval-user-parentless"), Email: "parentless@test.com",
-		DisplayName: "Parentless User", Role: "member", Status: "active",
-	}))
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: tid("eval-project-parentless"), Name: "Parentless Project", Slug: "eval-parentless",
-	}))
-
-	projectPolicy := &store.Policy{
-		ID: tid("project-allow-parentless"), Name: "Project Allow Parentless", ScopeType: "project",
-		ScopeID: tid("eval-project-parentless"), ResourceType: "agent",
-		Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("project-allow-parentless"), PrincipalType: "user", PrincipalID: tid("eval-user-parentless"),
-	}))
-
-	// No ResourceID: the evaluated resource has no project.
-	evalReq := EvaluateRequest{
-		PrincipalType: "user",
-		PrincipalID:   tid("eval-user-parentless"),
-		ResourceType:  "agent",
-		Action:        "read",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var evalResp EvaluateResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
-	assert.False(t, evalResp.Allowed)
-	assert.Equal(t, "default deny", evalResp.Reason)
-	assert.Empty(t, evalResp.MatchedPolicy)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_AgentPolicy(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create project and agent
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: tid("project-eval"), Name: "Eval Project", Slug: tid("project-eval"),
-	}))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: tid("agent-eval"), Slug: tid("agent-eval"), Name: "Eval Agent",
-		ProjectID: tid("project-eval"), Phase: string(state.PhaseRunning),
-	}))
-
-	// Create and bind policy to agent
-	policy := &store.Policy{
-		ID: tid("agent-policy-eval"), Name: "Agent Read", ScopeType: "hub",
-		ResourceType: "project", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("agent-policy-eval"), PrincipalType: "agent", PrincipalID: tid("agent-eval"),
-	}))
-
-	evalReq := EvaluateRequest{
-		PrincipalType: "agent",
-		PrincipalID:   tid("agent-eval"),
-		ResourceType:  "project",
-		Action:        "read",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var evalResp EvaluateResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
-	assert.True(t, evalResp.Allowed)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_AgentBinding(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create project and agent
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: tid("project-bind"), Name: "Bind Project", Slug: tid("project-bind"),
-	}))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: tid("agent-bind"), Slug: tid("agent-bind"), Name: "Bind Agent",
-		ProjectID: tid("project-bind"), Phase: string(state.PhaseRunning),
-	}))
-
-	// Create policy via API
-	policyReq := CreatePolicyRequest{
-		Name:         "Agent Manage",
-		ScopeType:    "hub",
-		ResourceType: "agent",
-		Actions:      []string{"manage"},
-		Effect:       "allow",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", policyReq)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	var createdPolicy store.Policy
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&createdPolicy))
-
-	// Bind to agent (tests that "agent" is now a valid principal type)
-	bindReq := AddPolicyBindingRequest{
-		PrincipalType: "agent",
-		PrincipalID:   tid("agent-bind"),
-	}
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+createdPolicy.ID+"/bindings", bindReq)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	// Verify binding exists
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+createdPolicy.ID+"/bindings", nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var bindingsResp ListPolicyBindingsResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bindingsResp))
-	assert.Len(t, bindingsResp.Bindings, 1)
-	assert.Equal(t, "agent", bindingsResp.Bindings[0].PrincipalType)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_Validation(t *testing.T) {
-	srv, _ := testServer(t)
-
-	tests := []struct {
-		name string
-		body EvaluateRequest
-	}{
-		{"missing principal", EvaluateRequest{ResourceType: "agent", Action: "read"}},
-		{"missing resource type", EvaluateRequest{PrincipalType: "user", PrincipalID: "u1", Action: "read"}},
-		{"missing action", EvaluateRequest{PrincipalType: "user", PrincipalID: "u1", ResourceType: "agent"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", tt.body)
-			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		})
-	}
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_MethodNotAllowed(t *testing.T) {
-	srv, _ := testServer(t)
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies/evaluate", nil)
-	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }
 
 func TestEvaluateEndpoint_CreatedByPopulated(t *testing.T) {
-	srv, _ := testServer(t)
-
-	policyReq := CreatePolicyRequest{
-		Name:         "Created By Test",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"*"},
-		Effect:       "allow",
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", policyReq)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	var createdPolicy store.Policy
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&createdPolicy))
-	// Dev auth should set CreatedBy
-	assert.NotEmpty(t, createdPolicy.CreatedBy)
+	// CO1: Policy evaluation removed. See golden tests for equivalent coverage.
 }

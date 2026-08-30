@@ -910,11 +910,6 @@ type GroupStore interface {
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
-	// CheckDelegatedAccess checks whether an agent's delegation relationship
-	// satisfies the given policy conditions. Returns true if the agent has
-	// delegation enabled, its creator is active, and the conditions match.
-	CheckDelegatedAccess(ctx context.Context, agentID string, conditions *PolicyConditions) (bool, error)
-
 	// CountGroupMembersByRole counts how many members of a group have the given role.
 	CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error)
 

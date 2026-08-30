@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -202,7 +203,7 @@ func TestAuthz_AgentAssignBaseline_HubScopedDenied(t *testing.T) {
 
 	// The same guard, from the other side: an agent carrying no project must
 	// not match a parentless resource either.
-	projectless := &evaluateAgentIdentity{id: f.agent.ID, projectID: ""}
+	projectless := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: f.agent.ID}}}
 	projectlessDecision := f.authz.CheckAccess(ctx, projectless, hubSA, ActionAssign)
 	assert.False(t, projectlessDecision.Allowed)
 }

@@ -1045,10 +1045,7 @@ func TestCanDelegate_Regression_AgentCallerEscalation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Agent caller with no special authority.
-	agentCaller := &evaluateAgentIdentity{
-		id:        agentID,
-		projectID: projectID,
-	}
+	agentCaller := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: agentID}, ProjectID: projectID}}
 
 	// Agent tries to add a member to the role-bearing group.
 	decision := authz.CanDelegate(ctx, agentCaller, GrantDescriptor{

@@ -166,29 +166,6 @@ func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAu
 	}()
 }
 
-// sanitizePolicySummary returns a compact JSON summary of a policy, safe for audit.
-// No secrets or raw condition values are included.
-func sanitizePolicySummary(p *store.Policy) string {
-	if p == nil {
-		return ""
-	}
-	summary := map[string]interface{}{
-		"name":         p.Name,
-		"effect":       p.Effect,
-		"resourceType": p.ResourceType,
-		"actions":      p.Actions,
-		"scopeType":    p.ScopeType,
-	}
-	if p.ResourceID != "" {
-		summary["resourceId"] = p.ResourceID
-	}
-	b, err := json.Marshal(summary)
-	if err != nil {
-		return fmt.Sprintf(`{"name":%q}`, p.Name)
-	}
-	return string(b)
-}
-
 // =============================================================================
 // Explain API Handler
 // =============================================================================

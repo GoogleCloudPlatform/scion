@@ -137,21 +137,6 @@ func userResource(u *store.User) Resource {
 	}
 }
 
-// policyResource constructs a Resource from a store.Policy for capability computation.
-func policyResource(p *store.Policy) Resource {
-	r := Resource{
-		Type:   "policy",
-		ID:     p.ID,
-		Labels: p.Labels,
-	}
-	// Project-scoped policies are children of the project for authz purposes.
-	if p.ScopeType == "project" && p.ScopeID != "" {
-		r.ParentType = "project"
-		r.ParentID = p.ScopeID
-	}
-	return r
-}
-
 // brokerResource constructs a Resource from a store.RuntimeBroker for capability computation.
 func brokerResource(b *store.RuntimeBroker) Resource {
 	return Resource{
