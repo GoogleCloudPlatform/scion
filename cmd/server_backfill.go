@@ -203,7 +203,7 @@ func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) 
 	case "postgres":
 		client, err := entc.OpenPostgres(cfg.Database.URL, entc.PoolConfig{MaxOpenConns: 10, MaxIdleConns: 5})
 		if err != nil {
-			return nil, fmt.Errorf("opening postgres: connection failed (verify DSN and network connectivity)")
+			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
 		if err := entc.AutoMigrate(ctx, client); err != nil {
 			_ = client.Close()

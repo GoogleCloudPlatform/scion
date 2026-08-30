@@ -45,9 +45,9 @@ func seedBackfillProject(t *testing.T, ctx context.Context, s store.Store) strin
 	t.Helper()
 	projectID := uuid.NewString()
 	err := s.CreateProject(ctx, &store.Project{
-		ID:         projectID,
-		Name:       "backfill-test",
-		Slug:       "backfill-test-" + projectID[:8],
+		ID:   projectID,
+		Name: "backfill-test",
+		Slug: "backfill-test-" + projectID[:8],
 	})
 	require.NoError(t, err)
 	return projectID
