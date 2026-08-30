@@ -415,7 +415,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 
 	globalDir, gErr := GetGlobalTemplatesDir()
 	if gErr != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting global templates dir: %w", gErr)
 	}
 
 	defaultHydrationMu.Lock()
@@ -428,7 +428,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 
 	if mErr := os.MkdirAll(globalDir, 0755); mErr != nil {
 		util.Debugf("failed to prepare global templates dir: %v", mErr)
-		return nil, err
+		return nil, fmt.Errorf("preparing global templates dir: %w", mErr)
 	}
 	// Stage outside globalDir: ListTemplates scans every directory entry there, so a
 	// staging dir leaked by a SIGKILL mid-seed would surface as a template forever.
@@ -436,12 +436,12 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	scionDir, sdErr := GetGlobalDir()
 	if sdErr != nil {
 		util.Debugf("failed to resolve scion dir for staging: %v", sdErr)
-		return nil, err
+		return nil, fmt.Errorf("resolving scion dir for staging: %w", sdErr)
 	}
 	staging, tErr := os.MkdirTemp(scionDir, ".default-hydrate-")
 	if tErr != nil {
 		util.Debugf("failed to stage default template: %v", tErr)
-		return nil, err
+		return nil, fmt.Errorf("creating staging dir for default template: %w", tErr)
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
 	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
@@ -451,7 +451,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
-		return nil, err
+		return nil, fmt.Errorf("seeding default template: %w", sErr)
 	}
 	// Atomic publish. ENOTEMPTY/EEXIST means another process won the race — fine,
 	// the retry below picks up their copy.
