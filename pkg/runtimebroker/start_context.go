@@ -609,8 +609,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_GIT_BRANCH"] = gc.Branch
 			classifyBrokerEnv("SCION_GIT_BRANCH", api.EnvKindPlain)
 		}
-		if gc.Depth > 0 {
-			env["SCION_GIT_DEPTH"] = strconv.Itoa(gc.Depth)
+		if gc.Depth != nil {
+			env["SCION_GIT_DEPTH"] = strconv.Itoa(*gc.Depth)
 			classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
 		}
 		if in.Config.Branch != "" {
@@ -931,10 +931,11 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 	worktreePath := provision.WorktreePath(resolved.HostPath, in.AgentID)
 
 	// Copy GitClone config so we don't mutate the shared pointer, and force a
-	// full clone (Depth -1 ≡ no --depth flag). The shared base needs full
+	// full clone (Depth 0 = no --depth flag). The shared base needs full
 	// history for coordinator merges, git log, and git blame (design §4.2a).
+	fullCloneDepth := 0
 	gcCopy := *in.GitClone
-	gcCopy.Depth = -1
+	gcCopy.Depth = &fullCloneDepth
 
 	return worktreeProvisionResult{
 		ShouldProvision: true,

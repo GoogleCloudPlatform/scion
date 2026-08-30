@@ -297,7 +297,6 @@ func TestProvision_WorktreePerAgent(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0,
 		},
 	})
 	if err != nil {
@@ -368,7 +367,6 @@ func TestProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0,
 		},
 	})
 	if err != nil {
@@ -386,7 +384,6 @@ func TestProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  0,
 		},
 	})
 	if err != nil {
@@ -451,7 +448,7 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 		AgentName: "alpha-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepoA, Branch: "main", Depth: 0},
+		GitClone:  &api.GitCloneConfig{URL: bareRepoA, Branch: "main"},
 	})
 	if err != nil {
 		t.Fatalf("Provision project A: %v", err)
@@ -472,7 +469,7 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 		AgentName: "beta-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepoB, Branch: "main", Depth: 0},
+		GitClone:  &api.GitCloneConfig{URL: bareRepoB, Branch: "main"},
 	})
 	if err != nil {
 		t.Fatalf("Provision project B: %v", err)
@@ -528,7 +525,6 @@ func TestProvision_WorktreePerAgent_ConcurrentSameProject(t *testing.T) {
 				GitClone: &api.GitCloneConfig{
 					URL:    bareRepo,
 					Branch: "main",
-					Depth:  0,
 				},
 			})
 		}(i)
@@ -564,7 +560,7 @@ func TestProvision_WorktreePerAgent_FullCloneDepth(t *testing.T) {
 	projectDir := t.TempDir()
 	hostPath := filepath.Join(projectDir, "workspace")
 
-	// Depth -1 means full clone (no --depth flag).
+	// Depth 0 means full clone (no --depth flag).
 	err := ProvisionShared(ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
 		ProjectID: "proj-depth-1",
@@ -575,11 +571,11 @@ func TestProvision_WorktreePerAgent_FullCloneDepth(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
-			Depth:  -1,
+			Depth:  intPtr(0),
 		},
 	})
 	if err != nil {
-		t.Fatalf("Provision with Depth=-1: %v", err)
+		t.Fatalf("Provision with Depth=0 (full clone): %v", err)
 	}
 
 	// Verify the clone is NOT shallow (full history).
@@ -617,7 +613,7 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 		AgentName: "shared-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
 
@@ -639,7 +635,7 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 		AgentName: "shared-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
 
@@ -673,7 +669,7 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 		AgentName: "agent-alpha",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
 
@@ -685,7 +681,7 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 		AgentName: "agent-beta",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
 
@@ -724,7 +720,7 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 		AgentName: "idem-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
 
@@ -736,7 +732,7 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 		AgentName: "idem-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
-		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
 
@@ -745,3 +741,5 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-a"}, sharers)
 }
+
+func intPtr(i int) *int { return &i }

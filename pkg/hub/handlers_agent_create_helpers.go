@@ -139,10 +139,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
+		defaultDepth := 1
 		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
 			URL:    cloneURL,
 			Branch: defaultBranch,
-			Depth:  1,
+			Depth:  &defaultDepth,
 		}
 	}
 

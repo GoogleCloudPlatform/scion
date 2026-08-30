@@ -62,7 +62,7 @@ func init() {
 	provisionCmd.Flags().StringVar(&provisionMode, "mode", "shared-plain",
 		"Workspace sharing mode (shared-plain, worktree-per-agent)")
 	provisionCmd.Flags().IntVar(&provisionDepth, "depth", 1,
-		"Git clone depth (1=shallow, 0=full, -1=no depth flag)")
+		"Git clone depth (0=full clone, >0=that depth; default 1=shallow)")
 	provisionCmd.Flags().IntVar(&provisionUID, "uid", 1000,
 		"UID for chown of provisioned files")
 	provisionCmd.Flags().IntVar(&provisionGID, "gid", 1000,
@@ -85,10 +85,11 @@ func runProvision(ctx context.Context) error {
 
 	var gc *api.GitCloneConfig
 	if cloneURL != "" {
+		depthVal := provisionDepth
 		gc = &api.GitCloneConfig{
 			URL:    cloneURL,
 			Branch: cloneBranch,
-			Depth:  provisionDepth,
+			Depth:  &depthVal,
 		}
 	}
 

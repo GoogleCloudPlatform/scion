@@ -302,7 +302,7 @@ func TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree(t *testing.
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
 
 	// Set up a hub-managed project layout: projectPath with .scion inside.
 	projectPath := filepath.Join(tmpDir, "proj")
@@ -427,7 +427,7 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *test
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
 
 	projectPath := filepath.Join(tmpDir, "proj")
 	scionDir := filepath.Join(projectPath, config.DotScion)
@@ -532,7 +532,7 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteLastSharer_RemovesWorktree(t *tes
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
 
 	projectPath := filepath.Join(tmpDir, "proj")
 	scionDir := filepath.Join(projectPath, config.DotScion)
@@ -617,7 +617,7 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
 
 	projectPath := filepath.Join(tmpDir, "proj")
 	scionDir := filepath.Join(projectPath, config.DotScion)
@@ -675,3 +675,5 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 		t.Errorf("shared base .git should survive: %v", err)
 	}
 }
+
+func intPtr(i int) *int { return &i }

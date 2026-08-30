@@ -354,7 +354,7 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 			GitClone: &api.GitCloneConfig{
 				URL:    "https://github.com/org/repo.git",
 				Branch: "main",
-				Depth:  1,
+				Depth:  intPtr(1),
 			},
 		},
 		HTTPRequest: r,
@@ -1053,7 +1053,7 @@ func TestResolveWorktreeProvision_Eligible(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    "https://github.com/org/repo.git",
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 		ProjectPath: projectDir,
 		ProjectID:   "proj-1",
@@ -1169,7 +1169,7 @@ func TestResolveWorktreeProvision_GitTooOld_Fallback(t *testing.T) {
 		GitClone: &api.GitCloneConfig{
 			URL:    "https://github.com/org/repo.git",
 			Branch: "main",
-			Depth:  1,
+			Depth:  intPtr(1),
 		},
 		ProjectPath: projectDir,
 		ProjectID:   "proj-1",
@@ -1288,7 +1288,7 @@ func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 	originalGC := &api.GitCloneConfig{
 		URL:    "https://github.com/org/repo.git",
 		Branch: "main",
-		Depth:  1,
+		Depth:  intPtr(1),
 	}
 
 	result := resolveWorktreeProvision(worktreeProvisionInput{
@@ -1304,12 +1304,12 @@ func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 		t.Fatalf("expected ShouldProvision=true, reason: %s", result.Reason)
 	}
 
-	if result.ProvisionInput.GitClone.Depth != -1 {
-		t.Errorf("expected GitClone.Depth=-1 (full clone), got %d", result.ProvisionInput.GitClone.Depth)
+	if result.ProvisionInput.GitClone.Depth == nil || *result.ProvisionInput.GitClone.Depth != 0 {
+		t.Errorf("expected GitClone.Depth=0 (full clone), got %v", result.ProvisionInput.GitClone.Depth)
 	}
 
-	if originalGC.Depth != 1 {
-		t.Errorf("original GitClone.Depth was mutated: got %d, want 1", originalGC.Depth)
+	if originalGC.Depth == nil || *originalGC.Depth != 1 {
+		t.Errorf("original GitClone.Depth was mutated: got %v, want 1", originalGC.Depth)
 	}
 }
 
@@ -1352,7 +1352,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	srv := newTestServerForStartContext(t, cfg)
 
 	bare := initBareRepoWithCommit(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
 
 	projectPath := filepath.Join(t.TempDir(), "proj")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
@@ -1438,7 +1438,7 @@ func TestWorktreeWorkspace_RepoRootDerivesToBase(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	bare := initBareRepoWithCommit(t)
-	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
 
 	projectPath := filepath.Join(t.TempDir(), "proj")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
@@ -1813,3 +1813,5 @@ func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 		}
 	})
 }
+
+func intPtr(i int) *int { return &i }

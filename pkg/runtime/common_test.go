@@ -474,7 +474,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				GitClone: &api.GitCloneConfig{
 					URL:    "https://github.com/example/repo.git",
 					Branch: "main",
-					Depth:  1,
+					Depth:  intPtr(1),
 				},
 			},
 			wantIn: []string{

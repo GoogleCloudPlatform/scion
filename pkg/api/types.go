@@ -842,7 +842,7 @@ func ClassifyEnvKey(classifications map[string]EnvKind, key string) (EnvKind, bo
 type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
-	Depth  int    `json:"depth,omitempty"`  // Clone depth (default: 1, 0 = full)
+	Depth  *int   `json:"depth,omitempty"`  // Clone depth (nil/omitted = shallow depth 1, 0 = full clone, >0 = that depth)
 }
 
 type gitCloneContextKey struct{}

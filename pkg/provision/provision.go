@@ -305,14 +305,15 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput) error {
 	runClone := func() ([]byte, error) {
 		args := []string{"clone"}
 
-		// Set depth (default: 1 for shallow clone, 0 = full).
-		depth := gc.Depth
-		if depth == 0 {
-			depth = 1
+		// Set depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
+		depth := 1 // default: shallow
+		if gc.Depth != nil {
+			depth = *gc.Depth
 		}
 		if depth > 0 {
 			args = append(args, "--depth", fmt.Sprintf("%d", depth))
 		}
+		// depth == 0 means full clone: no --depth flag
 
 		// Set branch if specified.
 		if gc.Branch != "" {
