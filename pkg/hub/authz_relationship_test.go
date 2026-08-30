@@ -37,7 +37,7 @@ func (a *testRelAgentIdentity) ID() string                    { return a.id }
 func (a *testRelAgentIdentity) Type() string                  { return "agent" }
 func (a *testRelAgentIdentity) ProjectID() string             { return a.projectID }
 func (a *testRelAgentIdentity) Scopes() []AgentTokenScope     { return nil }
-func (a *testRelAgentIdentity) HasScope(AgentTokenScope) bool { return true }
+func (a *testRelAgentIdentity) HasScope(AgentTokenScope) bool { return false }
 func (a *testRelAgentIdentity) Ancestry() []string            { return a.ancestry }
 func (a *testRelAgentIdentity) OriginUserID() string {
 	if len(a.ancestry) > 0 {

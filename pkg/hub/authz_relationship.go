@@ -152,6 +152,12 @@ func (r *RelationshipGrantResolver) CheckProgenyAccess(
 
 // isProgenyResource checks whether the given resource ID appears in the set
 // of progeny-eligible resources for the given ancestry chain.
+//
+// Performance note: This does a list-then-scan using existing ListProgeny*
+// store methods. For a single authorization check this is acceptable; if CO1
+// calls CheckProgenyAccess per-resource in a list endpoint, a point-lookup
+// store method (e.g. HasProgenySecret(ctx, resourceID, ancestorIDs)) would
+// avoid loading all progeny resources.
 func (r *RelationshipGrantResolver) isProgenyResource(
 	ctx context.Context,
 	relType RelationshipType,
