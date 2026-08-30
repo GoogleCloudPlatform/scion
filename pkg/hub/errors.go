@@ -57,13 +57,6 @@ const (
 	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
 	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
 
-	// ErrCodeConversationNotResolved is returned when the write-deny switch
-	// (or read-switch) is ON but the conversation could not be resolved.
-	// Status 409: the request conflicts with the resource's current state
-	// and retrying will not help until backfill runs. Consistent with G3's
-	// read-path shape.
-	ErrCodeConversationNotResolved = "conversation_not_resolved"
-
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
 	ErrCodePullFailed     = "pull_failed"
