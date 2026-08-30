@@ -511,16 +511,26 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	}
 
 	// Verify group exists for group principals.
+	// Try UUID first, fall back to slug lookup (mirrors email→UUID for users).
 	if req.PrincipalType == store.RoleBindingPrincipalGroup {
-		_, err := s.store.GetGroup(r.Context(), req.PrincipalID)
+		g, err := s.store.GetGroup(r.Context(), req.PrincipalID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				BadRequest(w, "group not found: "+req.PrincipalID)
+				g, err = s.store.GetGroupBySlug(r.Context(), req.PrincipalID)
+				if err != nil {
+					if errors.Is(err, store.ErrNotFound) {
+						BadRequest(w, "group not found: "+req.PrincipalID)
+					} else {
+						writeErrorFromErr(w, err, "")
+					}
+					return
+				}
 			} else {
 				writeErrorFromErr(w, err, "")
+				return
 			}
-			return
 		}
+		req.PrincipalID = g.ID
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
