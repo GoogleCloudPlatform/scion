@@ -810,7 +810,7 @@ func TestGetEffectivePermissions_GroupRoleBinding(t *testing.T) {
 	}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("grp-perm-group"),
-		MemberID:  tid("grp-perm-user"),
+		MemberID:   tid("grp-perm-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -854,7 +854,7 @@ func TestIsProjectOwnerOrAdmin_ViaGroup(t *testing.T) {
 	}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("grp-proj-group"),
-		MemberID:  tid("grp-proj-user"),
+		MemberID:   tid("grp-proj-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -926,7 +926,7 @@ func TestIsSystemAdmin_ViaGroup(t *testing.T) {
 	}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("grp-sysadmin-group"),
-		MemberID:  tid("grp-sysadmin-user"),
+		MemberID:   tid("grp-sysadmin-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -963,7 +963,7 @@ func TestIsHubAdmin_ViaGroup(t *testing.T) {
 	}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("grp-hubadmin-group"),
-		MemberID:  tid("grp-hubadmin-user"),
+		MemberID:   tid("grp-hubadmin-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -1006,7 +1006,7 @@ func TestGetEffectivePermissions_NestedGroup(t *testing.T) {
 	// Add child group to parent group
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("parent-group"),
-		MemberID:  tid("child-group"),
+		MemberID:   tid("child-group"),
 		MemberType: store.GroupMemberTypeGroup,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -1014,7 +1014,7 @@ func TestGetEffectivePermissions_NestedGroup(t *testing.T) {
 	// Add user to child group
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("child-group"),
-		MemberID:  tid("nested-grp-user"),
+		MemberID:   tid("nested-grp-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -1051,7 +1051,7 @@ func TestGetEffectivePermissions_DirectAndGroupMerge(t *testing.T) {
 	}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("merge-group"),
-		MemberID:  tid("merge-user"),
+		MemberID:   tid("merge-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
@@ -1124,7 +1124,7 @@ func TestRealTimeGroupExpansion(t *testing.T) {
 	// NOW add the user to the group
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    tid("realtime-group"),
-		MemberID:  tid("realtime-user"),
+		MemberID:   tid("realtime-user"),
 		MemberType: store.GroupMemberTypeUser,
 		Role:       store.GroupMemberRoleMember,
 	}))
