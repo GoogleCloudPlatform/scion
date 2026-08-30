@@ -1858,9 +1858,9 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	// Write the token to the canonical file atomically via temp+rename.
-	// Write the token to the canonical file atomically via temp+rename.
-	// Pass the token as part of the script using a heredoc pattern to avoid
-	// exposing it in argv (visible in /proc).
+	// WARNING: token appears in outer process argv via runtime Exec (docker exec / podman exec
+	// command line includes the full script text). The heredoc only hides it from the inner
+	// cat's argv, not the outer shell. See #1355 for the stdin-pipe fix.
 	writeCmd := []string{"sh", "-c",
 		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
 			"mkdir -p \"$TOKEN_DIR\" && " +
