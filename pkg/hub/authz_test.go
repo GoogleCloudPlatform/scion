@@ -786,3 +786,363 @@ type failingRoleBindingStore struct {
 func (f *failingRoleBindingStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
 	return nil, errors.New("store unavailable")
 }
+
+func (f *failingRoleBindingStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
+	return nil, errors.New("store unavailable")
+}
+
+// =============================================================================
+// Group-based RoleBinding Tests
+// =============================================================================
+
+func TestGetEffectivePermissions_GroupRoleBinding(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("grp-perm-user"), Email: "grpperm@test.com", DisplayName: "GrpPerm", Role: "member", Status: "active",
+	}))
+
+	// Create group and add user to it
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("grp-perm-group"), Slug: "grp-perm-group", Name: "GrpPerm Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("grp-perm-group"),
+		MemberID:  tid("grp-perm-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Create a custom role with a permission
+	rd := createTestRoleDefinition(t, s, "grp-test-role", store.RoleScopeSystem, []string{"agent.read"})
+
+	// Bind the role to the GROUP (not the user)
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("grp-perm-group"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// The user should get the group's permissions via expansion
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, tid("grp-perm-user"), store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	assert.Contains(t, perms, "agent.read", "user should inherit permissions from group role binding")
+}
+
+func TestIsProjectOwnerOrAdmin_ViaGroup(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user (no direct project membership)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("grp-proj-user"), Email: "grpproj@test.com", DisplayName: "GrpProj", Role: "member", Status: "active",
+	}))
+
+	// Create project
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("grp-proj"), Name: "Group Project", Slug: "grp-proj",
+	}))
+
+	// Create group and add user
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("grp-proj-group"), Slug: "grp-proj-group", Name: "GrpProj Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("grp-proj-group"),
+		MemberID:  tid("grp-proj-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Get the project-owner role definition
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Bind project-owner to the group, scoped to this project
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("grp-proj-group"),
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          tid("grp-proj"),
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	result := authz.isProjectOwnerOrAdmin(ctx, tid("grp-proj-user"), tid("grp-proj"))
+	assert.True(t, result, "user should be project owner via group membership")
+}
+
+func TestIsProjectOwnerOrAdmin_DirectStillWorks(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("direct-proj-user")
+	projectID := tid("direct-proj")
+
+	// Create user and project
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "directproj@test.com", DisplayName: "DirectProj", Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Direct Project", Slug: "direct-proj",
+	}))
+
+	// Get the project-owner role definition and bind directly to user
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	result := authz.isProjectOwnerOrAdmin(ctx, userID, projectID)
+	assert.True(t, result, "direct user binding should still work (regression test)")
+}
+
+func TestIsSystemAdmin_ViaGroup(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user (non-admin)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("grp-sysadmin-user"), Email: "grpsysadmin@test.com", DisplayName: "GrpSysAdmin", Role: "member", Status: "active",
+	}))
+
+	// Create group and add user
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("grp-sysadmin-group"), Slug: "grp-sysadmin-group", Name: "GrpSysAdmin Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("grp-sysadmin-group"),
+		MemberID:  tid("grp-sysadmin-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Bind super-admin role to the group
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("grp-sysadmin-group"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	result := authz.IsSystemAdmin(ctx, tid("grp-sysadmin-user"))
+	assert.True(t, result, "user should be system admin via group membership")
+}
+
+func TestIsHubAdmin_ViaGroup(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("grp-hubadmin-user"), Email: "grphubadmin@test.com", DisplayName: "GrpHubAdmin", Role: "member", Status: "active",
+	}))
+
+	// Create group and add user
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("grp-hubadmin-group"), Slug: "grp-hubadmin-group", Name: "GrpHubAdmin Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("grp-hubadmin-group"),
+		MemberID:  tid("grp-hubadmin-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Bind hub-admin role to the group
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("grp-hubadmin-group"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	result := authz.IsHubAdmin(ctx, tid("grp-hubadmin-user"))
+	assert.True(t, result, "user should be hub admin via group membership")
+}
+
+func TestGetEffectivePermissions_NestedGroup(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("nested-grp-user"), Email: "nestedgrp@test.com", DisplayName: "NestedGrp", Role: "member", Status: "active",
+	}))
+
+	// Create parent and child groups
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("parent-group"), Slug: "parent-group", Name: "Parent Group",
+	}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("child-group"), Slug: "child-group", Name: "Child Group",
+		ParentID: tid("parent-group"),
+	}))
+
+	// Add child group to parent group
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("parent-group"),
+		MemberID:  tid("child-group"),
+		MemberType: store.GroupMemberTypeGroup,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Add user to child group
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("child-group"),
+		MemberID:  tid("nested-grp-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Create a role with permission and bind to parent group
+	rd := createTestRoleDefinition(t, s, "nested-test-role", store.RoleScopeSystem, []string{"project.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("parent-group"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// The user in the child group should get permissions from the parent's binding (transitive)
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, tid("nested-grp-user"), store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	assert.Contains(t, perms, "project.read", "user in nested group should inherit parent group's role binding permissions")
+}
+
+func TestGetEffectivePermissions_DirectAndGroupMerge(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("merge-user"), Email: "merge@test.com", DisplayName: "MergeUser", Role: "member", Status: "active",
+	}))
+
+	// Create group and add user
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("merge-group"), Slug: "merge-group", Name: "Merge Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("merge-group"),
+		MemberID:  tid("merge-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Create role with agent.read and bind DIRECTLY to user
+	rdDirect := createTestRoleDefinition(t, s, "merge-direct-role", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rdDirect.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("merge-user"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create role with project.read and bind to GROUP
+	rdGroup := createTestRoleDefinition(t, s, "merge-group-role", store.RoleScopeSystem, []string{"project.read"})
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rdGroup.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("merge-group"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// User should get both direct AND group-granted permissions
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, tid("merge-user"), store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	assert.Contains(t, perms, "agent.read", "user should have direct permission")
+	assert.Contains(t, perms, "project.read", "user should have group-granted permission")
+}
+
+func TestRealTimeGroupExpansion(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	// Create user (NOT yet in any group)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("realtime-user"), Email: "realtime@test.com", DisplayName: "Realtime", Role: "member", Status: "active",
+	}))
+
+	// Create project
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("realtime-proj"), Name: "Realtime Project", Slug: "realtime-proj",
+	}))
+
+	// Create group
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("realtime-group"), Slug: "realtime-group", Name: "Realtime Group",
+	}))
+
+	// Bind the project-owner role to the group BEFORE the user joins
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      tid("realtime-group"),
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          tid("realtime-proj"),
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Verify user is NOT project owner yet (no group membership)
+	result := authz.isProjectOwnerOrAdmin(ctx, tid("realtime-user"), tid("realtime-proj"))
+	assert.False(t, result, "user should NOT be project owner before joining the group")
+
+	// NOW add the user to the group
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    tid("realtime-group"),
+		MemberID:  tid("realtime-user"),
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Verify user IS project owner now (real-time — no restart needed)
+	result = authz.isProjectOwnerOrAdmin(ctx, tid("realtime-user"), tid("realtime-proj"))
+	assert.True(t, result, "user should IMMEDIATELY be project owner after joining group (real-time expansion)")
+}
+
+// createTestRoleDefinition creates a custom role definition for tests.
+func createTestRoleDefinition(t *testing.T, s store.Store, name, scopeType string, permissions []string) *store.RoleDefinition {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        name,
+		ScopeType:   scopeType,
+		Permissions: permissions,
+	})
+	require.NoError(t, err)
+	return rd
+}

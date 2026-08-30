@@ -483,8 +483,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalType is required")
 		return
 	}
-	if req.PrincipalType != store.RoleBindingPrincipalUser && req.PrincipalType != store.RoleBindingPrincipalAgent {
-		BadRequest(w, "principalType must be \"user\" or \"agent\"")
+	if req.PrincipalType != store.RoleBindingPrincipalUser && req.PrincipalType != store.RoleBindingPrincipalAgent && req.PrincipalType != store.RoleBindingPrincipalGroup {
+		BadRequest(w, "principalType must be \"user\", \"agent\", or \"group\"")
 		return
 	}
 	if req.PrincipalID == "" {
@@ -508,6 +508,15 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		req.PrincipalID = resolvedUser.ID
+	}
+
+	// Verify group exists for group principals.
+	if req.PrincipalType == store.RoleBindingPrincipalGroup {
+		_, err := s.store.GetGroup(r.Context(), req.PrincipalID)
+		if err != nil {
+			BadRequest(w, "group not found: "+req.PrincipalID)
+			return
+		}
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {

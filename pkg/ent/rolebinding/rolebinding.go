@@ -83,6 +83,7 @@ type PrincipalType string
 const (
 	PrincipalTypeUser  PrincipalType = "user"
 	PrincipalTypeAgent PrincipalType = "agent"
+	PrincipalTypeGroup PrincipalType = "group"
 )
 
 func (pt PrincipalType) String() string {
@@ -92,7 +93,7 @@ func (pt PrincipalType) String() string {
 // PrincipalTypeValidator is a validator for the "principal_type" field enum values. It is called by the builders before save.
 func PrincipalTypeValidator(pt PrincipalType) error {
 	switch pt {
-	case PrincipalTypeUser, PrincipalTypeAgent:
+	case PrincipalTypeUser, PrincipalTypeAgent, PrincipalTypeGroup:
 		return nil
 	default:
 		return fmt.Errorf("rolebinding: invalid enum value for principal_type field: %q", pt)

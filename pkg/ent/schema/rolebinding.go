@@ -25,7 +25,7 @@ import (
 )
 
 // RoleBinding holds the schema definition for the RoleBinding entity.
-// A role binding connects a principal (user or agent) to a role definition,
+// A role binding connects a principal (user, agent, or group) to a role definition,
 // optionally scoped to a specific project.
 type RoleBinding struct {
 	ent.Schema
@@ -41,7 +41,7 @@ func (RoleBinding) Fields() []ent.Field {
 			Optional().
 			Nillable(),
 		field.Enum("principal_type").
-			Values("user", "agent"),
+			Values("user", "agent", "group"),
 		field.String("principal_id").
 			NotEmpty(),
 		field.Enum("scope_type").

@@ -1408,7 +1408,7 @@ var (
 	// RoleBindingsColumns holds the columns for the "role_bindings" table.
 	RoleBindingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
-		{Name: "principal_type", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
+		{Name: "principal_type", Type: field.TypeEnum, Enums: []string{"user", "agent", "group"}},
 		{Name: "principal_id", Type: field.TypeString},
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
