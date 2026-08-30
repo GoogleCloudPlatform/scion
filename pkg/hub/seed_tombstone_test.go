@@ -34,7 +34,7 @@ func TestSeedPolicy_SeededPoliciesHaveOrigin(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	for _, name := range []string{"hub-member-read-all", "hub-member-create-projects"} {
+	for _, name := range []string{"hub-member-read-user", "hub-member-create-projects"} {
 		res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
 		require.NoError(t, err)
 		require.Len(t, res.Items, 1, "expected seeded policy %q to exist", name)
@@ -49,7 +49,7 @@ func TestSeedPolicy_SkipsRecreationWhenTombstoneExists(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	const policyName = "hub-member-read-all"
+	const policyName = "hub-member-read-user"
 
 	// Delete the seeded policy so we can test recreation.
 	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
@@ -70,9 +70,9 @@ func TestSeedPolicy_SkipsRecreationWhenTombstoneExists(t *testing.T) {
 	seedPolicy(ctx, s, group.ID, &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         policyName,
-		Description:  "Allow hub members to read all resources",
+		Description:  "Allow hub members to read user resources",
 		ScopeType:    "hub",
-		ResourceType: "*",
+		ResourceType: "user",
 		Actions:      []string{"read", "list"},
 		Effect:       "allow",
 	})
@@ -89,7 +89,7 @@ func TestDeletePolicy_SeededPolicyCreatesTombstone(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	const policyName = "hub-member-read-all"
+	const policyName = "hub-member-read-user"
 
 	// Find the seeded policy.
 	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
@@ -180,16 +180,16 @@ func TestBackfillSeededPolicyOrigin_SkipsAlreadySet(t *testing.T) {
 
 	// The seeded policies already have Origin set by the seeder.
 	// Record the Updated timestamp before backfill.
-	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-read-all"}, store.ListOptions{Limit: 1})
+	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-read-user"}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
 	require.Len(t, res.Items, 1)
 	updatedBefore := res.Items[0].Updated
 
 	// Run backfill again.
-	backfillSeededPolicyOrigin(ctx, s, []string{"hub-member-read-all"})
+	backfillSeededPolicyOrigin(ctx, s, []string{"hub-member-read-user"})
 
 	// Verify it was not updated (timestamp should be unchanged).
-	res, err = s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-read-all"}, store.ListOptions{Limit: 1})
+	res, err = s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-read-user"}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
 	require.Len(t, res.Items, 1)
 	assert.Equal(t, updatedBefore, res.Items[0].Updated,

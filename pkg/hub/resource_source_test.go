@@ -335,7 +335,6 @@ func TestBootstrapSource_SkipNonBuiltinConflict(t *testing.T) {
 		StoragePath:   "templates/global/conflict",
 		StorageBucket: stor.Bucket(),
 		StorageURI:    "gs://test-bucket/templates/global/conflict",
-		Visibility:    store.VisibilityPrivate,
 	}
 	if err := s.CreateTemplate(ctx, existing); err != nil {
 		t.Fatalf("pre-create failed: %v", err)
@@ -393,7 +392,6 @@ func TestBootstrapSource_DuplicateCreateRace(t *testing.T) {
 		StoragePath:   "templates/global/raced",
 		StorageBucket: "test-bucket",
 		StorageURI:    "gs://test-bucket/templates/global/raced",
-		Visibility:    store.VisibilityPrivate,
 	}
 	if err := s.CreateTemplate(ctx, existing); err != nil {
 		t.Fatalf("pre-create failed: %v", err)
@@ -504,7 +502,6 @@ func TestBootstrapSource_OverwriteAlways(t *testing.T) {
 		StoragePath:   "templates/global/admin-override",
 		StorageBucket: stor.Bucket(),
 		StorageURI:    "gs://test-bucket/templates/global/admin-override",
-		Visibility:    store.VisibilityPrivate,
 	}
 	if err := s.CreateTemplate(ctx, existing); err != nil {
 		t.Fatalf("pre-create failed: %v", err)

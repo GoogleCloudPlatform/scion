@@ -52,7 +52,6 @@ type CreateProjectRequest struct {
 	Name          string            `json:"name"`
 	GitRemote     string            `json:"gitRemote,omitempty"`
 	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared", "worktree-per-agent", or "per-agent" (default); only meaningful when gitRemote is set
-	Visibility    string            `json:"visibility,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubToken   string            `json:"githubToken,omitempty"`
 }
@@ -138,12 +137,11 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.ProjectFilter{
-		OwnerID:    query.Get("ownerId"),
-		Visibility: query.Get("visibility"),
-		GitRemote:  util.NormalizeGitRemote(query.Get("gitRemote")),
-		BrokerID:   query.Get("brokerId"),
-		Name:       query.Get("name"),
-		Slug:       query.Get("slug"),
+		OwnerID:   query.Get("ownerId"),
+		GitRemote: util.NormalizeGitRemote(query.Get("gitRemote")),
+		BrokerID:  query.Get("brokerId"),
+		Name:      query.Get("name"),
+		Slug:      query.Get("slug"),
 	}
 
 	// Template filtering: default to excluding template projects.
@@ -368,16 +366,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := &store.Project{
-		ID:         projectID,
-		Name:       displayName,
-		Slug:       slug,
-		GitRemote:  normalizedRemote,
-		Labels:     req.Labels,
-		Visibility: req.Visibility,
-	}
-
-	if project.Visibility == "" {
-		project.Visibility = store.VisibilityPrivate
+		ID:        projectID,
+		Name:      displayName,
+		Slug:      slug,
+		GitRemote: normalizedRemote,
+		Labels:    req.Labels,
 	}
 
 	// Set ownership from authenticated user
@@ -896,10 +889,31 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 			"project_id", project.ID, "policy", policyName, "error", err.Error())
 	}
 
+	// Create project-level read policy for members. This grants read+list on
+	// project and agent resources, making the project visible to its members.
+	// Without this, projects are invisible after the hub-member-read-all
+	// wildcard was narrowed to exclude project/agent/broker.
+	s.ensureProjectMemberReadPolicy(ctx, project, membersGroup.ID)
+
 	// Create the project-level service-account assign policy alongside it.
 	// See projectAssignPolicyName in seed.go for why it is project-scoped and
 	// what reach it preserves.
 	ensureProjectAssignPolicy(ctx, s.store, project, membersGroup.ID)
+}
+
+// ensureProjectMemberReadPolicy creates or ensures a project-scoped read+list
+// policy for both "project" and "agent" resource types, bound to the project's
+// members group. This is the mechanism that makes a project visible to its
+// members after the global hub-member-read-all wildcard was narrowed to exclude
+// project/agent/broker resources.
+//
+// "Public" / "everyone" visibility is achieved by adding the hub-members group
+// to the project's members group — the read policy then applies transitively
+// to all hub users.
+func (s *Server) ensureProjectMemberReadPolicy(ctx context.Context, project *store.Project, membersGroupID string) {
+	// Delegate to the standalone function so the same logic is reusable
+	// from both inline handler paths and the startup backfill.
+	ensureProjectMemberReadPolicies(ctx, s.store, project, membersGroupID)
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
@@ -1380,12 +1394,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		project = &store.Project{
-			ID:         projectID,
-			Name:       displayName,
-			Slug:       slug,
-			GitRemote:  normalizedRemote,
-			Labels:     req.Labels,
-			Visibility: store.VisibilityPrivate,
+			ID:        projectID,
+			Name:      displayName,
+			Slug:      slug,
+			GitRemote: normalizedRemote,
+			Labels:    req.Labels,
 		}
 
 		// Set ownership from authenticated user
@@ -2531,6 +2544,17 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	// Ensure associated groups exist (backfill for projects created before
 	// group support was added). These calls are idempotent.
 	s.createProjectGroup(ctx, project)
+
+	// SECURITY-GATE: CheckAccess — verify read access to individual project
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		NotFound(w, "Project")
+		return
+	}
+	if decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead); !decision.Allowed {
+		NotFound(w, "Project")
+		return
+	}
 	s.createProjectMembersGroupAndPolicy(ctx, project)
 
 	// Enrich owner display name
@@ -2569,7 +2593,6 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		Name                   string            `json:"name,omitempty"`
 		Slug                   string            `json:"slug,omitempty"`
 		Labels                 map[string]string `json:"labels,omitempty"`
-		Visibility             string            `json:"visibility,omitempty"`
 		DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
 	}
 
@@ -2605,9 +2628,6 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	}
 	if updates.Labels != nil {
 		project.Labels = updates.Labels
-	}
-	if updates.Visibility != "" {
-		project.Visibility = updates.Visibility
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID
@@ -2676,6 +2696,23 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	} else if err != nil {
 		s.projectsLogger().Warn("failed to retrieve project member policy for migration",
 			"project_id", project.ID, "old_policy", oldPolicyName, "error", err)
+	}
+
+	// Migrate the project member-read-project policy name.
+	for _, suffix := range []string{"member-read-project", "member-read-agent"} {
+		oldReadPolicyName := "project:" + oldSlug + ":" + suffix
+		newReadPolicyName := "project:" + newSlug + ":" + suffix
+		if policies, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldReadPolicyName}, store.ListOptions{Limit: 1}); err == nil && len(policies.Items) > 0 {
+			policy := &policies.Items[0]
+			policy.Name = newReadPolicyName
+			if err := s.store.UpdatePolicy(ctx, policy); err != nil {
+				s.projectsLogger().Warn("failed to migrate project member read policy name",
+					"project_id", project.ID, "old_policy", oldReadPolicyName, "new_policy", newReadPolicyName, "error", err)
+			}
+		} else if err != nil {
+			s.projectsLogger().Warn("failed to retrieve project member read policy for migration",
+				"project_id", project.ID, "old_policy", oldReadPolicyName, "error", err)
+		}
 	}
 
 	// Migrate hub-managed project filesystem paths (best-effort).

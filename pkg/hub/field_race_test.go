@@ -74,10 +74,9 @@ func TestChannelRegistryRace(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "cr-race",
-		Slug:       "cr-race",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "cr-race",
+		Slug: "cr-race",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -202,10 +201,9 @@ func TestDispatcherRace(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "disp-race",
-		Slug:       "disp-race",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "disp-race",
+		Slug: "disp-race",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)

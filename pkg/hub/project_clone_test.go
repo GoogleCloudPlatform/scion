@@ -31,7 +31,6 @@ func createSourceProject(t *testing.T, srv *Server, s store.Store) *store.Projec
 		Slug:                   "source-project",
 		GitRemote:              "https://github.com/test/repo.git",
 		DefaultRuntimeBrokerID: "broker-123",
-		Visibility:             store.VisibilityPublic,
 		OwnerID:                DevUserID,
 		CreatedBy:              DevUserID,
 		Annotations: map[string]string{
@@ -226,9 +225,6 @@ func TestProjectClone_HappyPath(t *testing.T) {
 	assert.Equal(t, DevUserID, clone.OwnerID)
 	assert.Equal(t, DevUserID, clone.CreatedBy)
 
-	// Visibility resets to private
-	assert.Equal(t, store.VisibilityPrivate, clone.Visibility)
-
 	// Settings annotations copied
 	assert.Equal(t, "claude-sonnet", clone.Annotations["scion.io/default-model"])
 	assert.Equal(t, "100", clone.Annotations["scion.io/default-max-turns"])
@@ -360,12 +356,11 @@ func TestProjectClone_UnsetAnnotations(t *testing.T) {
 
 	// Create a project with NO annotations set
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Bare Project",
-		Slug:       "bare-project",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Bare Project",
+		Slug:      "bare-project",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -385,12 +380,11 @@ func TestProjectClone_SlugOmitted_NameCollides(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Original",
-		Slug:       "original",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Original",
+		Slug:      "original",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -412,12 +406,11 @@ func TestProjectClone_ExplicitSlugCollides(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Existing",
-		Slug:       "existing-slug",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Existing",
+		Slug:      "existing-slug",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -469,12 +462,11 @@ func TestProjectClone_NoAgents(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "With Agents",
-		Slug:       "with-agents",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "With Agents",
+		Slug:      "with-agents",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -536,12 +528,11 @@ func TestProjectClone_Unauthenticated(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Auth Test",
-		Slug:       "auth-test",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Auth Test",
+		Slug:      "auth-test",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -556,12 +547,11 @@ func TestProjectClone_ReadOnly_Succeeds(t *testing.T) {
 
 	// Project owned by the dev user — they can read it
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Readable",
-		Slug:       "readable",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Readable",
+		Slug:      "readable",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -583,12 +573,11 @@ func TestProjectClone_MissingName(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Valid Project",
-		Slug:       "valid-project",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Valid Project",
+		Slug:      "valid-project",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -602,12 +591,11 @@ func TestProjectClone_MethodNotAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Method Test",
-		Slug:       "method-test",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Method Test",
+		Slug:      "method-test",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -624,12 +612,11 @@ func TestProjectClone_ConcurrentClones(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Concurrent Source",
-		Slug:       "concurrent-source",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Concurrent Source",
+		Slug:      "concurrent-source",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -659,12 +646,11 @@ func TestProjectClone_AsTemplate_AdminOnly(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Template Source",
-		Slug:       "template-source",
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Template Source",
+		Slug:      "template-source",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -678,9 +664,6 @@ func TestProjectClone_AsTemplate_AdminOnly(t *testing.T) {
 
 	// Assert clone has scion.io/template: "true" label
 	assert.Equal(t, "true", clone.Labels[store.LabelTemplate])
-
-	// Assert clone visibility is "team"
-	assert.Equal(t, store.VisibilityTeam, clone.Visibility)
 }
 
 func TestProjectClone_AsTemplate_ScionIOLabelsStripped_WhenNoAsTemplate(t *testing.T) {
@@ -689,12 +672,11 @@ func TestProjectClone_AsTemplate_ScionIOLabelsStripped_WhenNoAsTemplate(t *testi
 
 	// Create source with scion.io/template label
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Existing Template",
-		Slug:       "existing-template",
-		Visibility: store.VisibilityTeam,
-		OwnerID:    DevUserID,
-		CreatedBy:  DevUserID,
+		ID:        api.NewUUID(),
+		Name:      "Existing Template",
+		Slug:      "existing-template",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 		Labels: map[string]string{
 			store.LabelTemplate: "true",
 			"team":              "backend",
@@ -716,8 +698,6 @@ func TestProjectClone_AsTemplate_ScionIOLabelsStripped_WhenNoAsTemplate(t *testi
 	// Assert non-system label IS preserved
 	assert.Equal(t, "backend", clone.Labels["team"])
 
-	// Assert visibility resets to private (not inherited from source)
-	assert.Equal(t, store.VisibilityPrivate, clone.Visibility)
 }
 
 func TestProjectClone_StorageFilesCopied(t *testing.T) {

@@ -174,7 +174,6 @@ func TestValidateStorage_ZeroFilesActive(t *testing.T) {
 		StoragePath:   "templates/global/zero-files",
 		StorageBucket: stor.Bucket(),
 		StorageURI:    "gs://test-bucket/templates/global/zero-files",
-		Visibility:    store.VisibilityPrivate,
 		Files:         nil,
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
@@ -469,7 +468,6 @@ func TestPartialUpload_ResourceStaysPending(t *testing.T) {
 		StoragePath:   "templates/global/partial",
 		StorageBucket: "test-bucket",
 		StorageURI:    "gs://test-bucket/templates/global/partial",
-		Visibility:    store.VisibilityPrivate,
 		Files: []store.TemplateFile{
 			{Path: "scion-agent.yaml", Size: 20},
 		},

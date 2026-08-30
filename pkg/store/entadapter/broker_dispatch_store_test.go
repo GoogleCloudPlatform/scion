@@ -174,7 +174,7 @@ func TestListPendingMessages_ByBrokerAgent(t *testing.T) {
 	brokerB := uuid.NewString()
 
 	// A project and two agents, one per broker.
-	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString()}
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], OwnerID: uuid.NewString()}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 	projUID := uuid.MustParse(proj.ID)
 	agentA := mustCreateAgent(t, client, projUID, brokerA)
@@ -206,7 +206,7 @@ func TestCountStuckPendingMessages(t *testing.T) {
 
 	proj := &store.Project{
 		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
-		Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString(),
+		OwnerID: uuid.NewString(),
 	}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 
@@ -246,7 +246,7 @@ func TestExpireStuckPendingMessages(t *testing.T) {
 
 	proj := &store.Project{
 		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
-		Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString(),
+		OwnerID: uuid.NewString(),
 	}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 

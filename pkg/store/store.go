@@ -381,7 +381,6 @@ type ProjectStore interface {
 // ProjectFilter defines criteria for filtering projects.
 type ProjectFilter struct {
 	OwnerID         string
-	Visibility      string
 	GitRemotePrefix string
 	GitRemote       string // Filter by exact git remote (case-sensitive)
 	BrokerID        string // Filter by contributing broker

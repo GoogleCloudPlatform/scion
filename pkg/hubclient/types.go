@@ -137,7 +137,6 @@ type Project struct {
 	Updated                time.Time         `json:"updated"`
 	CreatedBy              string            `json:"createdBy,omitempty"`
 	OwnerID                string            `json:"ownerId,omitempty"`
-	Visibility             string            `json:"visibility,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 	Annotations            map[string]string `json:"annotations,omitempty"`
 	Providers              []ProjectProvider `json:"providers,omitempty"`

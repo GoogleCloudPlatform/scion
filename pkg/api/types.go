@@ -1006,7 +1006,7 @@ type StatusEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// Visibility constants for agent and project access control.
+// Visibility constants for resource access control (skills, templates, harness configs).
 const (
 	VisibilityPrivate = "private" // Only the owner can access
 	VisibilityTeam    = "team"    // Team members can access
@@ -1029,9 +1029,8 @@ type ProjectInfo struct {
 	Updated time.Time `json:"updated,omitempty"` // Last modification timestamp
 
 	// Ownership
-	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the project
-	OwnerID    string `json:"ownerId,omitempty"`    // Current owner user ID
-	Visibility string `json:"visibility,omitempty"` // Access level: private, team, public
+	CreatedBy string `json:"createdBy,omitempty"` // User/system that created the project
+	OwnerID   string `json:"ownerId,omitempty"`   // Current owner user ID
 
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`

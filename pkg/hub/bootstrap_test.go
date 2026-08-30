@@ -752,7 +752,6 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
-		Visibility:      store.VisibilityPrivate,
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "test task",
 		},
@@ -838,7 +837,6 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -882,7 +880,6 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseStopped),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -932,7 +929,6 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)

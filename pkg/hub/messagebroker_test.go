@@ -131,10 +131,9 @@ func setupBrokerTestProject(t *testing.T, s store.Store) string {
 	}
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "test-project",
-		Slug:       "test-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "test-project",
+		Slug: "test-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)

@@ -147,20 +147,6 @@ func (_c *ProjectCreate) SetNillableOwnerID(v *string) *ProjectCreate {
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *ProjectCreate) SetVisibility(v string) *ProjectCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *ProjectCreate) SetNillableVisibility(v *string) *ProjectCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetGithubInstallationID sets the "github_installation_id" field.
 func (_c *ProjectCreate) SetGithubInstallationID(v int64) *ProjectCreate {
 	_c.mutation.SetGithubInstallationID(v)
@@ -289,10 +275,6 @@ func (_c *ProjectCreate) defaults() {
 		v := project.DefaultUpdated()
 		_c.mutation.SetUpdated(v)
 	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := project.DefaultVisibility
-		_c.mutation.SetVisibility(v)
-	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := project.DefaultID()
 		_c.mutation.SetID(v)
@@ -322,9 +304,6 @@ func (_c *ProjectCreate) check() error {
 	}
 	if _, ok := _c.mutation.Updated(); !ok {
 		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Project.updated"`)}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Project.visibility"`)}
 	}
 	return nil
 }
@@ -405,10 +384,6 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.OwnerID(); ok {
 		_spec.SetField(project.FieldOwnerID, field.TypeString, value)
 		_node.OwnerID = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(project.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.GithubInstallationID(); ok {
 		_spec.SetField(project.FieldGithubInstallationID, field.TypeInt64, value)
@@ -653,18 +628,6 @@ func (u *ProjectUpsert) UpdateOwnerID() *ProjectUpsert {
 // ClearOwnerID clears the value of the "owner_id" field.
 func (u *ProjectUpsert) ClearOwnerID() *ProjectUpsert {
 	u.SetNull(project.FieldOwnerID)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *ProjectUpsert) SetVisibility(v string) *ProjectUpsert {
-	u.Set(project.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *ProjectUpsert) UpdateVisibility() *ProjectUpsert {
-	u.SetExcluded(project.FieldVisibility)
 	return u
 }
 
@@ -983,20 +946,6 @@ func (u *ProjectUpsertOne) UpdateOwnerID() *ProjectUpsertOne {
 func (u *ProjectUpsertOne) ClearOwnerID() *ProjectUpsertOne {
 	return u.Update(func(s *ProjectUpsert) {
 		s.ClearOwnerID()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *ProjectUpsertOne) SetVisibility(v string) *ProjectUpsertOne {
-	return u.Update(func(s *ProjectUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *ProjectUpsertOne) UpdateVisibility() *ProjectUpsertOne {
-	return u.Update(func(s *ProjectUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -1495,20 +1444,6 @@ func (u *ProjectUpsertBulk) UpdateOwnerID() *ProjectUpsertBulk {
 func (u *ProjectUpsertBulk) ClearOwnerID() *ProjectUpsertBulk {
 	return u.Update(func(s *ProjectUpsert) {
 		s.ClearOwnerID()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *ProjectUpsertBulk) SetVisibility(v string) *ProjectUpsertBulk {
-	return u.Update(func(s *ProjectUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *ProjectUpsertBulk) UpdateVisibility() *ProjectUpsertBulk {
-	return u.Update(func(s *ProjectUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

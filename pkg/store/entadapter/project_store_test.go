@@ -39,11 +39,10 @@ func newTestProjectStore(t *testing.T) *ProjectStore {
 func newProject(seq int) *store.Project {
 	id := uuid.NewString()
 	return &store.Project{
-		ID:         id,
-		Name:       "Project " + id[:8],
-		Slug:       "project-" + id[:8],
-		Visibility: store.VisibilityPrivate,
-		Labels:     map[string]string{"seq": id[:4]},
+		ID:     id,
+		Name:   "Project " + id[:8],
+		Slug:   "project-" + id[:8],
+		Labels: map[string]string{"seq": id[:4]},
 	}
 }
 
@@ -64,7 +63,6 @@ func TestProject_CreateGet(t *testing.T) {
 	assert.Equal(t, p.Name, got.Name)
 	assert.Equal(t, p.Slug, got.Slug)
 	assert.Equal(t, "https://github.com/acme/repo.git", got.GitRemote)
-	assert.Equal(t, store.VisibilityPrivate, got.Visibility)
 	assert.Equal(t, store.ProjectTypeHubManaged, got.ProjectType) // computed default
 }
 
@@ -210,23 +208,15 @@ func TestProject_ListFilters(t *testing.T) {
 
 	owner := uuid.NewString()
 	pub := newProject(1)
-	pub.Visibility = "public"
 	pub.OwnerID = owner
 	require.NoError(t, ps.CreateProject(ctx, pub))
 
 	priv := newProject(2)
-	priv.Visibility = store.VisibilityPrivate
 	require.NoError(t, ps.CreateProject(ctx, priv))
 
 	all, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, all.TotalCount)
-
-	byVis, err := ps.ListProjects(ctx, store.ProjectFilter{Visibility: "public"}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, 1, byVis.TotalCount)
-	require.Len(t, byVis.Items, 1)
-	assert.Equal(t, pub.ID, byVis.Items[0].ID)
 
 	byOwner, err := ps.ListProjects(ctx, store.ProjectFilter{OwnerID: owner}, store.ListOptions{})
 	require.NoError(t, err)
@@ -457,7 +447,7 @@ func TestProvider_UpsertAndGet(t *testing.T) {
 
 	projectID := uuid.NewString()
 	brokerID := uuid.NewString()
-	require.NoError(t, ps.CreateProject(ctx, &store.Project{ID: projectID, Name: "p", Slug: "p-" + projectID[:8], Visibility: store.VisibilityPrivate}))
+	require.NoError(t, ps.CreateProject(ctx, &store.Project{ID: projectID, Name: "p", Slug: "p-" + projectID[:8]}))
 
 	prov := &store.ProjectProvider{
 		ProjectID:  projectID,
@@ -678,10 +668,9 @@ func TestListProjects_MaxLimit(t *testing.T) {
 	const total = 1010
 	for i := 0; i < total; i++ {
 		p := &store.Project{
-			ID:         uuid.NewString(),
-			Name:       fmt.Sprintf("proj-%04d", i),
-			Slug:       fmt.Sprintf("proj-%04d", i),
-			Visibility: store.VisibilityPrivate,
+			ID:   uuid.NewString(),
+			Name: fmt.Sprintf("proj-%04d", i),
+			Slug: fmt.Sprintf("proj-%04d", i),
 		}
 		require.NoError(t, ps.CreateProject(ctx, p))
 	}

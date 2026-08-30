@@ -1517,7 +1517,7 @@ export class ScionPageOnboarding extends LitElement {
       const res = await apiFetch('/api/v1/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: this.wsProjectName.trim(), visibility: 'private' }),
+        body: JSON.stringify({ name: this.wsProjectName.trim() }),
       });
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to create project');
@@ -1675,7 +1675,7 @@ export class ScionPageOnboarding extends LitElement {
       const projRes = await apiFetch('/api/v1/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: this.wsProjectName.trim(), visibility: 'private' }),
+        body: JSON.stringify({ name: this.wsProjectName.trim() }),
       });
       if (!projRes.ok) {
         this.error = await extractApiError(projRes, 'Failed to create project');

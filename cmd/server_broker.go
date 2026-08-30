@@ -41,10 +41,9 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	projectNeedsDefaultBroker := false
 	if globalProject == nil {
 		globalProject = &store.Project{
-			ID:         api.NewUUID(),
-			Name:       "Global",
-			Slug:       GlobalProjectName,
-			Visibility: store.VisibilityPrivate,
+			ID:   api.NewUUID(),
+			Name: "Global",
+			Slug: GlobalProjectName,
 			Labels: map[string]string{
 				"scion.io/system": "true",
 				"scion.io/global": "true",

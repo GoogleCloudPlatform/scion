@@ -31,11 +31,10 @@ import (
 func createTestProjectForPSH(t *testing.T, s store.Store) *store.Project {
 	t.Helper()
 	project := &store.Project{
-		ID:         tid("test-project-psh-" + t.Name()),
-		Name:       "Test Project PSH",
-		Slug:       "test-project-psh-" + strings.ToLower(t.Name()),
-		Visibility: "private",
-		OwnerID:    "dev@localhost",
+		ID:      tid("test-project-psh-" + t.Name()),
+		Name:    "Test Project PSH",
+		Slug:    "test-project-psh-" + strings.ToLower(t.Name()),
+		OwnerID: "dev@localhost",
 	}
 	require.NoError(t, s.CreateProject(t.Context(), project))
 	return project

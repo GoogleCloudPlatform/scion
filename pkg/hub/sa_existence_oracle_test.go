@@ -245,10 +245,9 @@ func TestSAOracle_ProjectDefault_MissingAndUnreachableAreOneAnswer(t *testing.T)
 	project := createTestProjectForSettings(t, s)
 
 	elsewhere := &store.Project{
-		ID:         tid("oracle-other-project"),
-		Name:       "Oracle Other",
-		Slug:       "oracle-other-project",
-		Visibility: "private",
+		ID:   tid("oracle-other-project"),
+		Name: "Oracle Other",
+		Slug: "oracle-other-project",
 	}
 	require.NoError(t, s.CreateProject(t.Context(), elsewhere))
 

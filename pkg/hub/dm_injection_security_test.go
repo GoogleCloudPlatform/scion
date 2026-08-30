@@ -84,41 +84,37 @@ func TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM(t *testing.T) {
 
 	// Project P1 — the attacker's project.
 	p1 := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "attacker-project",
-		Slug:       "attacker-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "attacker-project",
+		Slug: "attacker-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, p1))
 
 	// Project P2 — the victim's project (agent B lives here).
 	p2 := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "victim-project",
-		Slug:       "victim-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "victim-project",
+		Slug: "victim-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, p2))
 
 	// Agent A — attacker, lives in P1.
 	agentA := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "attacker-agent",
-		Slug:       "attacker-agent",
-		ProjectID:  p1.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "attacker-agent",
+		Slug:      "attacker-agent",
+		ProjectID: p1.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
 
 	// Agent B — legitimate, lives in P2.
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "legit-agent",
-		Slug:       "legit-agent",
-		ProjectID:  p2.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "legit-agent",
+		Slug:      "legit-agent",
+		ProjectID: p2.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
 

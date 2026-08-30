@@ -253,14 +253,12 @@ func TestChatNotifier_DMReceived_ResolvesAgentSlugFromSenderID(t *testing.T) {
 	// Name is preferred over Slug.
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "f2-notif", Slug: "f2-notif",
-		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateProject(ctx, project))
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "Helpful Bot", Slug: "helpful-bot",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, agent))
 
@@ -311,14 +309,12 @@ func TestChatNotifier_DMReceived_DoesNotClobberCallerLabel(t *testing.T) {
 
 	project := &store.Project{
 		ID: api.NewUUID(), Name: "f6-noclobber", Slug: "f6-noclobber",
-		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateProject(ctx, project))
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "Agent Real Name", Slug: "agent-slug",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, agent))
 
@@ -561,7 +557,6 @@ func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
 	agent := &store.Agent{
 		ID: api.NewUUID(), Slug: "scout", Name: "Scout",
 		Template: "claude", ProjectID: proj.ID,
-		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

@@ -166,10 +166,9 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Notification Test Project",
-		Slug:       "notif-test-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Notification Test Project",
+		Slug: "notif-test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 

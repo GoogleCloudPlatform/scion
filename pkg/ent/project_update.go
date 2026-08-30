@@ -188,20 +188,6 @@ func (_u *ProjectUpdate) ClearOwnerID() *ProjectUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *ProjectUpdate) SetVisibility(v string) *ProjectUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *ProjectUpdate) SetNillableVisibility(v *string) *ProjectUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetGithubInstallationID sets the "github_installation_id" field.
 func (_u *ProjectUpdate) SetGithubInstallationID(v int64) *ProjectUpdate {
 	_u.mutation.ResetGithubInstallationID()
@@ -443,9 +429,6 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.OwnerIDCleared() {
 		_spec.ClearField(project.FieldOwnerID, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(project.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.GithubInstallationID(); ok {
 		_spec.SetField(project.FieldGithubInstallationID, field.TypeInt64, value)
@@ -694,20 +677,6 @@ func (_u *ProjectUpdateOne) SetNillableOwnerID(v *string) *ProjectUpdateOne {
 // ClearOwnerID clears the value of the "owner_id" field.
 func (_u *ProjectUpdateOne) ClearOwnerID() *ProjectUpdateOne {
 	_u.mutation.ClearOwnerID()
-	return _u
-}
-
-// SetVisibility sets the "visibility" field.
-func (_u *ProjectUpdateOne) SetVisibility(v string) *ProjectUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *ProjectUpdateOne) SetNillableVisibility(v *string) *ProjectUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
 	return _u
 }
 
@@ -982,9 +951,6 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if _u.mutation.OwnerIDCleared() {
 		_spec.ClearField(project.FieldOwnerID, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(project.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.GithubInstallationID(); ok {
 		_spec.SetField(project.FieldGithubInstallationID, field.TypeInt64, value)

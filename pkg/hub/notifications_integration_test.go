@@ -67,10 +67,9 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	srv.SetDispatcher(recorder)
 
 	project := &store.Project{
-		ID:         tid("project-integ"),
-		Name:       "Integration Project",
-		Slug:       "integration-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   tid("project-integ"),
+		Name: "Integration Project",
+		Slug: "integration-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 

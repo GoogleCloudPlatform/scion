@@ -41,8 +41,6 @@ type Project struct {
 	CreatedBy string `json:"created_by,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
 	OwnerID string `json:"owner_id,omitempty"`
-	// Visibility holds the value of the "visibility" field.
-	Visibility string `json:"visibility,omitempty"`
 	// GithubInstallationID holds the value of the "github_installation_id" field.
 	GithubInstallationID *int64 `json:"github_installation_id,omitempty"`
 	// GithubPermissions holds the value of the "github_permissions" field.
@@ -84,7 +82,7 @@ func (*Project) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case project.FieldGithubInstallationID:
 			values[i] = new(sql.NullInt64)
-		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldVisibility, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGitIdentity:
+		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGitIdentity:
 			values[i] = new(sql.NullString)
 		case project.FieldCreated, project.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -182,12 +180,6 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field owner_id", values[i])
 			} else if value.Valid {
 				_m.OwnerID = value.String
-			}
-		case project.FieldVisibility:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field visibility", values[i])
-			} else if value.Valid {
-				_m.Visibility = value.String
 			}
 		case project.FieldGithubInstallationID:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -291,9 +283,6 @@ func (_m *Project) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("owner_id=")
 	builder.WriteString(_m.OwnerID)
-	builder.WriteString(", ")
-	builder.WriteString("visibility=")
-	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	if v := _m.GithubInstallationID; v != nil {
 		builder.WriteString("github_installation_id=")

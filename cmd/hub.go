@@ -258,10 +258,9 @@ Examples:
 }
 
 var (
-	hubProjectCreateSlug       string
-	hubProjectCreateName       string
-	hubProjectCreateBranch     string
-	hubProjectCreateVisibility string
+	hubProjectCreateSlug   string
+	hubProjectCreateName   string
+	hubProjectCreateBranch string
 )
 
 // hubProjectCreateCmd creates a project on the Hub from a git URL
@@ -341,7 +340,6 @@ func init() {
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateSlug, "slug", "", "Override the auto-derived slug")
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateBranch, "branch", "", "Base branch for the project (defaults to detected default branch, or main)")
-	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateVisibility, "visibility", "", "Project visibility: private, team, or public (default: private)")
 	hubProjectCreateCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 
 	// Also link flags to the hidden alias subcommands so they work too
@@ -351,7 +349,6 @@ func init() {
 	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateSlug, "slug", "", "Override the auto-derived slug")
 	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
 	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateBranch, "branch", "", "Base branch for the project (defaults to detected default branch, or main)")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateVisibility, "visibility", "", "Project visibility: private, team, or public (default: private)")
 	hubGrovesCreateCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 
 	// Broker subcommand flags
@@ -1326,7 +1323,6 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 			"name":       project.Name,
 			"slug":       project.Slug,
 			"gitRemote":  project.GitRemote,
-			"visibility": project.Visibility,
 			"agentCount": project.AgentCount,
 			"created":    project.Created,
 			"updated":    project.Updated,
@@ -1354,7 +1350,6 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	if project.GitRemote != "" {
 		fmt.Printf("Git Remote:  %s\n", project.GitRemote)
 	}
-	fmt.Printf("Visibility:  %s\n", valueOrDefault(project.Visibility, "private"))
 	fmt.Printf("Agents:      %d\n", project.AgentCount)
 	fmt.Printf("Created:     %s\n", project.Created.Format(time.RFC3339))
 	if !project.Updated.IsZero() && project.Updated != project.Created {
@@ -1607,10 +1602,9 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 
 	// Create project on the hub (server assigns ID)
 	project, err := client.Projects().Create(ctx, &hubclient.CreateProjectRequest{
-		Name:       displayName,
-		Slug:       slug,
-		GitRemote:  normalized,
-		Visibility: hubProjectCreateVisibility,
+		Name:      displayName,
+		Slug:      slug,
+		GitRemote: normalized,
 		Labels: map[string]string{
 			"scion.dev/default-branch": defaultBranch,
 			"scion.dev/clone-url":      util.ToHTTPSCloneURL(gitURL),

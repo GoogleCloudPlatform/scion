@@ -624,8 +624,8 @@ func TestMatchesResource_HubAndResourceScopesUnchanged(t *testing.T) {
 // of their literals: the only configurations whose behaviour changes are
 // user-authored project-scoped policies targeting a parentless resource type.
 //
-//   - seed.go's hub-member-read-all and hub-member-create-projects are
-//     ScopeType "hub", so the `case "project"` arm never runs for them.
+//   - seed.go's per-type hub-member-read-* policies and hub-member-create-projects
+//     are ScopeType "hub", so the `case "project"` arm never runs for them.
 //   - handlers_projects_core.go's project:<slug>:member-create-agents is
 //     project-scoped but ResourceType "agent"; agent resources always carry a
 //     project parent, so it matches exactly the same set as before.
@@ -656,7 +656,9 @@ func TestMatchesResource_SeededPoliciesUnaffected(t *testing.T) {
 	parentlessTemplate := templateResource(&store.Template{ID: tid("seed-template")})
 	ownProject := projectResource(project)
 
-	for _, name := range []string{"hub-member-read-all", "hub-member-create-projects"} {
+	// After narrowing hub-member-read-all, per-type read policies exist for
+	// directory resources and hub-member-create-projects remains unchanged.
+	for _, name := range []string{"hub-member-read-user", "hub-member-read-group", "hub-member-read-template", "hub-member-read-harness_config", "hub-member-read-broker", "hub-member-read-runtime_broker", "hub-member-read-gcp_service_account", "hub-member-read-policy", "hub-member-read-skill", "hub-member-read-quota", "hub-member-read-role", "hub-member-read-role_binding", "hub-member-read-hub", "hub-member-create-projects"} {
 		t.Run(name, func(t *testing.T) {
 			p := byName(name)
 			require.Equal(t, "hub", p.ScopeType,

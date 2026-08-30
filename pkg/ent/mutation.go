@@ -37151,7 +37151,6 @@ type ProjectMutation struct {
 	updated                   *time.Time
 	created_by                *string
 	owner_id                  *string
-	visibility                *string
 	github_installation_id    *int64
 	addgithub_installation_id *int64
 	github_permissions        *string
@@ -37757,42 +37756,6 @@ func (m *ProjectMutation) ResetOwnerID() {
 	delete(m.clearedFields, project.FieldOwnerID)
 }
 
-// SetVisibility sets the "visibility" field.
-func (m *ProjectMutation) SetVisibility(s string) {
-	m.visibility = &s
-}
-
-// Visibility returns the value of the "visibility" field in the mutation.
-func (m *ProjectMutation) Visibility() (r string, exists bool) {
-	v := m.visibility
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldVisibility returns the old "visibility" field's value of the Project entity.
-// If the Project object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *ProjectMutation) OldVisibility(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldVisibility requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
-	}
-	return oldValue.Visibility, nil
-}
-
-// ResetVisibility resets all changes to the "visibility" field.
-func (m *ProjectMutation) ResetVisibility() {
-	m.visibility = nil
-}
-
 // SetGithubInstallationID sets the "github_installation_id" field.
 func (m *ProjectMutation) SetGithubInstallationID(i int64) {
 	m.github_installation_id = &i
@@ -38098,7 +38061,7 @@ func (m *ProjectMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectMutation) Fields() []string {
-	fields := make([]string, 0, 16)
+	fields := make([]string, 0, 15)
 	if m.name != nil {
 		fields = append(fields, project.FieldName)
 	}
@@ -38131,9 +38094,6 @@ func (m *ProjectMutation) Fields() []string {
 	}
 	if m.owner_id != nil {
 		fields = append(fields, project.FieldOwnerID)
-	}
-	if m.visibility != nil {
-		fields = append(fields, project.FieldVisibility)
 	}
 	if m.github_installation_id != nil {
 		fields = append(fields, project.FieldGithubInstallationID)
@@ -38177,8 +38137,6 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case project.FieldOwnerID:
 		return m.OwnerID()
-	case project.FieldVisibility:
-		return m.Visibility()
 	case project.FieldGithubInstallationID:
 		return m.GithubInstallationID()
 	case project.FieldGithubPermissions:
@@ -38218,8 +38176,6 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldCreatedBy(ctx)
 	case project.FieldOwnerID:
 		return m.OldOwnerID(ctx)
-	case project.FieldVisibility:
-		return m.OldVisibility(ctx)
 	case project.FieldGithubInstallationID:
 		return m.OldGithubInstallationID(ctx)
 	case project.FieldGithubPermissions:
@@ -38313,13 +38269,6 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetOwnerID(v)
-		return nil
-	case project.FieldVisibility:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetVisibility(v)
 		return nil
 	case project.FieldGithubInstallationID:
 		v, ok := value.(int64)
@@ -38514,9 +38463,6 @@ func (m *ProjectMutation) ResetField(name string) error {
 		return nil
 	case project.FieldOwnerID:
 		m.ResetOwnerID()
-		return nil
-	case project.FieldVisibility:
-		m.ResetVisibility()
 		return nil
 	case project.FieldGithubInstallationID:
 		m.ResetGithubInstallationID()

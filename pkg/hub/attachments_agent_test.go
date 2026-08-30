@@ -140,7 +140,6 @@ func agentAttachmentServer(t *testing.T) (*Server, store.Store, *store.Project, 
 		ID:         api.NewUUID(),
 		Name:       "attach-project",
 		Slug:       "attach-project",
-		Visibility: store.VisibilityPrivate,
 		SharedDirs: []api.SharedDir{{Name: attachmentSharedDirName}},
 	}
 	if err := s.CreateProject(context.Background(), project); err != nil {
@@ -272,12 +271,11 @@ func TestOutboundMessage_AttachmentsLinkedToMessage(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "sender",
-		Slug:       "sender",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "sender",
+		Slug:      "sender",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)

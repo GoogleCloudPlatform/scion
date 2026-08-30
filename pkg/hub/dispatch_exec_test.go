@@ -129,11 +129,10 @@ func seedAgentWithBrokerID(t *testing.T, cs store.Store, brokerID string) *store
 	t.Helper()
 	ctx := context.Background()
 	proj := &store.Project{
-		ID:         uuid.NewString(),
-		Name:       "test-proj",
-		Slug:       "tp-" + uuid.NewString()[:8],
-		Visibility: store.VisibilityPrivate,
-		OwnerID:    uuid.NewString(),
+		ID:      uuid.NewString(),
+		Name:    "test-proj",
+		Slug:    "tp-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
 	}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 	broker := &store.RuntimeBroker{

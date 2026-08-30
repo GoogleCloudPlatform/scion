@@ -40,10 +40,9 @@ func assignPolicyTestProject(t *testing.T, srv *Server, slug string) *store.Proj
 	t.Helper()
 	ctx := context.Background()
 	p := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       slug + " project",
-		Slug:       slug,
-		Visibility: "private",
+		ID:   api.NewUUID(),
+		Name: slug + " project",
+		Slug: slug,
 	}
 	require.NoError(t, srv.store.CreateProject(ctx, p))
 	srv.createProjectMembersGroupAndPolicy(ctx, p)
@@ -251,10 +250,9 @@ func TestBackfillProjectAssignPolicies_SkipsGrouplessProject(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "groupless project",
-		Slug:       "assign-groupless",
-		Visibility: "private",
+		ID:   api.NewUUID(),
+		Name: "groupless project",
+		Slug: "assign-groupless",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 

@@ -58,10 +58,9 @@ func TestAgentStalledDetectionHandler_MarksStalledAgents(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Stalled Detection Project",
-		Slug:       "stalled-detect-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Stalled Detection Project",
+		Slug: "stalled-detect-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -144,10 +143,9 @@ func TestAgentStalledDetectionHandler_ClearedByActivityEvent(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Recovery Stalled Project",
-		Slug:       "recovery-stalled-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Recovery Stalled Project",
+		Slug: "recovery-stalled-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -205,10 +203,9 @@ func TestAgentStalledDetectionHandler_StalledFromActivityIsPreserved(t *testing.
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Stalled Preserved Project",
-		Slug:       "stalled-preserved-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Stalled Preserved Project",
+		Slug: "stalled-preserved-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -286,10 +283,9 @@ func TestAgentStalledDetectionHandler_BlockedAgentNotStalled(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Blocked Not Stalled Project",
-		Slug:       "blocked-not-stalled-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Blocked Not Stalled Project",
+		Slug: "blocked-not-stalled-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -350,10 +346,9 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "Idle Stalled Project",
-		Slug:       "working-stalled-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "Idle Stalled Project",
+		Slug: "working-stalled-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -483,10 +478,9 @@ func TestAgentStalledDetectionHandler_AutoSuspendDisabled(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "AutoSuspend Disabled Project",
-		Slug:       "autosuspend-disabled-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "AutoSuspend Disabled Project",
+		Slug: "autosuspend-disabled-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -550,10 +544,9 @@ func TestAgentStalledDetectionHandler_AutoSuspendEnabled(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "AutoSuspend Enabled Project",
-		Slug:       "autosuspend-enabled-project",
-		Visibility: store.VisibilityPrivate,
+		ID:   api.NewUUID(),
+		Name: "AutoSuspend Enabled Project",
+		Slug: "autosuspend-enabled-project",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
