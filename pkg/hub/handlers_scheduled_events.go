@@ -63,8 +63,9 @@ type ListScheduledEventsResponse struct {
 //
 // Agent identities are authorized by the caller: the existing checkAgentReadScope
 // and project isolation checks in the dispatcher are sufficient for agents.
-// User identities are policy-checked via s.authzService.CheckAccess against a
-// project-scoped scheduled_event resource.
+// User identities are authorized via s.authzService.Decide (with a canonical
+// permission ID for role-binding resolution) against a project-scoped
+// scheduled_event resource.
 func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Request, projectID string, action Action) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
