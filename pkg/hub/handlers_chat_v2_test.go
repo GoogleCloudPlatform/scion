@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -3432,5 +3433,79 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 		t.Fatalf("expected type %q (agent-routed via default), got %q — "+
 			"the default-agent routing branch may have been removed entirely",
 			messages.TypeInstruction, resp.Type)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC-G2-6: ConversationWriteDenySwitch integration test
+// ---------------------------------------------------------------------------
+
+// enableWriteDenySwitch configures OperationalSettings on the server with the
+// ConversationWriteDenySwitch flag ON. After this call, handlers that check
+// s.writeDenyEnabled() will deny writes when conversation resolution fails.
+func enableWriteDenySwitch(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	fakeStore.seed("messaging", json.RawMessage(`{"conversation_write_deny_switch":true}`))
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("ops.Refresh failed: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	if !srv.GetOperationalSettings().ConversationWriteDenySwitch() {
+		t.Fatalf("enableWriteDenySwitch: ConversationWriteDenySwitch() is still false after setup")
+	}
+}
+
+// TestG2_AC6_WriteDenySwitch_IntegrationChatV2 verifies AC-G2-6: with the
+// ConversationWriteDenySwitch OFF (default), a message sent to a topic without
+// a conversation_id succeeds (B10 behaviour). With the switch ON, the same
+// request is denied.
+func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic WITHOUT calling setTopicConversationID — conversation
+	// resolution will fail because there is no conversation_id on the topic.
+	topicID := tid("g2-ac6-topic")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-conv-id",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "AC-G2-6 probe"}
+
+	// --- Switch OFF (default) -------------------------------------------------
+	// B10 behaviour: derivation failure is logged but the message is delivered.
+	before := messaging.WriteDenialMetrics.Total()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("[switch OFF] expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Counter must not increment when switch is OFF — denials are not enforced.
+	if after := messaging.WriteDenialMetrics.Total(); after != before {
+		t.Errorf("[switch OFF] WriteDenialMetrics changed from %d to %d; expected no change",
+			before, after)
+	}
+
+	// --- Switch ON ------------------------------------------------------------
+	enableWriteDenySwitch(t, srv)
+
+	before = messaging.WriteDenialMetrics.Total()
+	rec = doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("[switch ON] expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Counter must increment when switch is ON and denial fires.
+	if after := messaging.WriteDenialMetrics.Total(); after <= before {
+		t.Errorf("[switch ON] WriteDenialMetrics did not increment: before=%d after=%d",
+			before, after)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -138,6 +139,57 @@ func (c *SwitchBypassCounter) Total() int64 {
 
 // SwitchBypassMetrics is the package-level counter for switch bypass events.
 var SwitchBypassMetrics = &SwitchBypassCounter{}
+
+// ---------------------------------------------------------------------------
+// Write-denial tracking (G2 — write-path enforcement)
+// ---------------------------------------------------------------------------
+
+// WriteDenialCounter tracks write-path conversation resolution denials,
+// partitioned by denial site. Safe for concurrent use.
+type WriteDenialCounter struct {
+	counts sync.Map // site string → *atomic.Int64
+}
+
+// Inc increments the counter for the given site.
+func (c *WriteDenialCounter) Inc(site string) {
+	v, _ := c.counts.LoadOrStore(site, &atomic.Int64{})
+	v.(*atomic.Int64).Add(1)
+}
+
+// Get returns the count for a given site.
+func (c *WriteDenialCounter) Get(site string) int64 {
+	v, ok := c.counts.Load(site)
+	if !ok {
+		return 0
+	}
+	return v.(*atomic.Int64).Load()
+}
+
+// Total returns the sum of all denial counts across all sites.
+func (c *WriteDenialCounter) Total() int64 {
+	var total int64
+	c.counts.Range(func(_, v any) bool {
+		total += v.(*atomic.Int64).Load()
+		return true
+	})
+	return total
+}
+
+// Sites returns a snapshot of all site names and their counts.
+func (c *WriteDenialCounter) Sites() map[string]int64 {
+	result := make(map[string]int64)
+	c.counts.Range(func(k, v any) bool {
+		result[k.(string)] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return result
+}
+
+// WriteDenialMetrics is the package-level counter for write-path denials.
+// Exported so that metrics collectors can read it. Separate from
+// DivergenceMetrics: divergence measures read-path coverage,
+// write denials measure G2 enforcement.
+var WriteDenialMetrics = &WriteDenialCounter{}
 
 // LogDivergence logs a DivergenceEntry to the provided logger and increments
 // the global divergence counter. Fallback entries increment only the fallback

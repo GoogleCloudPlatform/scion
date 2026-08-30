@@ -57,6 +57,10 @@ type MessageBrokerProxy struct {
 	// attachments. Neither can happen in the web channel spoke, because the ID
 	// does not exist until deliverToUser runs. Nil-safe.
 	webChatStore WebChatStore
+	// writeDenyEnabled returns whether the G2 write-deny switch is on.
+	// When nil or returning false, conversation resolution failures are non-fatal
+	// (B10 contract). When returning true, they deny the write (G2 contract).
+	writeDenyEnabled func() bool
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -467,8 +471,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {
-				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-				return
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.user.thread")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
@@ -477,8 +485,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 				if convErr != nil {
-					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-					return
+					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("mb.user.dm")
+						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+						return
+					}
+					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
@@ -659,16 +671,24 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {
-				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-				return
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.agent.thread")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		} else if msg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
 				if convErr != nil {
-					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-					return
+					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("mb.agent.dm")
+						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+						return
+					}
+					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",

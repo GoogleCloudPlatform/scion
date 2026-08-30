@@ -124,6 +124,8 @@ type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 // The ConversationReadSwitch flag gates the Phase 8 read-switch migration.
+// The ConversationWriteDenySwitch flag gates the G2 write-deny migration.
 type MessagingSettings struct {
-	ConversationReadSwitch *bool `json:"conversation_read_switch,omitempty"`
+	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
+	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
 }

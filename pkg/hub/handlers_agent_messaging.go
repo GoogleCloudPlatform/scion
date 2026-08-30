@@ -279,6 +279,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
 	// Uses DeriveConversationKey to unify thread and DM key derivation (§2.15).
+	var convResult *messaging.ConversationResult
 	extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
 		ThreadID:      req.ThreadID,
 		ProjectID:     agent.ProjectID,
@@ -288,27 +289,43 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		RecipientID:   recipientID,
 	})
 	if deriveErr != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"conversation key derivation failed: "+deriveErr.Error(), nil)
-		return
-	}
-	var keyOpts []messaging.ConversationByKeyOption
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-	if wcs != nil {
-		keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-	}
-	convResult, convErr := messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
-	if convErr != nil {
-		s.messageLog.Error("conversation resolution failed", "error", convErr)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-		return
-	}
-	storeMsg.ConversationID = convResult.ConversationID
-	if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-		ValidationError(w, err.Error(), nil)
-		return
+		if s.writeDenyEnabled() {
+			messaging.WriteDenialMetrics.Inc("outbound.derive")
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"conversation key derivation failed: "+deriveErr.Error(), nil)
+			return
+		}
+		s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
+			"thread_id", req.ThreadID, "agent_id", agent.ID, "error", deriveErr)
+	} else {
+		var keyOpts []messaging.ConversationByKeyOption
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+		}
+		var convErr error
+		convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+		if convErr != nil {
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("outbound.resolve")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return
+			}
+			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		} else {
+			storeMsg.ConversationID = convResult.ConversationID
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("outbound.validate")
+					ValidationError(w, err.Error(), nil)
+					return
+				}
+				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+			}
+		}
 	}
 	// Always log divergence — even when convResult is nil, that is a divergence signal.
 	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
@@ -724,14 +741,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
-			s.messageLog.Error("conversation resolution failed", "error", convErr)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-			return
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return
+			}
+			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		} else {
+			if structuredMsg.Metadata == nil {
+				structuredMsg.Metadata = make(map[string]string)
+			}
+			structuredMsg.Metadata["conversation_id"] = convResult.ConversationID
 		}
-		if structuredMsg.Metadata == nil {
-			structuredMsg.Metadata = make(map[string]string)
-		}
-		structuredMsg.Metadata["conversation_id"] = convResult.ConversationID
 	}
 
 	// Ownership check: verify the DM key IDs match the actual participants.
@@ -1010,32 +1032,49 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				RecipientID:   agent.ID,
 			})
 			if deriveErr != nil {
-				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-					"conversation key derivation failed: "+deriveErr.Error(), nil)
-				return
-			}
-			var keyOpts []messaging.ConversationByKeyOption
-			s.mu.RLock()
-			wcs := s.webChatStore
-			s.mu.RUnlock()
-			if wcs != nil {
-				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-			}
-			var convErr error
-			convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
-			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("agent_msg.derive")
+					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+						"conversation key derivation failed: "+deriveErr.Error(), nil)
+					return
+				}
+				s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
+					"thread_id", structuredMsg.ThreadID, "error", deriveErr)
+			} else {
+				var keyOpts []messaging.ConversationByKeyOption
+				s.mu.RLock()
+				wcs := s.webChatStore
+				s.mu.RUnlock()
+				if wcs != nil {
+					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+				}
+				var convErr error
+				convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+				if convErr != nil {
+					if s.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("agent_msg.resolve")
+						s.messageLog.Error("conversation resolution failed", "error", convErr)
+						writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+						return
+					}
+					s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					convResult = nil
+				}
 			}
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
 		messaging.RecordStep(ctx, "conversation_resolved")
-		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-			ValidationError(w, err.Error(), nil)
-			return
+		if convResult != nil {
+			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("agent_msg.validate")
+					ValidationError(w, err.Error(), nil)
+					return
+				}
+				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
@@ -1324,11 +1363,16 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
 					if convErr != nil {
-						s.messageLog.Error("conversation resolution failed", "error", convErr)
-						results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
-						continue
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("group.agent_recipient")
+							s.messageLog.Error("conversation resolution failed", "error", convErr)
+							results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					} else {
+						storeMsg.ConversationID = convResult.ConversationID
 					}
-					storeMsg.ConversationID = convResult.ConversationID
 				}
 			}
 			// Always log divergence — even when convResult is nil, that is a divergence signal.
@@ -1453,11 +1497,16 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
 					if convErr != nil {
-						s.messageLog.Error("conversation resolution failed", "error", convErr)
-						results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
-						continue
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("group.user_recipient")
+							s.messageLog.Error("conversation resolution failed", "error", convErr)
+							results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					} else {
+						storeMsg.ConversationID = convResult.ConversationID
 					}
-					storeMsg.ConversationID = convResult.ConversationID
 				}
 			}
 			// Always log divergence — even when convResult is nil, that is a divergence signal.

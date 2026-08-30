@@ -2155,6 +2155,13 @@ func (s *Server) GetOperationalSettings() *OperationalSettings {
 	return s.operationalSettings.Load()
 }
 
+// writeDenyEnabled returns whether the G2 conversation write-deny switch is ON.
+// Safe for concurrent use. Returns false when operational settings are absent.
+func (s *Server) writeDenyEnabled() bool {
+	ops := s.GetOperationalSettings()
+	return ops != nil && ops.ConversationWriteDenySwitch()
+}
+
 // logMessage logs a message dispatch event to the dedicated message logger
 // if configured, otherwise falls back to the standard subsystem message logger.
 func (s *Server) logMessage(msg string, attrs ...any) {
@@ -2486,6 +2493,10 @@ func (s *Server) StartNotificationDispatcher() {
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistry = s.channelRegistry
+	nd.writeDenyEnabled = func() bool {
+		ops := s.GetOperationalSettings()
+		return ops != nil && ops.ConversationWriteDenySwitch()
+	}
 	s.notificationDispatcher = nd
 	s.notificationDispatcher.Start()
 }
@@ -2546,6 +2557,10 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	proxy.messageLog = s.dedicatedMessageLog
 	proxy.chatNotifier = s.chatNotifier // W6: wire DM notification trigger
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
+	proxy.writeDenyEnabled = func() bool {
+		ops := s.GetOperationalSettings()
+		return ops != nil && ops.ConversationWriteDenySwitch()
+	}
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 

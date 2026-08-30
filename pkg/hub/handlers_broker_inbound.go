@@ -256,14 +256,19 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
-			log.Error("conversation resolution failed", "error", convErr)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-			return
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("broker.phase11")
+				log.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				return
+			}
+			log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		} else {
+			if req.Message.Metadata == nil {
+				req.Message.Metadata = make(map[string]string)
+			}
+			req.Message.Metadata["conversation_id"] = convResult.ConversationID
 		}
-		if req.Message.Metadata == nil {
-			req.Message.Metadata = make(map[string]string)
-		}
-		req.Message.Metadata["conversation_id"] = convResult.ConversationID
 		log.Info("Resolved conversation for broker inbound",
 			"conversation_id", convResult.ConversationID,
 			"surface", req.Surface, "external_ref", req.ExternalRef)
@@ -359,24 +364,36 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
 			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("broker.thread")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					return
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		} else if senderUserID != "" && agent.ID != "" {
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
 			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("broker.dm")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					return
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
-				return
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("broker.validate")
+					writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+					return
+				}
+				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.

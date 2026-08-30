@@ -40,8 +40,9 @@ type NotificationDispatcher struct {
 	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
 	log             *slog.Logger
 	messageLog      *slog.Logger        // dedicated message audit logger (nil = disabled)
-	channelRegistry *ChannelRegistry    // external notification channels (nil = disabled)
-	brokerProxy     *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
+	channelRegistry  *ChannelRegistry    // external notification channels (nil = disabled)
+	brokerProxy      *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
+	writeDenyEnabled func() bool         // G2 write-deny switch callback (nil = OFF)
 	stopCh          chan struct{}
 	stopOnce        sync.Once
 	wg              sync.WaitGroup
@@ -508,11 +509,17 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 		convResult, convErr := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
 			"agent", agent.ID, "user", sub.SubscriberID)
 		if convErr != nil {
-			nd.log.Error("conversation resolution failed for inbox notification",
+			if nd.writeDenyEnabled != nil && nd.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("notif.inbox")
+				nd.log.Error("conversation resolution failed for inbox notification",
+					"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
+				return
+			}
+			nd.log.Warn("conversation resolution failed for inbox notification (write-deny OFF, continuing)",
 				"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
-			return
+		} else {
+			storeMsg.ConversationID = convResult.ConversationID
 		}
-		storeMsg.ConversationID = convResult.ConversationID
 	}
 
 	if err := nd.store.CreateMessage(ctx, storeMsg); err != nil {

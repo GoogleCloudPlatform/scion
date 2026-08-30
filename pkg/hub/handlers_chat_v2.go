@@ -1174,24 +1174,36 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return ""
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.thread")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		} else if user.ID() != "" && primaryAgent.ID != "" {
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
 			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return ""
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.dm")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				ValidationError(w, err.Error(), nil)
-				return ""
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
+					ValidationError(w, err.Error(), nil)
+					return ""
+				}
+				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
 		}
 	}
@@ -1307,15 +1319,23 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 					if convErr != nil {
-						s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
-						continue
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("chat_v2.mention.thread")
+							s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed for mention (write-deny OFF, continuing)", "slug", mentionAgent.Slug, "error", convErr)
 					}
 				} else if user.ID() != "" && mentionAgent.ID != "" {
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
 					if convErr != nil {
-						s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
-						continue
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("chat_v2.mention.dm")
+							s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed for mention (write-deny OFF, continuing)", "slug", mentionAgent.Slug, "error", convErr)
 					}
 				}
 				if convResult != nil {
@@ -1428,17 +1448,25 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return ""
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.human.thread")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		} else if user.ID() != "" && recipientID != "" {
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
 			if convErr != nil {
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
-				return ""
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.human.dm")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		}
 		if convResult != nil {

@@ -395,4 +395,57 @@ func TestG2_AC5_AllWritePathFailuresReturnErrors(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// AC-G2-6: With the switch OFF, producer errors are still returned but the
+// WriteDenialMetrics counter is available for consumers to track denials.
+// The switch itself lives at the consumer (handler) level; this test verifies
+// the producer + counter contract that makes the switch work.
+// ============================================================================
+
+// TestG2_AC6_ProducerErrorsReturnedRegardlessOfSwitch proves that producer
+// functions always return errors (the switch doesn't change producer behavior).
+// The consumer decides whether to deny or continue based on the switch.
+func TestG2_AC6_ProducerErrorsReturnedRegardlessOfSwitch(t *testing.T) {
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Producer always returns error for invalid inputs, regardless of any switch.
+	_, err := ResolveOrCreateDMConversation(
+		context.Background(), mock, mock, logger,
+		"user", "", "agent", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	if err == nil {
+		t.Fatal("AC-G2-6: producer must always return error for invalid inputs")
+	}
+}
+
+// TestG2_AC6_WriteDenialCounterWorks proves the counter increments and
+// reports correctly.
+func TestG2_AC6_WriteDenialCounterWorks(t *testing.T) {
+	// Create a fresh counter (don't use the global to avoid test interference).
+	c := &WriteDenialCounter{}
+
+	if c.Total() != 0 {
+		t.Fatal("AC-G2-6: fresh counter should be zero")
+	}
+
+	c.Inc("test.site.a")
+	c.Inc("test.site.a")
+	c.Inc("test.site.b")
+
+	if c.Get("test.site.a") != 2 {
+		t.Errorf("AC-G2-6: expected 2 for site a, got %d", c.Get("test.site.a"))
+	}
+	if c.Get("test.site.b") != 1 {
+		t.Errorf("AC-G2-6: expected 1 for site b, got %d", c.Get("test.site.b"))
+	}
+	if c.Total() != 3 {
+		t.Errorf("AC-G2-6: expected total 3, got %d", c.Total())
+	}
+
+	sites := c.Sites()
+	if len(sites) != 2 {
+		t.Errorf("AC-G2-6: expected 2 sites, got %d", len(sites))
+	}
+}
+
 func strPtr(s string) *string { return &s }
