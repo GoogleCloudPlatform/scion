@@ -195,6 +195,10 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/role-bindings":  "hub-admin:role_binding",
 	"/api/v1/admin/role-bindings/": "hub-admin:role_binding",
 	"/api/v1/admin/permissions":    "hub-admin:role",
+
+	// Access Constraints (AC1)
+	"/api/v1/admin/access-constraints":  "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraints/": "hub-admin:access_constraint",
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {
