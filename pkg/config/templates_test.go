@@ -15,9 +15,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -630,15 +632,21 @@ func TestGetTemplateChainInProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// No default template exists on disk, so it is hydrated from the embedded
+	// copy into the global templates dir and prepended to the chain.
 	chain, err := GetTemplateChainInProject("test-tpl", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
-	if len(chain) != 1 {
-		t.Fatalf("expected chain length 1, got %d", len(chain))
+	if len(chain) != 2 {
+		t.Fatalf("expected chain length 2, got %d", len(chain))
 	}
-	if chain[0].Path != projectTplDir {
-		t.Errorf("expected path %q, got %q", projectTplDir, chain[0].Path)
+	hydratedDefault := filepath.Join(tmpDir, GlobalDir, "templates", "default")
+	if chain[0].Path != hydratedDefault {
+		t.Errorf("expected chain[0] path %q, got %q", hydratedDefault, chain[0].Path)
+	}
+	if chain[1].Path != projectTplDir {
+		t.Errorf("expected chain[1] path %q, got %q", projectTplDir, chain[1].Path)
 	}
 }
 
@@ -694,6 +702,166 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 	if chain[0].Path != defaultTplDir {
 		t.Errorf("expected path %q, got %q", defaultTplDir, chain[0].Path)
+	}
+}
+
+// Broker instances have no seeded ~/.scion/templates/default. The chain must still
+// carry the default template — hydrated from the embedded copy — so that its home
+// files (.tmux.conf, .zshrc, .gitconfig) reach provisioned agents.
+func TestGetTemplateChainInProject_HydratesDefaultFromEmbedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Chdir(tmpDir)
+
+	// Global templates dir holds a custom template but no default.
+	customTplDir := filepath.Join(tmpDir, GlobalDir, "templates", "my-custom")
+	if err := os.MkdirAll(filepath.Join(customTplDir, "home"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(customTplDir, "home", "custom-file"), []byte("custom"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	chain, err := GetTemplateChainInProject("my-custom", "")
+	if err != nil {
+		t.Fatalf("GetTemplateChainInProject failed: %v", err)
+	}
+
+	if len(chain) != 2 {
+		t.Fatalf("expected 2 templates in chain, got %d", len(chain))
+	}
+	if chain[0].Name != "default" {
+		t.Errorf("expected first template to be 'default', got %q", chain[0].Name)
+	}
+	if chain[1].Name != "my-custom" {
+		t.Errorf("expected second template to be 'my-custom', got %q", chain[1].Name)
+	}
+
+	// The hydrated default must carry the common home files.
+	tmuxPath := filepath.Join(chain[0].Path, "home", ".tmux.conf")
+	if _, err := os.Stat(tmuxPath); err != nil {
+		t.Errorf("hydrated default template is missing .tmux.conf: %v", err)
+	}
+}
+
+func TestGetTemplateChainInProject_HydratesDefaultWhenPrimary(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Chdir(tmpDir)
+
+	// No templates at all — default should be hydrated from the embedded copy.
+	chain, err := GetTemplateChainInProject("default", "")
+	if err != nil {
+		t.Fatalf("GetTemplateChainInProject failed: %v", err)
+	}
+
+	if len(chain) != 1 {
+		t.Fatalf("expected 1 template in chain, got %d", len(chain))
+	}
+	if chain[0].Name != "default" {
+		t.Errorf("expected template to be 'default', got %q", chain[0].Name)
+	}
+	tmuxPath := filepath.Join(chain[0].Path, "home", ".tmux.conf")
+	if _, err := os.Stat(tmuxPath); err != nil {
+		t.Errorf("hydrated default template is missing .tmux.conf: %v", err)
+	}
+}
+
+// An existing default template short-circuits hydration entirely: the lookup fast
+// path finds the directory, so seeding never runs and the user's tree is untouched.
+func TestGetTemplateChainInProject_ExistingDefaultIsNotReseeded(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Chdir(tmpDir)
+
+	defaultHome := filepath.Join(tmpDir, GlobalDir, "templates", "default", "home")
+	if err := os.MkdirAll(defaultHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(defaultHome, ".tmux.conf"), []byte("user-custom"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	chain, err := GetTemplateChainInProject("default", "")
+	if err != nil {
+		t.Fatalf("GetTemplateChainInProject failed: %v", err)
+	}
+	if len(chain) != 1 {
+		t.Fatalf("expected 1 template in chain, got %d", len(chain))
+	}
+
+	// Verify the user's .tmux.conf was not overwritten.
+	data, err := os.ReadFile(filepath.Join(defaultHome, ".tmux.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "user-custom" {
+		t.Errorf("existing .tmux.conf was overwritten, got %q", string(data))
+	}
+
+	// Verify seeding did NOT run — .zshrc should be absent because the fast path
+	// found the directory and skipped hydration entirely.
+	if _, err := os.Stat(filepath.Join(defaultHome, ".zshrc")); err == nil {
+		t.Error(".zshrc exists — SeedAgnosticTemplate ran despite existing default template")
+	}
+}
+
+// Hydration is published atomically, so concurrent callers must each receive a
+// fully-seeded default template rather than one mid-write.
+//
+// The per-caller failure rate against the pre-fix implementation is only ~7%, so a
+// single 16-way trial detects a regression roughly one run in five. Repeating the
+// trial takes detection to reliable. The fresh HOME per trial is load-bearing:
+// reusing one HOME yields exactly one hydration no matter how many trials run.
+func TestGetTemplateChainInProject_ConcurrentHydration(t *testing.T) {
+	const trials = 20
+	for trial := 0; trial < trials; trial++ {
+		t.Run(fmt.Sprintf("trial-%d", trial), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			t.Chdir(tmpDir)
+
+			const goroutines = 16
+			var wg sync.WaitGroup
+			var start sync.WaitGroup
+			errs := make([]error, goroutines)
+			chains := make([][]*Template, goroutines)
+			// The template contents must be observed inside the goroutine, immediately
+			// after the call returns: waiting until every goroutine has finished would
+			// let the slowest seeder complete the tree and mask a torn read.
+			statErrs := make([]error, goroutines)
+
+			start.Add(1)
+			wg.Add(goroutines)
+			for i := 0; i < goroutines; i++ {
+				go func(idx int) {
+					defer wg.Done()
+					start.Wait()
+					chain, err := GetTemplateChainInProject("default", "")
+					errs[idx] = err
+					chains[idx] = chain
+					if err == nil && len(chain) == 1 {
+						_, statErrs[idx] = os.Stat(filepath.Join(chain[0].Path, "home", ".tmux.conf"))
+					}
+				}(i)
+			}
+			start.Done()
+			wg.Wait()
+
+			for i := 0; i < goroutines; i++ {
+				if errs[i] != nil {
+					t.Errorf("goroutine %d: GetTemplateChainInProject failed: %v", i, errs[i])
+					continue
+				}
+				if len(chains[i]) != 1 {
+					t.Errorf("goroutine %d: expected 1 template, got %d", i, len(chains[i]))
+					continue
+				}
+				if statErrs[i] != nil {
+					t.Errorf("goroutine %d: hydrated default template missing .tmux.conf: %v", i, statErrs[i])
+				}
+			}
+		})
 	}
 }
 

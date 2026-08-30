@@ -18,11 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -393,35 +393,101 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	return nil, fmt.Errorf("template %s not found", name)
 }
 
+// findOrHydrateDefaultTemplate resolves the default template, seeding it from the
+// embedded copy into the global templates directory when it is absent from the
+// filesystem. Broker instances have no seeded ~/.scion/templates/default, so without
+// this the default template — and the common home files it carries (.tmux.conf,
+// .zshrc, .gitconfig) — would be silently dropped from every template chain.
+// Seeding never overwrites existing files, so user customizations are preserved.
+//
+// Hydration is published atomically: the embedded copy is seeded into a staging
+// directory and renamed into place, so concurrent callers never observe a
+// partially-seeded default template. defaultHydrationMu de-duplicates hydration
+// within the process (broker creates run up to 20-ways concurrent); the staging
+// directory plus rename covers cross-process races.
+var defaultHydrationMu sync.Mutex
+
+func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
+	tpl, err := FindTemplateInProjectPath("default", projectPath)
+	if err == nil {
+		return tpl, nil
+	}
+
+	globalDir, gErr := GetGlobalTemplatesDir()
+	if gErr != nil {
+		return nil, fmt.Errorf("getting global templates dir: %w", gErr)
+	}
+
+	defaultHydrationMu.Lock()
+	defer defaultHydrationMu.Unlock()
+
+	// Another goroutine may have hydrated while we waited.
+	if tpl, rErr := FindTemplateInProjectPath("default", projectPath); rErr == nil {
+		return tpl, nil
+	}
+
+	if mErr := os.MkdirAll(globalDir, 0755); mErr != nil {
+		util.Debugf("failed to prepare global templates dir: %v", mErr)
+		return nil, fmt.Errorf("preparing global templates dir: %w", mErr)
+	}
+	// Stage outside globalDir: ListTemplates scans every directory entry there, so a
+	// staging dir leaked by a SIGKILL mid-seed would surface as a template forever.
+	// ~/.scion is on the same filesystem, so the publish rename stays atomic.
+	scionDir, sdErr := GetGlobalDir()
+	if sdErr != nil {
+		util.Debugf("failed to resolve scion dir for staging: %v", sdErr)
+		return nil, fmt.Errorf("resolving scion dir for staging: %w", sdErr)
+	}
+	staging, tErr := os.MkdirTemp(scionDir, ".default-hydrate-")
+	if tErr != nil {
+		util.Debugf("failed to stage default template: %v", tErr)
+		return nil, fmt.Errorf("creating staging dir for default template: %w", tErr)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
+	// existing dir, so without this the published default diverges from every other
+	// seeding path, which yields 0755.
+	_ = os.Chmod(staging, 0755)
+
+	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
+		util.Debugf("failed to hydrate embedded default template: %v", sErr)
+		return nil, fmt.Errorf("seeding default template: %w", sErr)
+	}
+	// Atomic publish. ENOTEMPTY/EEXIST means another process won the race — fine,
+	// the retry below picks up their copy.
+	if rErr := os.Rename(staging, filepath.Join(globalDir, "default")); rErr != nil {
+		util.Debugf("failed to publish hydrated default template: %v", rErr)
+	}
+
+	return FindTemplateInProjectPath("default", projectPath)
+}
+
 // GetTemplateChainInProject returns a list of templates in inheritance order,
 // using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
 func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+	if name == "default" {
+		tpl, err := findOrHydrateDefaultTemplate(projectPath)
+		if err != nil {
+			// When the default template cannot be resolved, proceed without it
+			// (e.g. hub-dispatched agents on brokers with no local templates)
+			return nil, nil
+		}
+		return []*Template{tpl}, nil
+	}
+
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
-	if name != "default" {
-		defaultTpl, err := FindTemplateInProjectPath("default", projectPath)
-		if err == nil {
-			chain = append(chain, defaultTpl)
-		}
-		// If default template is not found, proceed without it
+	defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
+	if err == nil {
+		chain = append(chain, defaultTpl)
 	}
+	// If the default template cannot be resolved, proceed without it
 
 	tpl, err := FindTemplateInProjectPath(name, projectPath)
 	if err != nil {
-		if name == "default" {
-			// The default template was not found locally. This produces an
-			// empty template chain, which means no template home files
-			// (.tmux.conf, .zshrc, .gitconfig) will be copied into the agent
-			// home. ProvisionAgent falls back to embedded defaults, but log
-			// the miss so the resolution gap is visible.
-			slog.Warn("default template not found — template chain is empty; "+
-				"agent home will use embedded defaults only",
-				"projectPath", projectPath, "error", err)
-			return chain, nil
-		}
 		return nil, err
 	}
 	chain = append(chain, tpl)
