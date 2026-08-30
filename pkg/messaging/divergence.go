@@ -79,6 +79,66 @@ func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
 // Exported so that metrics collectors can read it.
 var DivergenceMetrics = &DivergenceCounter{}
 
+// ---------------------------------------------------------------------------
+// Switch bypass tracking (G3-e — switch coverage, not migration readiness)
+// ---------------------------------------------------------------------------
+
+// SwitchBypassCounter tracks cases where the ConversationReadSwitch is ON
+// but conversation scoping was not applied at a read site. Unlike the
+// DivergenceCounter (which measures migration readiness via IncFallback),
+// this counter measures switch *coverage*: how much traffic actually entered
+// the conversation-scoped path vs. silently bypassed it.
+//
+// A high bypass count on the VM run means the switch was ON but most traffic
+// never entered the new path — a negative test result that looks clean but
+// proves nothing. Safe for concurrent use.
+type SwitchBypassCounter struct {
+	slugParam     atomic.Int64 // S2: agent param is a slug (uuid.Parse fails)
+	agentNotFound atomic.Int64 // S2: agent param is a valid UUID but not in store
+	wcsNil        atomic.Int64 // S1: webChatStore nil for non-DM key (early return)
+	nonWebChannel atomic.Int64 // S3: channel is not "web"/"" and no thread_id
+	nonDMKey      atomic.Int64 // S2: no agent param → no DM key to derive
+}
+
+// IncSlugParam records a bypass because the agent query param was a slug.
+func (c *SwitchBypassCounter) IncSlugParam() { c.slugParam.Add(1) }
+
+// IncAgentNotFound records a bypass because the agent UUID was not in the store.
+func (c *SwitchBypassCounter) IncAgentNotFound() { c.agentNotFound.Add(1) }
+
+// IncWcsNil records a bypass because webChatStore was nil for a non-DM key.
+func (c *SwitchBypassCounter) IncWcsNil() { c.wcsNil.Add(1) }
+
+// IncNonWebChannel records a bypass because the channel was not web/"".
+func (c *SwitchBypassCounter) IncNonWebChannel() { c.nonWebChannel.Add(1) }
+
+// IncNonDMKey records a bypass because no agent param was provided (no DM key).
+func (c *SwitchBypassCounter) IncNonDMKey() { c.nonDMKey.Add(1) }
+
+// SlugParam returns the total slug-param bypasses.
+func (c *SwitchBypassCounter) SlugParam() int64 { return c.slugParam.Load() }
+
+// AgentNotFound returns the total agent-not-found bypasses.
+func (c *SwitchBypassCounter) AgentNotFound() int64 { return c.agentNotFound.Load() }
+
+// WcsNil returns the total wcs-nil bypasses.
+func (c *SwitchBypassCounter) WcsNil() int64 { return c.wcsNil.Load() }
+
+// NonWebChannel returns the total non-web-channel bypasses.
+func (c *SwitchBypassCounter) NonWebChannel() int64 { return c.nonWebChannel.Load() }
+
+// NonDMKey returns the total non-dm-key bypasses.
+func (c *SwitchBypassCounter) NonDMKey() int64 { return c.nonDMKey.Load() }
+
+// Total returns the total bypass count across all reasons.
+func (c *SwitchBypassCounter) Total() int64 {
+	return c.slugParam.Load() + c.agentNotFound.Load() +
+		c.wcsNil.Load() + c.nonWebChannel.Load() + c.nonDMKey.Load()
+}
+
+// SwitchBypassMetrics is the package-level counter for switch bypass events.
+var SwitchBypassMetrics = &SwitchBypassCounter{}
+
 // LogDivergence logs a DivergenceEntry to the provided logger and increments
 // the global divergence counter. Fallback entries increment only the fallback
 // counter; all others increment matches or mismatches. Matching entries are

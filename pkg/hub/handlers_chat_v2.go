@@ -1749,6 +1749,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		if wcs == nil {
+			// G3-e: switch ON + non-DM key + no webChatStore → bypass.
+			// Track before returning so the VM run can see uncovered traffic.
+			if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+				messaging.SwitchBypassMetrics.IncWcsNil()
+			}
 			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
 			return
 		}
@@ -1809,7 +1814,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		if convResult != nil {
+			// G3-d: preserve Channel:"web" — this endpoint serves the web
+			// chat UI. Dropping the channel constraint would widen visibility
+			// to messages from Discord, telegram, etc. that share the same
+			// conversation_id. Widening is not recoverable; narrowing is.
 			filter = store.MessageFilter{
+				Channel:        "web",
 				ConversationID: convResult.ConversationID,
 			}
 		} else {

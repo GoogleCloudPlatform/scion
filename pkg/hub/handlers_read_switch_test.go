@@ -1141,3 +1141,188 @@ func TestG3_AC4_DMKey_TooManyParts(t *testing.T) {
 			ErrCodeConversationNotResolved)
 	}
 }
+
+// G3-d — the switch-on filter at S1 (handleConversationHistory) must
+// preserve Channel:"web" so that messages from other surfaces sharing the
+// same conversation_id are NOT returned. Widening is not recoverable.
+func TestG3_D_ChannelConstraintPreserved(t *testing.T) {
+	srv, s := testServer(t)
+	enableReadSwitch(t, srv)
+
+	projectID := rsProject(t, s, "g3-d-project")
+	agentID := rsAgent(t, s, "g3-d-agent", projectID)
+
+	// Seed a DM conversation.
+	key := makeDMKey(agentID, DevUserID)
+	convID := seedConversation(t, s, "native", key, "direct")
+
+	// Create a web message — should be visible.
+	webMsg := &store.Message{
+		ID:             tid("g3-d-web-msg"),
+		ProjectID:      projectID,
+		Sender:         "agent:" + agentID,
+		SenderID:       agentID,
+		Recipient:      "user:" + DevUserID,
+		RecipientID:    DevUserID,
+		AgentID:        agentID,
+		Msg:            "web channel message",
+		Type:           "output",
+		Channel:        "web",
+		ThreadID:       key,
+		ConversationID: convID,
+	}
+	if err := s.CreateMessage(context.Background(), webMsg); err != nil {
+		t.Fatalf("CreateMessage (web): %v", err)
+	}
+
+	// Create a discord message in the SAME conversation — must NOT be visible.
+	discordMsg := &store.Message{
+		ID:             tid("g3-d-discord-msg"),
+		ProjectID:      projectID,
+		Sender:         "agent:" + agentID,
+		SenderID:       agentID,
+		Recipient:      "user:" + DevUserID,
+		RecipientID:    DevUserID,
+		AgentID:        agentID,
+		Msg:            "discord channel message",
+		Type:           "output",
+		Channel:        "discord",
+		ThreadID:       key,
+		ConversationID: convID,
+	}
+	if err := s.CreateMessage(context.Background(), discordMsg); err != nil {
+		t.Fatalf("CreateMessage (discord): %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var histResp chatHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &histResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// The web message must appear; the discord message must not.
+	var foundWeb, foundDiscord bool
+	for _, m := range histResp.Messages {
+		if m.ID == webMsg.ID {
+			foundWeb = true
+		}
+		if m.ID == discordMsg.ID {
+			foundDiscord = true
+		}
+	}
+	if !foundWeb {
+		t.Error("G3-d: web message should be visible but was not returned")
+	}
+	if foundDiscord {
+		t.Error("G3-d: discord message in the same conversation must NOT be " +
+			"visible — Channel:\"web\" constraint was dropped by the switch-on filter")
+	}
+}
+
+// ==========================================================================
+// G3-e — SwitchBypassCounter tests
+// ==========================================================================
+
+// bypassDelta captures a specific SwitchBypassMetrics accessor before calling
+// fn, then returns the delta. Same pattern as fallbackDelta.
+func bypassDelta(accessor func() int64, fn func()) int64 {
+	before := accessor()
+	fn()
+	return accessor() - before
+}
+
+func TestG3_E_Bypass_SlugParam(t *testing.T) {
+	srv, _ := testServer(t)
+	enableReadSwitch(t, srv)
+
+	delta := bypassDelta(messaging.SwitchBypassMetrics.SlugParam, func() {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent=my-agent-slug", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	if delta != 1 {
+		t.Errorf("slug_param: expected bypass delta 1, got %d", delta)
+	}
+}
+
+func TestG3_E_Bypass_AgentNotFound(t *testing.T) {
+	srv, _ := testServer(t)
+	enableReadSwitch(t, srv)
+
+	// Valid UUID that does not exist in the store.
+	fakeAgentID := tid("g3-e-agent-notfound")
+
+	delta := bypassDelta(messaging.SwitchBypassMetrics.AgentNotFound, func() {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+fakeAgentID, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	if delta != 1 {
+		t.Errorf("agent_not_found: expected bypass delta 1, got %d", delta)
+	}
+}
+
+func TestG3_E_Bypass_NonDMKey(t *testing.T) {
+	srv, _ := testServer(t)
+	enableReadSwitch(t, srv)
+
+	// No agent param → no DM key to derive.
+	delta := bypassDelta(messaging.SwitchBypassMetrics.NonDMKey, func() {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	if delta != 1 {
+		t.Errorf("non_dm_key: expected bypass delta 1, got %d", delta)
+	}
+}
+
+func TestG3_E_Bypass_WcsNil(t *testing.T) {
+	srv, _ := testServer(t)
+	enableReadSwitch(t, srv)
+	// Deliberately do NOT set webChatStore.
+
+	threadKey := "thread-key-wcsnil-" + tid("g3-e-wcsnil")
+
+	delta := bypassDelta(messaging.SwitchBypassMetrics.WcsNil, func() {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+threadKey+"/messages", nil)
+		// wcs nil → returns empty 200 before reaching switch block.
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	if delta != 1 {
+		t.Errorf("wcs_nil: expected bypass delta 1, got %d", delta)
+	}
+}
+
+func TestG3_E_Bypass_NonWebChannel(t *testing.T) {
+	srv, s := testServer(t)
+	enableReadSwitch(t, srv)
+
+	projectID := rsProject(t, s, "g3-e-nonweb-project")
+	agentID := rsAgent(t, s, "g3-e-agent-nonweb", projectID)
+
+	delta := bypassDelta(messaging.SwitchBypassMetrics.NonWebChannel, func() {
+		url := fmt.Sprintf("/api/v1/agents/%s/messages?channel=discord", agentID)
+		rec := doRequest(t, srv, http.MethodGet, url, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	if delta != 1 {
+		t.Errorf("non_web_channel: expected bypass delta 1, got %d", delta)
+	}
+}

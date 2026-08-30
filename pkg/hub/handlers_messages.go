@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -70,20 +71,34 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	//
 	// G3: fallback REMOVED. When the agent resolves but the conversation
 	// does not, return a typed 409 error instead of silently using the old
-	// filter. Agent lookup failures still skip the block (R-9 discipline).
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() && agentID != "" {
-		if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
-			convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
-			if convResult != nil {
-				filter.ConversationID = convResult.ConversationID
+	// filter. Agent lookup failures still skip the block (R-9 discipline)
+	// but are now counted by SwitchBypassMetrics for coverage visibility.
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+		if agentID != "" {
+			if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
+				convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
+				if convResult != nil {
+					filter.ConversationID = convResult.ConversationID
+				} else {
+					slog.Warn("read-switch: DM conversation not resolved for agent message list",
+						"agent_id", resolvedAgent.ID, "user_id", user.ID())
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+						"Conversation could not be resolved for this agent; the read-switch is ON but no matching conversation record exists",
+						nil)
+					return
+				}
 			} else {
-				slog.Warn("read-switch: DM conversation not resolved for agent message list",
-					"agent_id", resolvedAgent.ID, "user_id", user.ID())
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
-					"Conversation could not be resolved for this agent; the read-switch is ON but no matching conversation record exists",
-					nil)
-				return
+				// G3-e: switch ON, agent lookup failed — track bypass reason.
+				// R-9 discipline: not IncFallback (readiness), but SwitchBypass (coverage).
+				if _, parseErr := uuid.Parse(agentID); parseErr != nil {
+					messaging.SwitchBypassMetrics.IncSlugParam()
+				} else {
+					messaging.SwitchBypassMetrics.IncAgentNotFound()
+				}
 			}
+		} else {
+			// G3-e: switch ON but no agent param — no DM key to derive.
+			messaging.SwitchBypassMetrics.IncNonDMKey()
 		}
 	}
 
@@ -298,6 +313,10 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 					nil)
 				return
 			}
+		} else {
+			// G3-e: switch ON, non-web channel with no thread_id — conversation
+			// scoping not applied. Track for coverage visibility.
+			messaging.SwitchBypassMetrics.IncNonWebChannel()
 		}
 	}
 
