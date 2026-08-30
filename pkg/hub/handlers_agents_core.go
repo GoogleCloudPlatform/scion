@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -2604,6 +2605,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		}
 
 		allowed, reason := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
+		messaging.RecordStep(r.Context(), "message_authorized")
 		if !allowed {
 			slog.Warn("message authorization denied",
 				"sender_type", identity.Type(),

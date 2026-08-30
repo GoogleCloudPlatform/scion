@@ -26,6 +26,22 @@ type BrokerIdentity interface {
 }
 
 // brokerIdentityImpl implements BrokerIdentity.
+//
+// INTENTIONAL DESIGN: brokerIdentityImpl must not implement UserIdentity
+// or AgentIdentity. See TestBrokerIdentityImpl_MustNotSatisfyUserIdentity
+// and TestBrokerIdentityImpl_MustNotSatisfyAgentIdentity (DEF-58).
+//
+// Broker-relayed messages carry a SenderID that names the upstream
+// principal, NOT the broker itself. The SenderID == "" guard in
+// messagebroker.go (deliverToAgent, fanOutToProject, fanOutGlobal)
+// intentionally skips DM-conversation resolution and self-skip logic
+// when SenderID is empty, because an empty SenderID means the upstream
+// sender is unknown or not a locally-authenticated principal. Without
+// that guard, empty-SenderID messages would either derive a DM key
+// from a zero-value participant (creating ghost conversations) or
+// fail to self-skip (delivering the sender its own broadcast).
+// This comparison is tested by TestEmptySenderID_DeliverToUser_SkipsDMResolution
+// and TestEmptySenderID_DeliverToAgent_SkipsDMResolution in messagebroker_test.go.
 type brokerIdentityImpl struct {
 	brokerID string
 }

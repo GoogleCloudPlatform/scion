@@ -574,12 +574,14 @@ type MessageRequest struct {
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+	messaging.RecordStep(ctx, "handle_agent_message_enter")
 
 	var req MessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	messaging.RecordStep(ctx, "request_parsed")
 
 	// Determine the message content and structured message to forward
 	var plainMessage string
@@ -620,6 +622,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if structuredMsg.Type == "" {
 			structuredMsg.Type = messages.TypeInstruction
 		}
+		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else if req.Message != "" {
 		plainMessage = req.Message
 		// Build a structured message from the plain text so that downstream
@@ -636,6 +639,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
 		structuredMsg.SenderID = senderID
+		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
 		return
@@ -649,6 +653,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	messaging.RecordStep(ctx, "message_validated")
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
@@ -674,6 +679,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	messaging.RecordStep(ctx, "agent_loaded")
 
 	// AC-33: Cross-project mention check. Verify that all mentioned agents
 	// belong to the same project as the primary recipient before any dispatch.
@@ -846,6 +852,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Populate recipient slug and ID from the resolved agent.
 	structuredMsg.Recipient = "agent:" + agent.Slug
 	structuredMsg.RecipientID = agent.ID
+	messaging.RecordStep(ctx, "recipient_stamped")
 
 	// Default the channel to "web" for messages sent through the web UI.
 	// Only tag as "web" when the authenticated user's client type is
@@ -1025,6 +1032,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
+		messaging.RecordStep(ctx, "conversation_resolved")
 		// B10: ValidateAttributed rejection deliberately demoted to a log
 		// line. Converting a derivation-path empty ConversationID into a
 		// client-visible 4xx is a B10 violation — that flip belongs to
@@ -1058,6 +1066,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Match:      match,
 			Reason:     reason,
 		})
+		messaging.RecordStep(ctx, "divergence_logged")
 		// DEF-3: Independent consistency check against prior messages.
 		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
 		// Propagate GroupID from metadata so CLI-originated group[] messages
@@ -1072,6 +1081,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 		}
+		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
 		// unpersisted message is not legal.
 		if persistedMsgID != "" {
@@ -1079,6 +1089,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
 			s.events.PublishUserMessage(ctx, storeMsg)
+			messaging.RecordStep(ctx, "sse_published")
 		}
 	}
 
@@ -1157,6 +1168,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		return
 	}
+	messaging.RecordStep(ctx, "broker_dispatched")
 
 	// Publish agent-to-agent messages through the broker so plugin observers
 	// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own

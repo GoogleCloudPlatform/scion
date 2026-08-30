@@ -29,6 +29,7 @@ type divergenceBoardCaveats struct {
 	ScopeDetail               string `json:"scope_detail"`
 	MismatchComposition       string `json:"mismatch_composition"`
 	ConsistencyCheckFailsOpen string `json:"consistency_check_fails_open"`
+	UnbackfilledBlindSpot     string `json:"unbackfilled_blind_spot"`
 	NotGoNoGo                 string `json:"not_go_no_go"`
 	CounterSnapshot           string `json:"counter_snapshot"`
 }
@@ -61,6 +62,14 @@ var divergenceCaveats = divergenceBoardCaveats{
 		"lookup. A low mismatch count does not imply agreement — it is " +
 		"equally consistent with agreement, query errors, or insufficient " +
 		"lookup data.",
+	UnbackfilledBlindSpot: "The consistency check skips prior messages " +
+		"whose ConversationID is empty (divergence.go:312). Messages " +
+		"written before the Tranche G dual-write was enabled have no " +
+		"ConversationID and are therefore invisible to this board. " +
+		"A clean board does not mean the unbackfilled history is " +
+		"consistent — it means the board cannot see that history at all. " +
+		"Only messages written after the dual-write path began populating " +
+		"ConversationID contribute to the mismatch signal.",
 	NotGoNoGo: "This board is NOT the Tranche G go/no-go input. " +
 		"The offline recomputation report is the artifact that answers " +
 		"the go/no-go question.",
