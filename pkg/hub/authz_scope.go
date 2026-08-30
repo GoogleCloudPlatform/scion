@@ -246,7 +246,9 @@ func ResolveAuthorizedScopes(
 		cb := &candidateBindings[i]
 
 		// Only consider bindings for principals in the closure.
-		if _, ok := principalClosure[cb.PrincipalID]; !ok {
+		// O2: Use typed composite key (type:id) matching the kernel convention.
+		compositeKey := cb.PrincipalType + ":" + cb.PrincipalID
+		if _, ok := principalClosure[compositeKey]; !ok {
 			continue
 		}
 

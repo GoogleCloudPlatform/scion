@@ -59,9 +59,10 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	}
 
 	// Build the principal closure map for ResolveAuthorizedScopes.
+	// O2: Use typed composite keys (type:id) to prevent collisions.
 	principalClosure := make(map[string]struct{}, len(principals))
 	for _, p := range principals {
-		principalClosure[p.ID] = struct{}{}
+		principalClosure[p.Type+":"+p.ID] = struct{}{}
 	}
 
 	// Step 2: Load applicable role bindings for all principals in the closure.

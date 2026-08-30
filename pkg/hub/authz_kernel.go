@@ -235,6 +235,10 @@ func Evaluate(req KernelRequest) KernelDecision {
 	_, hasPermission := effectivePermissions[req.Permission]
 
 	// Phase 3: Apply restrictions. Restrictions can only subtract.
+	// O3: Only mark a restriction as Applied when it actually removes a
+	// permission that was granted. A restriction that denies a permission
+	// never in the pre-restriction union is not "applied" — it had no
+	// effect and must not produce misleading explain output.
 	var restrictions []RestrictionResult
 	for _, r := range req.Restrictions {
 		rr := RestrictionResult{
@@ -242,13 +246,18 @@ func Evaluate(req KernelRequest) KernelDecision {
 			Description: r.Description,
 		}
 		if r.Check == nil || !r.Check(req.Permission) {
-			rr.Applied = true
-			if r.Check == nil {
-				rr.Detail = "restriction has no check function (fail closed)"
+			if hasPermission {
+				rr.Applied = true
+				if r.Check == nil {
+					rr.Detail = "restriction has no check function (fail closed)"
+				} else {
+					rr.Detail = "permission removed by " + r.Kind
+				}
+				hasPermission = false
 			} else {
-				rr.Detail = "permission removed by " + r.Kind
+				// Permission was never granted; restriction did not change outcome.
+				rr.Detail = "permission was not in pre-restriction grant set"
 			}
-			hasPermission = false
 		}
 		restrictions = append(restrictions, rr)
 	}
@@ -314,7 +323,10 @@ func evaluateBinding(req KernelRequest, cb *CandidateBinding) GrantProvenance {
 	}
 
 	// Check 1: Is the binding's principal in the principal closure?
-	if _, inClosure := req.PrincipalClosure[cb.PrincipalID]; !inClosure {
+	// O2: Use typed composite key (type:id) to prevent collisions between
+	// different principal types with the same ID.
+	compositeKey := cb.PrincipalType + ":" + cb.PrincipalID
+	if _, inClosure := req.PrincipalClosure[compositeKey]; !inClosure {
 		prov.RejectReasons = append(prov.RejectReasons, "principal not in closure")
 		return prov
 	}
