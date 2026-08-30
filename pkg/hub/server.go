@@ -1353,49 +1353,33 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"mode", srv.hookIdentityCheckMode)
 	}
 
-	// Seed default policies and groups (idempotent)
-	seedDefaultPoliciesAndGroups(ctx, s)
+	// PG1: Reconcile built-in role definitions with curated, versioned
+	// permission lists. This replaces the old seedRoleDefinitions +
+	// backfillHubAdminRolePermissions flow. Roles are created if missing, or
+	// updated if the code revision is higher than the stored revision.
+	// Must run BEFORE seedDefaultGroupsAndBindings so the hub-member role exists.
+	reconcileBuiltInRoles(ctx, s)
 
-	// Backfill the per-project service-account assign policy onto projects
-	// that predate it (idempotent). Projects nobody touches never run
-	// createProjectMembersGroupAndPolicy again, so without this their members
-	// would silently lose assign when the gate moves to ActionAssign.
+	// PG1: Seed the hub-members group and a system-scoped RoleBinding of the
+	// hub-member role to that group. This replaces ~13 individual seeded policies
+	// and the hub-member-create-projects policy with a single role binding.
+	seedDefaultGroupsAndBindings(ctx, s)
+
+	// Legacy policy backfills — these remain for compatibility with existing
+	// project-scoped policies until PM1 converts project membership. The per-
+	// project policies are still consumed by the current evaluator alongside
+	// the new role bindings.
 	backfillProjectAssignPolicies(ctx, s)
-
-	// Backfill the "message" action into existing project member-create-agents
-	// policies. Projects created before msg-authz (PR #1371) lack this action,
-	// causing non-owner/non-admin members to be denied agent messaging.
 	backfillProjectMessageAction(ctx, s)
-
-	// Backfill per-project member-read policies for project and agent resource
-	// types. After narrowing hub-member-read-all, regular (non-owner/non-admin)
-	// members of existing projects that haven't been touched since the upgrade
-	// would be locked out without these policies. The inline path in
-	// createProjectMembersGroupAndPolicy covers active projects; this covers
-	// the rest.
 	backfillProjectMemberReadPolicies(ctx, s)
-
-	// Backfill per-project scheduled-event member policies. Existing role
-	// definitions are not updated by seedRoleDefinitions, so without this
-	// policy backfill existing project members would be denied scheduled-event
-	// operations until the role definitions are recreated.
 	backfillScheduledEventPermissions(ctx, s)
-
-	// Seed role definitions for the role-binding authorization model (Phase 1E).
-	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
-	seedRoleDefinitions(ctx, s)
-
-	// Backfill hub-admin role permissions. Existing deployments may have a
-	// hub-admin role definition that predates the scheduled_event.* permissions.
-	// Must run after seedRoleDefinitions so the role definition exists.
-	backfillHubAdminRolePermissions(ctx, s)
 
 	// Seed system limit definitions for the quota/limits subsystem (Phase 2B).
 	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.
 	seedLimitDefinitions(ctx, s)
 
 	// Backfill role bindings from existing User.Role and project group memberships.
-	// Must run after seedRoleDefinitions so the role definitions exist.
+	// Must run after reconcileBuiltInRoles so the role definitions exist.
 	if err := BackfillRoleBindings(ctx, s); err != nil {
 		slog.Warn("failed to backfill role bindings", "error", err)
 	}

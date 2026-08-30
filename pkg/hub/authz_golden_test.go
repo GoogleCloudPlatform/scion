@@ -32,7 +32,6 @@ package hub
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -925,14 +924,12 @@ func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
 // have overly broad permission sets that can reopen cross-project visibility
 // (design.md §Immediate sequencing constraint).
 //
-// The vulnerability: seedRoleDefinitions constructs hub-member from ALL
-// read+list permissions (seed.go:628-650), including project.list, project.read,
-// agent.list, agent.read. List handlers interpret these as admin-view authority
-// and skip per-item filtering (handlers_projects_core.go:212-233,
-// handlers_agents_core.go:310-337).
+// PG1 FIX: The hub-member role is now curated with explicit permission lists
+// that EXCLUDE project.list, project.read, agent.list, and agent.read at
+// system scope. The role binding grant path at authz.go:576-598 no longer
+// produces an admin-view grant for ordinary hub members.
 //
-// This test verifies the vulnerability exists at the role binding level and
-// documents it for correction.
+// This test VERIFIES the vulnerability is closed at the role definition level.
 func TestGolden_CrossProjectVisibilityRegression(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
@@ -974,20 +971,13 @@ func TestGolden_CrossProjectVisibilityRegression(t *testing.T) {
 	}
 	decision = f.authz.Decide(ctx, adminViewReq)
 
-	// DOCUMENT THE VULNERABILITY:
-	// This assertion proves the cross-project visibility gap exists.
-	// A hub member with no project memberships gets "allowed" on project.list
-	// at hub scope, which list handlers interpret as admin-view authority.
-	//
-	// POST-CUTOVER: This MUST return false. The hub-member RoleDefinition
-	// must be curated to exclude project.list and project.read at system scope.
-	// List handlers must use ResolveAuthorizedScopes.
-	assert.True(t, decision.Allowed,
-		"KNOWN VULNERABILITY: hub-member role binding grants project.list hub-wide")
-	assert.Equal(t, "role binding grant", decision.Reason,
-		"vulnerability comes from role binding check, not policy")
+	// PG1 FIX: The hub-member RoleDefinition is now curated to exclude
+	// project.list and project.read at system scope. A hub member with no
+	// project memberships can no longer obtain admin-view access.
+	assert.False(t, decision.Allowed,
+		"PG1 FIX: hub-member role no longer grants project.list hub-wide")
 
-	// Same vulnerability for agent.list
+	// Same fix for agent.list — excluded from hub-member role
 	agentAdminViewReq := AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
@@ -996,50 +986,8 @@ func TestGolden_CrossProjectVisibilityRegression(t *testing.T) {
 		Permission: "agent.list",
 	}
 	decision = f.authz.Decide(ctx, agentAdminViewReq)
-	assert.True(t, decision.Allowed,
-		"KNOWN VULNERABILITY: hub-member role binding grants agent.list hub-wide")
-	assert.Equal(t, "role binding grant", decision.Reason)
-
-	// --- Verify fix target ---
-	// After PG1 curates the hub-member role, these assertions flip:
-	// assert.False(t, decision.Allowed)
-	// The test documents both the current gap and the fix criteria.
-
-	// --- LS1: Handler-level fix is in place ---
-	// The list handlers now use ResolveAuthorizedScopes instead of hasAdminView.
-	// The vulnerability above remains at the evaluator/role-definition level
-	// (hub-member still includes project.list at system scope), which means
-	// ResolveAuthorizedScopes returns ScopeSetAll for hub members. PG1 must
-	// curate the role to complete the fix.
-	//
-	// However, the mechanism is correct: when hub-member is curated to exclude
-	// project.list at system scope, ResolveAuthorizedScopes returns only
-	// project-scoped bindings, and the handler pushes those IDs into the store
-	// query. Verify this with a simulated curated role:
-	curatedClosure := map[string]struct{}{f.memberNoneID: {}}
-	curatedBindings := []CandidateBinding{
-		{
-			BindingID:        "curated-b1",
-			RoleDefinitionID: "curated-hub-member",
-			PrincipalType:    "user",
-			PrincipalID:      f.memberNoneID,
-			ScopeType:        ScopeTypeSystem,
-		},
-	}
-	// Curated hub-member: read/list permissions removed at system scope.
-	curatedRoles := map[string]*RolePermissions{
-		"curated-hub-member": NewRolePermissions(
-			"curated-hub-member", "Hub Member (Curated)", ScopeTypeSystem,
-			[]string{"user.read", "group.read"}, // No project.list or agent.list
-		),
-	}
-	projectScopes := ResolveAuthorizedScopes(curatedClosure, "project.list", curatedBindings, curatedRoles, time.Now())
-	assert.True(t, projectScopes.IsNone(),
-		"LS1 MECHANISM: curated hub-member without project.list yields None — member cannot get admin view")
-
-	agentScopes := ResolveAuthorizedScopes(curatedClosure, "agent.list", curatedBindings, curatedRoles, time.Now())
-	assert.True(t, agentScopes.IsNone(),
-		"LS1 MECHANISM: curated hub-member without agent.list yields None — member cannot get admin view")
+	assert.False(t, decision.Allowed,
+		"PG1 FIX: hub-member role no longer grants agent.list hub-wide")
 }
 
 // =============================================================================
