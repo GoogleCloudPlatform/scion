@@ -35,17 +35,17 @@ import (
 // notification subscriptions, stores notification records, and dispatches
 // messages to subscriber agents.
 type NotificationDispatcher struct {
-	store           store.Store
-	events          EventPublisher
-	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
-	log             *slog.Logger
-	messageLog      *slog.Logger        // dedicated message audit logger (nil = disabled)
+	store            store.Store
+	events           EventPublisher
+	getDispatcher    func() AgentDispatcher // lazy getter; dispatcher may be set after startup
+	log              *slog.Logger
+	messageLog       *slog.Logger        // dedicated message audit logger (nil = disabled)
 	channelRegistry  *ChannelRegistry    // external notification channels (nil = disabled)
 	brokerProxy      *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
 	writeDenyEnabled func() bool         // G2 write-deny switch callback (nil = OFF)
-	stopCh          chan struct{}
-	stopOnce        sync.Once
-	wg              sync.WaitGroup
+	stopCh           chan struct{}
+	stopOnce         sync.Once
+	wg               sync.WaitGroup
 }
 
 // NewNotificationDispatcher creates a new NotificationDispatcher.
