@@ -103,11 +103,10 @@ func rsProject(t *testing.T, s store.Store, projectName string) string {
 	t.Helper()
 	projectID := tid(projectName)
 	project := &store.Project{
-		ID:         projectID,
-		Name:       projectName,
-		Slug:       projectName,
-		OwnerID:    DevUserID,
-		Visibility: store.VisibilityPrivate,
+		ID:      projectID,
+		Name:    projectName,
+		Slug:    projectName,
+		OwnerID: DevUserID,
 	}
 	if err := s.CreateProject(context.Background(), project); err != nil {
 		t.Fatalf("rsProject(%s): %v", projectName, err)
