@@ -27,7 +27,7 @@ jobs:
       - name: Run tests with race detector (excluding pkg/hub)
         run: |
           set -o pipefail
-          go test -race -count=1 -timeout 90m $(go list ./... | grep -v /pkg/hub) 2>&1 | tee race-detection-output.txt
+          go test -race -count=1 -timeout 90m $(go list ./... | grep -v -E '/pkg/hub(/|$)') 2>&1 | tee race-detection-output.txt
       - name: Summarize race findings
         if: always()
         run: |
