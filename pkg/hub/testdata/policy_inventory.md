@@ -62,7 +62,7 @@ model defined in the design doc.
 | **Actions** | `read`, `list` |
 | **Effect** | `allow` |
 | **Bound to** | `hub-members` group |
-| **Disposition** | **Intentional removal** — This wildcard policy is actively deleted on startup. It was the source of cross-project visibility: it granted read+list on ALL resource types including project and agent. The narrowed per-type policies (item 1) replace it with project/agent excluded. |
+| **Disposition** | **Intentional removal** — This wildcard policy is actively deleted on startup by `narrowHubMemberReadAll`, which also writes a hub setting tombstone to prevent re-creation. Re-creating this policy via the API does not cause it to be deleted again; the tombstone ensures the narrow function only runs once. It was the source of cross-project visibility: it granted read+list on ALL resource types including project and agent. The narrowed per-type policies (item 1) replace it with project/agent excluded. |
 | **Post-cutover equivalent** | None. Already removed. |
 
 ### 4. Project service-account assign policy

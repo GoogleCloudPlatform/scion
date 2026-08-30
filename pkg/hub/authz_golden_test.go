@@ -707,35 +707,77 @@ func TestGolden_AgentCrossProjectDenied(t *testing.T) {
 // =============================================================================
 
 // TestGolden_AgentDelegationCeiling verifies that delegation ceilings restrict
-// agent access.
+// agent access that would otherwise be granted.
 //
 // Current behavior: Delegation ceiling is checked AFTER the primary decision
-// in Decide() at authz.go:285-302. For non-read-only operations, a failed
-// ceiling check denies.
+// in Decide() at authz.go:285-302. When the delegator (user) loses the
+// permission that the agent is attempting to exercise, the ceiling denies
+// the agent even though the baseline would allow it.
 //
 // Intended post-cutover: Credential/delegation ceilings remain intrinsic
 // restrictions applied after the union of grants. Behavior preserved.
 //
 // Reference: design.md §6 (delegation ceilings are relationship constraints).
+//
+// Full delegation ceiling test coverage is in TestDelegationCeiling_* in
+// delegation_ceiling_test.go. This golden test demonstrates the ceiling
+// restricting access that the baseline would otherwise grant.
 func TestGolden_AgentDelegationCeiling(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
 
-	agent := &evaluateAgentIdentity{id: f.agentAlpha.ID, projectID: f.projectAlpha.ID}
+	// Set up a dedicated user and agent for the ceiling test.
+	// The user gets a project-owner role binding granting broad permissions.
+	ceilingUserID := tid("golden-ceiling-user")
+	ceilingAgentID := tid("golden-ceiling-agent")
+	createDCUser(t, f.store, ceilingUserID, "ceiling-user@golden.test",
+		f.projectAlpha.ID, store.ProjectRoleOwner)
 
-	// Agent can read in its own project via baseline
-	ownRes := Resource{
-		Type: "agent", ID: tid("golden-proj-resource"),
+	// Create the agent record with the user as owner.
+	createDCAgent(t, f.store, ceilingAgentID, f.projectAlpha.ID,
+		ceilingUserID, AgentRoleFull)
+
+	// Verify the user is NOT a system admin (ceiling test is vacuous otherwise).
+	assertNotSystemAdmin(t, f.authz, ctx, ceilingUserID)
+
+	// Create a delegation edge: user → agent (full role).
+	createDCEdge(t, f.store,
+		store.DelegationPrincipalUser, ceilingUserID,
+		store.DelegationPrincipalAgent, ceilingAgentID,
+		store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
+
+	// Build an agent identity with proper JWT scopes (dcAgentIdentity uses
+	// agentIdentityWrapper, which carries real scopes unlike evaluateAgentIdentity).
+	agent := dcAgentIdentity(ceilingAgentID, f.projectAlpha.ID, AgentRoleFull)
+	resource := Resource{
+		Type: "agent", ID: tid("golden-ceiling-resource"),
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
-	decision := f.authz.CheckAccess(ctx, agent, ownRes, ActionRead)
-	assert.True(t, decision.Allowed,
-		"agent should read own project resources (before ceiling)")
 
-	// Note: Full delegation ceiling testing requires the delegation edge store
-	// and agent token claims. The ceiling is applied in Decide() after
-	// checkAccessForAgent returns. This test verifies the baseline still works;
-	// ceiling enforcement is tested in dedicated delegation test files.
+	// ALLOWED: baseline grants read, ceiling passes because user holds permission.
+	decision := f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	assert.True(t, decision.Allowed,
+		"agent should read own project resources when delegation ceiling passes")
+
+	// Now remove the user's role binding — the user loses the permission
+	// that the agent depends on through the delegation chain.
+	bindings, err := f.store.ListRoleBindingsForPrincipal(ctx,
+		store.RoleBindingPrincipalUser, ceilingUserID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.projectAlpha.ID {
+			require.NoError(t, f.store.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	// DENIED: baseline would still grant read, but the delegation ceiling
+	// now denies because the delegator no longer holds the permission.
+	// This is the ceiling restricting access that would otherwise be granted.
+	decision = f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	assert.False(t, decision.Allowed,
+		"agent MUST be denied when delegator loses permission (ceiling enforcement)")
+	assert.Contains(t, decision.Reason, "delegator",
+		"denial reason should reference the delegator")
 }
 
 // =============================================================================
@@ -822,6 +864,15 @@ func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"progeny agent should access env vars created by its ancestor")
 	assert.Equal(t, "delegated access", decision.Reason)
+
+	// Negative case: an agent NOT in the ancestry should be denied
+	outsiderAgent := &evaluateAgentIdentity{
+		id:        tid("golden-outsider-envvar"),
+		projectID: f.projectBeta.ID,
+	}
+	decision = f.authz.CheckAccess(ctx, outsiderAgent, envVarRes, ActionRead)
+	assert.False(t, decision.Allowed,
+		"non-progeny agent should NOT access ancestor's env vars")
 }
 
 // =============================================================================
@@ -852,6 +903,15 @@ func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"progeny agent should access skill injections created by its ancestor")
 	assert.Equal(t, "delegated access", decision.Reason)
+
+	// Negative case: an agent NOT in the ancestry should be denied
+	outsiderAgent := &evaluateAgentIdentity{
+		id:        tid("golden-outsider-skill"),
+		projectID: f.projectBeta.ID,
+	}
+	decision = f.authz.CheckAccess(ctx, outsiderAgent, skillRes, ActionRead)
+	assert.False(t, decision.Allowed,
+		"non-progeny agent should NOT access ancestor's skill injections")
 }
 
 // =============================================================================
