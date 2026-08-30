@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -50,17 +51,27 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		slog.Info("seeded hub-members group", "id", group.ID)
 	}
 
-	// 2. Seed hub-member-read-all policy
-	seedPolicy(ctx, s, group.ID, &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         "hub-member-read-all",
-		Description:  "Allow hub members to read all resources",
-		ScopeType:    "hub",
-		ScopeID:      "",
-		ResourceType: "*",
-		Actions:      []string{"read", "list"},
-		Effect:       "allow",
-	})
+	// 2. Narrow the hub-member-read-all policy from wildcard to explicit
+	// per-type read policies for directory/catalog resources. Project, agent,
+	// and broker reads now come from per-project membership-scoped policies
+	// (created by createProjectMembersGroupAndPolicy).
+	narrowHubMemberReadAll(ctx, s, group.ID)
+
+	// Seed explicit per-type read policies for resources that should remain
+	// globally readable by all hub members. Only project and agent resources
+	// are excluded — those are gated by per-project membership policies.
+	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding"} {
+		seedPolicy(ctx, s, group.ID, &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         "hub-member-read-" + rt,
+			Description:  "Allow hub members to read " + rt + " resources",
+			ScopeType:    "hub",
+			ScopeID:      "",
+			ResourceType: rt,
+			Actions:      []string{"read", "list"},
+			Effect:       "allow",
+		})
+	}
 
 	// 3. Seed hub-member-create-projects policy
 	seedPolicy(ctx, s, group.ID, &store.Policy{
@@ -79,6 +90,18 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 	backfillSeededPolicyOrigin(ctx, s, []string{
 		"hub-member-read-all",
 		"hub-member-create-projects",
+		"hub-member-read-user",
+		"hub-member-read-group",
+		"hub-member-read-template",
+		"hub-member-read-harness_config",
+		"hub-member-read-broker",
+		"hub-member-read-runtime_broker",
+		"hub-member-read-gcp_service_account",
+		"hub-member-read-policy",
+		"hub-member-read-skill",
+		"hub-member-read-quota",
+		"hub-member-read-role",
+		"hub-member-read-role_binding",
 	})
 
 	// The human half of the svc-accnt service-account assign baseline is
@@ -341,6 +364,40 @@ func backfillProjectMessageAction(ctx context.Context, s store.Store) {
 		}
 		cursor = res.NextCursor
 	}
+}
+
+// narrowHubMemberReadAll migrates an existing hub-member-read-all policy from
+// the wildcard ResourceType:"*" to a no-op state. On existing hubs the wildcard
+// policy grants every hub member read+list on all resource types, including
+// project, agent, and broker. This migration deletes that wildcard policy so
+// that project/agent/broker reads are controlled by per-project membership
+// policies instead. The per-type policies for directory resources (user, group,
+// template, harness_config) are seeded separately.
+//
+// Idempotent: if the wildcard policy no longer exists, this is a no-op.
+func narrowHubMemberReadAll(ctx context.Context, s store.Store, hubMembersGroupID string) {
+	existing, err := s.ListPolicies(ctx, store.PolicyFilter{
+		Name:      "hub-member-read-all",
+		ScopeType: "hub",
+	}, store.ListOptions{Limit: 1})
+	if err != nil || len(existing.Items) == 0 {
+		return
+	}
+	policy := &existing.Items[0]
+	if policy.ResourceType != "*" {
+		return // already narrowed or customized
+	}
+	// Delete the wildcard policy. The per-type replacements are seeded right after.
+	if err := s.DeletePolicy(ctx, policy.ID); err != nil {
+		slog.Warn("failed to delete wildcard hub-member-read-all policy",
+			"id", policy.ID, "error", err)
+		return
+	}
+	// Record a tombstone so the old wildcard policy is not re-seeded.
+	_, _ = s.UpsertHubSetting(ctx, seedPolicyTombstoneKey("hub-member-read-all"),
+		json.RawMessage(`"narrowed"`), "system", -1, "seeded")
+	slog.Info("narrowed hub-member-read-all: deleted wildcard policy",
+		"id", policy.ID)
 }
 
 // seedPolicyTombstoneKey returns the hub-setting key used to record that a

@@ -889,10 +889,73 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 			"project_id", project.ID, "policy", policyName, "error", err.Error())
 	}
 
+	// Create project-level read policy for members. This grants read+list on
+	// project and agent resources, making the project visible to its members.
+	// Without this, projects are invisible after the hub-member-read-all
+	// wildcard was narrowed to exclude project/agent/broker.
+	s.ensureProjectMemberReadPolicy(ctx, project, membersGroup.ID)
+
 	// Create the project-level service-account assign policy alongside it.
 	// See projectAssignPolicyName in seed.go for why it is project-scoped and
 	// what reach it preserves.
 	ensureProjectAssignPolicy(ctx, s.store, project, membersGroup.ID)
+}
+
+// ensureProjectMemberReadPolicy creates or ensures a project-scoped read+list
+// policy for both "project" and "agent" resource types, bound to the project's
+// members group. This is the mechanism that makes a project visible to its
+// members after the global hub-member-read-all wildcard was narrowed to exclude
+// project/agent/broker resources.
+//
+// "Public" / "everyone" visibility is achieved by adding the hub-members group
+// to the project's members group — the read policy then applies transitively
+// to all hub users.
+func (s *Server) ensureProjectMemberReadPolicy(ctx context.Context, project *store.Project, membersGroupID string) {
+	for _, rt := range []string{"project", "agent"} {
+		policyName := "project:" + project.Slug + ":member-read-" + rt
+		policy := &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         policyName,
+			Description:  fmt.Sprintf("Allow members to read %s resources in project '%s'", rt, project.Slug),
+			ScopeType:    "project",
+			ScopeID:      project.ID,
+			ResourceType: rt,
+			Actions:      []string{"read", "list"},
+			Effect:       "allow",
+		}
+		if err := s.store.CreatePolicy(ctx, policy); err != nil {
+			if !errors.Is(err, store.ErrAlreadyExists) {
+				s.projectsLogger().Warn("failed to create project member read policy",
+					"project_id", project.ID, "policy", policyName, "resourceType", rt, "error", err.Error())
+				continue
+			}
+			// Policy already exists — ensure scope ID is correct.
+			existing, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+			if lookupErr != nil || len(existing.Items) == 0 {
+				s.projectsLogger().Warn("failed to look up existing project member read policy",
+					"project_id", project.ID, "policy", policyName, "error", lookupErr)
+				continue
+			}
+			policy = &existing.Items[0]
+			if policy.ScopeID != project.ID {
+				policy.ScopeID = project.ID
+				if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
+					s.projectsLogger().Warn("failed to update existing project member read policy",
+						"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
+				}
+			}
+		}
+
+		// Bind policy to the members group
+		if err := s.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+			PolicyID:      policy.ID,
+			PrincipalType: "group",
+			PrincipalID:   membersGroupID,
+		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			s.projectsLogger().Warn("failed to bind project member read policy",
+				"project_id", project.ID, "policy", policyName, "error", err.Error())
+		}
+	}
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
@@ -2517,6 +2580,17 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	project, err := s.store.GetProject(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — verify read access to individual project
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		NotFound(w, "Project")
+		return
+	}
+	if decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead); !decision.Allowed {
+		NotFound(w, "Project")
 		return
 	}
 
