@@ -39,26 +39,24 @@ func TestBackfillExecuteFlagDefaultIsFalse(t *testing.T) {
 	}
 }
 
-// TestBackfillDryRunDerivation verifies that the DryRun config field is
-// the logical inverse of backfillExecute. A wiring bug that sets
-// DryRun = backfillExecute (instead of !backfillExecute) would make the
-// default (execute=false) perform mutations.
+// TestBackfillDryRunDerivation calls the production backfillConfigFromFlags
+// function and asserts DryRun is the logical inverse of backfillExecute.
+// A wiring bug that sets DryRun = backfillExecute (instead of
+// !backfillExecute) would make the default perform mutations.
 func TestBackfillDryRunDerivation(t *testing.T) {
 	// Save and restore the global.
 	orig := backfillExecute
 	defer func() { backfillExecute = orig }()
 
-	// Default state: --execute not passed → backfillExecute is false.
+	// Default state: --execute not passed → DryRun must be true.
 	backfillExecute = false
-	dryRun := !backfillExecute
-	if !dryRun {
+	if !backfillConfigFromFlags().DryRun {
 		t.Fatal("DryRun must be true when backfillExecute is false (default)")
 	}
 
-	// Explicit --execute → backfillExecute is true.
+	// Explicit --execute → DryRun must be false.
 	backfillExecute = true
-	dryRun = !backfillExecute
-	if dryRun {
+	if backfillConfigFromFlags().DryRun {
 		t.Fatal("DryRun must be false when backfillExecute is true (--execute passed)")
 	}
 }

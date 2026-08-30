@@ -73,6 +73,16 @@ func init() {
 	serverBackfillCmd.Flags().StringVar(&backfillDB, "db", "", "Database DSN (overrides config/env)")
 }
 
+// backfillConfigFromFlags builds the BackfillConfig from command flags.
+// Extracted so the dry-run default is assertable without a database.
+func backfillConfigFromFlags() messaging.BackfillConfig {
+	return messaging.BackfillConfig{
+		DryRun:     !backfillExecute,
+		BatchSize:  backfillBatchSize,
+		Checkpoint: backfillCheckpoint,
+	}
+}
+
 func runServerBackfill(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
@@ -109,11 +119,7 @@ func runServerBackfill(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Build the backfill config once; per-project runs share it.
-	cfg := messaging.BackfillConfig{
-		DryRun:     !backfillExecute,
-		BatchSize:  backfillBatchSize,
-		Checkpoint: backfillCheckpoint,
-	}
+	cfg := backfillConfigFromFlags()
 
 	// Aggregate results across all projects.
 	total := &messaging.BackfillResult{}
