@@ -87,61 +87,71 @@ func expectedAgentResourceActions() []string {
 }
 
 func TestComputeCapabilities_AdminGetsAllActions(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Super-admin (role=admin) gets all actions via CheckAccess/Decide step-1 bypass
-	// even after the IsUnscopedLocalPlatformAdmin short-circuit was removed.
-	admin := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
+	// CO1: Admin access comes through role bindings, not bypass.
+	// Create user with super-admin role binding so the kernel can evaluate.
+	createTestUserWithRole(t, s, tid("admin-1"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("admin-1"), "admin@example.com", "Admin", "admin", "api")
 	resource := Resource{Type: "agent", ID: "some-agent"}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, admin, resource)
 	assert.Equal(t, expectedAgentResourceActions(), caps.Actions)
 }
 
-func TestComputeCapabilities_HubAdminGetsOnlyPolicyGrantedActions(t *testing.T) {
+func TestComputeCapabilities_HubAdminGetsOnlyRoleGrantedActions(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a non-admin user who has a policy granting only "read" and "update" on agents.
-	// This simulates a hub-admin who has role bindings but is not a super-admin.
+	// CO1: Policies no longer grant access. Create a custom role definition
+	// with only "read" and "update" permissions and bind it to the user.
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: tid("user-hubadmin-cap"), Email: "hubadmin-cap@test.com", DisplayName: "HubAdmin", Role: "member", Status: "active",
 	}))
 
-	policy := &store.Policy{
-		ID: tid("policy-hubadmin-cap"), Name: "Hub Admin Agent Read/Update", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read", "update"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-hubadmin-cap"), PrincipalType: "user", PrincipalID: tid("user-hubadmin-cap"),
-	}))
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-agent-read-update",
+		Description: "Test role with agent read/update",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.read", "agent.update"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-hubadmin-cap"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-hubadmin-cap"), "hubadmin-cap@test.com", "HubAdmin", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
-	// Hub-admin should get exactly the policy-granted actions, not all and not zero.
+	// User should get exactly the role-granted actions, not all and not zero.
 	assert.Equal(t, []string{"read", "update"}, caps.Actions)
 }
 
 func TestComputeScopeCapabilities_AdminGetsAllScopeActions(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Super-admin still gets all scope actions after short-circuit removal.
-	admin := NewAuthenticatedUser("admin-scope-regr", "admin-scope-regr@example.com", "Admin", "admin", "api")
+	// CO1: Admin access comes through role bindings, not bypass.
+	createTestUserWithRole(t, s, tid("admin-scope-regr"), "admin-scope-regr@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("admin-scope-regr"), "admin-scope-regr@example.com", "Admin", "admin", "api")
 	caps := srv.authzService.ComputeScopeCapabilities(ctx, admin, "", "", "agent")
 	assert.Equal(t, []string{"create", "list", "stop_all", "message"}, caps.Actions)
 }
 
 func TestComputeCapabilitiesBatch_AdminGetsAllAfterConversion(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Super-admin still gets all actions per resource in batch after short-circuit removal.
-	admin := NewAuthenticatedUser("admin-batch-regr", "admin-batch-regr@example.com", "Admin", "admin", "api")
+	// CO1: Admin access comes through role bindings, not bypass.
+	createTestUserWithRole(t, s, tid("admin-batch-regr"), "admin-batch-regr@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("admin-batch-regr"), "admin-batch-regr@example.com", "Admin", "admin", "api")
 	resources := []Resource{
 		{Type: "agent", ID: tid("agent-1")},
 		{Type: "agent", ID: tid("agent-2")},
@@ -172,18 +182,26 @@ func TestComputeCapabilities_PolicySubset(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
+	// CO1: Policies no longer grant access. Use role bindings instead.
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: tid("user-readonly-cap"), Email: "readonly-cap@test.com", DisplayName: "ReadOnly", Role: "member", Status: "active",
 	}))
 
-	policy := &store.Policy{
-		ID: tid("policy-ro-cap"), Name: "Read Only", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-ro-cap"), PrincipalType: "user", PrincipalID: tid("user-readonly-cap"),
-	}))
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-agent-readonly",
+		Description: "Test role with agent read only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.read"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-readonly-cap"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-readonly-cap"), "readonly-cap@test.com", "ReadOnly", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
@@ -208,10 +226,12 @@ func TestComputeCapabilities_DefaultDenyEmpty(t *testing.T) {
 }
 
 func TestComputeCapabilitiesBatch_AdminGetsAll(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	admin := NewAuthenticatedUser("admin-batch", "admin-batch@example.com", "Admin", "admin", "api")
+	// CO1: Admin access comes through role bindings, not bypass.
+	createTestUserWithRole(t, s, tid("admin-batch"), "admin-batch@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("admin-batch"), "admin-batch@example.com", "Admin", "admin", "api")
 	resources := []Resource{
 		{Type: "agent", ID: tid("agent-1")},
 		{Type: "agent", ID: tid("agent-2")},
@@ -229,12 +249,12 @@ func TestComputeCapabilitiesBatch_ScopedAdminCannotReadCrossProjectResources(t *
 	srv, s := testServer(t)
 	ctx := context.Background()
 	admin := NewAuthenticatedUser(tid("scoped-cap-admin"), "admin@example.com", "Admin", store.UserRoleAdmin, "api")
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	// CO1: Create user with super-admin role binding and project-scoped role binding.
+	createTestUserWithRole(t, s, admin.ID(), admin.Email(), store.UserRoleAdmin, store.SystemRoleSuperAdmin)
 	projectA := tid("scoped-cap-project-a")
 	projectB := tid("scoped-cap-project-b")
-	policy := &store.Policy{ID: tid("scoped-cap-read"), Name: "Scoped project read", ScopeType: "project", ScopeID: projectA, ResourceType: "agent", Actions: []string{"read"}, Effect: "allow"}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: admin.ID()}))
+	// Create a project-scoped role binding for projectA that includes agent.read
+	createTestUserWithProjectRole(t, s, admin.ID(), admin.Email(), projectA, store.ProjectRoleMember)
 	scoped := NewScopedUserIdentity(admin, projectA, []string{"agent:read"})
 	ctx = contextWithIdentity(ctx, scoped)
 
@@ -504,19 +524,27 @@ func TestComputeCapabilitiesBatch_MixedOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
+	// CO1: Policies no longer grant access. Use role bindings instead.
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: tid("user-mixed-cap"), Email: "mixed-cap@test.com", DisplayName: "Mixed", Role: "member", Status: "active",
 	}))
 
-	// Policy grants read-only on agents
-	policy := &store.Policy{
-		ID: tid("policy-mixed-cap"), Name: "Read Only", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-mixed-cap"), PrincipalType: "user", PrincipalID: tid("user-mixed-cap"),
-	}))
+	// Role binding grants read-only on agents
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-agent-readonly-mixed",
+		Description: "Test role with agent read only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.read"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-mixed-cap"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-mixed-cap"), "mixed-cap@test.com", "Mixed", "member", "api")
 	resources := []Resource{
@@ -527,10 +555,10 @@ func TestComputeCapabilitiesBatch_MixedOwnership(t *testing.T) {
 	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, user, resources, "agent")
 	require.Len(t, caps, 2)
 
-	// Owned resource gets all actions
+	// Owned resource gets all actions (via resource owner relationship grant)
 	assert.Equal(t, expectedAgentResourceActions(), caps[0].Actions)
 
-	// Non-owned resource gets only read from policy
+	// Non-owned resource gets only read from role binding
 	assert.Equal(t, []string{"read"}, caps[1].Actions)
 }
 
@@ -579,10 +607,12 @@ func TestComputeCapabilitiesBatch_AncestryAccess(t *testing.T) {
 }
 
 func TestComputeScopeCapabilities(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	admin := NewAuthenticatedUser("admin-scope-cap", "admin-scope@example.com", "Admin", "admin", "api")
+	// CO1: Admin access comes through role bindings, not bypass.
+	createTestUserWithRole(t, s, tid("admin-scope-cap"), "admin-scope@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("admin-scope-cap"), "admin-scope@example.com", "Admin", "admin", "api")
 
 	caps := srv.authzService.ComputeScopeCapabilities(ctx, admin, "", "", "agent")
 	assert.Equal(t, []string{"create", "list", "stop_all", "message"}, caps.Actions)
@@ -701,10 +731,12 @@ func TestResourceActions_AgentLifecycleUsesAttachPermission(t *testing.T) {
 }
 
 func TestComputeCapabilities_GCPServiceAccount_AdminSeesAssign(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	admin := NewAuthenticatedUser("admin-sa-assign", "admin-sa@example.com", "Admin", "admin", "api")
+	// CO1: Admin access comes through role bindings, not bypass.
+	createTestUserWithRole(t, s, tid("admin-sa-assign"), "admin-sa@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("admin-sa-assign"), "admin-sa@example.com", "Admin", "admin", "api")
 	resource := Resource{Type: "gcp_service_account", ID: "sa-1"}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, admin, resource)
@@ -717,17 +749,27 @@ func TestComputeCapabilities_GCPServiceAccount_ReadPolicyDoesNotGrantAssign(t *t
 	srv, s := testServer(t)
 	ctx := context.Background()
 
+	// CO1: Policies no longer grant access. Use role bindings instead.
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: tid("user-sa-reader"), Email: "sa-reader@test.com", DisplayName: "SA Reader",
 		Role: "member", Status: "active",
 	}))
-	require.NoError(t, s.CreatePolicy(ctx, &store.Policy{
-		ID: tid("policy-sa-read"), Name: "SA Read Only", ScopeType: "hub",
-		ResourceType: "gcp_service_account", Actions: []string{"read"}, Effect: "allow",
-	}))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-sa-read"), PrincipalType: "user", PrincipalID: tid("user-sa-reader"),
-	}))
+
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-sa-readonly",
+		Description: "Test role with SA read only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"gcp_service_account.read"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-sa-reader"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-sa-reader"), "sa-reader@test.com", "SA Reader", "member", "api")
 	caps := srv.authzService.ComputeCapabilities(ctx, user, Resource{Type: "gcp_service_account", ID: "sa-2"})
