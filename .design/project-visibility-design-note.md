@@ -12,8 +12,8 @@
 ### Proposed changes -- using existing Policy system (group-aware, fully wired)
 
 Step 1: Narrow the global read-all grant. Replace the ResourceType:"*" wildcard in hub-member-read-all with explicit per-type allows for directory/catalog types only:
-- KEEP globally readable: user, group, template, harness_config
-- GATE (remove from global read): project, agent, broker
+- KEEP globally readable: user, group, template, harness_config, broker, runtime_broker, gcp_service_account, policy, skill, quota, role, role_binding, hub
+- GATE (remove from global read): project, agent
 
 After this, a project is only visible to users who have a matching policy grant.
 

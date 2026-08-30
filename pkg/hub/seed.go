@@ -52,15 +52,15 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 	}
 
 	// 2. Narrow the hub-member-read-all policy from wildcard to explicit
-	// per-type read policies for directory/catalog resources. Project, agent,
-	// and broker reads now come from per-project membership-scoped policies
-	// (created by createProjectMembersGroupAndPolicy).
+	// per-type read policies for directory/catalog resources. Project and agent
+	// reads now come from per-project membership-scoped policies (created by
+	// createProjectMembersGroupAndPolicy and backfillProjectMemberReadPolicies).
 	narrowHubMemberReadAll(ctx, s, group.ID)
 
 	// Seed explicit per-type read policies for resources that should remain
 	// globally readable by all hub members. Only project and agent resources
 	// are excluded — those are gated by per-project membership policies.
-	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding"} {
+	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding", "hub"} {
 		seedPolicy(ctx, s, group.ID, &store.Policy{
 			ID:           api.NewUUID(),
 			Name:         "hub-member-read-" + rt,
@@ -102,6 +102,7 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		"hub-member-read-quota",
 		"hub-member-read-role",
 		"hub-member-read-role_binding",
+		"hub-member-read-hub",
 	})
 
 	// The human half of the svc-accnt service-account assign baseline is
@@ -366,13 +367,105 @@ func backfillProjectMessageAction(ctx context.Context, s store.Store) {
 	}
 }
 
+// backfillProjectMemberReadPolicies ensures every existing project has
+// per-project member-read policies for the "project" and "agent" resource
+// types. Without this, narrowing hub-member-read-all at startup would lock
+// regular (non-owner/non-admin) members of untouched projects out of
+// project reads — they have no owner/admin bypass and the wildcard policy
+// that previously granted access has been deleted. The inline backfill in
+// createProjectMembersGroupAndPolicy covers projects that are touched after
+// the upgrade; this covers the rest.
+func backfillProjectMemberReadPolicies(ctx context.Context, s store.Store) {
+	var cursor string
+	for {
+		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:  500,
+			Cursor: cursor,
+		})
+		if err != nil {
+			slog.Warn("failed to list projects for member-read-policy backfill", "error", err)
+			return
+		}
+		for i := range res.Items {
+			project := &res.Items[i]
+			group, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+			if err != nil {
+				slog.Debug("skipping member-read-policy backfill, no members group",
+					"project_id", project.ID, "slug", project.Slug)
+				continue
+			}
+			ensureProjectMemberReadPolicies(ctx, s, project, group.ID)
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+}
+
+// ensureProjectMemberReadPolicies creates read+list policies for "project"
+// and "agent" resource types scoped to the given project, bound to the
+// project's members group. Idempotent: skips creation if the policy already
+// exists, and repairs stale ScopeID on pre-existing policies.
+//
+// This is a standalone function (not a Server method) so it can be called
+// from startup backfill paths that don't have a Server instance.
+func ensureProjectMemberReadPolicies(ctx context.Context, s store.Store, project *store.Project, membersGroupID string) {
+	for _, rt := range []string{"project", "agent"} {
+		policyName := "project:" + project.Slug + ":member-read-" + rt
+		policy := &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         policyName,
+			Description:  fmt.Sprintf("Allow members to read %s resources in project '%s'", rt, project.Slug),
+			ScopeType:    "project",
+			ScopeID:      project.ID,
+			ResourceType: rt,
+			Actions:      []string{"read", "list"},
+			Effect:       "allow",
+		}
+		if err := s.CreatePolicy(ctx, policy); err != nil {
+			if !errors.Is(err, store.ErrAlreadyExists) {
+				slog.Warn("failed to create project member read policy",
+					"project_id", project.ID, "policy", policyName, "resourceType", rt, "error", err.Error())
+				continue
+			}
+			// Policy already exists — ensure scope ID is correct.
+			existing, lookupErr := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+			if lookupErr != nil || len(existing.Items) == 0 {
+				slog.Warn("failed to look up existing project member read policy",
+					"project_id", project.ID, "policy", policyName, "error", lookupErr)
+				continue
+			}
+			policy = &existing.Items[0]
+			if policy.ScopeID != project.ID {
+				policy.ScopeID = project.ID
+				if updateErr := s.UpdatePolicy(ctx, policy); updateErr != nil {
+					slog.Warn("failed to update existing project member read policy",
+						"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
+				}
+			}
+		}
+
+		// Bind policy to the members group
+		if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
+			PolicyID:      policy.ID,
+			PrincipalType: "group",
+			PrincipalID:   membersGroupID,
+		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			slog.Warn("failed to bind project member read policy",
+				"project_id", project.ID, "policy", policyName, "error", err.Error())
+		}
+	}
+}
+
 // narrowHubMemberReadAll migrates an existing hub-member-read-all policy from
 // the wildcard ResourceType:"*" to a no-op state. On existing hubs the wildcard
 // policy grants every hub member read+list on all resource types, including
-// project, agent, and broker. This migration deletes that wildcard policy so
-// that project/agent/broker reads are controlled by per-project membership
-// policies instead. The per-type policies for directory resources (user, group,
-// template, harness_config) are seeded separately.
+// project and agent. This migration deletes that wildcard policy so that
+// project and agent reads are controlled by per-project membership policies
+// instead. Per-type policies for all other resource types (user, group,
+// template, harness_config, broker, runtime_broker, gcp_service_account,
+// policy, skill, quota, role, role_binding, hub) are seeded separately.
 //
 // Idempotent: if the wildcard policy no longer exists, this is a no-op.
 func narrowHubMemberReadAll(ctx context.Context, s store.Store, hubMembersGroupID string) {

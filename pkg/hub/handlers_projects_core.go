@@ -911,51 +911,9 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 // to the project's members group — the read policy then applies transitively
 // to all hub users.
 func (s *Server) ensureProjectMemberReadPolicy(ctx context.Context, project *store.Project, membersGroupID string) {
-	for _, rt := range []string{"project", "agent"} {
-		policyName := "project:" + project.Slug + ":member-read-" + rt
-		policy := &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         policyName,
-			Description:  fmt.Sprintf("Allow members to read %s resources in project '%s'", rt, project.Slug),
-			ScopeType:    "project",
-			ScopeID:      project.ID,
-			ResourceType: rt,
-			Actions:      []string{"read", "list"},
-			Effect:       "allow",
-		}
-		if err := s.store.CreatePolicy(ctx, policy); err != nil {
-			if !errors.Is(err, store.ErrAlreadyExists) {
-				s.projectsLogger().Warn("failed to create project member read policy",
-					"project_id", project.ID, "policy", policyName, "resourceType", rt, "error", err.Error())
-				continue
-			}
-			// Policy already exists — ensure scope ID is correct.
-			existing, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-			if lookupErr != nil || len(existing.Items) == 0 {
-				s.projectsLogger().Warn("failed to look up existing project member read policy",
-					"project_id", project.ID, "policy", policyName, "error", lookupErr)
-				continue
-			}
-			policy = &existing.Items[0]
-			if policy.ScopeID != project.ID {
-				policy.ScopeID = project.ID
-				if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
-					s.projectsLogger().Warn("failed to update existing project member read policy",
-						"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
-				}
-			}
-		}
-
-		// Bind policy to the members group
-		if err := s.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-			PolicyID:      policy.ID,
-			PrincipalType: "group",
-			PrincipalID:   membersGroupID,
-		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			s.projectsLogger().Warn("failed to bind project member read policy",
-				"project_id", project.ID, "policy", policyName, "error", err.Error())
-		}
-	}
+	// Delegate to the standalone function so the same logic is reusable
+	// from both inline handler paths and the startup backfill.
+	ensureProjectMemberReadPolicies(ctx, s.store, project, membersGroupID)
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
@@ -2738,6 +2696,23 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	} else if err != nil {
 		s.projectsLogger().Warn("failed to retrieve project member policy for migration",
 			"project_id", project.ID, "old_policy", oldPolicyName, "error", err)
+	}
+
+	// Migrate the project member-read-project policy name.
+	for _, suffix := range []string{"member-read-project", "member-read-agent"} {
+		oldReadPolicyName := "project:" + oldSlug + ":" + suffix
+		newReadPolicyName := "project:" + newSlug + ":" + suffix
+		if policies, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldReadPolicyName}, store.ListOptions{Limit: 1}); err == nil && len(policies.Items) > 0 {
+			policy := &policies.Items[0]
+			policy.Name = newReadPolicyName
+			if err := s.store.UpdatePolicy(ctx, policy); err != nil {
+				s.projectsLogger().Warn("failed to migrate project member read policy name",
+					"project_id", project.ID, "old_policy", oldReadPolicyName, "new_policy", newReadPolicyName, "error", err)
+			}
+		} else if err != nil {
+			s.projectsLogger().Warn("failed to retrieve project member read policy for migration",
+				"project_id", project.ID, "old_policy", oldReadPolicyName, "error", err)
+		}
 	}
 
 	// Migrate hub-managed project filesystem paths (best-effort).

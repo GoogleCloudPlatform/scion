@@ -152,7 +152,6 @@ export interface Project {
   gitRemote?: string;
   projectType?: ProjectType;
   status: ProjectStatus;
-  visibility?: string;
   labels?: Record<string, string>;
   defaultRuntimeBrokerId?: string;
   ownerId?: string;

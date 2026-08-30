@@ -1278,9 +1278,9 @@ func TestPolicyList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	// 3 test policies + 13 seeded policies (12 per-type read + 1 create-projects) = 16
-	if len(resp.Policies) != 16 {
-		t.Errorf("expected 16 policies (3 test + 13 seeded), got %d", len(resp.Policies))
+	// 3 test policies + 14 seeded policies (13 per-type read + 1 create-projects) = 17
+	if len(resp.Policies) != 17 {
+		t.Errorf("expected 17 policies (3 test + 14 seeded), got %d", len(resp.Policies))
 	}
 }
 

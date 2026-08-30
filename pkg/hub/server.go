@@ -1367,6 +1367,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// causing non-owner/non-admin members to be denied agent messaging.
 	backfillProjectMessageAction(ctx, s)
 
+	// Backfill per-project member-read policies for project and agent resource
+	// types. After narrowing hub-member-read-all, regular (non-owner/non-admin)
+	// members of existing projects that haven't been touched since the upgrade
+	// would be locked out without these policies. The inline path in
+	// createProjectMembersGroupAndPolicy covers active projects; this covers
+	// the rest.
+	backfillProjectMemberReadPolicies(ctx, s)
+
 	// Seed role definitions for the role-binding authorization model (Phase 1E).
 	// Must run after seedDefaultPoliciesAndGroups so the hub-members group exists.
 	seedRoleDefinitions(ctx, s)

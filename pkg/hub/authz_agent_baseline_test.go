@@ -658,7 +658,7 @@ func TestMatchesResource_SeededPoliciesUnaffected(t *testing.T) {
 
 	// After narrowing hub-member-read-all, per-type read policies exist for
 	// directory resources and hub-member-create-projects remains unchanged.
-	for _, name := range []string{"hub-member-read-user", "hub-member-read-group", "hub-member-read-template", "hub-member-read-harness_config", "hub-member-read-broker", "hub-member-read-runtime_broker", "hub-member-read-gcp_service_account", "hub-member-read-policy", "hub-member-read-skill", "hub-member-read-quota", "hub-member-read-role", "hub-member-read-role_binding", "hub-member-create-projects"} {
+	for _, name := range []string{"hub-member-read-user", "hub-member-read-group", "hub-member-read-template", "hub-member-read-harness_config", "hub-member-read-broker", "hub-member-read-runtime_broker", "hub-member-read-gcp_service_account", "hub-member-read-policy", "hub-member-read-skill", "hub-member-read-quota", "hub-member-read-role", "hub-member-read-role_binding", "hub-member-read-hub", "hub-member-create-projects"} {
 		t.Run(name, func(t *testing.T) {
 			p := byName(name)
 			require.Equal(t, "hub", p.ScopeType,

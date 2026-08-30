@@ -52,7 +52,7 @@ func TestGetProject_MemberCanRead(t *testing.T) {
 
 	var resp ProjectWithCapabilities
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, project.ID, resp.Project.ID)
+	assert.Equal(t, project.ID, resp.ID)
 }
 
 // TestGetProject_NonMemberGetNotFound verifies that a hub member who is NOT a
@@ -101,7 +101,7 @@ func TestListProjects_MemberSeesOwnProject(t *testing.T) {
 
 	found := false
 	for _, p := range resp.Projects {
-		if p.Project.ID == project.ID {
+		if p.ID == project.ID {
 			found = true
 			break
 		}
@@ -121,7 +121,7 @@ func TestListProjects_NonMemberDoesNotSeeProject(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	for _, p := range resp.Projects {
-		assert.NotEqual(t, project.ID, p.Project.ID,
+		assert.NotEqual(t, project.ID, p.ID,
 			"non-member should NOT see the project in list")
 	}
 }
@@ -175,7 +175,7 @@ func TestProjectVisibility_HubMembersGroupMakesProjectVisibleInList(t *testing.T
 	var beforeResp ListProjectsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&beforeResp))
 	for _, p := range beforeResp.Projects {
-		require.NotEqual(t, project.ID, p.Project.ID,
+		require.NotEqual(t, project.ID, p.ID,
 			"non-member should not see project in list before making public")
 	}
 
@@ -198,7 +198,7 @@ func TestProjectVisibility_HubMembersGroupMakesProjectVisibleInList(t *testing.T
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&afterResp))
 	found := false
 	for _, p := range afterResp.Projects {
-		if p.Project.ID == project.ID {
+		if p.ID == project.ID {
 			found = true
 			break
 		}
@@ -248,7 +248,7 @@ func TestNarrowHubMemberReadAll_DeletesWildcardPolicy(t *testing.T) {
 		"wildcard hub-member-read-all should be deleted after narrowing")
 
 	// Per-type policies for globally readable resources should exist.
-	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding"} {
+	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding", "hub"} {
 		policies, err := s.ListPolicies(ctx, store.PolicyFilter{
 			Name:      "hub-member-read-" + rt,
 			ScopeType: "hub",
