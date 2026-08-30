@@ -1242,6 +1242,10 @@ func TestHandleAuthAdminStatus_SuperAdmin(t *testing.T) {
 	if !resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=true for super-admin")
 	}
+
+	// Super-admin should receive all permission IDs from the registry.
+	allIDs := allPermissionIDs()
+	require.ElementsMatch(t, allIDs, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_HubAdmin(t *testing.T) {
@@ -1288,6 +1292,10 @@ func TestHandleAuthAdminStatus_HubAdmin(t *testing.T) {
 	if resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=false for hub-admin (non-super-admin) user")
 	}
+
+	// Hub-admin should have the curated hub-admin permission set.
+	expectedPerms := hubAdminPermissionIDs()
+	require.ElementsMatch(t, expectedPerms, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PlainMember(t *testing.T) {
@@ -1320,6 +1328,107 @@ func TestHandleAuthAdminStatus_PlainMember(t *testing.T) {
 	}
 	if resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=false for plain member")
+	}
+
+	// Plain member should have an empty permissions array (not null).
+	if resp.Permissions == nil {
+		t.Error("expected permissions to be an empty array, got nil")
+	}
+	if len(resp.Permissions) != 0 {
+		t.Errorf("expected 0 permissions for plain member, got %d: %v", len(resp.Permissions), resp.Permissions)
+	}
+}
+
+func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a custom role with only template permissions.
+	customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "template-manager",
+		Description: "Can manage templates only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"template.list", "template.read", "template.create", "template.update", "template.delete"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	// Create a non-admin user and bind the custom role.
+	userID := tid("custom-role-handler")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "customrole@test.com", DisplayName: "CustomRole", Role: "member", Status: "active",
+	}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: customRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, "customrole@test.com", "CustomRole", "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Custom role with permissions → isAdmin=true, isSuperAdmin=false.
+	if !resp.IsAdmin {
+		t.Error("expected isAdmin=true for user with custom role permissions")
+	}
+	if resp.IsSuperAdmin {
+		t.Error("expected isSuperAdmin=false for user with custom role")
+	}
+
+	// Permissions should contain exactly the template permission IDs.
+	expectedPerms := []string{
+		"template.list",
+		"template.read",
+		"template.create",
+		"template.update",
+		"template.delete",
+	}
+	require.ElementsMatch(t, expectedPerms, resp.Permissions)
+}
+
+func TestHandleAuthAdminStatus_PermissionsSerializedAsEmptyArray(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// A plain member with no role bindings should serialize permissions as []
+	// (JSON empty array), NOT null.
+	userID := tid("empty-perms-handler")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "emptyperms@test.com", DisplayName: "EmptyPerms", Role: "member", Status: "active",
+	}))
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, "emptyperms@test.com", "EmptyPerms", "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify the raw JSON contains "permissions":[] not "permissions":null.
+	body := rec.Body.String()
+	if !strings.Contains(body, `"permissions":[]`) {
+		t.Errorf("expected permissions to serialize as empty array [], got body: %s", body)
 	}
 }
 
