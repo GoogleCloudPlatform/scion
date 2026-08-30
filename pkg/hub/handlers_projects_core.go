@@ -2541,6 +2541,10 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// Ensure associated groups exist (backfill for projects created before
+	// group support was added). These calls are idempotent.
+	s.createProjectGroup(ctx, project)
+
 	// SECURITY-GATE: CheckAccess — verify read access to individual project
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -2551,10 +2555,6 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		NotFound(w, "Project")
 		return
 	}
-
-	// Ensure associated groups exist (backfill for projects created before
-	// group support was added). These calls are idempotent.
-	s.createProjectGroup(ctx, project)
 	s.createProjectMembersGroupAndPolicy(ctx, project)
 
 	// Enrich owner display name
