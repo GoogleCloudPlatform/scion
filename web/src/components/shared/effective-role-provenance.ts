@@ -29,6 +29,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getLifecycleStatus, formatDateTime } from './role-binding-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -298,9 +299,13 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     }
   `;
 
+  /** Guard to prevent double-fetch when connectedCallback and updated both fire. */
+  private _initialLoadDone = false;
+
   override connectedCallback(): void {
     super.connectedCallback();
     if (this.principalId) {
+      this._initialLoadDone = true;
       void this.loadEffectiveRoles();
     }
   }
@@ -310,7 +315,11 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       (changed.has('principalId') || changed.has('principalType')) &&
       this.principalId
     ) {
-      void this.loadEffectiveRoles();
+      // Skip if connectedCallback already triggered the initial load.
+      if (!this._initialLoadDone) {
+        void this.loadEffectiveRoles();
+      }
+      this._initialLoadDone = false;
     }
   }
 
@@ -366,43 +375,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
-
-  private getLifecycleStatus(
-    binding: EffectiveRoleBinding
-  ): 'active' | 'expired' | 'pending' {
-    const now = Date.now();
-
-    if (binding.expiresAt) {
-      const expires = new Date(binding.expiresAt).getTime();
-      if (!isNaN(expires) && expires < now) return 'expired';
-    }
-
-    if (binding.notBefore) {
-      const notBefore = new Date(binding.notBefore).getTime();
-      if (!isNaN(notBefore) && notBefore > now) return 'pending';
-    }
-
-    return 'active';
-  }
-
-  private formatDateTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      return date.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-      });
-    } catch {
-      return dateString;
-    }
-  }
+  // getLifecycleStatus and formatDateTime are imported from ./role-binding-utils.js
 
   // ---------------------------------------------------------------------------
   // Render
@@ -481,7 +454,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   }
 
   private renderRoleCard(binding: EffectiveRoleBinding) {
-    const status = this.getLifecycleStatus(binding);
+    const status = getLifecycleStatus(binding);
 
     return html`
       <div class="role-card">
@@ -516,12 +489,12 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           </span>
           ${binding.expiresAt && status !== 'expired'
             ? html`<span class="lifecycle-info">
-                Expires ${this.formatDateTime(binding.expiresAt)}
+                Expires ${formatDateTime(binding.expiresAt)}
               </span>`
             : ''}
           ${binding.notBefore && status === 'pending'
             ? html`<span class="lifecycle-info">
-                Activates ${this.formatDateTime(binding.notBefore)}
+                Activates ${formatDateTime(binding.notBefore)}
               </span>`
             : ''}
         </div>

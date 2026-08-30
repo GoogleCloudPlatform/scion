@@ -44,7 +44,6 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
-import '../shared/group-member-editor.js';
 import '../shared/project-members-editor.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';

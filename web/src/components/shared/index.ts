@@ -61,3 +61,12 @@ export { ScionPrincipalPicker } from './principal-picker.js';
 export type { PrincipalChangeDetail } from './principal-picker.js';
 export { ScionEffectiveRoleProvenance } from './effective-role-provenance.js';
 export { ScionProjectMembersEditor } from './project-members-editor.js';
+export {
+  SYSTEM_DIRECT_USER_ONLY_ROLES,
+  PROJECT_DIRECT_USER_ONLY_ROLES,
+  PROJECT_OWNER_ROLE_NAMES,
+  getLifecycleStatus,
+  formatDateTime,
+  getPrincipalIcon,
+} from './role-binding-utils.js';
+export type { LifecycleStatus } from './role-binding-utils.js';

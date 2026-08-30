@@ -31,6 +31,13 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
 import '../shared/principal-picker.js';
+import {
+  SYSTEM_SYSTEM_DIRECT_USER_ONLY_ROLES,
+  getLifecycleStatus,
+  formatDateTime,
+  getPrincipalIcon,
+} from '../shared/role-binding-utils.js';
+import type { LifecycleStatus } from '../shared/role-binding-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,9 +65,6 @@ interface RoleDefinition {
   scopeType: string;
   system: boolean;
 }
-
-// Roles that may only be assigned to direct users (not groups).
-const DIRECT_USER_ONLY_ROLES = ['super-admin', 'project-owner'];
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -577,55 +581,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
     }
   }
 
-  private formatDateTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      return date.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-      });
-    } catch {
-      return dateString;
-    }
-  }
-
-  /**
-   * Determine the lifecycle status of a binding based on notBefore/expiresAt.
-   */
-  private getLifecycleStatus(
-    binding: RoleBinding
-  ): 'active' | 'expired' | 'pending' {
-    const now = Date.now();
-
-    if (binding.expiresAt) {
-      const expires = new Date(binding.expiresAt).getTime();
-      if (!isNaN(expires) && expires < now) return 'expired';
-    }
-
-    if (binding.notBefore) {
-      const notBefore = new Date(binding.notBefore).getTime();
-      if (!isNaN(notBefore) && notBefore > now) return 'pending';
-    }
-
-    return 'active';
-  }
-
-  private getPrincipalIcon(principalType: string): string {
-    switch (principalType) {
-      case 'user':
-        return 'person';
-      case 'group':
-        return 'diagram-3';
-      case 'agent':
-        return 'cpu';
-      default:
-        return 'question-circle';
-    }
-  }
+  // formatDateTime, getLifecycleStatus, and getPrincipalIcon are imported
+  // from ../shared/role-binding-utils.js
 
   // ---------------------------------------------------------------------------
   // Pagination
@@ -677,7 +634,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     // Groups cannot be assigned to direct-user-only roles
     if (this.formPrincipalType === 'group') {
       filtered = filtered.filter(
-        (r) => !DIRECT_USER_ONLY_ROLES.includes(r.name)
+        (r) => !SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name)
       );
     }
 
@@ -690,7 +647,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   private updateValidation(): void {
     if (this.formPrincipalType === 'group' && this.formRoleId) {
       const roleName = this.roleNameMap[this.formRoleId];
-      if (roleName && DIRECT_USER_ONLY_ROLES.includes(roleName)) {
+      if (roleName && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(roleName)) {
         this.formValidationWarning = `"${roleName}" can only be assigned to individual users, not groups.`;
         this.formRoleId = '';
         return;
@@ -789,7 +746,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     // Block group principals for direct-user-only roles
     if (this.formPrincipalType === 'group' && this.formRoleId) {
       const roleName = this.roleNameMap[this.formRoleId];
-      if (roleName && DIRECT_USER_ONLY_ROLES.includes(roleName)) return false;
+      if (roleName && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(roleName)) return false;
     }
 
     // Validate lifecycle dates: expiresAt must be after notBefore
@@ -918,7 +875,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   }
 
   private renderBindingRow(binding: RoleBinding) {
-    const lifecycleStatus = this.getLifecycleStatus(binding);
+    const lifecycleStatus = getLifecycleStatus(binding);
     const hasLifecycle = !!(binding.notBefore || binding.expiresAt);
 
     return html`
@@ -926,7 +883,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <td>
           <div class="principal-info">
             <div class="principal-icon ${binding.principalType}">
-              <sl-icon name="${this.getPrincipalIcon(binding.principalType)}"></sl-icon>
+              <sl-icon name="${getPrincipalIcon(binding.principalType)}"></sl-icon>
             </div>
             <div class="principal-details">
               <span class="principal-name">${binding.principalDisplayName || binding.principalId}</span>
@@ -960,12 +917,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
                 </span>
                 ${binding.expiresAt && lifecycleStatus !== 'expired'
                   ? html`<div class="lifecycle-detail">
-                      Expires ${this.formatDateTime(binding.expiresAt)}
+                      Expires ${formatDateTime(binding.expiresAt)}
                     </div>`
                   : ''}
                 ${binding.notBefore && lifecycleStatus === 'pending'
                   ? html`<div class="lifecycle-detail">
-                      Activates ${this.formatDateTime(binding.notBefore)}
+                      Activates ${formatDateTime(binding.notBefore)}
                     </div>`
                   : ''}
               `
@@ -1189,17 +1146,27 @@ export class ScionPageAdminRoleBindings extends LitElement {
                     Optional. The binding will automatically expire after this date/time.
                   </div>
                 </div>
-                ${this.formNotBefore && this.formExpiresAt
+                ${this.formExpiresAt
                   ? (() => {
-                      const nb = new Date(this.formNotBefore).getTime();
                       const ea = new Date(this.formExpiresAt).getTime();
-                      if (!isNaN(nb) && !isNaN(ea) && ea <= nb) {
+                      if (!isNaN(ea) && ea < Date.now()) {
                         return html`
                           <div class="validation-warning">
                             <sl-icon name="exclamation-triangle"></sl-icon>
-                            Expiration must be after the activation date.
+                            This expiration date is in the past. The binding will be created already expired.
                           </div>
                         `;
+                      }
+                      if (this.formNotBefore) {
+                        const nb = new Date(this.formNotBefore).getTime();
+                        if (!isNaN(nb) && !isNaN(ea) && ea <= nb) {
+                          return html`
+                            <div class="validation-warning">
+                              <sl-icon name="exclamation-triangle"></sl-icon>
+                              Expiration must be after the activation date.
+                            </div>
+                          `;
+                        }
                       }
                       return nothing;
                     })()

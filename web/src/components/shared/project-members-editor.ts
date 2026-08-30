@@ -37,6 +37,11 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import type { PrincipalChangeDetail } from './principal-picker.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
+import {
+  PROJECT_PROJECT_DIRECT_USER_ONLY_ROLES,
+  PROJECT_OWNER_ROLE_NAMES,
+  getPrincipalIcon,
+} from './role-binding-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,9 +69,6 @@ interface ProjectRole {
   name: string;
   scopeType: string;
 }
-
-// Roles that cannot be assigned to groups.
-const DIRECT_USER_ONLY_ROLES = ['project-owner'];
 
 // ---------------------------------------------------------------------------
 // Component
@@ -407,16 +409,24 @@ export class ScionProjectMembersEditor extends LitElement {
     }
   `;
 
+  /** Guard to prevent double-fetch when connectedCallback and updated both fire. */
+  private _initialLoadDone = false;
+
   override connectedCallback(): void {
     super.connectedCallback();
     if (this.projectId) {
+      this._initialLoadDone = true;
       void this.loadData();
     }
   }
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('projectId') && this.projectId) {
-      void this.loadData();
+      // Skip if connectedCallback already triggered the initial load.
+      if (!this._initialLoadDone) {
+        void this.loadData();
+      }
+      this._initialLoadDone = false;
     }
   }
 
@@ -572,17 +582,11 @@ export class ScionProjectMembersEditor extends LitElement {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private getPrincipalIcon(principalType: string): string {
-    switch (principalType) {
-      case 'user':
-        return 'person';
-      case 'group':
-        return 'diagram-3';
-      case 'agent':
-        return 'cpu';
-      default:
-        return 'question-circle';
-    }
+  // getPrincipalIcon is imported from ./role-binding-utils.js
+
+  /** Returns true if a role name represents project ownership. */
+  private isOwnerRole(roleName: string): boolean {
+    return PROJECT_OWNER_ROLE_NAMES.includes(roleName);
   }
 
   private get directOwnerCount(): number {
@@ -590,7 +594,7 @@ export class ScionProjectMembersEditor extends LitElement {
       (m) =>
         m.source === 'direct' &&
         m.principalType === 'user' &&
-        (m.roleName === 'project-owner' || m.roleName === 'owner')
+        this.isOwnerRole(m.roleName)
     ).length;
   }
 
@@ -600,18 +604,14 @@ export class ScionProjectMembersEditor extends LitElement {
       member.principalType !== 'user'
     )
       return false;
-    if (
-      member.roleName !== 'project-owner' &&
-      member.roleName !== 'owner'
-    )
-      return false;
+    if (!this.isOwnerRole(member.roleName)) return false;
     return this.directOwnerCount <= 1;
   }
 
   private get addFilteredRoles(): ProjectRole[] {
     let roles = this.projectRoles;
     if (this.addPrincipalType === 'group') {
-      roles = roles.filter((r) => !DIRECT_USER_ONLY_ROLES.includes(r.name));
+      roles = roles.filter((r) => !PROJECT_DIRECT_USER_ONLY_ROLES.includes(r.name));
     }
     return roles;
   }
@@ -677,25 +677,40 @@ export class ScionProjectMembersEditor extends LitElement {
     this.changeDialogOpen = true;
   }
 
+  /** Look up a role name from its definition ID. */
+  private getRoleNameById(roleId: string): string {
+    const role = this.projectRoles.find((r) => r.id === roleId);
+    return role?.name ?? '';
+  }
+
   private async handleChangeRole(): Promise<void> {
     if (!this.changeMember || !this.changeRoleId) return;
+
+    // R1: Prevent demoting the last direct owner to a non-owner role.
+    const newRoleName = this.getRoleNameById(this.changeRoleId);
+    if (
+      this.isLastDirectOwner(this.changeMember) &&
+      !this.isOwnerRole(newRoleName)
+    ) {
+      this.actionFeedback = {
+        message:
+          'Cannot change the last direct project owner to a non-owner role. Transfer ownership first.',
+        variant: 'danger',
+      };
+      this.changeDialogOpen = false;
+      this.changeMember = null;
+      return;
+    }
 
     this.changeLoading = true;
 
     try {
-      // Delete old binding and create new one (since PUT may not be supported)
+      // R2: Create the new binding BEFORE deleting the old one.
+      // If the POST fails, the user retains their existing role.
+      // A brief period of duplicate bindings is less harmful than
+      // losing the binding entirely. Once PUT/PATCH is supported
+      // server-side, this should be replaced with an atomic update.
       if (this.roleBindingApiAvailable) {
-        // Only delete if the binding has a real ID (not a fallback compound key)
-        if (
-          this.changeMember.id &&
-          !this.changeMember.id.includes('/')
-        ) {
-          await apiFetch(
-            `/api/v1/admin/role-bindings/${this.changeMember.id}`,
-            { method: 'DELETE' }
-          );
-        }
-
         const res = await apiFetch('/api/v1/admin/role-bindings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -710,6 +725,17 @@ export class ScionProjectMembersEditor extends LitElement {
 
         if (!res.ok) {
           throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+        }
+
+        // New binding created successfully — now delete the old one.
+        if (
+          this.changeMember.id &&
+          !this.changeMember.id.includes('/')
+        ) {
+          await apiFetch(
+            `/api/v1/admin/role-bindings/${this.changeMember.id}`,
+            { method: 'DELETE' }
+          );
         }
       }
 
@@ -961,7 +987,7 @@ export class ScionProjectMembersEditor extends LitElement {
           <div class="member-identity">
             <div class="member-icon ${member.principalType}">
               <sl-icon
-                name="${this.getPrincipalIcon(member.principalType)}"
+                name="${getPrincipalIcon(member.principalType)}"
               ></sl-icon>
             </div>
             <div class="member-info">
@@ -993,7 +1019,7 @@ export class ScionProjectMembersEditor extends LitElement {
                             <sl-icon-button
                               name="pencil"
                               label="Change role"
-                              ?disabled=${isRemoving}
+                              ?disabled=${isRemoving || lastOwner}
                               @click=${() =>
                                 this.openChangeRoleDialog(member)}
                             ></sl-icon-button>
@@ -1161,7 +1187,7 @@ export class ScionProjectMembersEditor extends LitElement {
               .filter(
                 (r) =>
                   this.changeMember?.principalType !== 'group' ||
-                  !DIRECT_USER_ONLY_ROLES.includes(r.name)
+                  !PROJECT_DIRECT_USER_ONLY_ROLES.includes(r.name)
               )
               .map(
                 (role) => html`
