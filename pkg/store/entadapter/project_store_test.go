@@ -658,6 +658,89 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// AuthorizedProjectIDs fail-closed filter (R1 — LS1 review)
+// =============================================================================
+
+// TestProjectStore_AuthorizedProjectIDs verifies that the AuthorizedProjectIDs
+// store filter fails closed: empty sets, invalid UUIDs, and nil each behave as
+// documented, ensuring scope-aware authorization cannot leak projects.
+func TestProjectStore_AuthorizedProjectIDs(t *testing.T) {
+	ctx := context.Background()
+
+	setup := func(t *testing.T) (*ProjectStore, string, string) {
+		t.Helper()
+		ps := newTestProjectStore(t)
+
+		pA := &store.Project{ID: uuid.NewString(), Name: "proj-a", Slug: "proj-a-" + uuid.NewString()[:8]}
+		pB := &store.Project{ID: uuid.NewString(), Name: "proj-b", Slug: "proj-b-" + uuid.NewString()[:8]}
+		require.NoError(t, ps.CreateProject(ctx, pA))
+		require.NoError(t, ps.CreateProject(ctx, pB))
+
+		return ps, pA.ID, pB.ID
+	}
+
+	t.Run("nil applies no filter (all projects returned)", func(t *testing.T) {
+		ps, _, _ := setup(t)
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			AuthorizedProjectIDs: nil,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount, "nil AuthorizedProjectIDs must not filter")
+	})
+
+	t.Run("empty non-nil returns zero results", func(t *testing.T) {
+		ps, _, _ := setup(t)
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			AuthorizedProjectIDs: []string{},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount, "empty AuthorizedProjectIDs must return zero projects")
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("valid UUID returns only matching project", func(t *testing.T) {
+		ps, projA, _ := setup(t)
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			AuthorizedProjectIDs: []string{projA},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount, "should return only proj-a")
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, projA, result.Items[0].ID)
+	})
+
+	t.Run("invalid UUID returns zero results (fail closed)", func(t *testing.T) {
+		ps, _, _ := setup(t)
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			AuthorizedProjectIDs: []string{"not-a-uuid"},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount, "invalid UUID must fail closed — no projects visible")
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("mix of valid and invalid UUIDs returns only valid matches", func(t *testing.T) {
+		ps, projA, _ := setup(t)
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			AuthorizedProjectIDs: []string{projA, "garbage"},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount, "only the valid UUID should match")
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, projA, result.Items[0].ID)
+	})
+
+	t.Run("multiple valid UUIDs returns both projects", func(t *testing.T) {
+		ps, projA, projB := setup(t)
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			AuthorizedProjectIDs: []string{projA, projB},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount, "both projects should be returned")
+	})
+}
+
 // TestListProjects_MaxLimit verifies that ListProjects with a Limit exceeding
 // 1000 is capped at maxProjectListLimit=1000.
 func TestListProjects_MaxLimit(t *testing.T) {

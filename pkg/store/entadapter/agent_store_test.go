@@ -1003,3 +1003,100 @@ func TestAgentStore_ExitCodeExitReason_Persistence(t *testing.T) {
 		assert.Equal(t, "", got2.ExitReason, "empty ExitReason via UpdateAgent must clear the field")
 	})
 }
+
+// =============================================================================
+// AuthorizedProjectIDs fail-closed filter (R1 — LS1 review)
+// =============================================================================
+
+// TestAgentStore_AuthorizedProjectIDs verifies that the AuthorizedProjectIDs
+// store filter fails closed: empty sets, invalid UUIDs, and nil each behave as
+// documented, ensuring scope-aware authorization cannot leak agents.
+func TestAgentStore_AuthorizedProjectIDs(t *testing.T) {
+	ctx := context.Background()
+
+	// Seed two projects and one agent per project so we can observe filtering.
+	setup := func(t *testing.T) (*AgentStore, string, string) {
+		t.Helper()
+		client := enttest.NewClient(t)
+
+		projAUID := uuid.MustParse("a0000000-0000-0000-0000-000000000001")
+		projBUID := uuid.MustParse("b0000000-0000-0000-0000-000000000002")
+
+		_, err := client.Project.Create().
+			SetID(projAUID).SetName("proj-a").SetSlug("proj-a").
+			Save(ctx)
+		require.NoError(t, err)
+		_, err = client.Project.Create().
+			SetID(projBUID).SetName("proj-b").SetSlug("proj-b").
+			Save(ctx)
+		require.NoError(t, err)
+
+		s := NewAgentStore(client)
+		aA := makeAgent(projAUID.String(), "agent-a")
+		require.NoError(t, s.CreateAgent(ctx, aA))
+		aB := makeAgent(projBUID.String(), "agent-b")
+		require.NoError(t, s.CreateAgent(ctx, aB))
+
+		return s, projAUID.String(), projBUID.String()
+	}
+
+	t.Run("nil applies no filter (all agents returned)", func(t *testing.T) {
+		s, _, _ := setup(t)
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: nil,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount, "nil AuthorizedProjectIDs must not filter")
+	})
+
+	t.Run("empty non-nil returns zero results", func(t *testing.T) {
+		s, _, _ := setup(t)
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: []string{},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount, "empty AuthorizedProjectIDs must return zero agents")
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("valid UUID returns only matching agents", func(t *testing.T) {
+		s, projA, _ := setup(t)
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: []string{projA},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount, "should return only the agent in proj-a")
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, projA, result.Items[0].ProjectID)
+	})
+
+	t.Run("invalid UUID returns zero results (fail closed)", func(t *testing.T) {
+		s, _, _ := setup(t)
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: []string{"not-a-uuid"},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount, "invalid UUID must fail closed — no agents visible")
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("mix of valid and invalid UUIDs returns only valid matches", func(t *testing.T) {
+		s, projA, _ := setup(t)
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: []string{projA, "garbage"},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount, "only the valid UUID should match")
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, projA, result.Items[0].ProjectID)
+	})
+
+	t.Run("multiple valid UUIDs returns agents from both projects", func(t *testing.T) {
+		s, projA, projB := setup(t)
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: []string{projA, projB},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount, "both projects' agents should be returned")
+	})
+}
