@@ -17,6 +17,7 @@ package hub
 import (
 	"sort"
 	"strings"
+	"time"
 )
 
 // scopeKind distinguishes the three forms of a ScopeSet.
@@ -219,6 +220,7 @@ func (s ScopeSet) Equal(other ScopeSet) bool {
 // The inputs are already resolved — this function does not query a store.
 //
 // For each binding in candidateBindings:
+//   - The binding must be active (checked via evaluateActivation with now).
 //   - The binding's role definition must contain the requested permission.
 //   - A system-scoped binding contributes All.
 //   - A project-scoped binding contributes its project ID.
@@ -228,11 +230,15 @@ func (s ScopeSet) Equal(other ScopeSet) bool {
 // principalClosure is the set of principal IDs (direct + transitive groups)
 // the caller has already resolved. Only bindings whose principal ID appears in
 // this closure are considered.
+//
+// This function resolves scopes from active grants only. Restrictions (credential caveats,
+// delegation ceilings, constraints) must be applied by the caller after scope resolution.
 func ResolveAuthorizedScopes(
 	principalClosure map[string]struct{},
 	permissionID string,
 	candidateBindings []CandidateBinding,
 	roleDefinitions map[string]*RolePermissions,
+	now time.Time,
 ) ScopeSet {
 	result := ScopeSetNone()
 
@@ -241,6 +247,12 @@ func ResolveAuthorizedScopes(
 
 		// Only consider bindings for principals in the closure.
 		if _, ok := principalClosure[cb.PrincipalID]; !ok {
+			continue
+		}
+
+		// Check activation conditions (notBefore / expiresAt).
+		activation := evaluateActivation(cb, now)
+		if !activation.Active {
 			continue
 		}
 

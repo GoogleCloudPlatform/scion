@@ -16,6 +16,7 @@ package hub
 
 import (
 	"testing"
+	"time"
 )
 
 func TestScopeSetAll(t *testing.T) {
@@ -276,7 +277,7 @@ func TestResolveAuthorizedScopes_SystemBinding(t *testing.T) {
 		"r1": NewRolePermissions("r1", "admin", ScopeTypeSystem, []string{"agent.list"}),
 	}
 
-	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles)
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, testNow)
 	if !result.IsAll() {
 		t.Fatalf("system binding should produce All, got %v", result)
 	}
@@ -306,7 +307,7 @@ func TestResolveAuthorizedScopes_ProjectBindings(t *testing.T) {
 		"r1": NewRolePermissions("r1", "member", ScopeTypeProject, []string{"agent.list", "agent.read"}),
 	}
 
-	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles)
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, testNow)
 	want := ScopeSetExplicit("proj-a", "proj-b")
 	if !result.Equal(want) {
 		t.Fatalf("got %v, want %v", result, want)
@@ -337,7 +338,7 @@ func TestResolveAuthorizedScopes_MixedBindings(t *testing.T) {
 		"r2": NewRolePermissions("r2", "viewer", ScopeTypeSystem, []string{"agent.list"}),
 	}
 
-	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles)
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, testNow)
 	if !result.IsAll() {
 		t.Fatalf("system binding via group should produce All, got %v", result)
 	}
@@ -359,7 +360,7 @@ func TestResolveAuthorizedScopes_NoMatchingPermission(t *testing.T) {
 		"r1": NewRolePermissions("r1", "member", ScopeTypeProject, []string{"agent.read"}),
 	}
 
-	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles)
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, testNow)
 	if !result.IsNone() {
 		t.Fatalf("no matching permission should produce None, got %v", result)
 	}
@@ -380,7 +381,7 @@ func TestResolveAuthorizedScopes_PrincipalNotInClosure(t *testing.T) {
 		"r1": NewRolePermissions("r1", "admin", ScopeTypeSystem, []string{"agent.list"}),
 	}
 
-	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles)
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, testNow)
 	if !result.IsNone() {
 		t.Fatalf("binding for non-closure principal should not contribute, got %v", result)
 	}
@@ -388,8 +389,72 @@ func TestResolveAuthorizedScopes_PrincipalNotInClosure(t *testing.T) {
 
 func TestResolveAuthorizedScopes_NoBindings(t *testing.T) {
 	closure := map[string]struct{}{"user1": {}}
-	result := ResolveAuthorizedScopes(closure, "agent.list", nil, nil)
+	result := ResolveAuthorizedScopes(closure, "agent.list", nil, nil, testNow)
 	if !result.IsNone() {
 		t.Fatalf("no bindings should produce None, got %v", result)
+	}
+}
+
+func TestResolveAuthorizedScopes_ExpiredAndNotYetActive(t *testing.T) {
+	// R2 regression: expired and not-yet-active bindings must not contribute
+	// to the scope set.
+	closure := map[string]struct{}{"user1": {}}
+	roles := map[string]*RolePermissions{
+		"r1": NewRolePermissions("r1", "member", ScopeTypeProject, []string{"agent.list"}),
+	}
+
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	bindings := []CandidateBinding{
+		// Expired binding — should NOT contribute.
+		{
+			BindingID:        "b-expired",
+			RoleDefinitionID: "r1",
+			PrincipalType:    "user",
+			PrincipalID:      "user1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "proj-expired",
+			ExpiresAt:        now.Add(-1 * time.Hour),
+		},
+		// Not-yet-active binding — should NOT contribute.
+		{
+			BindingID:        "b-future",
+			RoleDefinitionID: "r1",
+			PrincipalType:    "user",
+			PrincipalID:      "user1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "proj-future",
+			NotBefore:        now.Add(1 * time.Hour),
+		},
+		// Active binding — SHOULD contribute.
+		{
+			BindingID:        "b-active",
+			RoleDefinitionID: "r1",
+			PrincipalType:    "user",
+			PrincipalID:      "user1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "proj-active",
+			NotBefore:        now.Add(-2 * time.Hour),
+			ExpiresAt:        now.Add(24 * time.Hour),
+		},
+	}
+
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, now)
+
+	// Only proj-active should be in the scope set.
+	want := ScopeSetExplicit("proj-active")
+	if !result.Equal(want) {
+		t.Fatalf("expired and not-yet-active bindings should not contribute; got %v, want %v", result, want)
+	}
+
+	// Verify explicitly that expired and future projects are excluded.
+	if result.Contains("proj-expired") {
+		t.Fatal("expired binding should not contribute to scope set")
+	}
+	if result.Contains("proj-future") {
+		t.Fatal("not-yet-active binding should not contribute to scope set")
+	}
+	if !result.Contains("proj-active") {
+		t.Fatal("active binding should contribute to scope set")
 	}
 }

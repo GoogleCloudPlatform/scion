@@ -977,6 +977,51 @@ func TestEvaluate_NilRestrictionCheckAllowsEverything(t *testing.T) {
 	}
 }
 
+func TestEvaluate_EffectivePermissions_FullyRestricted(t *testing.T) {
+	// R1 regression: EffectivePermissions must be filtered through ALL
+	// restrictions, not just for the requested permission.
+	roles := map[string]*RolePermissions{
+		"r1": makeRole("r1", "admin", ScopeTypeSystem,
+			"agent.create", "agent.read", "agent.delete"),
+	}
+	bindings := []CandidateBinding{
+		makeBinding("b1", "r1", "user", "user1", ScopeTypeSystem, ""),
+	}
+
+	// Credential caveat that allows only agent.read.
+	req := KernelRequest{
+		Permission:        "agent.create",
+		PrincipalClosure:  closureOf("user1"),
+		Resource:          ResourceContext{ProjectID: "proj-a"},
+		CandidateBindings: bindings,
+		RoleDefinitions:   roles,
+		Restrictions: []Restriction{
+			{
+				Kind:        "credential_scope",
+				Description: "UAT scoped to agent.read only",
+				Check: func(permissionID string) bool {
+					return permissionID == "agent.read"
+				},
+			},
+		},
+		Now: testNow,
+	}
+
+	d := Evaluate(req)
+	if d.Allowed {
+		t.Fatal("agent.create should be denied by credential scope restriction")
+	}
+
+	// EffectivePermissions must contain ONLY agent.read — not agent.delete.
+	ep := d.Provenance.EffectivePermissions
+	if len(ep) != 1 {
+		t.Fatalf("expected exactly 1 effective permission, got %v", ep)
+	}
+	if ep[0] != "agent.read" {
+		t.Fatalf("expected effective permission agent.read, got %q", ep[0])
+	}
+}
+
 func TestEvaluate_CredentialCaveatIsRestriction(t *testing.T) {
 	// Verify that credential caveats and delegation ceilings use the
 	// restriction mechanism and can only reduce authority.

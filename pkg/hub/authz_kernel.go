@@ -167,6 +167,8 @@ type KernelRequest struct {
 	Restrictions []Restriction
 
 	// Now is the evaluation time. It is injectable for deterministic testing.
+	// A zero value causes all bindings with non-zero NotBefore to be rejected
+	// (fail closed).
 	Now time.Time
 }
 
@@ -241,10 +243,18 @@ func Evaluate(req KernelRequest) KernelDecision {
 			rr.Applied = true
 			rr.Detail = "permission removed by " + r.Kind
 			hasPermission = false
-			// Remove from effective permissions too.
-			delete(effectivePermissions, req.Permission)
 		}
 		restrictions = append(restrictions, rr)
+	}
+
+	// Apply all restrictions to the full effective permissions set for provenance accuracy.
+	for perm := range effectivePermissions {
+		for _, r := range req.Restrictions {
+			if r.Check != nil && !r.Check(perm) {
+				delete(effectivePermissions, perm)
+				break
+			}
+		}
 	}
 
 	// Build effective permissions list for provenance.
