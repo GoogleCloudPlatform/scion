@@ -73,7 +73,7 @@ Enabling progeny propagation dynamically registers implicit access policies (e.g
 
 ## Managing Environment Variables
 
-Use the `scion hub env` command suite to manage non-sensitive configuration.
+Use the `scion hub env` command suite to manage non-sensitive configuration. Each agent environment variable carries **provenance metadata** (hub-injected, user-defined, or runtime-derived) to help you audit and debug the origin of specific values.
 
 ### Setting Variables
 ```bash

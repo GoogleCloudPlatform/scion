@@ -185,6 +185,23 @@ When an agent uses the `ask_user` tool (or similar mechanism depending on the ha
 
 Messages are delivered in real-time to the Web Dashboard via Server-Sent Events (SSE). The **Messages Tab** on the individual agent detail page provides a real-time stream of all communication with that specific agent.
 
+## Message Authorization & Modes
+
+Every agent is protected by a **Message Mode** that controls which users and other agents can send messages to it. An agent's message mode can be set via the Web Dashboard or via the `set_message_mode` action. The available modes are:
+
+- **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode.
+- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
+- **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
+- **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
+
+### Piercing
+Highly privileged users can bypass an agent's message mode restrictions. This is called **piercing**.
+- **Project Owners** can pierce Branch and Lineage modes.
+- **Super-admins** pierce all modes, including None mode.
+Piercing applies only to user identities — it is never inherited by an owner's agents.
+
+The Web Dashboard displays reachability indicators (e.g., whether you can message a specific agent) based on the computed messageability, which takes into account the agent's mode, your ancestry relationship to it, and any piercing privileges.
+
 ---
 
 ## Developer Guide & Best Practices

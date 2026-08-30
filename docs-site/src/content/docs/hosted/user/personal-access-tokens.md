@@ -44,8 +44,9 @@ permissions). Available scopes:
 | `agent:attach` | Attach to agent sessions |
 | `agent:dispatch` | Dispatch agents (create + start) |
 | `agent:manage` | All agent scopes (convenience alias) |
+| `project:manage` | All project scopes (convenience alias) |
 
-In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. 
+In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
 You can dynamically discover all available scopes and their descriptions by querying the API:
 ```bash
