@@ -1215,6 +1215,8 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
+	maybeWarnUnbackfilledMessages(ctx, s)
+
 	if err := s.Ping(ctx); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("database ping failed: %w", err)
@@ -1299,6 +1301,27 @@ func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryL
 	}
 	defer func() { _ = release() }()
 	fn()
+}
+
+// maybeWarnUnbackfilledMessages checks whether any messages lack a
+// conversation_id and, if so, logs a warning with remediation guidance.
+// It is called once at startup after migrations succeed. Errors are
+// non-fatal: a failed count is logged but does not prevent boot.
+func maybeWarnUnbackfilledMessages(ctx context.Context, s store.Store) {
+	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	count, err := s.CountUnbackfilledMessages(tCtx, "")
+	if err != nil {
+		slog.Warn("Failed to check for unbackfilled messages", "error", err)
+		return
+	}
+	if count == 0 {
+		return
+	}
+	slog.Warn("Messages without conversation attribution detected",
+		"count", count,
+		"action", "Run 'scion server backfill --execute' to attribute historical messages to conversations. Use 'scion server backfill' (default: dry-run) to preview first.",
+	)
 }
 
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
