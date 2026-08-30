@@ -684,30 +684,22 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	}
 
-	// CanDelegate check (Phase 1F): ensure the actor has sufficient authority
-	// to grant the membership. For project member groups, adding a member with
-	// an elevated role (admin/owner) grants project-level authority, so the
-	// actor must hold at least that level of project authority.
+	// CanDelegate check: ensure the actor has sufficient authority to grant
+	// the membership. Because membership in a role-bearing group confers all
+	// of that group's role-binding authority, the actor must hold every
+	// permission that becomes newly reachable.
 	//
-	// This applies to BOTH user-type and group-type member additions by user
-	// callers. When a group is added as a member of a project members group,
-	// the members of the nested group inherit the GroupRole level of access
-	// in the project. The CanDelegate check ensures the actor can delegate
-	// that authority level.
-	//
-	// Agent callers are already constrained by the role-hierarchy check above
-	// (agents can only add plain members).
+	// This applies to ALL callers (user AND agent) and ALL member types
+	// (user, group, agent). An agent with group.addMember authority must
+	// pass the same delegation test as a user caller — group governance role
+	// does NOT substitute for resource authority.
 	var canDelegateResult, canDelegateReason string
-	if s.authzService != nil && (req.MemberType == store.GroupMemberTypeUser || req.MemberType == store.GroupMemberTypeGroup) && isUserCaller {
+	if s.authzService != nil {
 		actorIdentity := GetIdentityFromContext(ctx)
 		if actorIdentity != nil {
 			grantDesc := GrantDescriptor{
-				Type:      GrantTypeGroupMembership,
-				GroupID:   groupID,
-				GroupRole: req.Role,
-				ScopeType: store.RoleScopeProject,
-				ScopeID:   group.ProjectID,
-				ProjectID: group.ProjectID,
+				Type:    GrantTypeGroupMembership,
+				GroupID: groupID,
 			}
 			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
 			canDelegateResult = "allow"

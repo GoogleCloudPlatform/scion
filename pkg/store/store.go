@@ -886,6 +886,12 @@ type GroupStore interface {
 	// including the implicit project_agents group and transitive parent groups.
 	GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error)
 
+	// GetParentGroups returns all ancestor groups of the given group —
+	// i.e., groups that transitively contain this group as a child.
+	// Used by delegation checks to compute the full authority inherited
+	// through group membership.
+	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
+
 	// CheckDelegatedAccess checks whether an agent's delegation relationship
 	// satisfies the given policy conditions. Returns true if the agent has
 	// delegation enabled, its creator is active, and the conditions match.

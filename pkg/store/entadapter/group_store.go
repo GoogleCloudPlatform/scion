@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -278,6 +279,8 @@ func (s *GroupStore) UpdateGroup(ctx context.Context, g *store.Group) error {
 }
 
 // DeleteGroup removes a group by ID.
+// It cascades to delete group memberships and any role bindings bound to the group
+// principal, preventing orphan role bindings.
 func (s *GroupStore) DeleteGroup(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -287,6 +290,15 @@ func (s *GroupStore) DeleteGroup(ctx context.Context, id string) error {
 	// Delete memberships first (Ent cascade may handle this, but be explicit)
 	_, _ = s.client.GroupMembership.Delete().
 		Where(groupmembership.GroupIDEQ(uid)).
+		Exec(ctx)
+
+	// Delete role bindings where this group is the bound principal,
+	// preventing orphan bindings after group removal.
+	_, _ = s.client.RoleBinding.Delete().
+		Where(
+			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalTypeGroup),
+			rolebinding.PrincipalIDEQ(id),
+		).
 		Exec(ctx)
 
 	err = s.client.Group.DeleteOneID(uid).Exec(ctx)
@@ -825,6 +837,44 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 
 		for _, p := range parents {
 			if !visited[p.ID] {
+				queue = append(queue, p.ID)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GetParentGroups returns all ancestor groups of the given group — groups that
+// transitively contain this group as a child — via BFS through the
+// parent_groups edge. The group itself is NOT included in the result.
+func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
+	uid, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	visited := make(map[uuid.UUID]bool)
+	visited[uid] = true // mark self as visited to avoid including it in results
+	var result []string
+	queue := []uuid.UUID{uid}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		parents, err := s.client.Group.Query().
+			Where(group.IDEQ(current)).
+			QueryParentGroups().
+			All(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, p := range parents {
+			if !visited[p.ID] {
+				visited[p.ID] = true
+				result = append(result, p.ID.String())
 				queue = append(queue, p.ID)
 			}
 		}

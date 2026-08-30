@@ -170,27 +170,103 @@ func (a *AuthzService) canDelegateRoleBinding(ctx context.Context, actor Identit
 }
 
 // canDelegateGroupMembership checks whether the actor can add a member to
-// a group at the given role. For project member groups, adding a member with
-// an elevated role grants project-level authority — the actor must hold at
-// least that authority.
+// a group. Because membership in a role-bearing group confers all of that
+// group's role-binding authority, the actor must hold every permission that
+// becomes newly reachable through the addition.
+//
+// The check covers:
+//   - Direct role bindings on the target group.
+//   - For nested group additions: the full parent closure — if group A has
+//     role R at scope S, adding group B to A means B's members inherit R at S.
+//   - Agent callers: pass the same test as user callers.
+//   - GroupMembership.Role (governance) does NOT substitute for resource
+//     authority and is not consulted here.
 func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
-	// If the group is a project-scoped members group, check that the actor
-	// holds the equivalent project permissions.
-	if grant.ProjectID != "" && grant.GroupRole != "" {
-		projectRoleName := groupRoleToProjectRole(grant.GroupRole)
-		if projectRoleName != "" {
-			rd, err := a.store.GetRoleDefinitionByName(ctx, projectRoleName, store.RoleScopeProject)
-			if err != nil {
-				return Decision{Allowed: false, Reason: "cannot resolve project role definition for group role"}
-			}
-			return a.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, grant.ProjectID)
+	groupID := grant.GroupID
+	if groupID == "" {
+		return Decision{Allowed: true, Reason: "no group specified"}
+	}
+
+	// Build the principal closure of the target group: the group itself plus
+	// all ancestor groups that transitively contain it. Adding a member to
+	// groupID means the new member inherits bindings on groupID AND on every
+	// ancestor group.
+	groupPrincipals := []store.PrincipalRef{
+		{Type: store.RoleBindingPrincipalGroup, ID: groupID},
+	}
+
+	// Collect ancestor groups via the group's effective-group parent closure.
+	// GetEffectiveGroups returns groups a user/agent belongs to by walking UP
+	// the group hierarchy. For a group, we need to find which groups contain
+	// THIS group — i.e., its parent groups. We use the store method directly.
+	parentGroups, err := a.store.GetParentGroups(ctx, groupID)
+	if err != nil {
+		a.logger.Warn("failed to resolve parent groups for delegation check",
+			"group_id", groupID, "error", err)
+		// Fail closed: if we cannot resolve the parent closure, deny.
+		return Decision{Allowed: false, Reason: "cannot resolve parent group closure"}
+	}
+	for _, pgID := range parentGroups {
+		groupPrincipals = append(groupPrincipals, store.PrincipalRef{
+			Type: store.RoleBindingPrincipalGroup,
+			ID:   pgID,
+		})
+	}
+
+	// Fetch ALL role bindings for the group closure in one batched query.
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, groupPrincipals, nil, nil)
+	if err != nil {
+		a.logger.Warn("failed to list role bindings for group closure",
+			"group_id", groupID, "error", err)
+		return Decision{Allowed: false, Reason: "cannot resolve group role bindings"}
+	}
+
+	// If the group (and its ancestors) have no role bindings, no authority
+	// is being delegated through this membership addition.
+	if len(bindings) == 0 {
+		return Decision{Allowed: true, Reason: "group has no role bindings; no authority delegation required"}
+	}
+
+	// Collect all permissions grouped by (scopeType, scopeID) so we can
+	// verify the actor holds each permission at the appropriate scope.
+	type scopeKey struct {
+		scopeType string
+		scopeID   string
+	}
+	permsByScope := make(map[scopeKey]map[string]struct{})
+
+	for _, b := range bindings {
+		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if rdErr != nil {
+			a.logger.Warn("failed to resolve role definition for group binding",
+				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
+			continue
+		}
+		sk := scopeKey{scopeType: b.ScopeType, scopeID: b.ScopeID}
+		if permsByScope[sk] == nil {
+			permsByScope[sk] = make(map[string]struct{})
+		}
+		for _, perm := range rd.Permissions {
+			permsByScope[sk][perm] = struct{}{}
 		}
 	}
 
-	// For non-project groups, check that the actor is at least a group admin
-	// or owner. This is already enforced by the handler's role-hierarchy check,
-	// so CanDelegate adds the permission-level validation layer.
-	return Decision{Allowed: true, Reason: "group membership delegation permitted"}
+	// Verify the actor holds every inherited permission at each scope.
+	for sk, perms := range permsByScope {
+		permList := make([]string, 0, len(perms))
+		for p := range perms {
+			permList = append(permList, p)
+		}
+		decision := a.actorHoldsAllPermissions(ctx, actor, permList, sk.scopeType, sk.scopeID)
+		if !decision.Allowed {
+			return Decision{
+				Allowed: false,
+				Reason:  "actor cannot delegate inherited group authority: " + decision.Reason,
+			}
+		}
+	}
+
+	return Decision{Allowed: true, Reason: "actor holds all permissions inherited through group membership"}
 }
 
 // canDelegateAgent checks whether the actor holds all scopes/permissions
@@ -389,22 +465,6 @@ func (a *AuthzService) getPolicyGrantedPermissions(ctx context.Context, actor Id
 		}
 	}
 	return result
-}
-
-// groupRoleToProjectRole maps a group membership role to the corresponding
-// project role definition name. Returns "" for plain members, since member
-// access doesn't need additional delegation checks beyond ActionAddMember.
-func groupRoleToProjectRole(groupRole string) string {
-	switch groupRole {
-	case store.GroupMemberRoleOwner:
-		return store.ProjectRoleOwner
-	case store.GroupMemberRoleAdmin:
-		return store.ProjectRoleAdmin
-	case store.GroupMemberRoleMember:
-		return store.ProjectRoleMember
-	default:
-		return ""
-	}
 }
 
 // scopesToPermissionIDs maps agent token scopes to permission IDs using

@@ -1501,3 +1501,80 @@ func TestListGroupsWithProjectIDFilter(t *testing.T) {
 	assert.Equal(t, 1, result.TotalCount)
 	assert.Equal(t, g1.ID, result.Items[0].ID)
 }
+
+// TestDeleteGroup_CascadesRoleBindings verifies that deleting a group also
+// removes all role bindings where the group is the bound principal, preventing
+// orphan role bindings.  This is the R1 hard-gate integration test.
+func TestDeleteGroup_CascadesRoleBindings(t *testing.T) {
+	client := enttest.NewClient(t)
+	gs := NewGroupStore(client)
+	rs := NewRoleStore(client)
+	ctx := context.Background()
+
+	// Create two role definitions that can be bound to a group principal.
+	rd1, err := rs.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-cascade-role-a",
+		Description: "role A for cascade test",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"test.cascade.a"},
+	})
+	require.NoError(t, err)
+
+	rd2, err := rs.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-cascade-role-b",
+		Description: "role B for cascade test",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"test.cascade.b"},
+	})
+	require.NoError(t, err)
+
+	// Create a group.
+	groupID := uuid.New().String()
+	err = gs.CreateGroup(ctx, &store.Group{
+		ID:   groupID,
+		Name: "cascade-test-group",
+		Slug: "cascade-test-group",
+	})
+	require.NoError(t, err)
+
+	// Create two role bindings for the group principal (different roles).
+	rb1, err := rs.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd1.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	rb2, err := rs.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd2.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Verify bindings exist before deletion.
+	bindings, err := rs.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{
+		{Type: store.RoleBindingPrincipalGroup, ID: groupID},
+	}, nil, nil)
+	require.NoError(t, err)
+	assert.Len(t, bindings, 2, "expected 2 bindings before group deletion")
+	_ = rb1
+	_ = rb2
+
+	// Delete the group — should cascade to remove role bindings.
+	err = gs.DeleteGroup(ctx, groupID)
+	require.NoError(t, err)
+
+	// Verify zero remaining bindings for the deleted group principal.
+	bindings, err = rs.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{
+		{Type: store.RoleBindingPrincipalGroup, ID: groupID},
+	}, nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "expected zero bindings after group deletion")
+}
