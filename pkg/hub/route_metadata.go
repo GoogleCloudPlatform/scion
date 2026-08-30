@@ -718,6 +718,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 	},
+	"/api/v1/admin/messaging/divergence": {
+		Pattern: "/api/v1/admin/messaging/divergence", RouteID: "admin.messaging.divergence",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.diagnostics.read", Resource: "hub", Action: "read",
+	},
 	"/api/v1/metrics/": {
 		Pattern: "/api/v1/metrics/", RouteID: "admin.metricsDashboard",
 		Classification: RouteHubAdmin,
