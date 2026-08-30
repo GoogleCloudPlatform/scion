@@ -3500,8 +3500,16 @@ func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
 	before = messaging.WriteDenialMetrics.Total()
 	rec = doRequest(t, srv, http.MethodPost,
 		"/api/v1/chat/conversations/"+topicID+"/messages", body)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("[switch ON] expected 500, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("[switch ON] expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Verify the machine-readable error code matches G3's read-path shape.
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("[switch ON] unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("[switch ON] error code = %q, want %q", errResp.Error.Code, ErrCodeConversationNotResolved)
 	}
 	// Counter must increment when switch is ON and denial fires.
 	if after := messaging.WriteDenialMetrics.Total(); after <= before {

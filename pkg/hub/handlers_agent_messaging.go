@@ -291,7 +291,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if deriveErr != nil {
 		if s.writeDenyEnabled() {
 			messaging.WriteDenialMetrics.Inc("outbound.derive")
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
 				"conversation key derivation failed: "+deriveErr.Error(), nil)
 			return
 		}
@@ -311,7 +311,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("outbound.resolve")
 				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 				return
 			}
 			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -320,7 +320,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("outbound.validate")
-					ValidationError(w, err.Error(), nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
 					return
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
@@ -744,7 +744,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
 				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 				return
 			}
 			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -1034,7 +1034,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			if deriveErr != nil {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("agent_msg.derive")
-					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
 						"conversation key derivation failed: "+deriveErr.Error(), nil)
 					return
 				}
@@ -1054,7 +1054,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					if s.writeDenyEnabled() {
 						messaging.WriteDenialMetrics.Inc("agent_msg.resolve")
 						s.messageLog.Error("conversation resolution failed", "error", convErr)
-						writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+						writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 						return
 					}
 					s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -1070,7 +1070,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("agent_msg.validate")
-					ValidationError(w, err.Error(), nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
 					return
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)

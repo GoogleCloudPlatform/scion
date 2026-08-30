@@ -259,7 +259,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("broker.phase11")
 				log.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 				return
 			}
 			log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -367,7 +367,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("broker.thread")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -379,7 +379,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("broker.dm")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -390,7 +390,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("broker.validate")
-					writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
 					return
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)

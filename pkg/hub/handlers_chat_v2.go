@@ -1177,7 +1177,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.thread")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return ""
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -1189,7 +1189,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.dm")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return ""
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -1200,7 +1200,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
-					ValidationError(w, err.Error(), nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
 					return ""
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
@@ -1451,7 +1451,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.human.thread")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return ""
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
@@ -1463,7 +1463,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.human.dm")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "conversation resolution failed", nil)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 					return ""
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
