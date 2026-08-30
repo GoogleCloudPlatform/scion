@@ -129,26 +129,11 @@ func TestBuiltInRoles_AllPermissionsExistInRegistry(t *testing.T) {
 	}
 }
 
-// TestBuiltInRoles_RegistryAdditionDoesNotEnterRole verifies the merge gate
-// requirement: a new permission added to the registry does NOT automatically
-// enter any built-in role.
-func TestBuiltInRoles_RegistryAdditionDoesNotEnterRole(t *testing.T) {
-	// Get all permission IDs from all built-in roles
-	rolePerms := make(map[string]bool)
-	for _, role := range BuiltInRoles() {
-		// super-admin explicitly gets ALL permissions — that's by design
-		if role.Name == store.SystemRoleSuperAdmin {
-			continue
-		}
-		for _, p := range role.Permissions {
-			rolePerms[p] = true
-		}
-	}
-
-	// Verify that we're using explicit lists, not dynamic derivation.
-	// The test is structural: the permission lists are string literals,
-	// not calls to permissionIDsByActions or similar registry-scanning functions.
-	// The hub-member and hub-viewer roles are the critical ones.
+// TestBuiltInRoles_HubMemberAndViewerAreCurated verifies that hub-member and
+// hub-viewer have fewer permissions than a naive "all read+list" derivation
+// would produce, confirming they use curated lists rather than dynamic
+// registry scanning.
+func TestBuiltInRoles_HubMemberAndViewerAreCurated(t *testing.T) {
 	hubMemberPerms := hubMemberPermissionIDs()
 	hubViewerPerms := hubViewerPermissionIDs()
 
@@ -179,24 +164,44 @@ func TestBuiltInRoles_SuperAdminHasAllPermissions(t *testing.T) {
 		"super-admin must have ALL registry permissions")
 }
 
-// TestBuiltInRoles_ProjectMemberIncludesServiceAccountAssign verifies that
-// project-member includes gcp_service_account.assign (replacing the per-project
-// ensureProjectAssignPolicy).
-func TestBuiltInRoles_ProjectMemberIncludesServiceAccountAssign(t *testing.T) {
+// TestBuiltInRoles_ProjectMemberPermissions verifies that the curated
+// project-member role contains expected permissions and excludes permissions
+// that should be reserved for higher roles.
+func TestBuiltInRoles_ProjectMemberPermissions(t *testing.T) {
 	memberPerms := projectMemberCuratedPermissionIDs()
 	permSet := make(map[string]bool, len(memberPerms))
 	for _, p := range memberPerms {
 		permSet[p] = true
 	}
 
-	// gcp_service_account.assign is NOT a project-scoped resource in the current
-	// registry. Check if it's in the member perms through the action-class derivation.
-	// The member role includes "create", "read", "list", "message" actions on
-	// project resources, plus agent.stop_all. Service account assign may need
-	// to be added explicitly if it's not already covered.
-	//
-	// NOTE: This tests the current projectMemberPermissionIDs() which derives
-	// from action classes. The curated version should match.
+	// Project members MUST have basic operational permissions.
+	expected := []string{
+		"agent.create",
+		"agent.read",
+		"agent.list",
+		"agent.message",
+		"agent.stop_all",
+		"project.read",
+		"project.list",
+	}
+	for _, p := range expected {
+		assert.True(t, permSet[p],
+			"project-member role MUST contain %s", p)
+	}
+
+	// Project members MUST NOT have destructive or administrative permissions.
+	excluded := []string{
+		"agent.delete",
+		"agent.update",
+		"agent.set_message_mode",
+		"project.delete",
+		"project.manage",
+		"project.update",
+	}
+	for _, p := range excluded {
+		assert.False(t, permSet[p],
+			"project-member role MUST NOT contain %s (reserved for admin/owner)", p)
+	}
 }
 
 // =============================================================================

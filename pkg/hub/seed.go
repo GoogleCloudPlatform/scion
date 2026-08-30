@@ -234,23 +234,161 @@ func hubViewerPermissionIDs() []string {
 }
 
 // projectOwnerPermissionIDs returns the curated permission set for the
-// project-owner role: all project-scoped permissions.
+// project-owner role: all project-scoped permissions. This is an explicit list
+// — NOT derived from registry iteration. A new registry permission does NOT
+// automatically enter this role; it must be added here and the role revision
+// bumped.
 func projectOwnerPermissionIDs() []string {
-	return projectScopedPermissionIDs()
+	return []string{
+		// Agent lifecycle and operations
+		"agent.attach",
+		"agent.create",
+		"agent.delete",
+		"agent.identity_token",
+		"agent.list",
+		"agent.log_append",
+		"agent.message",
+		"agent.notify",
+		"agent.port_access",
+		"agent.port_forward",
+		"agent.read",
+		"agent.set_message_mode",
+		"agent.status_update",
+		"agent.stop_all",
+		"agent.token_refresh",
+		"agent.update",
+		// Harness config management
+		"harness_config.create",
+		"harness_config.delete",
+		"harness_config.list",
+		"harness_config.read",
+		"harness_config.update",
+		// Project management
+		"project.clone",
+		"project.create",
+		"project.delete",
+		"project.list",
+		"project.manage",
+		"project.read",
+		"project.register",
+		"project.secret_read",
+		"project.update",
+		// Scheduled event management
+		"scheduled_event.create",
+		"scheduled_event.delete",
+		"scheduled_event.list",
+		"scheduled_event.read",
+		"scheduled_event.update",
+		// Skill management
+		"skill.create",
+		"skill.delete",
+		"skill.list",
+		"skill.read",
+		"skill.register",
+		"skill.update",
+		// Template management
+		"template.create",
+		"template.delete",
+		"template.list",
+		"template.read",
+		"template.update",
+	}
 }
 
 // projectAdminPermissionIDs returns the curated permission set for the
-// project-admin role: all project-scoped permissions except delete and
-// agent.set_message_mode (D7: only project owners may unseal none-mode agents).
+// project-admin role. This is an explicit list — NOT derived from registry
+// iteration. Compared to project-owner, this excludes:
+//   - All *.delete permissions (admins cannot delete resources)
+//   - agent.set_message_mode (D7: only project owners may unseal none-mode agents)
+//
+// A new registry permission does NOT automatically enter this role; it must be
+// added here and the role revision bumped.
 func projectAdminPermissionIDs() []string {
-	return projectPermissionIDsExcluding("delete")
+	return []string{
+		// Agent lifecycle and operations (no delete, no set_message_mode)
+		"agent.attach",
+		"agent.create",
+		"agent.identity_token",
+		"agent.list",
+		"agent.log_append",
+		"agent.message",
+		"agent.notify",
+		"agent.port_access",
+		"agent.port_forward",
+		"agent.read",
+		"agent.status_update",
+		"agent.stop_all",
+		"agent.token_refresh",
+		"agent.update",
+		// Harness config management (no delete)
+		"harness_config.create",
+		"harness_config.list",
+		"harness_config.read",
+		"harness_config.update",
+		// Project management (no delete)
+		"project.clone",
+		"project.create",
+		"project.list",
+		"project.manage",
+		"project.read",
+		"project.register",
+		"project.secret_read",
+		"project.update",
+		// Scheduled event management (no delete)
+		"scheduled_event.create",
+		"scheduled_event.list",
+		"scheduled_event.read",
+		"scheduled_event.update",
+		// Skill management (no delete)
+		"skill.create",
+		"skill.list",
+		"skill.read",
+		"skill.register",
+		"skill.update",
+		// Template management (no delete)
+		"template.create",
+		"template.list",
+		"template.read",
+		"template.update",
+	}
 }
 
 // projectMemberCuratedPermissionIDs returns the curated permission set for the
-// project-member role. This is an explicit list replacing the old
-// action-class-derived projectMemberPermissionIDs.
+// project-member role. This is an explicit list — NOT derived from registry
+// iteration. Members get create, read, list, and message actions on project-
+// scoped resources, plus agent.stop_all.
+//
+// A new registry permission does NOT automatically enter this role; it must be
+// added here and the role revision bumped.
 func projectMemberCuratedPermissionIDs() []string {
-	return projectMemberPermissionIDs()
+	return []string{
+		// Agent operations (create, read, list, message, stop_all)
+		"agent.create",
+		"agent.list",
+		"agent.message",
+		"agent.read",
+		"agent.stop_all",
+		// Harness config (create, read, list)
+		"harness_config.create",
+		"harness_config.list",
+		"harness_config.read",
+		// Project (create, read, list)
+		"project.create",
+		"project.list",
+		"project.read",
+		// Scheduled events (create, read, list)
+		"scheduled_event.create",
+		"scheduled_event.list",
+		"scheduled_event.read",
+		// Skills (create, read, list)
+		"skill.create",
+		"skill.list",
+		"skill.read",
+		// Templates (create, read, list)
+		"template.create",
+		"template.list",
+		"template.read",
+	}
 }
 
 // seedDefaultGroupsAndBindings creates the default hub-members group,
