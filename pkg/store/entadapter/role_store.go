@@ -356,6 +356,35 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		return nil, fmt.Errorf("%w: role %q is direct-user-only", store.ErrDirectUserOnly, rd.Name)
 	}
 
+	// Scope shape validation: project scope requires a non-empty ScopeID,
+	// system scope requires an empty ScopeID.
+	if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == "" {
+		return nil, fmt.Errorf("%w: project scope requires a non-empty scope_id", store.ErrInvalidInput)
+	}
+	if rb.ScopeType == store.RoleScopeSystem && rb.ScopeID != "" {
+		return nil, fmt.Errorf("%w: system scope must have empty scope_id", store.ErrInvalidInput)
+	}
+
+	// Principal existence validation.
+	principalUID, err := parseUUID(rb.PrincipalID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid principal_id: %s", store.ErrInvalidInput, rb.PrincipalID)
+	}
+	switch rb.PrincipalType {
+	case store.RoleBindingPrincipalUser:
+		if _, err := r.client.User.Get(ctx, principalUID); err != nil {
+			return nil, fmt.Errorf("%w: user %s", store.ErrNotFound, rb.PrincipalID)
+		}
+	case store.RoleBindingPrincipalAgent:
+		if _, err := r.client.Agent.Get(ctx, principalUID); err != nil {
+			return nil, fmt.Errorf("%w: agent %s", store.ErrNotFound, rb.PrincipalID)
+		}
+	case store.RoleBindingPrincipalGroup:
+		if _, err := r.client.Group.Get(ctx, principalUID); err != nil {
+			return nil, fmt.Errorf("%w: group %s", store.ErrNotFound, rb.PrincipalID)
+		}
+	}
+
 	builder := r.client.RoleBinding.Create().
 		SetNillableRoleDefinitionID(&rdUID).
 		SetPrincipalType(rolebinding.PrincipalType(rb.PrincipalType)).

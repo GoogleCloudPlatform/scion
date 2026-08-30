@@ -47,9 +47,9 @@ type roleTestEnv struct {
 	projectID string
 
 	// Pre-created role definitions.
-	systemRoleDef  *store.RoleDefinition // system-scoped, e.g. "hub-member"
-	projectRoleDef *store.RoleDefinition // project-scoped, e.g. "project-member"
-	superAdminDef  *store.RoleDefinition // system-scoped, "super-admin"
+	systemRoleDef   *store.RoleDefinition // system-scoped, e.g. "hub-member"
+	projectRoleDef  *store.RoleDefinition // project-scoped, e.g. "project-member"
+	superAdminDef   *store.RoleDefinition // system-scoped, "super-admin"
 	projectOwnerDef *store.RoleDefinition // project-scoped, "project-owner"
 }
 
@@ -1065,4 +1065,90 @@ func TestListRoleBindingsForPrincipal_ReturnsLifecycleFields(t *testing.T) {
 	require.Len(t, results, 1)
 	require.NotNil(t, results[0].NotBefore)
 	require.NotNil(t, results[0].ExpiresAt)
+}
+
+// ---------------------------------------------------------------------------
+// (i) Scope shape and principal existence validation (R5).
+// ---------------------------------------------------------------------------
+
+func TestCreateRoleBinding_ProjectScopeEmptyScopeID(t *testing.T) {
+	env := newRoleTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          "", // empty — invalid for project scope
+		CreatedBy:        "test",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrInvalidInput),
+		"expected ErrInvalidInput for project scope with empty ScopeID, got: %v", err)
+}
+
+func TestCreateRoleBinding_SystemScopeNonEmptyScopeID(t *testing.T) {
+	env := newRoleTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.systemRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "some-junk-id", // non-empty — invalid for system scope
+		CreatedBy:        "test",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrInvalidInput),
+		"expected ErrInvalidInput for system scope with non-empty ScopeID, got: %v", err)
+}
+
+func TestCreateRoleBinding_NonexistentPrincipal_User(t *testing.T) {
+	env := newRoleTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.systemRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      uuid.New().String(), // does not exist
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrNotFound),
+		"expected ErrNotFound for nonexistent user principal, got: %v", err)
+}
+
+func TestCreateRoleBinding_NonexistentPrincipal_Agent(t *testing.T) {
+	env := newRoleTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.systemRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalAgent,
+		PrincipalID:      uuid.New().String(), // does not exist
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrNotFound),
+		"expected ErrNotFound for nonexistent agent principal, got: %v", err)
+}
+
+func TestCreateRoleBinding_NonexistentPrincipal_Group(t *testing.T) {
+	env := newRoleTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.systemRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      uuid.New().String(), // does not exist
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrNotFound),
+		"expected ErrNotFound for nonexistent group principal, got: %v", err)
 }

@@ -109,8 +109,10 @@ type Restriction struct {
 
 	// Check returns true if the given permission is ALLOWED by this
 	// restriction. Returning false means the restriction removes the
-	// permission. A nil Check function is treated as "allow everything"
-	// (the restriction has no effect).
+	// permission. A nil Check function means "deny everything" — the
+	// restriction removes all permissions (fail closed). A caller who
+	// wants a no-op restriction should omit it or pass an explicit
+	// func(string) bool { return true }.
 	Check func(permissionID string) bool
 }
 
@@ -239,9 +241,13 @@ func Evaluate(req KernelRequest) KernelDecision {
 			Kind:        r.Kind,
 			Description: r.Description,
 		}
-		if r.Check != nil && !r.Check(req.Permission) {
+		if r.Check == nil || !r.Check(req.Permission) {
 			rr.Applied = true
-			rr.Detail = "permission removed by " + r.Kind
+			if r.Check == nil {
+				rr.Detail = "restriction has no check function (fail closed)"
+			} else {
+				rr.Detail = "permission removed by " + r.Kind
+			}
 			hasPermission = false
 		}
 		restrictions = append(restrictions, rr)
@@ -250,7 +256,7 @@ func Evaluate(req KernelRequest) KernelDecision {
 	// Apply all restrictions to the full effective permissions set for provenance accuracy.
 	for perm := range effectivePermissions {
 		for _, r := range req.Restrictions {
-			if r.Check != nil && !r.Check(perm) {
+			if r.Check == nil || !r.Check(perm) {
 				delete(effectivePermissions, perm)
 				break
 			}
@@ -316,6 +322,12 @@ func evaluateBinding(req KernelRequest, cb *CandidateBinding) GrantProvenance {
 	// Check 2: Is the role definition known?
 	if role == nil {
 		prov.RejectReasons = append(prov.RejectReasons, "unknown role definition: "+cb.RoleDefinitionID)
+		return prov
+	}
+
+	// Check 2b: Does the binding's scope type match the role's scope type?
+	if role.ScopeType != cb.ScopeType {
+		prov.RejectReasons = append(prov.RejectReasons, "binding scope type does not match role scope type")
 		return prov
 	}
 

@@ -262,6 +262,11 @@ func ResolveAuthorizedScopes(
 			continue
 		}
 
+		// Scope-type mismatch guard: binding scope type must match role scope type.
+		if role.ScopeType != cb.ScopeType {
+			continue
+		}
+
 		// Check if the role grants the requested permission.
 		if !role.HasPermission(permissionID) {
 			continue

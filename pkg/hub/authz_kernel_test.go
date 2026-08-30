@@ -948,7 +948,63 @@ func TestProperty_OrderIndependence_Randomized(t *testing.T) {
 	}
 }
 
-func TestEvaluate_NilRestrictionCheckAllowsEverything(t *testing.T) {
+func TestEvaluate_ScopeTypeMismatch_Rejected(t *testing.T) {
+	// A binding with ScopeType "system" pointing at a project-scoped role
+	// must be rejected. Vice versa as well.
+	roles := map[string]*RolePermissions{
+		"r-project": makeRole("r-project", "project-role", ScopeTypeProject, "agent.create"),
+		"r-system":  makeRole("r-system", "system-role", ScopeTypeSystem, "agent.create"),
+	}
+
+	cases := []struct {
+		name          string
+		bindingScopeT string
+		roleID        string
+	}{
+		{"system_binding_project_role", ScopeTypeSystem, "r-project"},
+		{"project_binding_system_role", ScopeTypeProject, "r-system"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scopeID := ""
+			if tc.bindingScopeT == ScopeTypeProject {
+				scopeID = "proj-a"
+			}
+			bindings := []CandidateBinding{
+				makeBinding("b1", tc.roleID, "user", "user1", tc.bindingScopeT, scopeID),
+			}
+			req := KernelRequest{
+				Permission:        "agent.create",
+				PrincipalClosure:  closureOf("user1"),
+				Resource:          ResourceContext{ProjectID: "proj-a"},
+				CandidateBindings: bindings,
+				RoleDefinitions:   roles,
+				Now:               testNow,
+			}
+			d := Evaluate(req)
+			if d.Allowed {
+				t.Fatal("scope-type mismatch should be rejected")
+			}
+			// Verify the reject reason is recorded.
+			if len(d.Provenance.RejectedCandidates) == 0 {
+				t.Fatal("expected rejected candidate")
+			}
+			rc := d.Provenance.RejectedCandidates[0]
+			found := false
+			for _, reason := range rc.RejectReasons {
+				if reason == "binding scope type does not match role scope type" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected scope-type mismatch reason, got %v", rc.RejectReasons)
+			}
+		})
+	}
+}
+
+func TestEvaluate_NilRestrictionCheckDeniesEverything(t *testing.T) {
 	roles := map[string]*RolePermissions{
 		"r1": makeRole("r1", "admin", ScopeTypeSystem, "agent.create"),
 	}
@@ -972,8 +1028,12 @@ func TestEvaluate_NilRestrictionCheckAllowsEverything(t *testing.T) {
 		Now: testNow,
 	}
 	d := Evaluate(req)
-	if !d.Allowed {
-		t.Fatal("nil check restriction should allow everything")
+	if d.Allowed {
+		t.Fatal("nil check restriction should deny everything (fail closed)")
+	}
+	// Verify that effective permissions are empty.
+	if len(d.Provenance.EffectivePermissions) != 0 {
+		t.Fatalf("expected no effective permissions with nil check restriction, got %v", d.Provenance.EffectivePermissions)
 	}
 }
 

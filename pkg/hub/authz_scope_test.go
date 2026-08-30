@@ -395,6 +395,41 @@ func TestResolveAuthorizedScopes_NoBindings(t *testing.T) {
 	}
 }
 
+func TestResolveAuthorizedScopes_ScopeTypeMismatch_Rejected(t *testing.T) {
+	// A binding with ScopeType "system" pointing at a project-scoped role
+	// should not contribute to the scope set. Vice versa as well.
+	closure := map[string]struct{}{"user1": {}}
+	roles := map[string]*RolePermissions{
+		"r-project": NewRolePermissions("r-project", "project-role", ScopeTypeProject, []string{"agent.list"}),
+		"r-system":  NewRolePermissions("r-system", "system-role", ScopeTypeSystem, []string{"agent.list"}),
+	}
+
+	bindings := []CandidateBinding{
+		// System binding pointing at a project-scoped role — mismatch.
+		{
+			BindingID:        "b1",
+			RoleDefinitionID: "r-project",
+			PrincipalType:    "user",
+			PrincipalID:      "user1",
+			ScopeType:        ScopeTypeSystem,
+		},
+		// Project binding pointing at a system-scoped role — mismatch.
+		{
+			BindingID:        "b2",
+			RoleDefinitionID: "r-system",
+			PrincipalType:    "user",
+			PrincipalID:      "user1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "proj-a",
+		},
+	}
+
+	result := ResolveAuthorizedScopes(closure, "agent.list", bindings, roles, testNow)
+	if !result.IsNone() {
+		t.Fatalf("scope-type mismatch bindings should not contribute, got %v", result)
+	}
+}
+
 func TestResolveAuthorizedScopes_ExpiredAndNotYetActive(t *testing.T) {
 	// R2 regression: expired and not-yet-active bindings must not contribute
 	// to the scope set.

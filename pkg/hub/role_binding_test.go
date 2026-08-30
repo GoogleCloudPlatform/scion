@@ -213,14 +213,26 @@ func TestRoleBinding_ListForScope(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
+	userID := tid("scope-test-user")
 	projectID := tid("scope-test-project")
+
+	// Create the user and project so principal/scope existence checks pass.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "scope-test@test.com", DisplayName: "Scope Test",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "scope-test-project", Slug: "scope-test-project",
+		OwnerID: userID, CreatedBy: userID, Created: time.Now(), Updated: time.Now(),
+	}))
+
 	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	require.NoError(t, err)
 
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      tid("scope-test-user"),
+		PrincipalID:      userID,
 		ScopeType:        store.RoleScopeProject,
 		ScopeID:          projectID,
 	})
@@ -619,6 +631,12 @@ func TestGetEffectivePermissions_SystemScope(t *testing.T) {
 
 	userID := tid("eff-perms-user")
 
+	// Create the user so principal existence check passes.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "eff-perms@test.com", DisplayName: "Eff Perms User",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}))
+
 	// Create hub-member binding
 	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
 	require.NoError(t, err)
@@ -643,6 +661,16 @@ func TestGetEffectivePermissions_ProjectScope(t *testing.T) {
 
 	userID := tid("eff-perms-proj-user")
 	projectID := tid("eff-perms-project")
+
+	// Create the user and project so existence checks pass.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "eff-perms-proj@test.com", DisplayName: "Eff Perms Proj User",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "eff-perms-project", Slug: "eff-perms-project",
+		OwnerID: userID, CreatedBy: userID, Created: time.Now(), Updated: time.Now(),
+	}))
 
 	// Create project-owner binding
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)

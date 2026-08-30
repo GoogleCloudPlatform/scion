@@ -58,28 +58,28 @@ type goldenFixture struct {
 	projectBeta  *store.Project
 
 	// Groups
-	hubMembersGroup    *store.Group
-	alphaMembersGroup  *store.Group
-	betaMembersGroup   *store.Group
-	alphaAgentsGroup   *store.Group
-	betaAgentsGroup    *store.Group
+	hubMembersGroup   *store.Group
+	alphaMembersGroup *store.Group
+	betaMembersGroup  *store.Group
+	alphaAgentsGroup  *store.Group
+	betaAgentsGroup   *store.Group
 
 	// Users
-	superAdminID       string
-	hubAdminID         string
-	memberAlphaID      string // hub member AND alpha project member
-	memberNoneID       string // hub member with NO project memberships
-	projectOwnerID     string // owner of project alpha
-	projectAdminID     string // admin of project alpha
+	superAdminID   string
+	hubAdminID     string
+	memberAlphaID  string // hub member AND alpha project member
+	memberNoneID   string // hub member with NO project memberships
+	projectOwnerID string // owner of project alpha
+	projectAdminID string // admin of project alpha
 
 	// Agents
-	agentAlpha         *store.Agent // agent in project alpha
-	agentBeta          *store.Agent // agent in project beta
+	agentAlpha *store.Agent // agent in project alpha
+	agentBeta  *store.Agent // agent in project beta
 
 	// Progeny test resources
-	secretID           string
-	envVarID           string
-	skillInjectionID   string
+	secretID         string
+	envVarID         string
+	skillInjectionID string
 }
 
 func newGoldenFixture(t *testing.T) *goldenFixture {
@@ -221,7 +221,7 @@ func newGoldenFixture(t *testing.T) *goldenFixture {
 	// member-read-project/agent and member-create-agents policies for alpha
 	for _, rt := range []string{"project", "agent"} {
 		policy := &store.Policy{
-			ID: api.NewUUID(),
+			ID:           api.NewUUID(),
 			Name:         "project:golden-alpha:member-read-" + rt,
 			ScopeType:    "project",
 			ScopeID:      f.projectAlpha.ID,
@@ -237,7 +237,7 @@ func newGoldenFixture(t *testing.T) *goldenFixture {
 
 	// member-create-agents for alpha
 	createAgentsPolicy := &store.Policy{
-		ID: api.NewUUID(),
+		ID:           api.NewUUID(),
 		Name:         "project:golden-alpha:member-create-agents",
 		ScopeType:    "project",
 		ScopeID:      f.projectAlpha.ID,
@@ -254,7 +254,7 @@ func newGoldenFixture(t *testing.T) *goldenFixture {
 	// --- Progeny policies (matching handlers_env_secrets.go / handlers_skills_injection.go) ---
 	// Secret progeny policy
 	secretPolicy := &store.Policy{
-		ID: api.NewUUID(),
+		ID:           api.NewUUID(),
 		Name:         "progeny-secret-access:" + f.secretID,
 		ScopeType:    store.PolicyScopeResource,
 		ScopeID:      f.secretID,
@@ -274,7 +274,7 @@ func newGoldenFixture(t *testing.T) *goldenFixture {
 
 	// EnvVar progeny policy
 	envVarPolicy := &store.Policy{
-		ID: api.NewUUID(),
+		ID:           api.NewUUID(),
 		Name:         "progeny-envvar-access:" + f.envVarID,
 		ScopeType:    store.PolicyScopeResource,
 		ScopeID:      f.envVarID,
@@ -294,7 +294,7 @@ func newGoldenFixture(t *testing.T) *goldenFixture {
 
 	// Skill injection progeny policy
 	skillPolicy := &store.Policy{
-		ID: api.NewUUID(),
+		ID:           api.NewUUID(),
 		Name:         "progeny-skill-access:" + f.skillInjectionID,
 		ScopeType:    store.PolicyScopeResource,
 		ScopeID:      f.skillInjectionID,
@@ -395,7 +395,7 @@ func TestGolden_HubMemberListAgents_OnlyOwnProjectAgents(t *testing.T) {
 	// Alpha agent: member should read (project member + policy grants read+list on agent)
 	alphaAgentRes := Resource{
 		Type: "agent", ID: f.agentAlpha.ID,
-		OwnerID: f.projectOwnerID,
+		OwnerID:    f.projectOwnerID,
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
 	decision := f.authz.CheckAccess(ctx, user, alphaAgentRes, ActionRead)
@@ -405,7 +405,7 @@ func TestGolden_HubMemberListAgents_OnlyOwnProjectAgents(t *testing.T) {
 	// Beta agent: member should NOT read (not a project member, no policy)
 	betaAgentRes := Resource{
 		Type: "agent", ID: f.agentBeta.ID,
-		OwnerID: tid("golden-beta-owner"),
+		OwnerID:    tid("golden-beta-owner"),
 		ParentType: "project", ParentID: f.projectBeta.ID,
 	}
 	decision = f.authz.CheckAccess(ctx, user, betaAgentRes, ActionRead)
@@ -436,7 +436,7 @@ func TestGolden_ProjectOwnerFullAccess(t *testing.T) {
 	owner := NewAuthenticatedUser(f.projectOwnerID, "proj-owner@golden.test", "Project Owner", "member", "api")
 	alphaAgentRes := Resource{
 		Type: "agent", ID: f.agentAlpha.ID,
-		OwnerID: f.projectOwnerID,
+		OwnerID:    f.projectOwnerID,
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
 
@@ -455,7 +455,7 @@ func TestGolden_ProjectOwnerFullAccess(t *testing.T) {
 	// Owner should NOT access beta project resources (not owner/member there)
 	betaAgentRes := Resource{
 		Type: "agent", ID: f.agentBeta.ID,
-		OwnerID: tid("golden-beta-owner"),
+		OwnerID:    tid("golden-beta-owner"),
 		ParentType: "project", ParentID: f.projectBeta.ID,
 	}
 	decision = f.authz.CheckAccess(ctx, owner, betaAgentRes, ActionRead)
@@ -484,7 +484,7 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 	admin := NewAuthenticatedUser(f.projectAdminID, "proj-admin@golden.test", "Project Admin", "member", "api")
 	alphaAgentRes := Resource{
 		Type: "agent", ID: f.agentAlpha.ID,
-		OwnerID: f.projectOwnerID,
+		OwnerID:    f.projectOwnerID,
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
 
@@ -565,7 +565,7 @@ func TestGolden_SuperAdminFullAccess(t *testing.T) {
 	// Can access everything in alpha
 	alphaAgentRes := Resource{
 		Type: "agent", ID: f.agentAlpha.ID,
-		OwnerID: f.projectOwnerID,
+		OwnerID:    f.projectOwnerID,
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
 	for _, action := range []Action{ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage} {
@@ -579,7 +579,7 @@ func TestGolden_SuperAdminFullAccess(t *testing.T) {
 	// Can access everything in beta too
 	betaAgentRes := Resource{
 		Type: "agent", ID: f.agentBeta.ID,
-		OwnerID: tid("golden-beta-owner"),
+		OwnerID:    tid("golden-beta-owner"),
 		ParentType: "project", ParentID: f.projectBeta.ID,
 	}
 	decision := f.authz.CheckAccess(ctx, admin, betaAgentRes, ActionDelete)
