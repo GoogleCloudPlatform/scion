@@ -69,6 +69,10 @@ export class ScionPageSettings extends LitElement {
   @state()
   private statusLoaded = false;
 
+  /** Whether the admin-status fetch failed (network error or non-OK response). */
+  @state()
+  private fetchFailed = false;
+
   /**
    * Compute the set of tabs visible to the current user.
    * Super-admins see all tabs; other users see only tabs matching their permissions.
@@ -186,9 +190,11 @@ export class ScionPageSettings extends LitElement {
           isSuperAdmin: data.isSuperAdmin === true,
           permissions: Array.isArray(data.permissions) ? data.permissions : [],
         };
+      } else {
+        this.fetchFailed = true;
       }
     } catch {
-      // Auth endpoint unavailable — leave adminStatus null.
+      this.fetchFailed = true;
     }
     this.statusLoaded = true;
 
@@ -219,6 +225,20 @@ export class ScionPageSettings extends LitElement {
         </div>
         <div class="section">
           <sl-spinner></sl-spinner>
+        </div>
+      `;
+    }
+
+    // If the fetch failed, show a distinct error so users can tell the
+    // difference between "no permissions" and "we couldn't check."
+    if (this.fetchFailed) {
+      return html`
+        <div class="header">
+          <sl-icon name="gear"></sl-icon>
+          <h1>Hub Resources</h1>
+        </div>
+        <div class="section">
+          <p>Failed to load your permissions. Please refresh the page.</p>
         </div>
       `;
     }
