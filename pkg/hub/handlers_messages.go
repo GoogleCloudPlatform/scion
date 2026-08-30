@@ -286,7 +286,23 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	// skip the block (no conversation model for external surfaces).
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
 		threadID := q.Get("thread_id")
-		if threadID != "" && agent.ProjectID != "" {
+		// G3-f: threadID is the primary discriminator. A thread request must
+		// never fall through to the DM branch — that serves wrong data with a
+		// 200 and no signal. Before G3-f, threadID="" && agent.ProjectID==""
+		// with channel="web" silently took the DM path.
+		if threadID != "" {
+			if agent.ProjectID == "" || agent.ProjectID == uuid.Nil.String() {
+				// Thread requested but agent has no project — resolution is
+				// impossible. Return a distinct 409 so the VM operator can
+				// distinguish "agent has no project" from "conversation row
+				// missing". (G3-f)
+				slog.Warn("read-switch: thread query on project-less agent",
+					"thread_id", threadID, "agent_id", agent.ID)
+				writeError(w, http.StatusConflict, ErrCodeThreadProjectRequired,
+					"Thread conversation cannot be resolved: this agent has no project",
+					nil)
+				return
+			}
 			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID)
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID

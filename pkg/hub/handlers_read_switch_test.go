@@ -1326,3 +1326,146 @@ func TestG3_E_Bypass_NonWebChannel(t *testing.T) {
 		t.Errorf("non_web_channel: expected bypass delta 1, got %d", delta)
 	}
 }
+
+// ==========================================================================
+// G3-f — thread query on project-less agent must not serve DM results
+// ==========================================================================
+
+func TestG3_F_ThreadOnProjectlessAgent_SwitchOn(t *testing.T) {
+	// Before G3-f, threadID="t" + agent.ProjectID="" + channel="web" fell
+	// through to the DM branch and served DM-scoped results with a 200.
+	// That is a wrong answer with no signal — the exact failure class this
+	// tranche exists to remove. After G3-f the handler returns 409 with
+	// code "thread_project_required".
+	srv, s := testServer(t)
+	enableReadSwitch(t, srv)
+
+	// Create a sentinel "no project" entry with the nil UUID so the FK
+	// constraint is satisfied, then create an agent pointing at it.  The
+	// handler treats uuid.Nil.String() the same as "" — "no project".
+	nilProject := &store.Project{
+		ID:      "00000000-0000-0000-0000-000000000000",
+		Name:    "nil-project",
+		Slug:    "nil-project",
+		OwnerID: DevUserID,
+	}
+	if err := s.CreateProject(context.Background(), nilProject); err != nil {
+		t.Fatalf("CreateProject(nil): %v", err)
+	}
+	agentID := rsAgent(t, s, "g3-f-agent-noproj", "00000000-0000-0000-0000-000000000000")
+
+	// Seed a DM conversation so the DM branch would succeed if reached.
+	key := makeDMKey(agentID, DevUserID)
+	seedConversation(t, s, "native", key, "direct")
+
+	// Create a DM message — this is what the caller must NOT receive.
+	dmMsg := &store.Message{
+		ID:             tid("g3-f-dm-msg"),
+		ProjectID:      nilProject.ID,
+		Sender:         "agent:" + agentID,
+		SenderID:       agentID,
+		Recipient:      "user:" + DevUserID,
+		RecipientID:    DevUserID,
+		AgentID:        agentID,
+		Msg:            "DM message that must not be served for a thread query",
+		Type:           "output",
+		Channel:        "web",
+		ThreadID:       key,
+		ConversationID: "",
+	}
+	if err := s.CreateMessage(context.Background(), dmMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// Thread query on the project-less agent.
+	url := fmt.Sprintf("/api/v1/agents/%s/messages?thread_id=some-thread", agentID)
+	rec := doRequest(t, srv, http.MethodGet, url, nil)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeThreadProjectRequired {
+		t.Errorf("expected error code %q, got %q", ErrCodeThreadProjectRequired, errResp.Error.Code)
+	}
+	// Verify the code is distinguishable from conversation_not_resolved.
+	if errResp.Error.Code == ErrCodeConversationNotResolved {
+		t.Error("thread_project_required must be distinguishable from conversation_not_resolved")
+	}
+}
+
+func TestG3_F_ThreadOnProjectlessAgent_SwitchOff(t *testing.T) {
+	// With the switch OFF, the conversation-resolution block is not entered.
+	// The handler uses the legacy filter (AgentID, etc.) with no conversation
+	// scoping. A thread_id param is not used in the filter — the caller gets
+	// all messages for the agent, which is the old behaviour. The key
+	// invariant: the result is NOT DM-scoped.
+	srv, s := testServer(t)
+	// No enableReadSwitch → flag OFF.
+
+	// Create a sentinel "no project" entry (see SwitchOn variant).
+	nilProject := &store.Project{
+		ID:      "00000000-0000-0000-0000-000000000000",
+		Name:    "nil-project-off",
+		Slug:    "nil-project-off",
+		OwnerID: DevUserID,
+	}
+	if err := s.CreateProject(context.Background(), nilProject); err != nil {
+		t.Fatalf("CreateProject(nil): %v", err)
+	}
+	agentID := rsAgent(t, s, "g3-f-agent-noproj-off", "00000000-0000-0000-0000-000000000000")
+
+	// Create two messages: one DM, one with a different thread.
+	dmMsg := &store.Message{
+		ID:          tid("g3-f-off-dm-msg"),
+		ProjectID:   nilProject.ID,
+		Sender:      "agent:" + agentID,
+		SenderID:    agentID,
+		Recipient:   "user:" + DevUserID,
+		RecipientID: DevUserID,
+		AgentID:     agentID,
+		Msg:         "DM message",
+		Type:        "output",
+		Channel:     "web",
+	}
+	threadMsg := &store.Message{
+		ID:          tid("g3-f-off-thread-msg"),
+		ProjectID:   nilProject.ID,
+		Sender:      "agent:" + agentID,
+		SenderID:    agentID,
+		Recipient:   "user:" + DevUserID,
+		RecipientID: DevUserID,
+		AgentID:     agentID,
+		Msg:         "thread message",
+		Type:        "output",
+		Channel:     "web",
+		ThreadID:    "some-thread",
+	}
+	for _, msg := range []*store.Message{dmMsg, threadMsg} {
+		if err := s.CreateMessage(context.Background(), msg); err != nil {
+			t.Fatalf("CreateMessage: %v", err)
+		}
+	}
+
+	// Thread query with switch off — returns everything (legacy filter).
+	url := fmt.Sprintf("/api/v1/agents/%s/messages?thread_id=some-thread", agentID)
+	rec := doRequest(t, srv, http.MethodGet, url, nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("switch OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result store.ListResult[store.Message]
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// With switch off, both messages should be visible (legacy filter by
+	// AgentID, no ConversationID scoping). The result is NOT DM-scoped.
+	if len(result.Items) < 2 {
+		t.Errorf("switch OFF: expected at least 2 messages (legacy filter), got %d", len(result.Items))
+	}
+}

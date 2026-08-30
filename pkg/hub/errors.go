@@ -97,6 +97,14 @@ const (
 	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
 	// because this is a parse failure, not a lookup miss.
 	ErrCodeInvalidDMKey = "invalid_dm_key"
+
+	// ErrCodeThreadProjectRequired is returned when a thread_id query param
+	// is present but the agent has no ProjectID, making thread conversation
+	// resolution impossible. Distinct from conversation_not_resolved so a VM
+	// operator can tell "agent has no project" apart from "conversation row
+	// missing". Without this, the request would silently fall through to the
+	// DM branch and serve wrong data (G3-f).
+	ErrCodeThreadProjectRequired = "thread_project_required"
 )
 
 // writeError writes a JSON error response.
