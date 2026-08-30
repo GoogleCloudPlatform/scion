@@ -491,6 +491,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		if _, _, err := s.secretBackend.Set(ctx, tokenInput); err != nil {
 			s.projectsLogger().Error("failed to save GitHub token as project secret",
 				"project_id", project.ID, "error", err)
+			// Cascade-delete role bindings before the project row to avoid
+			// orphaned bindings referencing a deleted project (R1 review fix).
+			if _, rbErr := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID); rbErr != nil {
+				s.projectsLogger().Warn("failed to clean up role bindings after secret save failure",
+					"project_id", project.ID, "error", rbErr)
+			}
 			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
 				s.projectsLogger().Warn("failed to clean up project record after secret save failure",
 					"project_id", project.ID, "error", delErr)
@@ -513,6 +519,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 					s.projectsLogger().Warn("failed to clean up project secret after clone failure",
 						"project_id", project.ID, "error", delErr)
 				}
+			}
+			// Cascade-delete role bindings before the project row to avoid
+			// orphaned bindings referencing a deleted project (R1 review fix).
+			if _, rbErr := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID); rbErr != nil {
+				s.projectsLogger().Warn("failed to clean up role bindings after clone failure",
+					"project_id", project.ID, "error", rbErr)
 			}
 			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
 				s.projectsLogger().Warn("failed to clean up project record after clone failure",
@@ -695,6 +707,11 @@ func (s *Server) createProjectRoleBinding(ctx context.Context, projectID, princi
 // the hub-members group, making the project visible to all hub members.
 // This replaces the old pattern of adding hub-members as a nested group member
 // of the project's members group. Best-effort; failures are logged.
+//
+// NOTE(PM1/O1): This function is intentionally not wired into production paths
+// yet. Visibility currently flows through the legacy ensureProjectMemberReadPolicy
+// bridge. This will be activated when CO1 removes legacy policies and rewires
+// the evaluator to use RoleBinding permissions directly.
 func (s *Server) ensureHubMembersProjectVisibility(ctx context.Context, project *store.Project) {
 	group, err := s.store.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {
@@ -709,8 +726,15 @@ func (s *Server) ensureHubMembersProjectVisibility(ctx context.Context, project 
 	}
 }
 
-// countDirectOwnerBindings returns the number of active direct-user
-// project-owner role bindings for a project.
+// countDirectOwnerBindings returns the number of direct-user project-owner
+// role bindings for a project.
+//
+// Known limitation (O3): This count includes all matching bindings regardless
+// of activation conditions (NotBefore, ExpiresAt). An expired or not-yet-active
+// binding still counts toward the minimum owner threshold. Currently moot
+// because owner bindings are created unconditionally without time bounds, but
+// this will need to filter by activation state if time-bounded ownership
+// bindings are introduced.
 func (s *Server) countDirectOwnerBindings(ctx context.Context, projectID string) (int, error) {
 	bindings, err := s.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
@@ -795,8 +819,11 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
-			// Group creation is best-effort for collaboration; RoleBindings below
-			// are the authorization source.
+			// Group creation failed with a non-duplicate error. The group was
+			// never persisted, so its UUID is a phantom — skip all downstream
+			// operations that reference the group ID to avoid creating dangling
+			// group memberships or legacy policy bindings (R2 review fix).
+			return
 		}
 		if errors.Is(createErr, store.ErrAlreadyExists) {
 			// Slug conflict — look up existing group

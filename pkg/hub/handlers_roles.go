@@ -607,6 +607,14 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 
 	// PM1: last-owner protection — cannot delete the last direct-user
 	// project-owner binding. Every project must retain at least one.
+	//
+	// Known limitation (O2): The count-then-delete sequence is not
+	// transactional, so two concurrent deletions of different owner bindings
+	// could both pass the check and leave the project with zero owners.
+	// Risk is low (requires simultaneous admin operations on the same
+	// project) and is mitigated by the offline recovery command (RC1)
+	// which can detect and repair orphaned projects. This matches the
+	// AC1 TOCTOU pattern accepted elsewhere in the authorization layer.
 	if binding.ScopeType == store.RoleScopeProject && binding.PrincipalType == store.RoleBindingPrincipalUser {
 		roleDef, rdErr := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 		if rdErr == nil && binding.RoleDefinitionID == roleDef.ID {
