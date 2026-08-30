@@ -138,30 +138,49 @@ func TestHandleBrokerInbound_RejectsNonRunningAgent(t *testing.T) {
 			srv, s := testServer(t)
 			ctx := context.Background()
 
-			// Create project.
+			// Create a normal member user so the sender resolves and passes
+			// authorization via project membership + agent's project message mode.
+			user := &store.User{
+				ID:          tid("user-phase-test"),
+				Email:       "phase-test@example.com",
+				DisplayName: "Phase Test User",
+				Role:        store.UserRoleMember,
+				Status:      "active",
+				Created:     time.Now(),
+			}
+			require.NoError(t, s.CreateUser(ctx, user))
+			ensureHubMembership(ctx, s, user.ID)
+
+			// Create project with members group and policy.
 			project := &store.Project{
-				ID:      tid("proj-broker-inbound"),
-				Slug:    "broker-inbound-proj",
-				Name:    "Broker Inbound Test Project",
-				Created: time.Now(),
-				Updated: time.Now(),
+				ID:        tid("proj-broker-inbound"),
+				Slug:      "broker-inbound-proj",
+				Name:      "Broker Inbound Test Project",
+				OwnerID:   user.ID,
+				CreatedBy: user.ID,
+				Created:   time.Now(),
+				Updated:   time.Now(),
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
+			srv.createProjectMembersGroupAndPolicy(ctx, project)
+			msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
-			// Create agent with the specified phase.
+			// Create agent with the specified phase and project message mode
+			// so normal project members can message it.
 			agent := &store.Agent{
 				ID:           tid("agent-errstate"),
 				Slug:         "errstate-agent",
 				Name:         "Error State Agent",
 				ProjectID:    project.ID,
 				Phase:        string(tt.phase),
+				MessageMode:  store.MessageModeProject,
 				StateVersion: 1,
 				Created:      time.Now(),
 				Updated:      time.Now(),
 			}
 			require.NoError(t, s.CreateAgent(ctx, agent))
 
-			// Build broker inbound request.
+			// Build broker inbound request with a user: sender that resolves.
 			topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
 			payload := inboundMessageRequest{
 				Topic: topic,
@@ -169,7 +188,7 @@ func TestHandleBrokerInbound_RejectsNonRunningAgent(t *testing.T) {
 					Version:   messages.Version,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 					Channel:   "discord",
-					Sender:    "agent:other-agent",
+					Sender:    "user:" + user.Email,
 					Recipient: "agent:" + agent.Slug,
 					Msg:       "hello from discord",
 					Type:      messages.TypeInstruction,
@@ -201,29 +220,48 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create project.
+	// Create a normal member user so the sender resolves and passes
+	// authorization via project membership + agent's project message mode.
+	user := &store.User{
+		ID:          tid("user-conv-resolve"),
+		Email:       "conv-resolve@example.com",
+		DisplayName: "Conv Resolve User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Create project with members group and policy.
 	project := &store.Project{
-		ID:      tid("proj-conv-resolve"),
-		Slug:    "conv-resolve-proj",
-		Name:    "Conversation Resolution Test Project",
-		Created: time.Now(),
-		Updated: time.Now(),
+		ID:        tid("proj-conv-resolve"),
+		Slug:      "conv-resolve-proj",
+		Name:      "Conversation Resolution Test Project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
-	// Create a running agent.
+	// Create a running agent with project message mode.
 	agent := &store.Agent{
 		ID:           tid("agent-conv-resolve"),
 		Slug:         "conv-agent",
 		Name:         "Conversation Agent",
 		ProjectID:    project.ID,
 		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
 		StateVersion: 1,
 		Created:      time.Now(),
 		Updated:      time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
+	senderRef := "user:" + user.Email
 	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
 
 	tests := []struct {
@@ -302,7 +340,7 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 					Version:   messages.Version,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 					Channel:   "discord",
-					Sender:    "agent:other-agent",
+					Sender:    senderRef,
 					Recipient: "agent:" + agent.Slug,
 					Msg:       "hello",
 					Type:      messages.TypeInstruction,
@@ -372,14 +410,31 @@ func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *test
 			srv, s := testServer(t)
 			ctx := context.Background()
 
+			// Create a normal member user so the sender resolves and passes
+			// authorization via project membership + agent's project message mode.
+			user := &store.User{
+				ID:          tid("user-regr-" + surf.name),
+				Email:       "regr-" + surf.name + "@example.com",
+				DisplayName: "Regression User",
+				Role:        store.UserRoleMember,
+				Status:      "active",
+				Created:     time.Now(),
+			}
+			require.NoError(t, s.CreateUser(ctx, user))
+			ensureHubMembership(ctx, s, user.ID)
+
 			project := &store.Project{
-				ID:      tid("proj-regr-" + surf.name),
-				Slug:    "regr-" + surf.name,
-				Name:    "Regression " + surf.name,
-				Created: time.Now(),
-				Updated: time.Now(),
+				ID:        tid("proj-regr-" + surf.name),
+				Slug:      "regr-" + surf.name,
+				Name:      "Regression " + surf.name,
+				OwnerID:   user.ID,
+				CreatedBy: user.ID,
+				Created:   time.Now(),
+				Updated:   time.Now(),
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
+			srv.createProjectMembersGroupAndPolicy(ctx, project)
+			msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 			agent := &store.Agent{
 				ID:           tid("agent-regr-" + surf.name),
@@ -387,6 +442,7 @@ func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *test
 				Name:         "Regression Agent",
 				ProjectID:    project.ID,
 				Phase:        string(state.PhaseRunning),
+				MessageMode:  store.MessageModeProject,
 				StateVersion: 1,
 				Created:      time.Now(),
 				Updated:      time.Now(),
@@ -400,7 +456,7 @@ func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *test
 					Version:   messages.Version,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 					Channel:   surf.name,
-					Sender:    "agent:test",
+					Sender:    "user:" + user.Email,
 					Recipient: "agent:" + agent.Slug,
 					Msg:       "regression test",
 					Type:      messages.TypeInstruction,
@@ -430,30 +486,48 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create project.
+	// Create a normal member user so the sender resolves and passes
+	// authorization via project membership + agent's project message mode.
+	user := &store.User{
+		ID:          tid("user-running-test"),
+		Email:       "running-test@example.com",
+		DisplayName: "Running Test User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Create project with members group and policy.
 	project := &store.Project{
-		ID:      tid("proj-broker-running"),
-		Slug:    "broker-running-proj",
-		Name:    "Broker Running Test Project",
-		Created: time.Now(),
-		Updated: time.Now(),
+		ID:        tid("proj-broker-running"),
+		Slug:      "broker-running-proj",
+		Name:      "Broker Running Test Project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
-	// Create a running agent.
+	// Create a running agent with project message mode.
 	agent := &store.Agent{
 		ID:           tid("agent-running"),
 		Slug:         "running-agent",
 		Name:         "Running Agent",
 		ProjectID:    project.ID,
 		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
 		StateVersion: 1,
 		Created:      time.Now(),
 		Updated:      time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Build broker inbound request.
+	// Build broker inbound request with a user: sender that resolves.
 	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
 	payload := inboundMessageRequest{
 		Topic: topic,
@@ -461,7 +535,7 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 			Version:   messages.Version,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Channel:   "discord",
-			Sender:    "agent:other-agent",
+			Sender:    "user:" + user.Email,
 			Recipient: "agent:" + agent.Slug,
 			Msg:       "hello",
 			Type:      messages.TypeInstruction,
@@ -480,4 +554,119 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 	// Running agent passes the phase check but gets 503 because no
 	// dispatcher is configured in the test.
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleBrokerInbound_AgentSenderDenied verifies that agent-prefixed
+// senders are denied.
+func TestHandleBrokerInbound_AgentSenderDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("proj-agent-denied"),
+		Slug:    "agent-denied-proj",
+		Name:    "Agent Denied Test",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:           tid("agent-denied-target"),
+		Slug:         "denied-agent",
+		Name:         "Denied Agent",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
+	payload := inboundMessageRequest{
+		Topic: topic,
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			Sender:    "agent:some-other-agent",
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from agent",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	// Agent-prefixed senders are denied.
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeMessageDenied, errResp.Error.Code)
+}
+
+// TestHandleBrokerInbound_UnmappedExternalSenderDenied verifies that an
+// unmapped external-channel sender (e.g. "discord:someuser") is denied.
+func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("proj-unmapped"),
+		Slug:    "unmapped-proj",
+		Name:    "Unmapped Sender Test",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:           tid("agent-unmapped"),
+		Slug:         "unmapped-agent",
+		Name:         "Unmapped Agent",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
+	payload := inboundMessageRequest{
+		Topic: topic,
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			Sender:    "discord:someuser",
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from unmapped user",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeMessageDenied, errResp.Error.Code)
 }
