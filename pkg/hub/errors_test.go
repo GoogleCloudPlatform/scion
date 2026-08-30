@@ -60,6 +60,50 @@ func TestWriteErrorFromErr_PermissionError(t *testing.T) {
 	}
 }
 
+func TestMethodNotAllowed_WithAllowedMethods(t *testing.T) {
+	rr := httptest.NewRecorder()
+	MethodNotAllowed(rr, http.MethodGet, http.MethodPost)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
+	}
+
+	allow := rr.Header().Get("Allow")
+	if allow != "GET, POST" {
+		t.Errorf("expected Allow header %q, got %q", "GET, POST", allow)
+	}
+
+	var resp ErrorResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Error.Code != "method_not_allowed" {
+		t.Errorf("expected error code %q, got %q", "method_not_allowed", resp.Error.Code)
+	}
+}
+
+func TestMethodNotAllowed_WithoutAllowedMethods(t *testing.T) {
+	rr := httptest.NewRecorder()
+	MethodNotAllowed(rr)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
+	}
+
+	allow := rr.Header().Get("Allow")
+	if allow != "" {
+		t.Errorf("expected no Allow header, got %q", allow)
+	}
+
+	var resp ErrorResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Error.Code != "method_not_allowed" {
+		t.Errorf("expected error code %q, got %q", "method_not_allowed", resp.Error.Code)
+	}
+}
+
 func TestWriteErrorFromErr_GenericError_Still500(t *testing.T) {
 	// A generic error that is NOT a PermissionError should still be 500
 	err := fmt.Errorf("something went wrong")

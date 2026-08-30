@@ -100,7 +100,7 @@ type teamsBotCommand struct {
 // Authorization: route guard checks hub.teams_manifest.read.
 func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

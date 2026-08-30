@@ -82,7 +82,7 @@ func GatherDiagnostics(ctx context.Context, cfg *config.VersionedSettings) []Dia
 
 func (s *Server) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -138,7 +138,7 @@ func (s *Server) handleSystemRuntime(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		s.handlePutRuntime(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -250,7 +250,7 @@ type putRegistryResponse struct {
 
 func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut)
 		return
 	}
 
@@ -419,7 +419,7 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -445,7 +445,7 @@ type systemInitResponse struct {
 
 func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -583,7 +583,7 @@ type imagePullResponse struct {
 
 func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -699,7 +699,7 @@ func resolveBuildScript() string {
 
 func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -813,7 +813,7 @@ type fsListResponse struct {
 
 func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -902,7 +902,7 @@ type fsMkdirResponse struct {
 
 func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -988,7 +988,7 @@ type fsValidatePathResponse struct {
 // ClassifyPath's managed-path overlap check and the assertLoopback guard.
 func (s *Server) handleFSValidatePath(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1045,7 +1045,7 @@ func (s *Server) handleAppleDNS(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleAppleDNSSetup(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -1086,7 +1086,7 @@ type workstationSettingsRequest struct {
 // It allows toggling workstation-level settings without requiring admin role.
 func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPatch)
 		return
 	}
 

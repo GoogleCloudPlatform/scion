@@ -24,7 +24,7 @@ import (
 // resources (templates and harness-configs). Requires admin role.
 func (s *Server) handleAdminValidateResources(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
