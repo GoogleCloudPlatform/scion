@@ -60,6 +60,13 @@ func enableReadSwitch(t *testing.T, srv *Server) {
 		t.Fatalf("ops.Refresh failed: %v", err)
 	}
 	srv.SetOperationalSettings(ops)
+	// Canary: verify the switch is actually on. Without this, a silent
+	// failure in enableReadSwitch makes every delta==0 assertion pass
+	// trivially — the handler never enters the read-switch block at all.
+	if !srv.GetOperationalSettings().ConversationReadSwitch() {
+		t.Fatalf("enableReadSwitch: ConversationReadSwitch() is still false after setup — " +
+			"every FlagOn test in this file is vacuous without this guard")
+	}
 }
 
 // seedConversation creates a conversation in the store with the given
@@ -336,11 +343,6 @@ func TestReadSwitch_S1_DM_SevenPartKey_FlagOn(t *testing.T) {
 		// Accept either 200 (legacy fallback) or 400 (rejected by validDMKey).
 		if rec.Code != http.StatusOK && rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 200 or 400, got %d: %s", rec.Code, rec.Body.String())
-		}
-		if rec.Code == http.StatusOK {
-			// Reached the read-switch: 7-part key → convResult nil → fallback.
-			// If 400, the request was rejected before the read-switch, which is
-			// also safe (no conversation derivation happened).
 		}
 	})
 
@@ -900,9 +902,17 @@ func TestReadSwitch_S3_FlagOn_Manager_WithExistingDM_LosesVisibility(t *testing.
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	// With the defect: the manager only sees messages in their own DM.
-	// The other user's message is NOT in the manager's DM conversation,
-	// so it is filtered out. This asserts the defect is present.
+	// DEF-64 characterisation: pin the KNOWN DEFECT. With the defect
+	// present, the manager only sees messages in their own DM. The other
+	// user's message is NOT in the manager's DM conversation, so it is
+	// filtered out. A failure here likely means DEF-64 was FIXED — update
+	// this test to assert the corrected behaviour rather than reverting
+	// the fix.
+	//
+	// Note: fallbackDelta is deliberately absent from this test. The
+	// defect succeeds silently — resolution returns a valid conversation
+	// and narrows the filter without triggering IncFallback. There is no
+	// fallback to count, so a delta assertion here can never fire.
 	found := false
 	for _, m := range result.Items {
 		if m.ID == otherMsg.ID {
@@ -911,14 +921,10 @@ func TestReadSwitch_S3_FlagOn_Manager_WithExistingDM_LosesVisibility(t *testing.
 		}
 	}
 	if found {
-		// If the other user's message IS visible, the defect was fixed (or
-		// our understanding is wrong). Report this as a surprising result.
-		t.Log("SURPRISING: manager still sees other user's message with DM " +
-			"conversation in filter — the no-canManage-guard defect may have been fixed")
-	} else {
-		// Pin the defect: manager does NOT see the other user's message.
-		t.Log("confirmed: manager with existing DM loses visibility of " +
-			"other users' messages when read-switch is ON (no canManage guard)")
+		t.Errorf("DEF-64 (known defect, pinned): manager with an existing DM " +
+			"should currently NOT see other users' messages due to missing " +
+			"canManage guard. If this now passes, DEF-64 may be FIXED — " +
+			"update this test rather than reverting the fix")
 	}
 }
 
