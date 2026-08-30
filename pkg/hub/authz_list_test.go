@@ -254,10 +254,8 @@ func TestScopeAwareList_ExpiredBindingExcluded(t *testing.T) {
 	}
 }
 
-// TestScopeAwareList_PaginationCountsReflectFilter verifies that the
-// AuthorizedProjectIDs filter correctly limits the result set. This is a
-// unit-level check that the filter field is properly forwarded — the actual
-// SQL filtering is tested at the store/entadapter level.
+// TestScopeAwareList_RoleWithoutListPermission verifies that a user whose role
+// does NOT include the list permission gets None even with project-scoped bindings.
 func TestScopeAwareList_RoleWithoutListPermission(t *testing.T) {
 	// A user whose role does NOT include project.list should get None even
 	// though they have project-scoped bindings.

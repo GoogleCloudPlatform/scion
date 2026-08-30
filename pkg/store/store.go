@@ -1712,6 +1712,10 @@ type RoleStore interface {
 	// Returns ErrNotFound if the role definition doesn't exist.
 	GetRoleDefinition(ctx context.Context, id string) (*RoleDefinition, error)
 
+	// GetRoleDefinitionsByIDs retrieves role definitions by a list of IDs.
+	// Missing IDs are silently omitted from the result map.
+	GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*RoleDefinition, error)
+
 	// GetRoleDefinitionByName retrieves a role definition by name and scope type.
 	// Returns ErrNotFound if the role definition doesn't exist.
 	GetRoleDefinitionByName(ctx context.Context, name string, scopeType string) (*RoleDefinition, error)

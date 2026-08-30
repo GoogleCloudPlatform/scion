@@ -614,6 +614,8 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 
 	// AuthorizedProjectIDs: scope-aware authorization filter applied at the SQL
 	// level so pagination and totals reflect only the authorized set.
+	// Fail-closed: if all IDs fail UUID parsing, match nothing rather than
+	// omitting the predicate (which would return all agents).
 	if filter.AuthorizedProjectIDs != nil {
 		if len(filter.AuthorizedProjectIDs) == 0 {
 			// Empty authorized set: no agents visible.
@@ -622,6 +624,9 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 			projectUIDs := parseUUIDList(filter.AuthorizedProjectIDs)
 			if len(projectUIDs) > 0 {
 				preds = append(preds, agent.ProjectIDIn(projectUIDs...))
+			} else {
+				// All IDs failed UUID parsing: fail closed — no agents visible.
+				preds = append(preds, agent.ProjectIDEQ(uuid.Nil))
 			}
 		}
 	}

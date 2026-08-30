@@ -315,26 +315,20 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		items = []store.Agent{}
 	} else {
 		scopes := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
-		switch {
-		case scopes.IsAll():
-			// System-wide authority: unfiltered query (admin view).
+		if !scopes.IsNone() {
+			// All or explicit scope set: push authorized IDs into the store
+			// query so pagination and totals reflect only the visible set.
+			// For All, AuthorizedProjectIDs remains nil (no filter applied).
+			if !scopes.IsAll() {
+				filter.AuthorizedProjectIDs = scopes.ProjectIDs()
+			}
 			result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
 			if err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
 			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		case !scopes.IsNone():
-			// Explicit project set: push authorized IDs into the store query
-			// so pagination and totals reflect only the visible set.
-			filter.AuthorizedProjectIDs = scopes.ProjectIDs()
-			result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		default:
+		} else {
 			// No role bindings resolved. Fall back to per-item policy filtering
 			// for backward compatibility during the transition period before
 			// CO1 cutover completes. After cutover, all principals will have

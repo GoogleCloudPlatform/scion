@@ -24,6 +24,11 @@ import (
 // ResolveListScopes resolves the set of projects the caller is authorized to
 // see for a given list permission (e.g. "project.list" or "agent.list").
 //
+// Currently wired into the project and agent list handlers. The same
+// hasAdminView pattern also exists in handlers_groups.go, template_handlers.go,
+// and harness_config_handlers.go — those should be converted in CO1 or a
+// follow-up using this same adapter.
+//
 // It bridges the store layer and the AK1 authorization kernel:
 //  1. Resolves the caller's principal closure (direct principal + effective groups).
 //  2. Loads applicable role bindings via ListRoleBindingsForPrincipals.
@@ -129,17 +134,25 @@ func collectRoleDefinitionIDs(bindings []*store.RoleBinding) []string {
 	return ids
 }
 
-// loadRoleDefinitions fetches role definitions by ID and converts them to the
-// kernel's RolePermissions map.
+// loadRoleDefinitions fetches role definitions by ID in a single batch query
+// and converts them to the kernel's RolePermissions map.
+//
+// Missing role definitions are silently omitted — the corresponding bindings
+// will simply not contribute permissions. Transient store errors (DB timeout,
+// connection reset) are propagated to the caller, which fails closed by
+// returning ScopeSetNone.
 func (a *AuthzService) loadRoleDefinitions(ctx context.Context, roleDefIDs []string) (map[string]*RolePermissions, error) {
-	result := make(map[string]*RolePermissions, len(roleDefIDs))
-	for _, id := range roleDefIDs {
-		rd, err := a.store.GetRoleDefinition(ctx, id)
-		if err != nil {
-			// Skip missing role definitions (fail open for this role, but the
-			// binding will simply not contribute any permissions).
-			continue
-		}
+	if len(roleDefIDs) == 0 {
+		return map[string]*RolePermissions{}, nil
+	}
+
+	defs, err := a.store.GetRoleDefinitionsByIDs(ctx, roleDefIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*RolePermissions, len(defs))
+	for _, rd := range defs {
 		result[rd.ID] = NewRolePermissions(rd.ID, rd.Name, rd.ScopeType, rd.Permissions)
 	}
 	return result, nil

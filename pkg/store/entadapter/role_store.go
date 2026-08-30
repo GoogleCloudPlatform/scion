@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
@@ -79,6 +81,37 @@ func (r *RoleStore) GetRoleDefinition(ctx context.Context, id string) (*store.Ro
 		return nil, mapError(err)
 	}
 	return entRoleDefinitionToStore(rd), nil
+}
+
+// GetRoleDefinitionsByIDs retrieves role definitions by a list of IDs.
+// Missing IDs are silently omitted from the result map.
+func (r *RoleStore) GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	if len(ids) == 0 {
+		return map[string]*store.RoleDefinition{}, nil
+	}
+	uids := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := uuid.Parse(id)
+		if err != nil {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	if len(uids) == 0 {
+		return map[string]*store.RoleDefinition{}, nil
+	}
+	rds, err := r.client.RoleDefinition.Query().
+		Where(roledefinition.IDIn(uids...)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make(map[string]*store.RoleDefinition, len(rds))
+	for _, rd := range rds {
+		srd := entRoleDefinitionToStore(rd)
+		result[srd.ID] = srd
+	}
+	return result, nil
 }
 
 // GetRoleDefinitionByName retrieves a role definition by name and scope type.
