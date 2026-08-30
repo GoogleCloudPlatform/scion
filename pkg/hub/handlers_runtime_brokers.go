@@ -62,7 +62,7 @@ func (s *Server) handleRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listRuntimeBrokers(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -267,7 +267,7 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 	case http.MethodDelete:
 		s.deleteRuntimeBroker(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -293,7 +293,7 @@ func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request)
 	case http.MethodDelete:
 		s.deleteRuntimeBroker(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 

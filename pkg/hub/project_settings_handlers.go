@@ -244,7 +244,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(project))
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 

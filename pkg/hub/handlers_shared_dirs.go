@@ -117,7 +117,7 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusCreated, newDir)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -208,6 +208,6 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
