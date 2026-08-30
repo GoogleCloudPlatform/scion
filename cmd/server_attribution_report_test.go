@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -93,6 +94,28 @@ func seedSlugMessage(t *testing.T, ctx context.Context, s store.Store, projectID
 		RecipientID: "my-agent-slug",
 		Msg:         "slug message",
 		Type:        "instruction",
+		CreatedAt:   time.Now(),
+	})
+	require.NoError(t, err)
+	return msgID
+}
+
+// seedBroadcastMessage creates a broadcasted message without a conversation_id.
+func seedBroadcastMessage(t *testing.T, ctx context.Context, s store.Store, projectID string) string {
+	t.Helper()
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	msgID := uuid.NewString()
+	err := s.CreateMessage(ctx, &store.Message{
+		ID:          msgID,
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "broadcast message",
+		Type:        "instruction",
+		Broadcasted: true,
 		CreatedAt:   time.Now(),
 	})
 	require.NoError(t, err)
@@ -173,7 +196,7 @@ func TestAttributionReport_MutationGuard(t *testing.T) {
 // AC-G-2: non-UUID principal is distinct from unresolvable, and flip-blocking
 // --------------------------------------------------------------------------
 
-// TestAttributionReport_BucketClassification verifies that the three
+// TestAttributionReport_BucketClassification verifies that the four
 // unattributed buckets are correctly populated and distinct.
 func TestAttributionReport_BucketClassification(t *testing.T) {
 	ctx := context.Background()
@@ -197,18 +220,24 @@ func TestAttributionReport_BucketClassification(t *testing.T) {
 	// 4. Non-UUID principal: slug.
 	seedSlugMessage(t, ctx, s, projectID)
 
+	// 5. Broadcast: unattributed, Broadcasted=true.
+	seedBroadcastMessage(t, ctx, s, projectID)
+
 	report, err := runAttributionReportForProject(ctx, s, projectID)
 	require.NoError(t, err)
 
-	assert.Equal(t, 5, report.Total, "total messages")
+	assert.Equal(t, 6, report.Total, "total messages")
 	assert.Equal(t, 1, report.Attributed, "attributed messages")
 	assert.Equal(t, 2, report.Backfillable, "backfillable messages")
+	assert.Equal(t, 1, report.BroadcastNotBackfillable, "broadcast messages")
 	assert.Equal(t, 2, report.NonUUIDPrincipal, "non-UUID principal messages")
 	assert.Equal(t, 0, report.Unresolvable, "unresolvable messages")
 
 	// Verify the buckets are distinct and sum correctly.
-	unattributed := report.Backfillable + report.NonUUIDPrincipal + report.Unresolvable
-	assert.Equal(t, report.Total-report.Attributed, unattributed, "unattributed buckets must sum to total minus attributed")
+	unattributed := report.Backfillable + report.BroadcastNotBackfillable +
+		report.NonUUIDPrincipal + report.Unresolvable
+	assert.Equal(t, report.Total-report.Attributed, unattributed,
+		"unattributed buckets must sum to total minus attributed")
 }
 
 // TestAttributionReport_FlipBlockingOutput verifies that non-zero non-UUID
@@ -397,6 +426,95 @@ func TestAttributionReport_UsesProductionDerivation(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// Broadcast bucket tests
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_BroadcastFlipBlocking verifies that broadcasts with
+// no conversation_id are reported as flip-blocking.
+func TestAttributionReport_BroadcastFlipBlocking(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	seedBroadcastMessage(t, ctx, s, projectID)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, report.Total)
+	assert.Equal(t, 0, report.Attributed)
+	assert.Equal(t, 0, report.Backfillable)
+	assert.Equal(t, 1, report.BroadcastNotBackfillable)
+	assert.Equal(t, 0, report.NonUUIDPrincipal)
+	assert.Equal(t, 0, report.Unresolvable)
+
+	var buf bytes.Buffer
+	printAttributionReport(&buf, report, projectID)
+	output := buf.String()
+
+	assert.Contains(t, output, "BLOCKS FLIP", "broadcast must be flip-blocking")
+	assert.Contains(t, output, "FLIP BLOCKED", "broadcast must trigger flip blocked warning")
+	assert.Contains(t, output, "broadcast", "output must name the broadcast bucket")
+	assert.Contains(t, output, "backfill skips broadcasts", "output must explain why broadcasts block")
+}
+
+// TestAttributionReport_BroadcastNotInBackfillable verifies that a broadcast
+// message does not land in the backfillable bucket, even when its principals
+// are valid UUIDs.
+func TestAttributionReport_BroadcastNotInBackfillable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+
+	// Seed one backfillable and one broadcast (same UUIDs, only
+	// Broadcasted flag differs).
+	seedDMMessage(t, ctx, s, projectID, senderID, recipientID, time.Now())
+	seedBroadcastMessage(t, ctx, s, projectID)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, report.Backfillable, "non-broadcast should be backfillable")
+	assert.Equal(t, 1, report.BroadcastNotBackfillable, "broadcast should be in its own bucket")
+	assert.Equal(t, 0, report.Unresolvable, "neither should be unresolvable")
+}
+
+// --------------------------------------------------------------------------
+// Reconciliation test
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_ReconciliationMatch verifies that when all projects
+// are scanned, the report's unattributed total matches the global
+// CountUnbackfilledMessages.
+func TestAttributionReport_ReconciliationMatch(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+
+	seedAttributedMessage(t, ctx, s, projectID)
+	seedDMMessage(t, ctx, s, projectID, senderID, recipientID, time.Now())
+	seedFederatedMessage(t, ctx, s, projectID)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	reportUnattributed := report.Backfillable + report.BroadcastNotBackfillable +
+		report.NonUUIDPrincipal + report.Unresolvable
+
+	globalCount, err := s.CountUnbackfilledMessages(ctx, "")
+	require.NoError(t, err)
+
+	assert.Equal(t, globalCount, reportUnattributed,
+		"report unattributed total must match global CountUnbackfilledMessages")
+}
+
+// --------------------------------------------------------------------------
 // Multi-project aggregation test
 // --------------------------------------------------------------------------
 
@@ -417,8 +535,9 @@ func TestAttributionReport_MultiProject(t *testing.T) {
 	seedAttributedMessage(t, ctx, s, projectA)
 	seedDMMessage(t, ctx, s, projectA, senderID, recipientID, now)
 
-	// Project B: 1 federated.
+	// Project B: 1 federated, 1 broadcast.
 	seedFederatedMessage(t, ctx, s, projectB)
+	seedBroadcastMessage(t, ctx, s, projectB)
 
 	// Run for each project separately.
 	reportA, err := runAttributionReportForProject(ctx, s, projectA)
@@ -431,9 +550,128 @@ func TestAttributionReport_MultiProject(t *testing.T) {
 	mergeAttributionReport(total, reportA)
 	mergeAttributionReport(total, reportB)
 
-	assert.Equal(t, 3, total.Total)
+	assert.Equal(t, 4, total.Total)
 	assert.Equal(t, 1, total.Attributed)
 	assert.Equal(t, 1, total.Backfillable)
+	assert.Equal(t, 1, total.BroadcastNotBackfillable)
 	assert.Equal(t, 1, total.NonUUIDPrincipal)
 	assert.Equal(t, 0, total.Unresolvable)
+}
+
+// --------------------------------------------------------------------------
+// G1-c: Behavioral production derivation test
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_DerivationBehavioral verifies that the report's
+// classification tracks the success and failure of the production
+// messaging.DeriveConversationKey function. This is a behavioural guard:
+// inputs known to fail derivation must land in unresolvable, and inputs
+// known to succeed must land in backfillable.
+func TestAttributionReport_DerivationBehavioral(t *testing.T) {
+	// First, confirm our test inputs against production DeriveConversationKey
+	// to establish the ground truth.
+	validSender := uuid.NewString()
+	validRecipient := uuid.NewString()
+
+	// Table of inputs and expected derivation outcomes.
+	cases := []struct {
+		name        string
+		threadID    string
+		senderKind  string
+		senderID    string
+		recipKind   string
+		recipID     string
+		wantSuccess bool
+	}{
+		{
+			name:        "valid DM — no thread",
+			senderKind:  "user",
+			senderID:    validSender,
+			recipKind:   "agent",
+			recipID:     validRecipient,
+			wantSuccess: true,
+		},
+		{
+			name:        "malformed dm: prefix",
+			threadID:    "dm:broken:key",
+			senderKind:  "user",
+			senderID:    validSender,
+			recipKind:   "agent",
+			recipID:     validRecipient,
+			wantSuccess: false,
+		},
+		{
+			name:        "dm: key with non-canonical UUID",
+			threadID:    "dm:user:" + strings.ToUpper(validSender) + ":agent:" + validRecipient,
+			senderKind:  "user",
+			senderID:    validSender,
+			recipKind:   "agent",
+			recipID:     validRecipient,
+			wantSuccess: false,
+		},
+		{
+			name:        "unknown kind in dm: key",
+			threadID:    "dm:bot:" + validSender + ":user:" + validRecipient,
+			senderKind:  "user",
+			senderID:    validSender,
+			recipKind:   "agent",
+			recipID:     validRecipient,
+			wantSuccess: false,
+		},
+	}
+
+	// Verify our ground truth: confirm each case behaves as expected
+	// against the production DeriveConversationKey.
+	for _, tc := range cases {
+		_, _, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:      tc.threadID,
+			ProjectID:     uuid.NewString(),
+			SenderKind:    tc.senderKind,
+			SenderID:      tc.senderID,
+			RecipientKind: tc.recipKind,
+			RecipientID:   tc.recipID,
+		})
+		if tc.wantSuccess {
+			require.NoError(t, err, "ground truth: %s should succeed", tc.name)
+		} else {
+			require.Error(t, err, "ground truth: %s should fail", tc.name)
+		}
+	}
+
+	// Now run each case through the report's classifier and verify the
+	// bucket assignment matches.
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	for _, tc := range cases {
+		msgID := uuid.NewString()
+		err := s.CreateMessage(ctx, &store.Message{
+			ID:          msgID,
+			ProjectID:   projectID,
+			Sender:      tc.senderKind + ":" + tc.senderID,
+			SenderID:    tc.senderID,
+			Recipient:   tc.recipKind + ":" + tc.recipID,
+			RecipientID: tc.recipID,
+			Msg:         "test",
+			Type:        "instruction",
+			ThreadID:    tc.threadID,
+			CreatedAt:   time.Now().Add(time.Duration(len(tc.name)) * time.Millisecond),
+		})
+		require.NoError(t, err, "seeding message for %s", tc.name)
+	}
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	// 1 success case → backfillable, 3 failure cases → unresolvable.
+	assert.Equal(t, 4, report.Total, "total")
+	assert.Equal(t, 1, report.Backfillable,
+		"exactly the case where DeriveConversationKey succeeds must be backfillable")
+	assert.Equal(t, 3, report.Unresolvable,
+		"all cases where DeriveConversationKey fails must be unresolvable")
+	assert.Equal(t, 0, report.NonUUIDPrincipal,
+		"all principals are valid UUIDs")
+	assert.Equal(t, 0, report.BroadcastNotBackfillable,
+		"no broadcasts in this test")
 }

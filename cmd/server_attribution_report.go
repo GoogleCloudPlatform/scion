@@ -73,6 +73,16 @@ type AttributionReport struct {
 	// slugs). Backfill cannot ever repair these rows because the information
 	// needed to derive a DM key does not exist in the database.
 	NonUUIDPrincipal int
+	// BroadcastNotBackfillable is the count of unattributed messages with
+	// Broadcasted=true. The backfill service (backfill.go:127) skips
+	// broadcasts, so these will never be attributed by 'scion server
+	// backfill'. Under the read switch, broadcasts are read through the same
+	// ListMessages path as all other messages — all three read-switch sites
+	// (handlers_messages.go:70, :259, handlers_chat_v2.go:1782) scope by
+	// ConversationID with no broadcast-specific alternative path — so a
+	// broadcast with NULL conversation_id becomes invisible at the flip.
+	// No existing tool repairs them. Flip-blocking.
+	BroadcastNotBackfillable int
 	// Unresolvable is the count of unattributed messages whose principal IDs
 	// are valid UUIDs but key derivation still fails or the row lacks the
 	// inputs to derive at all.
@@ -158,12 +168,45 @@ func runServerAttributionReport(cmd *cobra.Command, _ []string) error {
 		mergeAttributionReport(total, result)
 	}
 
+	// Reconciliation check: on all-projects runs, compare the report's
+	// unattributed total against the global CountUnbackfilledMessages. A
+	// mismatch means the report cannot see some rows (e.g. messages not
+	// associated with any project). The report's job here is to say
+	// "there are N rows I cannot see," not to find them.
+	var reconciliationMismatch bool
+	var globalUnbackfilled, reportUnattributed int
+	if attrReportProject == "" {
+		reportUnattributed = total.Backfillable + total.BroadcastNotBackfillable +
+			total.NonUUIDPrincipal + total.Unresolvable
+		var err error
+		globalUnbackfilled, err = s.CountUnbackfilledMessages(ctx, "")
+		if err != nil {
+			return fmt.Errorf("counting global unbackfilled messages: %w", err)
+		}
+		if globalUnbackfilled != reportUnattributed {
+			reconciliationMismatch = true
+		}
+	}
+
 	// Print report.
 	projectLabel := attrReportProject
 	if projectLabel == "" {
 		projectLabel = fmt.Sprintf("ALL (%d projects)", len(projectIDs))
 	}
 	printAttributionReport(out, total, projectLabel)
+
+	// Print reconciliation result after the main report.
+	if attrReportProject == "" {
+		if reconciliationMismatch {
+			_, _ = fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out, "*** RECONCILIATION MISMATCH — BLOCKS FLIP ***")
+			_, _ = fmt.Fprintf(out, "  report unattributed total:   %d\n", reportUnattributed)
+			_, _ = fmt.Fprintf(out, "  global unbackfilled count:   %d\n", globalUnbackfilled)
+			_, _ = fmt.Fprintf(out, "  delta (unseen by report):    %d\n", globalUnbackfilled-reportUnattributed)
+			_, _ = fmt.Fprintln(out, "  The report cannot account for all unattributed rows.")
+			_, _ = fmt.Fprintln(out, "  The conversation read switch MUST NOT be enabled until this is investigated.")
+		}
+	}
 
 	return nil
 }
@@ -216,6 +259,15 @@ func runAttributionReportForProject(ctx context.Context, s store.Store, projectI
 // classifyUnattributedMessage determines which unattributed bucket a message
 // belongs to, using the production key-derivation functions.
 func classifyUnattributedMessage(report *AttributionReport, msg *store.Message, projectID string) {
+	// Broadcasts are skipped by the backfill service (backfill.go:127),
+	// so they will never gain a conversation_id through that tool.
+	// Under the read switch they become invisible — no separate read path
+	// exists for broadcasts. Separate bucket, flip-blocking.
+	if msg.Broadcasted {
+		report.BroadcastNotBackfillable++
+		return
+	}
+
 	// Extract principal kind and ID, same as the backfill service.
 	senderKind, senderID := parsePrincipalForReport(msg.Sender, msg.SenderID)
 	recipientKind, recipientID := parsePrincipalForReport(msg.Recipient, msg.RecipientID)
@@ -309,6 +361,7 @@ func mergeAttributionReport(dst, src *AttributionReport) {
 	dst.Total += src.Total
 	dst.Attributed += src.Attributed
 	dst.Backfillable += src.Backfillable
+	dst.BroadcastNotBackfillable += src.BroadcastNotBackfillable
 	dst.NonUUIDPrincipal += src.NonUUIDPrincipal
 	dst.Unresolvable += src.Unresolvable
 	dst.NonUUIDExamples = append(dst.NonUUIDExamples, src.NonUUIDExamples...)
@@ -328,6 +381,11 @@ func printAttributionReport(out io.Writer, r *AttributionReport, projectLabel st
 		_, _ = fmt.Fprint(out, "   -> run 'scion server backfill --execute'")
 	}
 	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  unattributed — broadcast              %d", r.BroadcastNotBackfillable)
+	if r.BroadcastNotBackfillable > 0 {
+		_, _ = fmt.Fprint(out, "   -> BLOCKS FLIP (backfill skips broadcasts)")
+	}
+	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintf(out, "  unattributed — non-UUID principal     %d", r.NonUUIDPrincipal)
 	if r.NonUUIDPrincipal > 0 {
 		_, _ = fmt.Fprint(out, "   -> BLOCKS FLIP (DEF-32)")
@@ -340,9 +398,13 @@ func printAttributionReport(out io.Writer, r *AttributionReport, projectLabel st
 	_, _ = fmt.Fprintln(out)
 
 	// Flip-blocking summary.
-	if r.NonUUIDPrincipal > 0 || r.Unresolvable > 0 {
+	if r.BroadcastNotBackfillable > 0 || r.NonUUIDPrincipal > 0 || r.Unresolvable > 0 {
 		_, _ = fmt.Fprintln(out)
 		_, _ = fmt.Fprintln(out, "*** FLIP BLOCKED ***")
+		if r.BroadcastNotBackfillable > 0 {
+			_, _ = fmt.Fprintf(out, "  %d broadcast message(s) have no conversation_id and backfill skips broadcasts.\n", r.BroadcastNotBackfillable)
+			_, _ = fmt.Fprintln(out, "  No existing tool attributes them; they become invisible under the read switch.")
+		}
 		if r.NonUUIDPrincipal > 0 {
 			_, _ = fmt.Fprintf(out, "  %d message(s) have non-UUID principal IDs and cannot be attributed.\n", r.NonUUIDPrincipal)
 			_, _ = fmt.Fprintln(out, "  These are permanently unattributable without a federated identity link table (DEF-32).")
