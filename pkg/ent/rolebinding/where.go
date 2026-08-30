@@ -71,6 +71,16 @@ func ScopeID(v string) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldEQ(FieldScopeID, v))
 }
 
+// NotBefore applies equality check predicate on the "not_before" field. It's identical to NotBeforeEQ.
+func NotBefore(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldNotBefore, v))
+}
+
+// ExpiresAt applies equality check predicate on the "expires_at" field. It's identical to ExpiresAtEQ.
+func ExpiresAt(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldExpiresAt, v))
+}
+
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
 func CreatedBy(v string) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldEQ(FieldCreatedBy, v))
@@ -279,6 +289,106 @@ func ScopeIDEqualFold(v string) predicate.RoleBinding {
 // ScopeIDContainsFold applies the ContainsFold predicate on the "scope_id" field.
 func ScopeIDContainsFold(v string) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldContainsFold(FieldScopeID, v))
+}
+
+// NotBeforeEQ applies the EQ predicate on the "not_before" field.
+func NotBeforeEQ(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldNotBefore, v))
+}
+
+// NotBeforeNEQ applies the NEQ predicate on the "not_before" field.
+func NotBeforeNEQ(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNEQ(FieldNotBefore, v))
+}
+
+// NotBeforeIn applies the In predicate on the "not_before" field.
+func NotBeforeIn(vs ...time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIn(FieldNotBefore, vs...))
+}
+
+// NotBeforeNotIn applies the NotIn predicate on the "not_before" field.
+func NotBeforeNotIn(vs ...time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotIn(FieldNotBefore, vs...))
+}
+
+// NotBeforeGT applies the GT predicate on the "not_before" field.
+func NotBeforeGT(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGT(FieldNotBefore, v))
+}
+
+// NotBeforeGTE applies the GTE predicate on the "not_before" field.
+func NotBeforeGTE(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGTE(FieldNotBefore, v))
+}
+
+// NotBeforeLT applies the LT predicate on the "not_before" field.
+func NotBeforeLT(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLT(FieldNotBefore, v))
+}
+
+// NotBeforeLTE applies the LTE predicate on the "not_before" field.
+func NotBeforeLTE(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLTE(FieldNotBefore, v))
+}
+
+// NotBeforeIsNil applies the IsNil predicate on the "not_before" field.
+func NotBeforeIsNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIsNull(FieldNotBefore))
+}
+
+// NotBeforeNotNil applies the NotNil predicate on the "not_before" field.
+func NotBeforeNotNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotNull(FieldNotBefore))
+}
+
+// ExpiresAtEQ applies the EQ predicate on the "expires_at" field.
+func ExpiresAtEQ(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldExpiresAt, v))
+}
+
+// ExpiresAtNEQ applies the NEQ predicate on the "expires_at" field.
+func ExpiresAtNEQ(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNEQ(FieldExpiresAt, v))
+}
+
+// ExpiresAtIn applies the In predicate on the "expires_at" field.
+func ExpiresAtIn(vs ...time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIn(FieldExpiresAt, vs...))
+}
+
+// ExpiresAtNotIn applies the NotIn predicate on the "expires_at" field.
+func ExpiresAtNotIn(vs ...time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotIn(FieldExpiresAt, vs...))
+}
+
+// ExpiresAtGT applies the GT predicate on the "expires_at" field.
+func ExpiresAtGT(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGT(FieldExpiresAt, v))
+}
+
+// ExpiresAtGTE applies the GTE predicate on the "expires_at" field.
+func ExpiresAtGTE(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGTE(FieldExpiresAt, v))
+}
+
+// ExpiresAtLT applies the LT predicate on the "expires_at" field.
+func ExpiresAtLT(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLT(FieldExpiresAt, v))
+}
+
+// ExpiresAtLTE applies the LTE predicate on the "expires_at" field.
+func ExpiresAtLTE(v time.Time) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLTE(FieldExpiresAt, v))
+}
+
+// ExpiresAtIsNil applies the IsNil predicate on the "expires_at" field.
+func ExpiresAtIsNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIsNull(FieldExpiresAt))
+}
+
+// ExpiresAtNotNil applies the NotNil predicate on the "expires_at" field.
+func ExpiresAtNotNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotNull(FieldExpiresAt))
 }
 
 // CreatedByEQ applies the EQ predicate on the "created_by" field.

@@ -41153,6 +41153,8 @@ type RoleBindingMutation struct {
 	principal_id           *string
 	scope_type             *rolebinding.ScopeType
 	scope_id               *string
+	not_before             *time.Time
+	expires_at             *time.Time
 	created_by             *string
 	created                *time.Time
 	clearedFields          map[string]struct{}
@@ -41460,6 +41462,104 @@ func (m *RoleBindingMutation) ResetScopeID() {
 	m.scope_id = nil
 }
 
+// SetNotBefore sets the "not_before" field.
+func (m *RoleBindingMutation) SetNotBefore(t time.Time) {
+	m.not_before = &t
+}
+
+// NotBefore returns the value of the "not_before" field in the mutation.
+func (m *RoleBindingMutation) NotBefore() (r time.Time, exists bool) {
+	v := m.not_before
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotBefore returns the old "not_before" field's value of the RoleBinding entity.
+// If the RoleBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleBindingMutation) OldNotBefore(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotBefore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotBefore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotBefore: %w", err)
+	}
+	return oldValue.NotBefore, nil
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (m *RoleBindingMutation) ClearNotBefore() {
+	m.not_before = nil
+	m.clearedFields[rolebinding.FieldNotBefore] = struct{}{}
+}
+
+// NotBeforeCleared returns if the "not_before" field was cleared in this mutation.
+func (m *RoleBindingMutation) NotBeforeCleared() bool {
+	_, ok := m.clearedFields[rolebinding.FieldNotBefore]
+	return ok
+}
+
+// ResetNotBefore resets all changes to the "not_before" field.
+func (m *RoleBindingMutation) ResetNotBefore() {
+	m.not_before = nil
+	delete(m.clearedFields, rolebinding.FieldNotBefore)
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *RoleBindingMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *RoleBindingMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the RoleBinding entity.
+// If the RoleBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleBindingMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *RoleBindingMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[rolebinding.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *RoleBindingMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[rolebinding.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *RoleBindingMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, rolebinding.FieldExpiresAt)
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (m *RoleBindingMutation) SetCreatedBy(s string) {
 	m.created_by = &s
@@ -41606,7 +41706,7 @@ func (m *RoleBindingMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleBindingMutation) Fields() []string {
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 9)
 	if m.role_definition != nil {
 		fields = append(fields, rolebinding.FieldRoleDefinitionID)
 	}
@@ -41621,6 +41721,12 @@ func (m *RoleBindingMutation) Fields() []string {
 	}
 	if m.scope_id != nil {
 		fields = append(fields, rolebinding.FieldScopeID)
+	}
+	if m.not_before != nil {
+		fields = append(fields, rolebinding.FieldNotBefore)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, rolebinding.FieldExpiresAt)
 	}
 	if m.created_by != nil {
 		fields = append(fields, rolebinding.FieldCreatedBy)
@@ -41646,6 +41752,10 @@ func (m *RoleBindingMutation) Field(name string) (ent.Value, bool) {
 		return m.ScopeType()
 	case rolebinding.FieldScopeID:
 		return m.ScopeID()
+	case rolebinding.FieldNotBefore:
+		return m.NotBefore()
+	case rolebinding.FieldExpiresAt:
+		return m.ExpiresAt()
 	case rolebinding.FieldCreatedBy:
 		return m.CreatedBy()
 	case rolebinding.FieldCreated:
@@ -41669,6 +41779,10 @@ func (m *RoleBindingMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldScopeType(ctx)
 	case rolebinding.FieldScopeID:
 		return m.OldScopeID(ctx)
+	case rolebinding.FieldNotBefore:
+		return m.OldNotBefore(ctx)
+	case rolebinding.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
 	case rolebinding.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
 	case rolebinding.FieldCreated:
@@ -41717,6 +41831,20 @@ func (m *RoleBindingMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetScopeID(v)
 		return nil
+	case rolebinding.FieldNotBefore:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotBefore(v)
+		return nil
+	case rolebinding.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
 	case rolebinding.FieldCreatedBy:
 		v, ok := value.(string)
 		if !ok {
@@ -41764,6 +41892,12 @@ func (m *RoleBindingMutation) ClearedFields() []string {
 	if m.FieldCleared(rolebinding.FieldRoleDefinitionID) {
 		fields = append(fields, rolebinding.FieldRoleDefinitionID)
 	}
+	if m.FieldCleared(rolebinding.FieldNotBefore) {
+		fields = append(fields, rolebinding.FieldNotBefore)
+	}
+	if m.FieldCleared(rolebinding.FieldExpiresAt) {
+		fields = append(fields, rolebinding.FieldExpiresAt)
+	}
 	if m.FieldCleared(rolebinding.FieldCreatedBy) {
 		fields = append(fields, rolebinding.FieldCreatedBy)
 	}
@@ -41783,6 +41917,12 @@ func (m *RoleBindingMutation) ClearField(name string) error {
 	switch name {
 	case rolebinding.FieldRoleDefinitionID:
 		m.ClearRoleDefinitionID()
+		return nil
+	case rolebinding.FieldNotBefore:
+		m.ClearNotBefore()
+		return nil
+	case rolebinding.FieldExpiresAt:
+		m.ClearExpiresAt()
 		return nil
 	case rolebinding.FieldCreatedBy:
 		m.ClearCreatedBy()
@@ -41809,6 +41949,12 @@ func (m *RoleBindingMutation) ResetField(name string) error {
 		return nil
 	case rolebinding.FieldScopeID:
 		m.ResetScopeID()
+		return nil
+	case rolebinding.FieldNotBefore:
+		m.ResetNotBefore()
+		return nil
+	case rolebinding.FieldExpiresAt:
+		m.ResetExpiresAt()
 		return nil
 	case rolebinding.FieldCreatedBy:
 		m.ResetCreatedBy()

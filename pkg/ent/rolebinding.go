@@ -29,6 +29,10 @@ type RoleBinding struct {
 	ScopeType rolebinding.ScopeType `json:"scope_type,omitempty"`
 	// ScopeID holds the value of the "scope_id" field.
 	ScopeID string `json:"scope_id,omitempty"`
+	// NotBefore holds the value of the "not_before" field.
+	NotBefore *time.Time `json:"not_before,omitempty"`
+	// ExpiresAt holds the value of the "expires_at" field.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// Created holds the value of the "created" field.
@@ -68,7 +72,7 @@ func (*RoleBinding) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case rolebinding.FieldPrincipalType, rolebinding.FieldPrincipalID, rolebinding.FieldScopeType, rolebinding.FieldScopeID, rolebinding.FieldCreatedBy:
 			values[i] = new(sql.NullString)
-		case rolebinding.FieldCreated:
+		case rolebinding.FieldNotBefore, rolebinding.FieldExpiresAt, rolebinding.FieldCreated:
 			values[i] = new(sql.NullTime)
 		case rolebinding.FieldID:
 			values[i] = new(uuid.UUID)
@@ -123,6 +127,20 @@ func (_m *RoleBinding) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field scope_id", values[i])
 			} else if value.Valid {
 				_m.ScopeID = value.String
+			}
+		case rolebinding.FieldNotBefore:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field not_before", values[i])
+			} else if value.Valid {
+				_m.NotBefore = new(time.Time)
+				*_m.NotBefore = value.Time
+			}
+		case rolebinding.FieldExpiresAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field expires_at", values[i])
+			} else if value.Valid {
+				_m.ExpiresAt = new(time.Time)
+				*_m.ExpiresAt = value.Time
 			}
 		case rolebinding.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -193,6 +211,16 @@ func (_m *RoleBinding) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("scope_id=")
 	builder.WriteString(_m.ScopeID)
+	builder.WriteString(", ")
+	if v := _m.NotBefore; v != nil {
+		builder.WriteString("not_before=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.ExpiresAt; v != nil {
+		builder.WriteString("expires_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)

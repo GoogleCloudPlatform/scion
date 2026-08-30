@@ -26,6 +26,10 @@ const (
 	FieldScopeType = "scope_type"
 	// FieldScopeID holds the string denoting the scope_id field in the database.
 	FieldScopeID = "scope_id"
+	// FieldNotBefore holds the string denoting the not_before field in the database.
+	FieldNotBefore = "not_before"
+	// FieldExpiresAt holds the string denoting the expires_at field in the database.
+	FieldExpiresAt = "expires_at"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -51,6 +55,8 @@ var Columns = []string{
 	FieldPrincipalID,
 	FieldScopeType,
 	FieldScopeID,
+	FieldNotBefore,
+	FieldExpiresAt,
 	FieldCreatedBy,
 	FieldCreated,
 }
@@ -154,6 +160,16 @@ func ByScopeType(opts ...sql.OrderTermOption) OrderOption {
 // ByScopeID orders the results by the scope_id field.
 func ByScopeID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldScopeID, opts...).ToFunc()
+}
+
+// ByNotBefore orders the results by the not_before field.
+func ByNotBefore(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotBefore, opts...).ToFunc()
+}
+
+// ByExpiresAt orders the results by the expires_at field.
+func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.

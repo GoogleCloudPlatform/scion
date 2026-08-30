@@ -1243,7 +1243,7 @@ func init() {
 	// rolebinding.DefaultScopeID holds the default value on creation for the scope_id field.
 	rolebinding.DefaultScopeID = rolebindingDescScopeID.Default.(string)
 	// rolebindingDescCreated is the schema descriptor for created field.
-	rolebindingDescCreated := rolebindingFields[7].Descriptor()
+	rolebindingDescCreated := rolebindingFields[9].Descriptor()
 	// rolebinding.DefaultCreated holds the default value on creation for the created field.
 	rolebinding.DefaultCreated = rolebindingDescCreated.Default.(func() time.Time)
 	// rolebindingDescID is the schema descriptor for id field.

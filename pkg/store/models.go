@@ -2438,14 +2438,16 @@ type RoleDefinition struct {
 
 // RoleBinding connects a principal to a role definition, optionally scoped.
 type RoleBinding struct {
-	ID               string    `json:"id"`
-	RoleDefinitionID string    `json:"roleDefinitionId"`
-	PrincipalType    string    `json:"principalType"` // "user", "agent"
-	PrincipalID      string    `json:"principalId"`
-	ScopeType        string    `json:"scopeType"` // "system", "project"
-	ScopeID          string    `json:"scopeId"`   // "" for system, project ID for project
-	CreatedBy        string    `json:"createdBy"`
-	CreatedAt        time.Time `json:"createdAt"`
+	ID               string     `json:"id"`
+	RoleDefinitionID string     `json:"roleDefinitionId"`
+	PrincipalType    string     `json:"principalType"` // "user", "agent", "group"
+	PrincipalID      string     `json:"principalId"`
+	ScopeType        string     `json:"scopeType"`  // "system", "project"
+	ScopeID          string     `json:"scopeId"`    // "" for system, project ID for project
+	NotBefore        *time.Time `json:"notBefore"`  // Binding is inactive before this time (kernel evaluates)
+	ExpiresAt        *time.Time `json:"expiresAt"`  // Binding is inactive after this time (kernel evaluates)
+	CreatedBy        string     `json:"createdBy"`
+	CreatedAt        time.Time  `json:"createdAt"`
 }
 
 // ProjectMembership is a convenience view of role bindings scoped to a project.

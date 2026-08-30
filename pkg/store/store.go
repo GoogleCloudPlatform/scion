@@ -36,6 +36,14 @@ var (
 	// and the system reconciler; the F1.5 role-binding machinery must not be a
 	// second grant path.
 	ErrSuperAdminBindingRestricted = errors.New("super-admin role bindings can only be created by the system reconciler")
+
+	// ErrDirectUserOnly is returned when a role binding for a direct-user-only
+	// role (super-admin, project-owner) is attempted with a non-user principal.
+	ErrDirectUserOnly = errors.New("this role requires a direct user principal")
+
+	// ErrScopeMismatch is returned when a role binding's scope type does not
+	// match the role definition's scope type.
+	ErrScopeMismatch = errors.New("binding scope type does not match role definition scope type")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -1698,16 +1706,43 @@ type RoleStore interface {
 	// ListRoleBindingsForPrincipal returns all role bindings for a given principal.
 	ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*RoleBinding, error)
 
+	// ListRoleBindingsForPrincipals returns all role bindings matching any of the
+	// given principals, optionally filtered by scope types and scope IDs.
+	// This is the authorization hot-path query: it resolves bindings for the
+	// entire principal closure (direct user + all transitive groups) and applicable
+	// scopes (system + project) in ONE query.
+	//
+	// If scopeTypes is non-empty, only bindings with a matching scope_type are returned.
+	// If scopeIDs is non-empty, only bindings with a matching scope_id are returned.
+	// Both filters are optional; passing nil/empty returns all scopes.
+	ListRoleBindingsForPrincipals(ctx context.Context, principals []PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*RoleBinding, error)
+
 	// ListRoleBindingsForScope returns all role bindings for a given scope.
 	ListRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) ([]*RoleBinding, error)
 
 	// CreateRoleBinding creates a new role binding.
 	// Returns ErrAlreadyExists if the exact binding already exists.
+	//
+	// Validation enforced:
+	//   - RoleDefinitionID must reference a valid role definition
+	//   - Scope type must match the role definition's scope type
+	//   - PrincipalType must be one of user/agent/group
+	//   - super-admin and project-owner bindings are direct-user-only
+	//   - Duplicate (role, principal, scope) is rejected
 	CreateRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
 	DeleteRoleBinding(ctx context.Context, id string) error
+
+	// DeleteRoleBindingsForPrincipal deletes all role bindings where the given
+	// principal (type + ID) is the bound principal. Used for cascade delete
+	// when a group is deleted — no orphan bindings may remain.
+	DeleteRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) (int, error)
+
+	// DeleteRoleBindingsForScope deletes all role bindings scoped to the given
+	// scope type and ID. Used for cascade delete when a project is deleted.
+	DeleteRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) (int, error)
 
 	// UpdateRoleDefinition updates an existing role definition.
 	// Returns ErrNotFound if the role definition doesn't exist.

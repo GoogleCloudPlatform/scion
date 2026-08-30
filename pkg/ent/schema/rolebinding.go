@@ -48,6 +48,14 @@ func (RoleBinding) Fields() []ent.Field {
 			Values("system", "project"),
 		field.String("scope_id").
 			Default(""),
+		// Lifecycle fields: the store persists these but does NOT evaluate them.
+		// Activation evaluation is the kernel's job (AK1).
+		field.Time("not_before").
+			Optional().
+			Nillable(),
+		field.Time("expires_at").
+			Optional().
+			Nillable(),
 		field.String("created_by").
 			Optional(),
 		field.Time("created").
@@ -65,7 +73,9 @@ func (RoleBinding) Indexes() []ent.Index {
 		index.Fields("role_definition_id"),
 		// Find all bindings for a scope (e.g. a project)
 		index.Fields("scope_type", "scope_id"),
-		// Prevent duplicate bindings
+		// Prevent duplicate bindings (lifecycle fields are NOT part of the unique
+		// constraint — the same (role, principal, scope) tuple must be unique
+		// regardless of activation windows).
 		index.Fields("role_definition_id", "principal_type", "principal_id", "scope_type", "scope_id").Unique(),
 	}
 }

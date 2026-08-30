@@ -1412,6 +1412,8 @@ var (
 		{Name: "principal_id", Type: field.TypeString},
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "role_definition_id", Type: field.TypeUUID, Nullable: true},
@@ -1424,7 +1426,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "role_bindings_role_definitions_role_bindings",
-				Columns:    []*schema.Column{RoleBindingsColumns[7]},
+				Columns:    []*schema.Column{RoleBindingsColumns[9]},
 				RefColumns: []*schema.Column{RoleDefinitionsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -1438,7 +1440,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[7]},
+				Columns: []*schema.Column{RoleBindingsColumns[9]},
 			},
 			{
 				Name:    "rolebinding_scope_type_scope_id",
@@ -1448,7 +1450,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id_principal_type_principal_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{RoleBindingsColumns[7], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
+				Columns: []*schema.Column{RoleBindingsColumns[9], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 		},
 	}

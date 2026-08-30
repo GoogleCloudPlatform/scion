@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -56,6 +57,8 @@ func entRoleBindingToStore(rb *ent.RoleBinding) *store.RoleBinding {
 		PrincipalID:   rb.PrincipalID,
 		ScopeType:     string(rb.ScopeType),
 		ScopeID:       rb.ScopeID,
+		NotBefore:     rb.NotBefore,
+		ExpiresAt:     rb.ExpiresAt,
 		CreatedBy:     rb.CreatedBy,
 		CreatedAt:     rb.Created,
 	}
@@ -300,26 +303,57 @@ func (r *RoleStore) ListRoleBindingsForScope(ctx context.Context, scopeType, sco
 	return result, nil
 }
 
+// directUserOnlyRoles lists role names that require a direct user principal.
+// Group and agent principals are not allowed for these roles.
+var directUserOnlyRoles = map[string]bool{
+	store.SystemRoleSuperAdmin: true,
+	store.ProjectRoleOwner:     true,
+}
+
 // CreateRoleBinding creates a new role binding.
 //
-// Security invariant (D10): the super-admin role definition is bindable only
-// by the system reconciler (CreatedBy == store.SystemReconcileCreatedBy).
-// Any other caller receives ErrSuperAdminBindingRestricted. This guard lives
-// at the store level so that every code path — current and future — that
-// creates a role binding is covered.
+// Validation enforced:
+//   - RoleDefinitionID must reference a valid role definition
+//   - Scope type must match the role definition's scope type
+//   - PrincipalType must be one of user/agent/group
+//   - super-admin and project-owner bindings are direct-user-only
+//   - super-admin is reconciler-only (D10)
+//   - Duplicate (role, principal, scope) is rejected via unique index
+//   - Lifecycle fields (NotBefore, ExpiresAt) are stored but not evaluated
 func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	// Validate principal type.
+	switch rb.PrincipalType {
+	case store.RoleBindingPrincipalUser, store.RoleBindingPrincipalAgent, store.RoleBindingPrincipalGroup:
+		// valid
+	default:
+		return nil, fmt.Errorf("%w: invalid principal_type: %s", store.ErrInvalidInput, rb.PrincipalType)
+	}
+
 	rdUID, err := parseUUID(rb.RoleDefinitionID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid role_definition_id: %s", store.ErrInvalidInput, rb.RoleDefinitionID)
 	}
 
-	// D10 guard: refuse super-admin bindings from non-reconciler callers.
+	// Resolve the role definition — required for scope matching and privilege checks.
 	rd, err := r.client.RoleDefinition.Get(ctx, rdUID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving role definition for binding guard: %w", mapError(err))
 	}
+
+	// Scope type must match the role definition's scope type.
+	if rb.ScopeType != string(rd.ScopeType) {
+		return nil, fmt.Errorf("%w: role %q requires scope %q but got %q",
+			store.ErrScopeMismatch, rd.Name, string(rd.ScopeType), rb.ScopeType)
+	}
+
+	// D10 guard: refuse super-admin bindings from non-reconciler callers.
 	if rd.Name == store.SystemRoleSuperAdmin && !store.IsSuperAdminBindingAllowed(rb.CreatedBy) {
 		return nil, store.ErrSuperAdminBindingRestricted
+	}
+
+	// Direct-user-only guard: super-admin and project-owner reject non-user principals.
+	if directUserOnlyRoles[rd.Name] && rb.PrincipalType != store.RoleBindingPrincipalUser {
+		return nil, fmt.Errorf("%w: role %q is direct-user-only", store.ErrDirectUserOnly, rd.Name)
 	}
 
 	builder := r.client.RoleBinding.Create().
@@ -340,6 +374,14 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		builder.SetCreatedBy(rb.CreatedBy)
 	}
 
+	// Lifecycle fields — stored as-is; activation evaluation is the kernel's job.
+	if rb.NotBefore != nil {
+		builder.SetNotBefore(*rb.NotBefore)
+	}
+	if rb.ExpiresAt != nil {
+		builder.SetExpiresAt(*rb.ExpiresAt)
+	}
+
 	created, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -357,6 +399,85 @@ func (r *RoleStore) DeleteRoleBinding(ctx context.Context, id string) error {
 		return mapError(err)
 	}
 	return nil
+}
+
+// ListRoleBindingsForPrincipals returns all role bindings matching any of the
+// given principals, optionally filtered by scope type and scope ID.
+// This is the authorization hot-path query — it uses IN clauses to resolve
+// all bindings for the entire principal closure in a single query.
+func (r *RoleStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if len(principals) == 0 {
+		return nil, nil
+	}
+
+	// Build OR predicates for each principal in the closure.
+	principalPreds := make([]predicate.RoleBinding, 0, len(principals))
+	for _, p := range principals {
+		principalPreds = append(principalPreds, rolebinding.And(
+			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(p.Type)),
+			rolebinding.PrincipalIDEQ(p.ID),
+		))
+	}
+
+	query := r.client.RoleBinding.Query().
+		Where(rolebinding.Or(principalPreds...))
+
+	// Optional scope type filter.
+	if len(scopeTypes) > 0 {
+		stPreds := make([]rolebinding.ScopeType, 0, len(scopeTypes))
+		for _, st := range scopeTypes {
+			stPreds = append(stPreds, rolebinding.ScopeType(st))
+		}
+		query = query.Where(rolebinding.ScopeTypeIn(stPreds...))
+	}
+
+	// Optional scope ID filter.
+	if len(scopeIDs) > 0 {
+		query = query.Where(rolebinding.ScopeIDIn(scopeIDs...))
+	}
+
+	rbs, err := query.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]*store.RoleBinding, len(rbs))
+	for i, rb := range rbs {
+		result[i] = entRoleBindingToStore(rb)
+	}
+	return result, nil
+}
+
+// DeleteRoleBindingsForPrincipal deletes all role bindings where the given
+// principal is the bound principal. Returns the number of deleted bindings.
+// Used for cascade delete when a group is deleted.
+func (r *RoleStore) DeleteRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) (int, error) {
+	n, err := r.client.RoleBinding.Delete().
+		Where(
+			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(principalType)),
+			rolebinding.PrincipalIDEQ(principalID),
+		).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// DeleteRoleBindingsForScope deletes all role bindings scoped to the given
+// scope type and ID. Returns the number of deleted bindings.
+// Used for cascade delete when a project is deleted.
+func (r *RoleStore) DeleteRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) (int, error) {
+	n, err := r.client.RoleBinding.Delete().
+		Where(
+			rolebinding.ScopeTypeEQ(rolebinding.ScopeType(scopeType)),
+			rolebinding.ScopeIDEQ(scopeID),
+		).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }
 
 // GetProjectMembership returns the project membership for a user in a project.
