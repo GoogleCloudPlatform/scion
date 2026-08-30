@@ -240,7 +240,8 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		if rdErr != nil {
 			a.logger.Warn("failed to resolve role definition for group binding",
 				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-			continue
+			// Fail closed: an unresolvable role definition must deny, not skip.
+			return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
 		}
 		sk := scopeKey{scopeType: b.ScopeType, scopeID: b.ScopeID}
 		if permsByScope[sk] == nil {

@@ -294,12 +294,15 @@ func (s *GroupStore) DeleteGroup(ctx context.Context, id string) error {
 
 	// Delete role bindings where this group is the bound principal,
 	// preventing orphan bindings after group removal.
-	_, _ = s.client.RoleBinding.Delete().
+	_, err = s.client.RoleBinding.Delete().
 		Where(
 			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalTypeGroup),
 			rolebinding.PrincipalIDEQ(id),
 		).
 		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("deleting role bindings for group %s: %w", id, mapError(err))
+	}
 
 	err = s.client.Group.DeleteOneID(uid).Exec(ctx)
 	if err != nil {
