@@ -1245,19 +1245,7 @@ func TestHandleAuthAdminStatus_SuperAdmin(t *testing.T) {
 
 	// Super-admin should receive all permission IDs from the registry.
 	allIDs := allPermissionIDs()
-	if len(resp.Permissions) != len(allIDs) {
-		t.Errorf("expected %d permissions for super-admin, got %d", len(allIDs), len(resp.Permissions))
-	}
-	// Verify every registry permission is present in the response.
-	permSet := make(map[string]bool, len(resp.Permissions))
-	for _, p := range resp.Permissions {
-		permSet[p] = true
-	}
-	for _, id := range allIDs {
-		if !permSet[id] {
-			t.Errorf("super-admin permissions missing registry ID %q", id)
-		}
-	}
+	require.ElementsMatch(t, allIDs, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_HubAdmin(t *testing.T) {
@@ -1307,18 +1295,7 @@ func TestHandleAuthAdminStatus_HubAdmin(t *testing.T) {
 
 	// Hub-admin should have the curated hub-admin permission set.
 	expectedPerms := hubAdminPermissionIDs()
-	if len(resp.Permissions) != len(expectedPerms) {
-		t.Errorf("expected %d permissions for hub-admin, got %d", len(expectedPerms), len(resp.Permissions))
-	}
-	permSet := make(map[string]bool, len(resp.Permissions))
-	for _, p := range resp.Permissions {
-		permSet[p] = true
-	}
-	for _, id := range expectedPerms {
-		if !permSet[id] {
-			t.Errorf("hub-admin permissions missing expected ID %q", id)
-		}
-	}
+	require.ElementsMatch(t, expectedPerms, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PlainMember(t *testing.T) {
@@ -1415,33 +1392,14 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 	}
 
 	// Permissions should contain exactly the template permission IDs.
-	expectedPerms := map[string]bool{
-		"template.list":   true,
-		"template.read":   true,
-		"template.create": true,
-		"template.update": true,
-		"template.delete": true,
+	expectedPerms := []string{
+		"template.list",
+		"template.read",
+		"template.create",
+		"template.update",
+		"template.delete",
 	}
-	if len(resp.Permissions) != len(expectedPerms) {
-		t.Fatalf("expected %d permissions, got %d: %v", len(expectedPerms), len(resp.Permissions), resp.Permissions)
-	}
-	for _, p := range resp.Permissions {
-		if !expectedPerms[p] {
-			t.Errorf("unexpected permission %q in custom role response", p)
-		}
-	}
-	for p := range expectedPerms {
-		found := false
-		for _, rp := range resp.Permissions {
-			if rp == p {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("missing expected permission %q in custom role response", p)
-		}
-	}
+	require.ElementsMatch(t, expectedPerms, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PermissionsSerializedAsEmptyArray(t *testing.T) {

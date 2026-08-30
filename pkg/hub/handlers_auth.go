@@ -650,16 +650,19 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 			store.RoleScopeSystem, "",
 		)
 		if err != nil {
-			slog.Warn("failed to resolve effective permissions for admin-status",
+			slog.Error("failed to resolve effective permissions for admin-status",
 				"user_id", user.ID(), "error", err)
-		} else {
-			perms = effective
+			InternalError(w)
+			return
 		}
+		perms = effective
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.
 	if perms == nil {
 		perms = []string{}
+	} else {
+		sort.Strings(perms)
 	}
 
 	writeJSON(w, http.StatusOK, AdminStatusResponse{
