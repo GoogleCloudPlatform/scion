@@ -33,8 +33,9 @@ type BackfillConfig struct {
 	DryRun bool
 	// BatchSize is the page size for scanning messages (default 100).
 	BatchSize int
-	// Checkpoint is the ID of the last message processed in a previous run.
-	// When set, only messages created after that message are processed.
+	// Checkpoint is a pagination cursor from a previous run's LastCheckpoint.
+	// When set, the backfill resumes from this position in the message stream.
+	// This is an opaque string produced by ListMessages' cursor mechanism.
 	Checkpoint string
 	// ProjectID scopes the backfill to a single project.
 	ProjectID string
@@ -42,15 +43,18 @@ type BackfillConfig struct {
 
 // BackfillResult summarises what a backfill run did (or would do in dry-run).
 type BackfillResult struct {
-	TotalProcessed       int      `json:"totalProcessed"`
-	Attributed           int      `json:"attributed"`
-	Inferred             int      `json:"inferred"`
-	Skipped              int      `json:"skipped"`
-	ConversationsCreated int      `json:"conversationsCreated"`
-	HazardAEmailCount    int      `json:"hazardAEmailCount"`
-	HazardBSlugCount     int      `json:"hazardBSlugCount"`
-	LastCheckpoint       string   `json:"lastCheckpoint,omitempty"`
-	Errors               []string `json:"errors,omitempty"`
+	TotalProcessed       int `json:"totalProcessed"`
+	Attributed           int `json:"attributed"`
+	Inferred             int `json:"inferred"`
+	Skipped              int `json:"skipped"`
+	ConversationsCreated int `json:"conversationsCreated"`
+	HazardAEmailCount    int `json:"hazardAEmailCount"`
+	HazardBSlugCount     int `json:"hazardBSlugCount"`
+	// LastCheckpoint is the pagination cursor of the last completed page.
+	// Pass this value as BackfillConfig.Checkpoint to resume from this position.
+	// Empty when the backfill completed in a single page (no more data to process).
+	LastCheckpoint string   `json:"lastCheckpoint,omitempty"`
+	Errors         []string `json:"errors,omitempty"`
 }
 
 // conversationGroup collects messages that belong to the same conversation.
@@ -101,19 +105,10 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 
 	result := &BackfillResult{}
 
-	// If a checkpoint is provided, resolve it to a time boundary.
-	filter := store.MessageFilter{ProjectID: cfg.ProjectID}
-	if cfg.Checkpoint != "" {
-		cpMsg, err := s.msgStore.GetMessage(ctx, cfg.Checkpoint)
-		if err != nil {
-			return nil, fmt.Errorf("resolving checkpoint message %s: %w", cfg.Checkpoint, err)
-		}
-		filter.After = cpMsg.CreatedAt
-	}
-
 	// Phase 1: Scan all messages and group by conversation key.
+	filter := store.MessageFilter{ProjectID: cfg.ProjectID}
 	groups := make(map[string]*conversationGroup)
-	cursor := ""
+	cursor := cfg.Checkpoint // empty string = start from beginning; cursor string = resume
 
 	for {
 		page, err := s.msgStore.ListMessages(ctx, filter, store.ListOptions{
@@ -140,9 +135,6 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 				continue
 			}
 
-			// Track the last message we looked at for checkpointing.
-			result.LastCheckpoint = msg.ID
-
 			g := s.groupForMessage(msg, cfg.ProjectID, groups)
 			if g == nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("message %s: key derivation failed", msg.ID))
@@ -155,6 +147,7 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 			break
 		}
 		cursor = page.NextCursor
+		result.LastCheckpoint = cursor
 	}
 
 	// Phase 2: Resolve agent references and determine drift state for groups.
