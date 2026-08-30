@@ -85,7 +85,7 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 		// isolation in the dispatcher. If we reach here, those passed.
 		return true
 
-	case "user", "dev":
+	case "user", "dev", "federated_user":
 		userIdent, ok := identity.(UserIdentity)
 		if !ok {
 			logAuthzDenial(r, identity, resource, action, "invalid user identity")
@@ -158,6 +158,8 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	// Dispatch to handler — method filtering is done in the authorization
+	// block above; only valid methods reach this point.
 	if eventPath == "" {
 		switch r.Method {
 		case http.MethodGet:

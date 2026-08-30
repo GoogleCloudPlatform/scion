@@ -899,6 +899,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	// See projectAssignPolicyName in seed.go for why it is project-scoped and
 	// what reach it preserves.
 	ensureProjectAssignPolicy(ctx, s.store, project, membersGroup.ID)
+	ensureProjectScheduledEventPolicy(ctx, s.store, project, membersGroup.ID)
 }
 
 // ensureProjectMemberReadPolicy creates or ensures a project-scoped read+list

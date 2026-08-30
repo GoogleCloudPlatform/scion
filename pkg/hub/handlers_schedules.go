@@ -83,6 +83,10 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		}
 	}
 
+	// Parse schedule ID and optional sub-action once, reused for both
+	// authorization and dispatch below.
+	pathParts := strings.SplitN(schedulePath, "/", 2)
+
 	// Determine the authorization action from method and path.
 	var authzAction Action
 	if schedulePath == "" {
@@ -96,10 +100,9 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 			return
 		}
 	} else {
-		parts := strings.SplitN(schedulePath, "/", 2)
 		subAction := ""
-		if len(parts) > 1 {
-			subAction = parts[1]
+		if len(pathParts) > 1 {
+			subAction = pathParts[1]
 		}
 
 		switch subAction {
@@ -138,6 +141,8 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 
+	// Dispatch to handler — method filtering is done in the authorization
+	// block above; only valid methods reach this point.
 	if schedulePath == "" {
 		switch r.Method {
 		case http.MethodGet:
@@ -148,12 +153,10 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 
-	// Parse schedule ID and optional action from path
-	parts := strings.SplitN(schedulePath, "/", 2)
-	scheduleID := parts[0]
+	scheduleID := pathParts[0]
 	routeAction := ""
-	if len(parts) > 1 {
-		routeAction = parts[1]
+	if len(pathParts) > 1 {
+		routeAction = pathParts[1]
 	}
 
 	switch routeAction {

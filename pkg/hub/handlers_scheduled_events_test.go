@@ -511,6 +511,76 @@ func TestScheduledEvent_ProjectOwnerAllowed(t *testing.T) {
 	})
 }
 
+func TestScheduledEvent_FederatedUserAllowed(t *testing.T) {
+	srv, s, projectID := setupScheduledEventTest(t)
+	ctx := context.Background()
+
+	// Create a test identity that returns type "federated_user" and
+	// implements UserIdentity with a UUID ID. This verifies that the
+	// "federated_user" case in authorizeScheduledEventAccess reaches the
+	// CheckAccess path instead of falling to the default deny.
+	//
+	// We use a UUID-based ID because the store requires UUIDs for user
+	// records. A real FederatedUserIdentity uses "issuer:subject" as ID,
+	// but the authorization code path under test only checks identity.Type()
+	// and the UserIdentity type assertion — both of which this test identity
+	// exercises faithfully.
+	fedUserID := tid("sched-evt-fed-user")
+	fedUser := &federatedTestIdentity{
+		id:          fedUserID,
+		email:       "fedsched@example.com",
+		displayName: "Fed User",
+		role:        "member",
+	}
+
+	// Register a store user so authz group/membership lookups succeed.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          fedUserID,
+		Email:       fedUser.Email(),
+		DisplayName: fedUser.DisplayName(),
+		Role:        "member",
+		Status:      "active",
+	}))
+
+	// Set up project membership infrastructure and owner role binding.
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, fedUserID))
+
+	t.Run("list allowed", func(t *testing.T) {
+		rec := doScheduledEventUserRequest(t, srv, fedUser, http.MethodGet, projectID, "", nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("create allowed", func(t *testing.T) {
+		req := CreateScheduledEventRequest{
+			EventType: "message",
+			FireIn:    "30m",
+			AgentName: "test-agent",
+			Message:   "Hello from federated user",
+		}
+		rec := doScheduledEventUserRequest(t, srv, fedUser, http.MethodPost, projectID, "", req)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+	})
+}
+
+// federatedTestIdentity implements UserIdentity with Type() = "federated_user"
+// and a UUID-based ID, enabling end-to-end authorization tests through the
+// store layer which requires UUID user IDs.
+type federatedTestIdentity struct {
+	id          string
+	email       string
+	displayName string
+	role        string
+}
+
+func (f *federatedTestIdentity) ID() string          { return f.id }
+func (f *federatedTestIdentity) Type() string        { return "federated_user" }
+func (f *federatedTestIdentity) Email() string       { return f.email }
+func (f *federatedTestIdentity) DisplayName() string { return f.displayName }
+func (f *federatedTestIdentity) Role() string        { return f.role }
+
 func TestScheduledEvent_UnknownIdentityTypeDenied(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
 
