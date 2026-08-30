@@ -831,9 +831,11 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 			if lookupErr != nil {
 				s.projectsLogger().Warn("failed to look up existing project members group by slug",
 					"project_id", project.ID, "slug", membersSlug, "error", lookupErr.Error())
+				return
 			} else if !isSystemProjectMembersGroup(existing, project.ID) {
 				s.projectsLogger().Warn("refusing to adopt colliding project members group",
 					"project_id", project.ID, "slug", membersSlug, "group", existing.ID)
+				return
 			} else {
 				membersGroup = existing
 				// Update the owner in case it changed.

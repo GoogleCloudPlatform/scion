@@ -617,7 +617,12 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 	// AC1 TOCTOU pattern accepted elsewhere in the authorization layer.
 	if binding.ScopeType == store.RoleScopeProject && binding.PrincipalType == store.RoleBindingPrincipalUser {
 		roleDef, rdErr := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-		if rdErr == nil && binding.RoleDefinitionID == roleDef.ID {
+		if rdErr != nil {
+			slog.Error("last-owner check: failed to look up project-owner role definition", "error", rdErr)
+			writeErrorFromErr(w, rdErr, "")
+			return
+		}
+		if binding.RoleDefinitionID == roleDef.ID {
 			ownerCount, countErr := s.countDirectOwnerBindings(ctx, binding.ScopeID)
 			if countErr != nil {
 				writeErrorFromErr(w, countErr, "")
