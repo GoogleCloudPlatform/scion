@@ -450,7 +450,15 @@ func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
 	}
 	for _, sd := range sharedDirs {
 		sdPath := filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", sd.Name)
-		mounts = append(mounts, fmt.Sprintf("type=bind,source=%s,destination=%s", sdPath, sdPath))
+		mountDst := fmt.Sprintf("/scion-volumes/%s", sd.Name)
+		if sd.InWorkspace {
+			mountDst = filepath.Join(sandboxWorkspace, ".scion-volumes", sd.Name)
+		}
+		spec := fmt.Sprintf("type=bind,source=%s,destination=%s", sdPath, mountDst)
+		if sd.ReadOnly {
+			spec += ",readonly"
+		}
+		mounts = append(mounts, spec)
 	}
 	return mounts
 }
