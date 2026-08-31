@@ -315,20 +315,10 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		workspace: filepath.Join(rootDir, "agents", slug, "workspace"),
 	}
 
-	// Create all directories and chown them to the sandbox user.
-	// The launcher runs as root on Cloud Run, so directories default to
-	// root:root. The sandbox process drops to sandboxUID:sandboxGID via
-	// sciontool init, and needs these directories writable from the start
-	// (they are bind-mounted into the sandbox). Chowning here also
-	// naturally resolves /workspace writability: previously the workspace
-	// was root-owned and the sandbox ran as root; now both are scion-owned.
+	// Create agent home and workspace directories.
 	for _, d := range []string{p.agentHome, p.workspace} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return p, fmt.Errorf("mkdir %s: %w", d, err)
-		}
-		if err := os.Chown(d, sandboxUID, sandboxGID); err != nil {
-			runtimeLog.Warn("failed to chown directory to sandbox user",
-				"dir", d, "uid", sandboxUID, "gid", sandboxGID, "error", err)
 		}
 	}
 
@@ -370,6 +360,34 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 			if err := os.MkdirAll(iwPath, 0755); err != nil {
 				runtimeLog.Warn("failed to create in-workspace shared dir",
 					"name", sd.Name, "path", iwPath, "error", err)
+			}
+		}
+	}
+
+	// Recursively chown agent home and workspace to the sandbox user.
+	// This runs AFTER all file setup (directory creation, relocation,
+	// workspace copy) so that every file — including those created by
+	// relocateToScion and copyDirContents — is owned by the sandbox user.
+	//
+	// Guard: only chown when running as root (Cloud Run). In non-root
+	// environments (local dev, CI) os.Chown fails with EPERM, so skip it.
+	//
+	// Lchown is used instead of Chown to avoid following symlinks: if a
+	// relocated directory contains symlinks, we change the link's ownership
+	// rather than the target's (which may be outside our mount).
+	if os.Getuid() == 0 {
+		for _, d := range []string{p.agentHome, p.workspace} {
+			if walkErr := filepath.WalkDir(d, func(path string, entry fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if chownErr := os.Lchown(path, sandboxUID, sandboxGID); chownErr != nil {
+					runtimeLog.Warn("failed to chown path to sandbox user",
+						"path", path, "uid", sandboxUID, "gid", sandboxGID, "error", chownErr)
+				}
+				return nil
+			}); walkErr != nil {
+				runtimeLog.Warn("failed to walk directory for chown", "dir", d, "error", walkErr)
 			}
 		}
 	}

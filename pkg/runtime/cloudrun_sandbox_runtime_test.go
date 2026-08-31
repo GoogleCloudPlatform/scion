@@ -1117,7 +1117,8 @@ func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
 }
 
 // TestPrepareScionLayout_ChownsDirectories verifies that prepareScionLayout
-// chowns agent home and workspace to sandboxUID:sandboxGID.
+// recursively chowns agent home and workspace to sandboxUID:sandboxGID,
+// including files created during relocation and workspace copy.
 // This test only runs as root (like on Cloud Run) because chown requires
 // CAP_CHOWN.
 func TestPrepareScionLayout_ChownsDirectories(t *testing.T) {
@@ -1129,22 +1130,69 @@ func TestPrepareScionLayout_ChownsDirectories(t *testing.T) {
 	}
 
 	rootDir := t.TempDir()
-	paths, err := prepareScionLayout(rootDir, "chown-agent", RunConfig{})
+
+	// Create a HomeDir with nested content to verify recursive chown.
+	homeDir := t.TempDir()
+	subDir := filepath.Join(homeDir, "subdir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{HomeDir: homeDir}
+	paths, err := prepareScionLayout(rootDir, "chown-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
 
-	for _, dir := range []string{paths.agentHome, paths.workspace} {
-		info, statErr := os.Stat(dir)
+	// Verify recursive chown: check the directory, a top-level file,
+	// and a nested file are all owned by sandboxUID:sandboxGID.
+	checkPaths := []string{
+		paths.agentHome,
+		filepath.Join(paths.agentHome, "agent-info.json"),
+		filepath.Join(paths.agentHome, "subdir"),
+		filepath.Join(paths.agentHome, "subdir", "nested.txt"),
+		paths.workspace,
+	}
+	for _, p := range checkPaths {
+		info, statErr := os.Lstat(p)
 		if statErr != nil {
-			t.Fatalf("stat %s: %v", dir, statErr)
+			t.Fatalf("lstat %s: %v", p, statErr)
 		}
 		stat := info.Sys().(*syscall.Stat_t)
 		if int(stat.Uid) != sandboxUID {
-			t.Errorf("dir %s owned by UID %d, want %d", dir, stat.Uid, sandboxUID)
+			t.Errorf("path %s owned by UID %d, want %d", p, stat.Uid, sandboxUID)
 		}
 		if int(stat.Gid) != sandboxGID {
-			t.Errorf("dir %s owned by GID %d, want %d", dir, stat.Gid, sandboxGID)
+			t.Errorf("path %s owned by GID %d, want %d", p, stat.Gid, sandboxGID)
+		}
+	}
+}
+
+// TestPrepareScionLayout_SkipsChownNonRoot verifies that prepareScionLayout
+// does NOT call os.Chown when not running as root, preventing EPERM errors
+// in non-root environments (local dev, CI).
+func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("this test verifies non-root behavior; skipping when running as root")
+	}
+
+	rootDir := t.TempDir()
+	paths, err := prepareScionLayout(rootDir, "nonroot-agent", RunConfig{})
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// In non-root mode, directories should still be created successfully.
+	// The test passes if no EPERM error was returned (chown was skipped).
+	for _, dir := range []string{paths.agentHome, paths.workspace} {
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			t.Errorf("directory not created: %s", dir)
 		}
 	}
 }
