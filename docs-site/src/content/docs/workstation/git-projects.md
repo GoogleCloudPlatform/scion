@@ -268,8 +268,10 @@ scion hub project create https://github.com/acme/backend.git --branch develop
 
 ### Agent needs full git history
 
-Shallow clones (`depth=1`) are used by default for fast startup. If an agent needs full history for operations like `git log` or `git blame`, it can fetch the rest from inside its session:
+Shallow clones (`depth=1`) are used by default for fast startup. 
 
-```bash
-git fetch --unshallow
-```
+- **Full Clones on Startup:** If an agent needs full history for operations like `git log` or `git blame` from the start, you can request a complete, non-shallow clone by configuring a clone depth of `0` in your project or agent configuration (`depth: 0` or environment variable `SCION_GIT_DEPTH=0`). The underlying `GitCloneConfig` API treats a depth of `0` as an explicit request for a full clone, while omission/nil continues to default to shallow depth `1`.
+- **Unshallowing Later:** Alternatively, if an agent has a shallow clone, it can unshallow itself later inside its session by running:
+  ```bash
+  git fetch --unshallow
+  ```

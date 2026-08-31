@@ -88,6 +88,7 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /limits/:id`, `PUT /limits/:id`: Inspect or update a Limit Definition.
 - `GET /entitlements/:id`: Inspect an Entitlement Binding.
 - `GET /gcp-quota`: View GCP quota status.
+- `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
 
 The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
 

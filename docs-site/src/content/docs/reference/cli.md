@@ -493,6 +493,16 @@ Manages Scion server components (Hub and Broker).
         - `--db <string>`: Database driver/connection.
         - `--dev-auth`: Enable dev-auth authentication.
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
+- `scion server backfill`: Scan historical messages that predate the conversation model and assign them to conversations based on their thread, sender, and recipient metadata.
+    - **Safety Default (Dry-Run):** By default, the command runs in DRY-RUN mode — scanning and reporting what would change without modifying the database. You must explicitly pass `--execute` to apply changes.
+    - **Idempotency:** The backfill is idempotent: messages already attributed to a conversation are skipped, making re-running entirely safe.
+    - **Compound-Cursor Resumability (DEF-81):** Supports resuming interrupted runs via `--checkpoint`. The resume checkpoint uses a compound `(created, id)` keyset cursor (instead of a strictly-greater-than timestamp) to guarantee zero permanent row loss on resume, even for messages with identical timestamps.
+    - Flags:
+        - `--execute`: Apply changes (default: dry-run, safe).
+        - `--project <string>`: Scope backfill to a specific project ID (default: all).
+        - `--batch-size <int>`: Number of messages to process per batch (default: 100).
+        - `--checkpoint <string>`: Resume from this pagination cursor (project-scoped).
+        - `--db <string>`: Database DSN (overrides configuration/environment DSN).
 
 ## Miscellaneous
 

@@ -37,6 +37,7 @@ Permissions are granted on specific resource types:
 - `project`: A project-level workspace.
 - `agent`: An individual agent instance.
 - `template`: An agent configuration blueprint.
+- `scheduled_event`: A time-based recurring schedule or scheduled event.
 
 ### Actions
 Scion uses a standardized set of actions:
@@ -50,6 +51,26 @@ Scion enforces strict policy-based authorization for all agent operations:
 - **Agent Creation**: Requires active membership in the target project.
 - **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator) or system administrators.
 - **Agent Deletion**: Only the agent's owner, a system administrator, or authorized agent callers can delete an agent. For an agent caller to perform a deletion, it must have `project:agent:lifecycle` (associated with the `full` role) and must target an agent within its own project (which closes a cross-project agent deletion vulnerability).
+
+### Membership-Based Project Access (Visibility Eradication)
+
+The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies.
+- **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is dynamically bound to per-project read policies (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent`).
+- **Fail-Closed Retrieval (404 Gate)**: Project read access is verified via a `CheckAccess` gate on retrieval. If a caller is not authorized to read the project, the API responds with a standard `404 Not Found` (rather than a `403 Forbidden`) to prevent callers from probing the existence of private projects.
+
+### Scheduler Authorization & Owner-Based Access Control
+
+Scheduled events and recurring schedules are strictly protected using an **Owner-Based Access Control** model, combined with dedicated permissions and dynamic policy bindings:
+- **Owner-Based Protection**: Only the creator (the owner) of a schedule/event, or a system-wide administrator, has the authority to view, update, delete, or otherwise manage a scheduled event or recurring schedule. This is enforced via creator/owner ID validation at the API handlers layer.
+- **Project Member Bindings**: During project creation or template synchronization, Scion backfills/seeds project-scoped scheduled event policies bound to the project's members group. This grants members the capability to schedule events within their project space.
+- **Scheduler Permissions**: A set of 7 dedicated permissions are enforced across scheduler endpoints:
+  - `scheduled_event.read`: Permission to read a scheduled event or recurring schedule.
+  - `scheduled_event.list`: Permission to list scheduled events and recurring schedules.
+  - `scheduled_event.create`: Permission to create a scheduled event or recurring schedule.
+  - `scheduled_event.update`: Permission to update a recurring schedule (including pausing/resuming).
+  - `scheduled_event.delete`: Permission to cancel a scheduled event or delete a schedule.
+  - `hub.scheduler.read`: Permission to read hub-wide scheduler configurations.
+  - `hub.scheduler.update`: Permission to update hub-wide scheduler configurations.
 
 Scion uses a **Hierarchical Override Model** for policies. Policies can be attached at three levels:
 
@@ -260,7 +281,10 @@ The Scion Web Dashboard includes a centralized **Admin Management Suite** (acces
 - **Groups Management**: Create organizational groups and manage their membership with a human-friendly member editor and user search autocomplete. Group creation is strictly authorized, and the `project:` prefix is a reserved slug. To prevent slug collisions, colliding group identifiers require a system marker combined with the `ProjectID`. Membership lookups rely on canonical identity resolution. This enables policy-based authorization where permissions can be granted to an entire team at once, while strictly enforcing group ownership and authorization rules.
 - **Role & Binding Management**: Full CRUD interfaces for Role Definitions and Role Bindings. Administrators can define custom roles, map permissions, and bind them to users, groups, or agents at the Hub or Project scope, while the system enforces `CanDelegate` checks to prevent privilege escalation.
 - **Quota Management**: Dedicated admin view to manage the Quota System. Administrators can view, create, and update `LimitDefinition` thresholds and monitor `EntitlementBinding` status across projects.
-- **Admin Security & Navigation**: The dashboard uses capabilities-based navigation to render the Admin Suite. Instead of a binary `role===admin` check, visibility and access are scoped to specific permissions (e.g., `hub-admin` vs `super-admin`), ensuring users only see the management tools they are authorized to use.
+- **Admin Security & Navigation**: The dashboard uses a **Per-Resource Permission-Gated Admin UI** to render and restrict access to the Admin Suite. Instead of a binary `role===admin` check:
+  - Nav and route guards use granular, per-item permission checks.
+  - The admin status API endpoint returns a per-resource permissions array that determines what elements are active and visible in the Admin UI.
+  - Settings page tabs are gated by the caller's actual resource-level permissions. For example, a role with template-only permissions (like `template.*`) sees only the Templates tab, while other administrative tabs are hidden.
 - **Broker Visibility**: Comprehensive broker detail pages provide a grouped view of all active agents by their respective projects, helping administrators understand resource distribution.
 - **Maintenance Mode**: Administrators can toggle maintenance mode for the Hub and Web servers directly from the UI to facilitate safe infrastructure updates.
 

@@ -157,8 +157,9 @@ For high-availability deployments with multiple hub replicas:
 
 ## Admin UI
 
-The admin settings page (`/admin/server-config`) is layer-aware and has been restructured for improved usability:
+The admin settings page (`/admin/server-config`) is layer-aware, permission-gated, and has been restructured for improved usability:
 
+- **Permission-Gated Tabs:** Settings page tabs are dynamically gated by the caller's actual resource-level permissions. For example, a role with template-only permissions (like `template.*`) sees only the **Templates** tab, with other administrative tabs hidden. Nav and route guards use granular, per-item permission checks driven by the `/api/v1/admin/status` permissions array.
 - **Database mode:** Layer-0 fields are read-only with a "Managed via deployment configuration" badge. Layer-1 fields are editable.
 - **File mode:** Fields pinned by `SCION_SERVER_*` environment variables are read-only with a "Set via environment variable" badge. Other fields are editable and write to `settings.yaml`.
 
