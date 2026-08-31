@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scion
+  labels:
+    app.kubernetes.io/name: scion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scion
+    spec:
+      serviceAccountName: scion
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scion
+          image: scion-server:latest
+          imagePullPolicy: Always
+          command:
+            - /usr/local/bin/scion
+          args:
+            - server
+            - start
+            - --foreground
+            - --production
+            - --enable-hub
+            - --enable-runtime-broker
+            - --enable-web
+            - --web-port=8080
+            - --runtime-broker-port=9800
+            - --auto-provide
+          env:
+            - name: HOME
+              value: /home/scion
+            - name: SCION_LOG_LEVEL
+              value: info
+          envFrom:
+            - secretRef:
+                name: scion-auth
+                optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: broker
+              containerPort: 9800
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: state
+              mountPath: /home/scion/.scion
+            - name: settings
+              mountPath: /home/scion/.scion/settings.yaml
+              subPath: settings.yaml
+              readOnly: true
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: scion-state
+        - name: settings
+          configMap:
+            name: scion-settings
