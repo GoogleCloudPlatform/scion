@@ -15,19 +15,17 @@
  */
 
 /**
- * Project Members Editor — RoleBinding-backed
+ * Project Members Editor — RoleBinding-backed (PM1)
  *
- * Manages project membership via project-scoped RoleBindings:
- *  - Adding a member = creating a project-scoped RoleBinding
- *  - Changing a member's role = updating the RoleBinding
- *  - Removing a member = deleting the RoleBinding
+ * Manages project membership via the project-scoped members API:
+ *  - Adding a member = POST /api/v1/projects/{id}/members
+ *  - Changing a member's role = PATCH /api/v1/projects/{id}/members/{bindingID}
+ *  - Removing a member = DELETE /api/v1/projects/{id}/members/{bindingID}
  *  - Shows provenance (direct vs. group-derived)
  *  - Owner protection: prevents removing the last direct owner
  *
- * TODO: Integrate with PM1 API shapes when available on branch.
- * Currently operates against the existing role-binding CRUD API and
- * falls back to the group-based membership API when role-binding
- * endpoints return 404.
+ * The server returns enriched bindings with roleName and source fields,
+ * and the PATCH endpoint performs atomic role changes.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -95,9 +93,6 @@ export class ScionProjectMembersEditor extends LitElement {
   @state() private members: ProjectMemberBinding[] = [];
   @state() private projectRoles: ProjectRole[] = [];
   @state() private error: string | null = null;
-
-  /** Whether the RoleBinding API is available. If false, we fall back. */
-  @state() private roleBindingApiAvailable = true;
 
   // Add dialog state
   @state() private addDialogOpen = false;
@@ -440,136 +435,38 @@ export class ScionProjectMembersEditor extends LitElement {
     this.error = null;
 
     try {
-      // Try loading via role-binding API for project-scoped bindings
+      // PM1: Use project-scoped members endpoint + roles list in parallel.
       const [membersRes, rolesRes] = await Promise.all([
         apiFetch(
-          `/api/v1/admin/role-bindings?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}&includeGroupDerived=true`
+          `/api/v1/projects/${encodeURIComponent(this.projectId)}/members`
         ),
         apiFetch('/api/v1/admin/roles'),
       ]);
 
-      if (membersRes.status === 404) {
-        // TODO: PM1 API not yet available, fall back
-        this.roleBindingApiAvailable = false;
-        await this.loadDataFallback();
-        return;
-      }
-
-      if (!membersRes.ok) {
-        // Try without includeGroupDerived
-        const fallbackRes = await apiFetch(
-          `/api/v1/admin/role-bindings?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`
-        );
-        if (fallbackRes.status === 404) {
-          this.roleBindingApiAvailable = false;
-          await this.loadDataFallback();
-          return;
-        }
-        if (!fallbackRes.ok) {
-          throw new Error(
-            await extractApiError(fallbackRes, `HTTP ${fallbackRes.status}`)
-          );
-        }
-        const data = (await fallbackRes.json()) as {
-          items?: ProjectMemberBinding[];
-        };
-        this.members = (data.items || []).map((b) => ({
-          ...b,
-          source: b.source || 'direct',
-        }));
-      } else {
-        const data = (await membersRes.json()) as {
-          items?: ProjectMemberBinding[];
-        };
-        this.members = (data.items || []).map((b) => ({
-          ...b,
-          source: b.source || 'direct',
-        }));
-      }
-
-      // Load project roles
-      if (rolesRes.ok) {
-        const rolesData = (await rolesRes.json()) as { items?: ProjectRole[] };
-        this.projectRoles = (rolesData.items || []).filter(
-          (r) => r.scopeType === 'project'
-        );
-      }
-
-      this.roleBindingApiAvailable = true;
-    } catch (err) {
-      console.error('Failed to load project members:', err);
-      this.error =
-        err instanceof Error ? err.message : 'Failed to load project members';
-    } finally {
-      this.loading = false;
-    }
-  }
-
-  /**
-   * Fallback: load members from the groups-based membership API.
-   * TODO: Remove when PM1 API is available on branch.
-   */
-  private async loadDataFallback(): Promise<void> {
-    try {
-      // Find the members group
-      const groupsRes = await apiFetch(
-        `/api/v1/groups?projectId=${encodeURIComponent(this.projectId)}&groupType=explicit&limit=10`
-      );
-      if (!groupsRes.ok) {
-        throw new Error(
-          await extractApiError(groupsRes, `HTTP ${groupsRes.status}`)
-        );
-      }
-
-      const groupsData = (await groupsRes.json()) as {
-        groups?: Array<{ id: string; slug: string; name: string }>;
-      };
-      const groups = groupsData.groups || [];
-      const membersGroup = groups.find((g) => g.slug?.endsWith(':members'));
-
-      if (!membersGroup) {
-        this.members = [];
-        return;
-      }
-
-      // Load group members
-      const membersRes = await apiFetch(
-        `/api/v1/groups/${encodeURIComponent(membersGroup.id)}/members`
-      );
       if (!membersRes.ok) {
         throw new Error(
           await extractApiError(membersRes, `HTTP ${membersRes.status}`)
         );
       }
 
-      const membersData = (await membersRes.json()) as {
-        members?: Array<{
-          memberId: string;
-          memberType: string;
-          displayName?: string;
-          role: string;
-          addedAt: string;
-        }>;
+      const data = (await membersRes.json()) as {
+        items?: ProjectMemberBinding[];
       };
-      const groupMembers = Array.isArray(membersData)
-        ? membersData
-        : membersData.members || [];
-
-      // Convert group members to our ProjectMemberBinding shape
-      this.members = groupMembers.map((m) => ({
-        id: `${m.memberType}/${m.memberId}`,
-        roleDefinitionId: '',
-        roleName: m.role || 'member',
-        principalType: m.memberType,
-        principalId: m.memberId,
-        principalDisplayName: m.displayName,
-        scopeType: 'project',
-        scopeId: this.projectId,
-        createdAt: m.addedAt,
-        source: 'direct' as const,
+      // Server returns enriched items with roleName and source.
+      this.members = (data.items || []).map((b) => ({
+        ...b,
+        source: b.source || 'direct',
       }));
+
+      // Load project roles for the role picker.
+      if (rolesRes.ok) {
+        const rolesData = (await rolesRes.json()) as { items?: ProjectRole[] };
+        this.projectRoles = (rolesData.items || []).filter(
+          (r) => r.scopeType === 'project'
+        );
+      }
     } catch (err) {
-      console.error('Failed to load project members (fallback):', err);
+      console.error('Failed to load project members:', err);
       this.error =
         err instanceof Error ? err.message : 'Failed to load project members';
     } finally {
@@ -632,30 +529,32 @@ export class ScionProjectMembersEditor extends LitElement {
       this.addError = 'Please select a principal';
       return;
     }
+    if (!this.addRoleId) {
+      this.addError = 'Please select a role';
+      return;
+    }
 
     this.addLoading = true;
     this.addError = null;
 
     try {
-      if (this.roleBindingApiAvailable && this.addRoleId) {
-        // Create via RoleBinding API
-        const res = await apiFetch('/api/v1/admin/role-bindings', {
+      // PM1: Use project-scoped members endpoint.
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/members`,
+        {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             roleDefinitionId: this.addRoleId,
             principalType: this.addPrincipalType,
             principalId: this.addPrincipalId.trim(),
-            scopeType: 'project',
-            scopeId: this.projectId,
           }),
-        });
-
-        if (!res.ok) {
-          throw new Error(await extractApiError(res, `HTTP ${res.status}`));
         }
+      );
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
-      // TODO: When PM1 API not available, fall back to group member add
 
       this.addDialogOpen = false;
       this.actionFeedback = { message: 'Member added', variant: 'success' };
@@ -703,51 +602,20 @@ export class ScionProjectMembersEditor extends LitElement {
     this.changeLoading = true;
 
     try {
-      // R2: Create the new binding BEFORE deleting the old one.
-      // If the POST fails, the user retains their existing role.
-      // A brief period of duplicate bindings is less harmful than
-      // losing the binding entirely. Once PUT/PATCH is supported
-      // server-side, this should be replaced with an atomic update.
-      if (this.roleBindingApiAvailable) {
-        const res = await apiFetch('/api/v1/admin/role-bindings', {
-          method: 'POST',
+      // PM1: Atomic role change via PATCH endpoint.
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/members/${this.changeMember.id}`,
+        {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             roleDefinitionId: this.changeRoleId,
-            principalType: this.changeMember.principalType,
-            principalId: this.changeMember.principalId,
-            scopeType: 'project',
-            scopeId: this.projectId,
           }),
-        });
-
-        if (!res.ok) {
-          throw new Error(await extractApiError(res, `HTTP ${res.status}`));
         }
+      );
 
-        // New binding created successfully — now delete the old one.
-        if (
-          this.changeMember.id &&
-          !this.changeMember.id.includes('/')
-        ) {
-          const deleteRes = await apiFetch(
-            `/api/v1/admin/role-bindings/${this.changeMember.id}`,
-            { method: 'DELETE' }
-          );
-          if (!deleteRes.ok) {
-            // The new role is already active; warn but don't fail.
-            console.warn('Failed to delete old binding:', deleteRes.status);
-            this.actionFeedback = {
-              message:
-                'Role updated but the old binding could not be removed. You may need to remove it manually.',
-              variant: 'danger',
-            };
-            this.changeDialogOpen = false;
-            this.changeMember = null;
-            void this.loadData();
-            return;
-          }
-        }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
       this.changeDialogOpen = false;
@@ -791,18 +659,13 @@ export class ScionProjectMembersEditor extends LitElement {
     this.removingMemberId = member.id;
 
     try {
-      if (
-        this.roleBindingApiAvailable &&
-        member.id &&
-        !member.id.includes('/')
-      ) {
-        const res = await apiFetch(
-          `/api/v1/admin/role-bindings/${member.id}`,
-          { method: 'DELETE' }
-        );
-        if (!res.ok) {
-          throw new Error(await extractApiError(res, `HTTP ${res.status}`));
-        }
+      // PM1: Use project-scoped members endpoint.
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/members/${member.id}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
       this.actionFeedback = { message: 'Member removed', variant: 'success' };
@@ -1025,7 +888,7 @@ export class ScionProjectMembersEditor extends LitElement {
               <td class="actions-cell">
                 ${!isGroupDerived
                   ? html`
-                      ${this.roleBindingApiAvailable && this.projectRoles.length > 0
+                      ${this.projectRoles.length > 0
                         ? html`
                             <sl-icon-button
                               name="pencil"
@@ -1109,7 +972,7 @@ export class ScionProjectMembersEditor extends LitElement {
           ></scion-principal-picker>
         </div>
 
-        ${this.roleBindingApiAvailable && this.projectRoles.length > 0
+        ${this.projectRoles.length > 0
           ? html`
               <div class="form-group">
                 <sl-select
