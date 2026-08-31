@@ -159,21 +159,38 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope=mine: projects the current user owns
+	// scope=mine: projects the current user owns or is a member of
 	// scope=shared: projects where the user is a member/admin but not the owner
 	// mine=true (legacy): projects the user owns or is a member of
+	//
+	// All scopes merge two membership sources:
+	//   1. Legacy group memberships (resolveUserProjectIDs)
+	//   2. Project-scoped RoleBindings (resolveUserRBProjectIDs)
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			// Legacy ownership (Project.OwnerID) combined with
+			// RoleBinding-based and group-based membership.
 			filter.OwnerID = userIdent.ID()
+			memberIDs := mergeProjectIDs(
+				s.resolveUserProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+			)
+			if len(memberIDs) > 0 {
+				filter.MemberOrOwnerIDs = memberIDs
+			}
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-				filter.MemberProjectIDs = projectIDs
+			memberIDs := mergeProjectIDs(
+				s.resolveUserProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+			)
+			if len(memberIDs) > 0 {
+				filter.MemberProjectIDs = memberIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
-				// User has no group memberships — return empty result
+				// User has no memberships — return empty result
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
 		}
@@ -182,8 +199,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerIDs = projectIDs
+				memberIDs := mergeProjectIDs(
+					s.resolveUserProjectIDs(ctx, userIdent.ID()),
+					s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+				)
+				if len(memberIDs) > 0 {
+					filter.MemberOrOwnerIDs = memberIDs
 				}
 			}
 		}

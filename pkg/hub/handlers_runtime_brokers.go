@@ -585,6 +585,53 @@ func (s *Server) resolveUserProjectIDs(ctx context.Context, userID string) []str
 	return projectIDs
 }
 
+// mergeProjectIDs deduplicates and merges project IDs from multiple sources.
+func mergeProjectIDs(sources ...[]string) []string {
+	seen := make(map[string]struct{})
+	for _, ids := range sources {
+		for _, id := range ids {
+			seen[id] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	merged := make([]string, 0, len(seen))
+	for id := range seen {
+		merged = append(merged, id)
+	}
+	return merged
+}
+
+// resolveUserRBProjectIDs returns project IDs from the user's project-scoped
+// RoleBindings. This complements resolveUserProjectIDs (which uses legacy
+// group memberships) by including projects where the user was granted access
+// via the RoleBinding-based membership model (project-owner, project-admin,
+// or project-member).
+func (s *Server) resolveUserRBProjectIDs(ctx context.Context, userID string) []string {
+	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil || len(bindings) == 0 {
+		return nil
+	}
+
+	projectIDSet := make(map[string]struct{})
+	for _, rb := range bindings {
+		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID != "" {
+			projectIDSet[rb.ScopeID] = struct{}{}
+		}
+	}
+
+	if len(projectIDSet) == 0 {
+		return nil
+	}
+
+	projectIDs := make([]string, 0, len(projectIDSet))
+	for id := range projectIDSet {
+		projectIDs = append(projectIDs, id)
+	}
+	return projectIDs
+}
+
 // brokerHeartbeatRequest is the request body for broker heartbeats.
 type brokerHeartbeatRequest struct {
 	Status   string                   `json:"status"`

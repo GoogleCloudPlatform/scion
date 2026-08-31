@@ -599,6 +599,139 @@ func TestBackfill_Idempotent(t *testing.T) {
 }
 
 // =============================================================================
+// Test: Backfill project-owner role bindings
+// =============================================================================
+
+func TestBackfill_ProjectOwnerRoleBinding(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user (project owner)
+	owner := &store.User{
+		ID:          tid("backfill-proj-owner"),
+		Email:       "backfill-proj-owner@test.com",
+		DisplayName: "Backfill Project Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+
+	// Create a project with CreatedBy set (simulates pre-existing project)
+	project := &store.Project{
+		ID:        tid("backfill-proj"),
+		Name:      "Backfill Project",
+		Slug:      "backfill-proj",
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Before backfill: no project-scoped role bindings
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner.ID)
+	require.NoError(t, err)
+	var projectBindingsBefore int
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject {
+			projectBindingsBefore++
+		}
+	}
+	assert.Equal(t, 0, projectBindingsBefore, "no project bindings before backfill")
+
+	// Run backfill
+	err = BackfillRoleBindings(ctx, s)
+	require.NoError(t, err)
+
+	// After backfill: project-owner role binding exists
+	bindings, err = s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner.ID)
+	require.NoError(t, err)
+
+	var hasProjectOwner bool
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == project.ID {
+			rd, err := s.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			if err != nil {
+				continue
+			}
+			if rd.Name == store.ProjectRoleOwner {
+				hasProjectOwner = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasProjectOwner, "project owner should have project-owner role binding after backfill")
+}
+
+func TestBackfill_ProjectOwnerIdempotent(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user
+	owner := &store.User{
+		ID:          tid("backfill-proj-idem"),
+		Email:       "backfill-proj-idem@test.com",
+		DisplayName: "Backfill Idempotent Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+
+	// Create a project
+	project := &store.Project{
+		ID:        tid("backfill-proj-idem-p"),
+		Name:      "Backfill Idempotent Project",
+		Slug:      "backfill-proj-idem",
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Run backfill twice — should not error or create duplicates
+	require.NoError(t, BackfillRoleBindings(ctx, s))
+	require.NoError(t, BackfillRoleBindings(ctx, s))
+
+	// Verify no duplicate project bindings
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner.ID)
+	require.NoError(t, err)
+
+	var projectBindings int
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == project.ID {
+			projectBindings++
+		}
+	}
+	assert.Equal(t, 1, projectBindings, "backfill should not create duplicate project-owner bindings")
+}
+
+func TestBackfill_ProjectWithoutCreatedBySkipped(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a project without CreatedBy (edge case)
+	project := &store.Project{
+		ID:      tid("backfill-no-owner-p"),
+		Name:    "No Owner Project",
+		Slug:    "backfill-no-owner",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Run backfill — should not error even without CreatedBy
+	require.NoError(t, BackfillRoleBindings(ctx, s))
+
+	// No bindings should be created for this project
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "project without CreatedBy should not get backfilled bindings")
+}
+
+// =============================================================================
 // Test: User.Role as compatibility output
 // =============================================================================
 

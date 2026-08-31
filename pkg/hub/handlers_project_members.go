@@ -176,7 +176,7 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		info := projectMemberInfo{
 			RoleBinding: *b,
 			RoleName:    roleName,
-			Source:       "direct", // TODO: group-derived expansion deferred (needs architect ruling)
+			Source:      "direct", // TODO: group-derived expansion deferred (needs architect ruling)
 		}
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
@@ -384,7 +384,7 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 	info := projectMemberInfo{
 		RoleBinding: *created,
 		RoleName:    roleDef.Name,
-		Source:       "direct",
+		Source:      "direct",
 	}
 	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, created.PrincipalType, created.PrincipalID)
 	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, created.CreatedBy)
@@ -550,9 +550,9 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		"actor", user.Email())
 
 	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType: "project_member_role_change",
-		TargetType:   "project_membership",
-		TargetID:     projectID,
+		MutationType:  "project_member_role_change",
+		TargetType:    "project_membership",
+		TargetID:      projectID,
 		BeforeSummary: `{"principalId":"` + existing.PrincipalID + `","role":"` + oldRoleDef.Name + `"}`,
 		AfterSummary:  `{"principalId":"` + existing.PrincipalID + `","role":"` + newRoleDef.Name + `"}`,
 	})
@@ -560,7 +560,7 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 	info := projectMemberInfo{
 		RoleBinding: *created,
 		RoleName:    newRoleDef.Name,
-		Source:       "direct",
+		Source:      "direct",
 	}
 	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, created.PrincipalType, created.PrincipalID)
 	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, created.CreatedBy)

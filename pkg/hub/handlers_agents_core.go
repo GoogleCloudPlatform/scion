@@ -262,15 +262,28 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// scope=mine: agents the current user created
 	// scope=shared: agents in projects the user is a member of, but not created by them
 	// mine=true (legacy): agents the user created or in projects they own/are a member of
+	//
+	// All scopes merge legacy group memberships and RoleBinding-based membership.
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			filter.OwnerID = userIdent.ID()
+			memberIDs := mergeProjectIDs(
+				s.resolveUserProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+			)
+			if len(memberIDs) > 0 {
+				filter.MemberOrOwnerProjectIDs = memberIDs
+			}
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-				filter.MemberProjectIDs = projectIDs
+			memberIDs := mergeProjectIDs(
+				s.resolveUserProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+			)
+			if len(memberIDs) > 0 {
+				filter.MemberProjectIDs = memberIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
@@ -280,8 +293,12 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerProjectIDs = projectIDs
+				memberIDs := mergeProjectIDs(
+					s.resolveUserProjectIDs(ctx, userIdent.ID()),
+					s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+				)
+				if len(memberIDs) > 0 {
+					filter.MemberOrOwnerProjectIDs = memberIDs
 				}
 			}
 		}
