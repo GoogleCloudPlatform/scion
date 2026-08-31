@@ -180,6 +180,17 @@ type explainRequest struct {
 	Action        string `json:"action"`
 	PrincipalID   string `json:"principalId,omitempty"`
 	PrincipalKind string `json:"principalKind,omitempty"`
+
+	// Mode controls what the explain endpoint returns:
+	//   - "" or "decision": explain a single permission decision (default)
+	//   - "effective_permissions": return the full effective permission set
+	//     with per-permission provenance
+	Mode string `json:"mode,omitempty"`
+
+	// ComparePrincipalID, when set with mode="effective_permissions",
+	// returns a comparison of two principals' effective permission sets.
+	ComparePrincipalID   string `json:"comparePrincipalId,omitempty"`
+	ComparePrincipalKind string `json:"comparePrincipalKind,omitempty"`
 }
 
 // explainResponse is the JSON response for the explain endpoint.
@@ -191,6 +202,49 @@ type explainResponse struct {
 	PolicyID      string              `json:"policyId,omitempty"`
 	Trace         []DecisionStep      `json:"trace"`
 	Provenance    *DecisionProvenance `json:"provenance,omitempty"`
+
+	// EffectivePermissions is populated in "effective_permissions" mode.
+	// Each entry describes a permission in the effective set with its
+	// source grant and any boundary that capped it.
+	EffectivePermissions []PermissionProvenance `json:"effectivePermissions,omitempty"`
+
+	// CompareResult is populated when ComparePrincipalID is set.
+	CompareResult *PermissionCompareResult `json:"compareResult,omitempty"`
+}
+
+// PermissionProvenance describes which grant sourced a permission and which
+// boundary (if any) capped it.
+type PermissionProvenance struct {
+	// PermissionID is the canonical permission identifier.
+	PermissionID string `json:"permissionId"`
+
+	// Granted is true if this permission is in the effective set.
+	Granted bool `json:"granted"`
+
+	// SourceGrant identifies the binding and role that sourced this permission.
+	SourceGrant *GrantDetail `json:"sourceGrant,omitempty"`
+
+	// CappedBy lists the restrictions that would remove this permission.
+	// Empty when Granted is true.
+	CappedBy []RestrictionProvenance `json:"cappedBy,omitempty"`
+}
+
+// PermissionCompareResult compares two principals' effective permission sets.
+type PermissionCompareResult struct {
+	// PrincipalAID is the first principal.
+	PrincipalAID string `json:"principalAId"`
+
+	// PrincipalBID is the second principal.
+	PrincipalBID string `json:"principalBId"`
+
+	// OnlyA lists permissions held only by principal A.
+	OnlyA []string `json:"onlyA"`
+
+	// OnlyB lists permissions held only by principal B.
+	OnlyB []string `json:"onlyB"`
+
+	// Both lists permissions held by both principals.
+	Both []string `json:"both"`
 }
 
 // handleAuthzExplain handles POST /api/v1/authz/explain.
@@ -272,6 +326,13 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		resource.ParentID = req.Resource.ProjectID
 	}
 
+	// Handle effective_permissions mode: return full effective permission set
+	// with per-permission provenance.
+	if req.Mode == "effective_permissions" {
+		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal)
+		return
+	}
+
 	// Build the authz request with Explain enabled.
 	authzReq := AuthzRequest{
 		Principal:  principalContextForIdentity(explainIdentity),
@@ -305,6 +366,167 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleExplainEffectivePermissions handles the effective_permissions mode
+// of the explain endpoint. It returns the full effective permission set
+// with per-permission provenance showing which grant sourced each permission
+// and which boundary (if any) capped it.
+func (s *Server) handleExplainEffectivePermissions(
+	w http.ResponseWriter,
+	ctx context.Context,
+	req explainRequest,
+	explainIdentity Identity,
+	resource Resource,
+	isCrossPrincipal bool,
+) {
+	scopeType := ""
+	scopeID := ""
+	if resource.ParentType == "project" && resource.ParentID != "" {
+		scopeType = ScopeTypeProject
+		scopeID = resource.ParentID
+	} else if resource.Type == "project" && resource.ID != "" {
+		scopeType = ScopeTypeProject
+		scopeID = resource.ID
+	} else {
+		scopeType = ScopeTypeSystem
+	}
+
+	// Get effective permissions for the principal.
+	effectivePerms, err := s.authzService.getEffectivePermissions(
+		ctx,
+		explainIdentity.Type(),
+		explainIdentity.ID(),
+		scopeType, scopeID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to compute effective permissions", nil)
+		return
+	}
+
+	// Build per-permission provenance by running a Decide for each
+	// permission in the effective set.
+	var permProvenance []PermissionProvenance
+	effectiveSet := make(map[string]bool, len(effectivePerms))
+	for _, permID := range effectivePerms {
+		effectiveSet[permID] = true
+
+		authzReq := AuthzRequest{
+			Principal:  principalContextForIdentity(explainIdentity),
+			Credential: credentialContextForIdentity(explainIdentity),
+			Resource:   resource,
+			Permission: permID,
+			Action:     Action(req.Action),
+			Explain:    true,
+		}
+		decision := s.authzService.Decide(ctx, authzReq)
+
+		pp := PermissionProvenance{
+			PermissionID: permID,
+			Granted:      decision.Allowed,
+		}
+
+		// Extract source grant from provenance.
+		if decision.Provenance != nil && len(decision.Provenance.Grants) > 0 {
+			g := decision.Provenance.Grants[0]
+			// Prefer a grant that contains the requested permission.
+			for _, candidate := range decision.Provenance.Grants {
+				if candidate.ContainsRequested {
+					g = candidate
+					break
+				}
+			}
+			pp.SourceGrant = &g
+		}
+
+		// Extract capping restrictions.
+		if decision.Provenance != nil {
+			for _, r := range decision.Provenance.Restrictions {
+				if r.Applied {
+					pp.CappedBy = append(pp.CappedBy, r)
+				}
+			}
+		}
+
+		if isCrossPrincipal && pp.SourceGrant != nil {
+			redacted := redactGrantDetail(*pp.SourceGrant)
+			pp.SourceGrant = &redacted
+		}
+
+		permProvenance = append(permProvenance, pp)
+	}
+
+	resp := explainResponse{
+		Allowed:              len(effectivePerms) > 0,
+		Reason:               fmt.Sprintf("%d effective permissions", len(effectivePerms)),
+		EffectivePermissions: permProvenance,
+		Trace:                []DecisionStep{},
+	}
+
+	// Handle comparison with another principal.
+	if req.ComparePrincipalID != "" {
+		compareIdentity, err := s.resolveExplainPrincipal(ctx, req.ComparePrincipalID, req.ComparePrincipalKind)
+		if err != nil {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Compare principal not found", nil)
+			return
+		}
+
+		comparePerms, err := s.authzService.getEffectivePermissions(
+			ctx,
+			compareIdentity.Type(),
+			compareIdentity.ID(),
+			scopeType, scopeID,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to compute compare principal's effective permissions", nil)
+			return
+		}
+
+		compareSet := make(map[string]bool, len(comparePerms))
+		for _, p := range comparePerms {
+			compareSet[p] = true
+		}
+
+		result := &PermissionCompareResult{
+			PrincipalAID: explainIdentity.ID(),
+			PrincipalBID: req.ComparePrincipalID,
+		}
+
+		for _, p := range effectivePerms {
+			if compareSet[p] {
+				result.Both = append(result.Both, p)
+			} else {
+				result.OnlyA = append(result.OnlyA, p)
+			}
+		}
+		for _, p := range comparePerms {
+			if !effectiveSet[p] {
+				result.OnlyB = append(result.OnlyB, p)
+			}
+		}
+
+		resp.CompareResult = result
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveExplainPrincipal resolves a principal ID and kind to an Identity.
+func (s *Server) resolveExplainPrincipal(ctx context.Context, principalID, principalKind string) (Identity, error) {
+	if principalKind == "agent" || principalKind == string(PrincipalKindAgent) {
+		agent, err := s.store.GetAgent(ctx, principalID)
+		if err != nil {
+			return nil, err
+		}
+		return newAgentIdentityFromStore(agent), nil
+	}
+	user, err := s.store.GetUser(ctx, principalID)
+	if err != nil {
+		return nil, err
+	}
+	return NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "api"), nil
 }
 
 // redactCrossPrincipalProvenance redacts sensitive fields from provenance
