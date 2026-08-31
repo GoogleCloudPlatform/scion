@@ -30,8 +30,8 @@ import (
 // --- Registry completeness tests ---
 
 func TestRegistryHasAllSections(t *testing.T) {
-	expected := []string{"access", "lifecycle", "maintenance", "telemetry",
-		"agent_defaults", "endpoints", "github_app", "notifications",
+	expected := []string{"access", "lifecycle", "maintenance", "messaging",
+		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
 		"project_defaults", "auto_expose_ports", "federation"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
@@ -68,6 +68,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 	// Sections that are DB-only (no settings.yaml representation).
 	dbOnlySections := map[string]bool{
 		"maintenance": true,
+		"messaging":   true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
@@ -137,6 +138,34 @@ func TestMaintenanceHasNoOwnedKeys(t *testing.T) {
 		if sec := OwningSection(key); sec != "" {
 			t.Errorf("maintenance has no KoanfPaths, but OwningSection(%q) returned %q", key, sec)
 		}
+	}
+}
+
+func TestMessagingHasNoOwnedKeys(t *testing.T) {
+	keys := []string{
+		"messaging.conversation_read_switch",
+		"messaging.conversation_write_deny_switch",
+	}
+	for _, key := range keys {
+		if sec := OwningSection(key); sec != "" {
+			t.Errorf("messaging has no KoanfPaths, but OwningSection(%q) returned %q", key, sec)
+		}
+	}
+}
+
+// TestMessagingNotSeeded verifies that syncHubSettings skips the messaging
+// section because KoanfPaths is nil. The seeding loop condition is:
+//
+//	if len(sec.KoanfPaths) == 0 { continue }
+//
+// A seeded messaging row would be a behaviour change on every existing deployment.
+func TestMessagingNotSeeded(t *testing.T) {
+	sec := SectionByName("messaging")
+	if sec == nil {
+		t.Fatal("messaging section not found in registry")
+	}
+	if len(sec.KoanfPaths) != 0 {
+		t.Fatalf("messaging section has non-empty KoanfPaths %v; syncHubSettings will seed it at startup", sec.KoanfPaths)
 	}
 }
 

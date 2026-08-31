@@ -663,6 +663,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.project_defaults.read", Resource: "hub", Action: "read",
 	},
+	"/api/v1/admin/messaging": {
+		Pattern: "/api/v1/admin/messaging", RouteID: "admin.messaging",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.messaging.update", Resource: "hub", Action: "update",
+	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,

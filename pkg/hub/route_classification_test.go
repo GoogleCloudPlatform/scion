@@ -111,6 +111,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/server-config/sections/":     "hub-admin:server-config",
 	"/api/v1/admin/server-config":               "hub-admin:server-config",
 	"/api/v1/admin/project-defaults":            "hub-admin:project-defaults",
+	"/api/v1/admin/messaging":                   "hub-admin:messaging",
 	"/api/v1/admin/agents/reset-auth-all":       "hub-admin:agent-reset",
 	"/api/v1/admin/gcp-quota":                   "hub-admin:gcp-quota",
 	"/api/v1/admin/lifecycle-hooks":             "hub-admin:lifecycle-hook",
@@ -447,7 +448,8 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 		"/api/v1/admin/maintenance/restart", "/api/v1/github-app/installations/discover",
 		"/api/v1/github-app/sync-permissions":
 		method = http.MethodPost
-	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults":
+	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults",
+		"/api/v1/admin/messaging":
 		method = http.MethodPut
 		body = "{}"
 	case "/api/v1/hub/settings/injected-skills":
