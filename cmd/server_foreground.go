@@ -1910,19 +1910,24 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
 
 	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
-	// Gated on postgres: in SQLite/workstation mode the legacy file path is
-	// used unchanged.
-	if strings.EqualFold(cfg.Database.Driver, "postgres") {
-		if err := initOperationalSettings(ctx, cfg, hubSrv, s, globalDir); err != nil {
-			return nil, fmt.Errorf("operational settings init: %w", err)
-		}
+	// Driver-agnostic: initOperationalSettings handles both postgres (advisory
+	// locking) and SQLite (single-writer) via the existing AdvisoryLocker branch.
+	// Fail-soft: a boot-time error is logged loudly but does not abort the hub.
+	// Without OperationalSettings the messaging admin API switches remain
+	// fail-closed (OFF) — see GetOperationalSettings nil guard in handlers.
+	if err := initOperationalSettings(ctx, cfg, hubSrv, s, globalDir); err != nil {
+		slog.Error("Operational settings init failed — settings will be unavailable for this process lifetime",
+			"error", err,
+			"driver", cfg.Database.Driver,
+		)
 	}
 
 	return hubSrv, nil
 }
 
-// initOperationalSettings sets up the OperationalSettings service for postgres
-// mode (settings-db §3.9). It:
+// initOperationalSettings sets up the OperationalSettings service (settings-db
+// §3.9). It is driver-agnostic: postgres uses advisory locking, SQLite uses the
+// single-writer no-op path. It:
 //  1. Acquires advisory lock "hub_settings_seed"
 //  2. If no _meta row exists, seeds sections from settings.yaml (file values only)
 //  3. Releases the lock
@@ -1994,11 +1999,12 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 // startSettingsPropagation wires the event publisher into the OperationalSettings
 // service and starts the cross-replica propagation loop (design §3.6, Phase 4).
-// In file/SQLite mode (no OperationalSettings), this is a no-op.
+// When OperationalSettings is nil (init failed) this is a no-op. On SQLite the
+// event publisher is nil, so StartPropagation itself short-circuits.
 func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub hub.EventPublisher) {
 	ops := hubSrv.GetOperationalSettings()
 	if ops == nil {
-		return // file/SQLite mode — no propagation needed
+		return // OperationalSettings unavailable — no propagation possible
 	}
 	ops.SetEventPublisher(eventPub)
 	ops.StartPropagation(ctx, hubSrv)

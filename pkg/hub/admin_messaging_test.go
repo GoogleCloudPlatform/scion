@@ -374,6 +374,33 @@ func TestHandleAdminMessaging_PutRecordsUpdatedBy(t *testing.T) {
 // for admin endpoints is tested in TestRouteGuardOpsPermissions. We verify the
 // route metadata entry exists below.
 
+func TestHandleAdminMessaging_GetNilOperationalSettings(t *testing.T) {
+	// GET with nil OperationalSettings (init failed) → both switches OFF.
+	// This is the fail-closed guard: if initOperationalSettings errors out and
+	// the hub boots without OperationalSettings, the switches must still read OFF.
+	srv := newAdminMessagingServer(t, nil) // nil store = no OperationalSettings
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
+	req = adminContext(req)
+	rr := httptest.NewRecorder()
+	srv.handleAdminMessaging(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body opsettings.MessagingSettings
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if body.ConversationReadSwitch == nil || *body.ConversationReadSwitch != false {
+		t.Errorf("expected conversation_read_switch=false (nil ops fail-closed), got %v", body.ConversationReadSwitch)
+	}
+	if body.ConversationWriteDenySwitch == nil || *body.ConversationWriteDenySwitch != false {
+		t.Errorf("expected conversation_write_deny_switch=false (nil ops fail-closed), got %v", body.ConversationWriteDenySwitch)
+	}
+}
+
 func TestAdminMessagingRouteMetadataExists(t *testing.T) {
 	// Verify that the route metadata entry exists for admin messaging.
 	meta, ok := routeMetadataTable["/api/v1/admin/messaging"]

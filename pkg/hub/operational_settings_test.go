@@ -952,3 +952,84 @@ func TestBuildLayer1SnapshotFromFile_NoFederation(t *testing.T) {
 		t.Error("want nil FederationConfig when federation is disabled and no issuers")
 	}
 }
+
+// --- Messaging switch fail-closed tests (H2 acceptance criteria) ---
+//
+// All four degenerate inputs must yield OFF for both switches:
+//   1. Absent messaging row (no "messaging" section in cache)
+//   2. Empty JSON doc `{}`
+//   3. Malformed JSON
+//   4. (Covered at handler level) nil OperationalSettings pointer
+
+func TestConversationReadSwitch_FailClosed_AbsentRow(t *testing.T) {
+	// No "messaging" section seeded → switch must be OFF.
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if ops.ConversationReadSwitch() {
+		t.Error("ConversationReadSwitch: want false (absent row), got true")
+	}
+}
+
+func TestConversationWriteDenySwitch_FailClosed_AbsentRow(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if ops.ConversationWriteDenySwitch() {
+		t.Error("ConversationWriteDenySwitch: want false (absent row), got true")
+	}
+}
+
+func TestConversationReadSwitch_FailClosed_EmptyDoc(t *testing.T) {
+	// Empty JSON doc `{}` → omitted fields → switch must be OFF.
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(`{}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if ops.ConversationReadSwitch() {
+		t.Error("ConversationReadSwitch: want false (empty doc), got true")
+	}
+}
+
+func TestConversationWriteDenySwitch_FailClosed_EmptyDoc(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(`{}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if ops.ConversationWriteDenySwitch() {
+		t.Error("ConversationWriteDenySwitch: want false (empty doc), got true")
+	}
+}
+
+func TestConversationReadSwitch_FailClosed_MalformedJSON(t *testing.T) {
+	// Malformed JSON → unmarshal fails → switch must be OFF.
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(`not valid json`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if ops.ConversationReadSwitch() {
+		t.Error("ConversationReadSwitch: want false (malformed JSON), got true")
+	}
+}
+
+func TestConversationWriteDenySwitch_FailClosed_MalformedJSON(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(`not valid json`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if ops.ConversationWriteDenySwitch() {
+		t.Error("ConversationWriteDenySwitch: want false (malformed JSON), got true")
+	}
+}

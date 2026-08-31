@@ -148,8 +148,9 @@ type SettingsUpdatedEvent struct {
 // OperationalSettings is the runtime component that merges file, DB, and env
 // sources into a single Layer-1 view per §3.5 of the settings-db design.
 //
-// It is owned by the Server and used only when database.driver == "postgres".
-// In file/SQLite mode the legacy reloadSettings path is used instead.
+// It is owned by the Server and used on all database drivers. Cross-replica
+// propagation (§3.6) requires a PostgresEventPublisher and is a no-op on
+// SQLite.
 type OperationalSettings struct {
 	store          store.HubSettingStore
 	bootstrapKoanf *koanf.Koanf    // Full bootstrap merge: defaults → SEED → yaml → SERVER
