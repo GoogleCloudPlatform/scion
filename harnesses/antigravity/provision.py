@@ -73,12 +73,6 @@ ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
     "antigravity",
     [
         scion_harness.env_method(
-            "api-key",
-            any_of=["GEMINI_API_KEY"],
-            env_fallback=True,
-            hint="set GEMINI_API_KEY",
-        ),
-        scion_harness.env_method(
             "vertex-ai",
             all_of=["GOOGLE_CLOUD_PROJECT"],
             any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
@@ -90,6 +84,11 @@ ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
             any_of=["AGY_TOKEN"],
             env_fallback=True,
             hint="set AGY_TOKEN",
+        ),
+        scion_harness.env_method(
+            "api-key",
+            any_of=["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            hint="set GEMINI_API_KEY or GOOGLE_API_KEY",
         ),
     ],
     fallback_to_none_on_error=True,
@@ -170,11 +169,12 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx.info(f"vertex-ai ADC auth: AGY version {'.'.join(str(v) for v in ver)}")
 
     elif method == "api-key":
-        api_key = ctx.read_secret("GEMINI_API_KEY", env_fallback=True)
-        if not api_key:
-            raise scion_harness.ProvisionError("GEMINI_API_KEY secret is empty")
-        env_overlay["GEMINI_API_KEY"] = api_key
-        ctx.info("api-key auth: GEMINI_API_KEY configured")
+        api_key_name = resolved.env_key or "GEMINI_API_KEY"
+        # Validate key exists and is non-empty; overlay uses shell interpolation.
+        if not ctx.read_secret(api_key_name, env_fallback=True):
+            raise scion_harness.ProvisionError(f"{api_key_name} secret is empty")
+        env_overlay[api_key_name] = f"${{{api_key_name}}}"
+        ctx.info(f"api-key auth: {api_key_name} configured")
 
     elif method == "oauth-token":
         token_raw = _read_agy_token(ctx)
@@ -252,6 +252,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx.home, enterprise=is_enterprise, model=model,
         thinking_tier=thinking_tier, auth_method=method,
     )
+
     _apply_mcp(ctx)
 
     ctx.info(f"method={method}")
