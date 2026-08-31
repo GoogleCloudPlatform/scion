@@ -123,17 +123,18 @@ def _update_gemini_settings(settings_path: str, gemini_auth_type: str) -> None:
 def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
     """Build the env vars overlay for outputs/env.json."""
     if method == "api-key" and env_key:
-        return {env_key: f"${{{env_key}}}"}
+        return {env_key: os.environ.get(env_key, "")}
     if method == "auth-file":
         overlay: dict[str, str] = {}
-        if os.environ.get("GOOGLE_CLOUD_PROJECT"):
-            overlay["GOOGLE_CLOUD_PROJECT"] = "${GOOGLE_CLOUD_PROJECT}"
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+        if project:
+            overlay["GOOGLE_CLOUD_PROJECT"] = project
         return overlay
     if method == "vertex-ai":
         return {
-            "GOOGLE_CLOUD_PROJECT": "${GOOGLE_CLOUD_PROJECT}",
-            "GOOGLE_CLOUD_REGION": "${GOOGLE_CLOUD_REGION}",
-            "GOOGLE_CLOUD_LOCATION": "${GOOGLE_CLOUD_REGION}",
+            "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
+            "GOOGLE_CLOUD_REGION": os.environ.get("GOOGLE_CLOUD_REGION", ""),
+            "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", ""),
         }
     return {}
 
