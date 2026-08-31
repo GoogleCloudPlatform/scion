@@ -16,12 +16,16 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -39,6 +43,90 @@ const (
 )
 
 // ---------------------------------------------------------------------------
+// WP0-conformant capabilities serialization (R1)
+// ---------------------------------------------------------------------------
+
+// wpCapabilities is the WP0 wire shape for capabilities. The B6
+// BoundaryCapabilities struct uses boolean fields; the WP0 contract
+// (type-shapes.ts §8) specifies an actions array. This wrapper lives
+// in B7 (serialization layer), not B6.
+type wpCapabilities struct {
+	Actions []string `json:"actions"`
+}
+
+// toWPCapabilities maps B6 boolean BoundaryCapabilities to the WP0
+// actions array format. Action names match type-shapes.ts §8
+// AccessBoundaryCapabilityAction.
+func toWPCapabilities(bc *BoundaryCapabilities) *wpCapabilities {
+	if bc == nil {
+		return &wpCapabilities{Actions: []string{}}
+	}
+	// Always include "read" — if the actor can see the resource, they have read.
+	actions := []string{"read"}
+	if bc.CanPreview {
+		actions = append(actions, "previewCreate", "previewTighten", "previewRelax")
+	}
+	if bc.CanCreate {
+		actions = append(actions, "commit")
+	}
+	if bc.CanUpdate {
+		// commit covers create+update; only add if not already present from CanCreate.
+		if !bc.CanCreate {
+			actions = append(actions, "commit")
+		}
+	}
+	if bc.CanDelete {
+		actions = append(actions, "delete")
+	}
+	if bc.IsAdmin {
+		actions = append(actions, "readAudit")
+	}
+	return &wpCapabilities{Actions: actions}
+}
+
+// ---------------------------------------------------------------------------
+// Strict JSON decoding (R2)
+// ---------------------------------------------------------------------------
+
+// readJSONStrict decodes JSON from the request body into v, rejecting unknown
+// fields. Used for mutation endpoints (create, update, preview) to enforce the
+// "unknown mutation fields are rejected" contract.
+func readJSONStrict(r *http.Request, v interface{}) error {
+	if r.Body == nil {
+		return fmt.Errorf("empty request body")
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Permission display name cache (N3)
+// ---------------------------------------------------------------------------
+
+var (
+	permissionDisplayNameCache     map[string]string
+	permissionDisplayNameCacheOnce sync.Once
+)
+
+// getPermissionDisplayNameLookup returns a lazily-built, cached lookup map
+// from permission ID to display name. The registry is static for the process
+// lifetime, so the map is built once and shared.
+func getPermissionDisplayNameLookup() map[string]string {
+	permissionDisplayNameCacheOnce.Do(func() {
+		m := make(map[string]string, len(permissions.Registry))
+		for _, p := range permissions.Registry {
+			m[p.ID] = p.Description
+		}
+		permissionDisplayNameCache = m
+	})
+	return permissionDisplayNameCache
+}
+
+// ---------------------------------------------------------------------------
 // Request types — preview-bound mutations (B7)
 // ---------------------------------------------------------------------------
 
@@ -46,11 +134,11 @@ const (
 // /api/v1/admin/access-constraints (preview-bound create).
 type accessConstraintCreateRequest struct {
 	Name               string                  `json:"name"`
-	Purpose            string                  `json:"purpose,omitempty"`
+	Purpose            string                  `json:"purpose"`
 	Subject            subjectSelectorRequest  `json:"subject"`
 	Scope              constraintScopeRequest  `json:"scope"`
 	MaximumPermissions []string                `json:"maximumPermissions"`
-	Condition          *constraintConditionReq `json:"condition,omitempty"`
+	AppliesWhen        *constraintConditionReq `json:"appliesWhen,omitempty"`
 	PreviewToken       string                  `json:"previewToken"`
 }
 
@@ -58,11 +146,11 @@ type accessConstraintCreateRequest struct {
 // /api/v1/admin/access-constraints/:id (preview-bound full update).
 type accessConstraintUpdateRequest struct {
 	Name               string                  `json:"name"`
-	Purpose            string                  `json:"purpose,omitempty"`
+	Purpose            string                  `json:"purpose"`
 	Subject            subjectSelectorRequest  `json:"subject"`
 	Scope              constraintScopeRequest  `json:"scope"`
 	MaximumPermissions []string                `json:"maximumPermissions"`
-	Condition          *constraintConditionReq `json:"condition,omitempty"`
+	AppliesWhen        *constraintConditionReq `json:"appliesWhen,omitempty"`
 	PreviewToken       string                  `json:"previewToken"`
 }
 
@@ -103,40 +191,61 @@ type previewCreateRequest struct {
 
 	// For update and delete:
 	ConstraintID string `json:"constraintId,omitempty"`
-	BaseRevision int64  `json:"baseRevision,omitempty"`
+	// BaseRevision is an opaque string on the wire (N4, WP0 contract).
+	// Parsed to int64 internally.
+	BaseRevision string `json:"baseRevision,omitempty"`
 }
 
 type previewDraftRequest struct {
 	Name               string                  `json:"name"`
-	Purpose            string                  `json:"purpose,omitempty"`
+	Purpose            string                  `json:"purpose"`
 	Subject            subjectSelectorRequest  `json:"subject"`
 	Scope              constraintScopeRequest  `json:"scope"`
 	MaximumPermissions []string                `json:"maximumPermissions"`
-	Condition          *constraintConditionReq `json:"condition,omitempty"`
+	AppliesWhen        *constraintConditionReq `json:"appliesWhen,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
 // API response types (B7 response shape)
 // ---------------------------------------------------------------------------
 
+// principalRef is the WP0 wire shape for createdBy/updatedBy (R4.3).
+type principalRef struct {
+	Type        string `json:"type"`
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+}
+
+// appliesWhenResponse is the WP0 wire shape for time conditions (R4.6).
+type appliesWhenResponse struct {
+	NotBefore *time.Time `json:"notBefore"`
+	ExpiresAt *time.Time `json:"expiresAt"`
+}
+
 // accessBoundarySummary is a list row with resolved references and capabilities.
+// Field shapes conform to the frozen WP0 contract (type-shapes.ts §8).
 type accessBoundarySummary struct {
-	ID                 string                   `json:"id"`
-	Name               string                   `json:"name"`
-	Purpose            string                   `json:"purpose,omitempty"`
-	Subject            resolvedSubject           `json:"subject"`
-	Scope              resolvedScope             `json:"scope"`
-	MaximumPermissions []resolvedPermission      `json:"maximumPermissions"`
-	Status             string                    `json:"status"`
-	Health             resolutionHealth          `json:"health"`
-	Completeness       responseCompleteness      `json:"completeness"`
-	Condition          *constraintConditionReq   `json:"condition,omitempty"`
-	Revision           int64                     `json:"revision"`
-	CreatedBy          string                    `json:"createdBy"`
-	CreatedAt          time.Time                 `json:"createdAt"`
-	UpdatedAt          time.Time                 `json:"updatedAt"`
-	UpdatedBy          string                    `json:"updatedBy,omitempty"`
-	Capabilities       *BoundaryCapabilities     `json:"_capabilities,omitempty"`
+	ID                    string               `json:"id"`
+	Name                  string               `json:"name"`
+	Purpose               string               `json:"purpose"`
+	Subject               resolvedSubject      `json:"subject"`
+	SubjectDisplay        subjectDisplayResp   `json:"subjectDisplay"`
+	Scope                 resolvedScope        `json:"scope"`
+	ScopeDisplay          scopeDisplayResp     `json:"scopeDisplay"`
+	MaximumPermissions    []resolvedPermission `json:"maximumPermissions"`
+	MaxPermissionCount    int                  `json:"maximumPermissionCount"`
+	AffectedPrincipalCnt  int                  `json:"affectedPrincipalCount"`
+	AffectedPrincipalExact bool                `json:"affectedPrincipalCountExact"`
+	Status                string               `json:"status"`
+	Risk                  []string             `json:"risk"`
+	Health                wpResolutionHealth   `json:"health"`
+	AppliesWhen           appliesWhenResponse  `json:"appliesWhen"`
+	Revision              string               `json:"revision"`
+	CreatedBy             *principalRef        `json:"createdBy"`
+	CreatedAt             time.Time            `json:"createdAt"`
+	UpdatedBy             *principalRef        `json:"updatedBy"`
+	UpdatedAt             time.Time            `json:"updatedAt"`
+	Capabilities          *wpCapabilities      `json:"_capabilities,omitempty"`
 }
 
 // accessBoundaryDetail is the full record with temporal impact, lockout, provenance.
@@ -152,13 +261,29 @@ type resolvedSubject struct {
 	PrincipalType string `json:"principalType,omitempty"`
 	PrincipalID   string `json:"principalId,omitempty"`
 	GroupID       string `json:"groupId,omitempty"`
-	DisplayName   string `json:"displayName,omitempty"`
+}
+
+// subjectDisplayResp is the WP0 ConstraintSubjectDisplay shape.
+type subjectDisplayResp struct {
+	Kind          string `json:"kind"`
+	Label         string `json:"label"`
+	PrincipalType string `json:"principalType,omitempty"`
+	PrincipalName string `json:"principalName,omitempty"`
+	GroupName     string `json:"groupName,omitempty"`
+	Resolved      bool   `json:"resolved"`
 }
 
 type resolvedScope struct {
-	Type        string `json:"type"`
-	ID          string `json:"id,omitempty"`
-	DisplayName string `json:"displayName,omitempty"`
+	Type      string `json:"type"`
+	ProjectID string `json:"projectId,omitempty"`
+}
+
+// scopeDisplayResp is the WP0 ConstraintScopeDisplay shape.
+type scopeDisplayResp struct {
+	Type        string  `json:"type"`
+	Label       string  `json:"label"`
+	ProjectName *string `json:"projectName"`
+	Resolved    bool    `json:"resolved"`
 }
 
 type resolvedPermission struct {
@@ -166,14 +291,19 @@ type resolvedPermission struct {
 	DisplayName string `json:"displayName,omitempty"`
 }
 
-type resolutionHealth struct {
-	Healthy  bool   `json:"healthy"`
-	Degraded bool   `json:"degraded,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+// wpResolutionHealth is the WP0 ResolutionHealth wire shape (R4.2).
+// Maps from the old {healthy, degraded, reason} to {state, unresolvedReferences}.
+type wpResolutionHealth struct {
+	State                string                `json:"state"`
+	UnresolvedReferences []unresolvedReference `json:"unresolvedReferences"`
 }
 
-type responseCompleteness struct {
-	Complete bool `json:"complete"`
+// unresolvedReference identifies a reference that could not be resolved.
+type unresolvedReference struct {
+	Field         string `json:"field"`
+	ReferenceType string `json:"referenceType"`
+	ReferenceID   string `json:"referenceId"`
+	Reason        string `json:"reason"`
 }
 
 type provenanceLinks struct {
@@ -181,10 +311,12 @@ type provenanceLinks struct {
 }
 
 // accessBoundaryListResponse is the list envelope.
+// Includes collection-level _capabilities (R4.7).
 type accessBoundaryListResponse struct {
 	Items         []accessBoundarySummary `json:"items"`
 	NextPageToken string                  `json:"nextPageToken,omitempty"`
 	TotalCount    int                     `json:"totalCount"`
+	Capabilities  *wpCapabilities         `json:"_capabilities,omitempty"`
 }
 
 // auditEventResponse wraps a single audit entry for the API.
@@ -193,8 +325,8 @@ type auditEventResponse struct {
 	ConstraintID   string       `json:"constraintId"`
 	Operation      string       `json:"operation"`
 	ActorID        string       `json:"actorId"`
-	BeforeRevision int64        `json:"beforeRevision"`
-	AfterRevision  int64        `json:"afterRevision"`
+	BeforeRevision string       `json:"beforeRevision"`
+	AfterRevision  string       `json:"afterRevision"`
 	Classification string       `json:"classification"`
 	PreviewID      string       `json:"previewId,omitempty"`
 	DraftHash      string       `json:"draftHash,omitempty"`
@@ -381,10 +513,20 @@ func (s *Server) listAccessConstraints(w http.ResponseWriter, r *http.Request) {
 		items = append(items, summary)
 	}
 
+	// Collection-level _capabilities (R4.7): gates "New boundary" control.
+	var collectionCaps *wpCapabilities
+	if actor != nil && s.capabilitiesService != nil {
+		bc, err := s.capabilitiesService.ComputeCapabilities(r.Context(), *actor, ScopeTypeSystem, "")
+		if err == nil {
+			collectionCaps = toWPCapabilities(bc)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, accessBoundaryListResponse{
 		Items:         items,
 		NextPageToken: nextToken,
 		TotalCount:    totalCount,
+		Capabilities:  collectionCaps,
 	})
 }
 
@@ -406,8 +548,8 @@ func (s *Server) getAccessConstraint(w http.ResponseWriter, r *http.Request, id 
 	actor := s.actorFromRequest(r)
 	detail := s.buildBoundaryDetail(r.Context(), sc, actor)
 
-	// If-Match revision support: set ETag header.
-	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, sc.Revision))
+	// If-Match revision support: set ETag header (opaque string per WP0).
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, strconv.FormatInt(sc.Revision, 10)))
 
 	writeJSON(w, http.StatusOK, detail)
 }
@@ -442,30 +584,62 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Cursor pagination over affected principals.
+	// Keyset pagination based on principal ID (R5).
 	pageSize := parseIntOr(r.URL.Query().Get("pageSize"), 50)
 	if pageSize > 200 {
 		pageSize = 200
 	}
-	offset := parseIntOr(r.URL.Query().Get("pageToken"), 0)
 
-	total := len(preview.AffectedPrincipals)
-	end := offset + pageSize
+	allPrincipals := preview.AffectedPrincipals
+	total := len(allPrincipals)
+
+	// Sort by PrincipalID for deterministic keyset ordering.
+	sort.Slice(allPrincipals, func(i, j int) bool {
+		return allPrincipals[i].PrincipalID < allPrincipals[j].PrincipalID
+	})
+
+	// Decode cursor: base64-encoded last-seen principal ID.
+	var cursorID string
+	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
+		if err != nil {
+			BadRequest(w, "invalid pageToken")
+			return
+		}
+		cursorID = string(decoded)
+	}
+
+	// Filter: skip all items with PrincipalID <= cursorID.
+	startIdx := 0
+	if cursorID != "" {
+		for i, ap := range allPrincipals {
+			if ap.PrincipalID > cursorID {
+				startIdx = i
+				break
+			}
+			if i == len(allPrincipals)-1 {
+				startIdx = len(allPrincipals) // all items consumed
+			}
+		}
+	}
+
+	end := startIdx + pageSize
 	if end > total {
 		end = total
 	}
 
 	var items []AffectedPrincipal
-	if offset < total {
-		items = preview.AffectedPrincipals[offset:end]
+	if startIdx < total {
+		items = allPrincipals[startIdx:end]
 	}
 	if items == nil {
 		items = []AffectedPrincipal{}
 	}
 
 	var nextToken string
-	if end < total {
-		nextToken = fmt.Sprintf("%d", end)
+	if end < total && len(items) > 0 {
+		lastID := items[len(items)-1].PrincipalID
+		nextToken = base64.RawURLEncoding.EncodeToString([]byte(lastID))
 	}
 
 	writeJSON(w, http.StatusOK, affectedPrincipalsResponse{
@@ -502,29 +676,60 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 		entries = s.governanceService.auditWriter.GetEntriesForConstraint(id)
 	}
 
-	// Cursor pagination.
+	// Keyset pagination based on audit entry ID (R5).
+	// Audit entries are append-only, so ID-based keyset is stable.
 	pageSize := parseIntOr(r.URL.Query().Get("pageSize"), 50)
 	if pageSize > 200 {
 		pageSize = 200
 	}
-	offset := parseIntOr(r.URL.Query().Get("pageToken"), 0)
+
+	// Sort entries by ID for deterministic ordering.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ID < entries[j].ID
+	})
 
 	total := len(entries)
-	end := offset + pageSize
+
+	// Decode cursor: base64-encoded last-seen audit entry ID.
+	var cursorID string
+	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
+		if err != nil {
+			BadRequest(w, "invalid pageToken")
+			return
+		}
+		cursorID = string(decoded)
+	}
+
+	// Filter: skip all entries with ID <= cursorID.
+	startIdx := 0
+	if cursorID != "" {
+		for i, e := range entries {
+			if e.ID > cursorID {
+				startIdx = i
+				break
+			}
+			if i == len(entries)-1 {
+				startIdx = len(entries) // all items consumed
+			}
+		}
+	}
+
+	end := startIdx + pageSize
 	if end > total {
 		end = total
 	}
 
 	var items []auditEventResponse
-	if offset < total {
-		for _, e := range entries[offset:end] {
+	if startIdx < total {
+		for _, e := range entries[startIdx:end] {
 			items = append(items, auditEventResponse{
 				ID:             e.ID,
 				ConstraintID:   e.ConstraintID,
 				Operation:      e.Operation,
 				ActorID:        e.ActorID,
-				BeforeRevision: e.BeforeRevision,
-				AfterRevision:  e.AfterRevision,
+				BeforeRevision: strconv.FormatInt(e.BeforeRevision, 10),
+				AfterRevision:  strconv.FormatInt(e.AfterRevision, 10),
 				Classification: e.Classification,
 				PreviewID:      e.PreviewID,
 				DraftHash:      e.DraftHash,
@@ -538,8 +743,9 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	var nextToken string
-	if end < total {
-		nextToken = fmt.Sprintf("%d", end)
+	if end < total && len(items) > 0 {
+		lastID := items[len(items)-1].ID
+		nextToken = base64.RawURLEncoding.EncodeToString([]byte(lastID))
 	}
 
 	writeJSON(w, http.StatusOK, auditListResponse{
@@ -560,14 +766,8 @@ func (s *Server) createPreview(w http.ResponseWriter, r *http.Request, user User
 	}
 
 	var req previewCreateRequest
-	if err := readJSON(r, &req); err != nil {
+	if err := readJSONStrict(r, &req); err != nil {
 		BadRequest(w, "invalid request body: "+err.Error())
-		return
-	}
-
-	// Reject unknown fields by re-decoding with DisallowUnknownFields.
-	if hasUnknownFields(r) {
-		BadRequest(w, "request contains unknown fields")
 		return
 	}
 
@@ -577,10 +777,21 @@ func (s *Server) createPreview(w http.ResponseWriter, r *http.Request, user User
 		ID:   user.ID(),
 	}
 
+	// Parse BaseRevision from opaque string to int64 (N4).
+	var baseRevision int64
+	if req.BaseRevision != "" {
+		var parseErr error
+		baseRevision, parseErr = strconv.ParseInt(req.BaseRevision, 10, 64)
+		if parseErr != nil {
+			BadRequest(w, "invalid baseRevision: must be a numeric string")
+			return
+		}
+	}
+
 	previewReq := PreviewRequest{
 		Operation:    req.Operation,
 		ConstraintID: req.ConstraintID,
-		BaseRevision: req.BaseRevision,
+		BaseRevision: baseRevision,
 		Actor:        actor,
 	}
 
@@ -656,7 +867,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var req accessConstraintCreateRequest
-	if err := readJSON(r, &req); err != nil {
+	if err := readJSONStrict(r, &req); err != nil {
 		BadRequest(w, "invalid request body: "+err.Error())
 		return
 	}
@@ -672,6 +883,13 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		BadRequest(w, "name is required")
+		return
+	}
+
+	// N1: purpose is required by the WP0 contract.
+	req.Purpose = strings.TrimSpace(req.Purpose)
+	if req.Purpose == "" {
+		BadRequest(w, "purpose is required")
 		return
 	}
 
@@ -728,10 +946,10 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		draft.SubjectGroupID = &subject.GroupID
 	}
 
-	// Set condition (time window).
-	if req.Condition != nil {
-		draft.NotBefore = req.Condition.NotBefore
-		draft.ExpiresAt = req.Condition.ExpiresAt
+	// Set time window (appliesWhen).
+	if req.AppliesWhen != nil {
+		draft.NotBefore = req.AppliesWhen.NotBefore
+		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
 	}
 
 	// Commit through governance service.
@@ -790,7 +1008,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var req accessConstraintUpdateRequest
-	if err := readJSON(r, &req); err != nil {
+	if err := readJSONStrict(r, &req); err != nil {
 		BadRequest(w, "invalid request body: "+err.Error())
 		return
 	}
@@ -822,6 +1040,13 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		BadRequest(w, "name is required")
+		return
+	}
+
+	// N1: purpose is required by the WP0 contract.
+	req.Purpose = strings.TrimSpace(req.Purpose)
+	if req.Purpose == "" {
+		BadRequest(w, "purpose is required")
 		return
 	}
 
@@ -875,9 +1100,9 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		draft.SubjectGroupID = &subject.GroupID
 	}
 
-	if req.Condition != nil {
-		draft.NotBefore = req.Condition.NotBefore
-		draft.ExpiresAt = req.Condition.ExpiresAt
+	if req.AppliesWhen != nil {
+		draft.NotBefore = req.AppliesWhen.NotBefore
+		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
 	}
 
 	actor := PrincipalContext{
@@ -906,7 +1131,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	)
 
 	detail := s.buildBoundaryDetail(r.Context(), result.Constraint, &actor)
-	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, result.Constraint.Revision))
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, strconv.FormatInt(result.Constraint.Revision, 10)))
 	writeJSON(w, http.StatusOK, mutationResponse{
 		accessBoundaryDetail: detail,
 		AuditID:              result.AuditID,
@@ -924,29 +1149,34 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// For DELETE, the preview token may be in the request body or a query param.
+	// R3: Accept preview token ONLY from request body (JSON) or
+	// X-Preview-Token header. Never from query parameters — tokens are
+	// HMAC credentials and must not appear in URLs.
 	var previewToken string
 
 	// Try reading from body first (if content-type is JSON).
 	if r.Header.Get("Content-Type") == "application/json" || r.ContentLength > 0 {
 		var req accessConstraintDeleteRequest
-		if err := readJSON(r, &req); err == nil {
+		if err := readJSONStrict(r, &req); err == nil {
 			previewToken = req.PreviewToken
 		}
 	}
 
-	// Fall back to query parameter.
+	// Fall back to X-Preview-Token header.
 	if previewToken == "" {
-		previewToken = r.URL.Query().Get("previewToken")
+		previewToken = r.Header.Get("X-Preview-Token")
 	}
 
 	if previewToken == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"previewToken is required; mutations must go through preview first", nil)
+			"previewToken is required; provide via request body or X-Preview-Token header", nil)
 		return
 	}
 
-	// Check the constraint exists and is not recovery-disabled.
+	// N2: This pre-fetch checks the Disabled flag before calling
+	// CommitBoundaryChange. The governance service will re-fetch internally,
+	// but we need the early check to return the correct error code for
+	// recovery-disabled constraints without consuming the preview token.
 	existing, err := s.store.GetAccessConstraint(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1411,54 +1641,66 @@ func (s *Server) buildAffectedPrincipal(
 // ---------------------------------------------------------------------------
 
 // buildBoundarySummary converts a store constraint into an API summary response.
+// Response shape conforms to the frozen WP0 contract (type-shapes.ts §8).
 func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConstraint, actor *PrincipalContext) accessBoundarySummary {
 	hc := storeToHubAccessConstraint(sc)
 
 	// Resolve subject display name.
-	subjectDisplay := s.resolveSubjectDisplayName(ctx, sc)
+	subjectDisplayName := s.resolveSubjectDisplayName(ctx, sc)
 
 	// Resolve scope display name.
-	scopeDisplay := s.resolveScopeDisplayName(ctx, sc.ScopeType, sc.ScopeID)
+	scopeDisplayName := s.resolveScopeDisplayName(ctx, sc.ScopeType, sc.ScopeID)
 
-	// Resolve permission display names.
+	// Resolve permission display names (uses cached lookup — N3).
 	resolvedPerms := resolvePermissionDisplayNames(sc.MaximumPermissions)
 
 	// Compute status.
 	status := computeConstraintStatus(sc, hc)
 
-	// Compute health.
-	health := computeHealth(hc)
+	// Compute health (WP0 shape).
+	health := computeWPHealth(hc)
+
+	// Build subject display (WP0 ConstraintSubjectDisplay shape).
+	subjectDisp := buildSubjectDisplay(sc, subjectDisplayName)
+
+	// Build scope display (WP0 ConstraintScopeDisplay shape).
+	scopeDisp := buildScopeDisplay(sc, scopeDisplayName)
+
+	// R4.3: createdBy/updatedBy as PrincipalRef objects.
+	createdByRef := s.resolvePrincipalRef(ctx, sc.CreatedBy)
+	updatedByRef := s.resolvePrincipalRef(ctx, sc.UpdatedBy)
 
 	summary := accessBoundarySummary{
-		ID:                 sc.ID,
-		Name:               sc.Name,
-		Purpose:            sc.Purpose,
-		Subject:            resolvedSubjectFromStore(sc, subjectDisplay),
-		Scope:              resolvedScope{Type: sc.ScopeType, ID: sc.ScopeID, DisplayName: scopeDisplay},
-		MaximumPermissions: resolvedPerms,
-		Status:             status,
-		Health:             health,
-		Completeness:       responseCompleteness{Complete: !hc.Degraded},
-		Revision:           sc.Revision,
-		CreatedBy:          sc.CreatedBy,
-		CreatedAt:          sc.CreatedAt,
-		UpdatedAt:          sc.UpdatedAt,
-		UpdatedBy:          sc.UpdatedBy,
-	}
-
-	// Set condition if time-bounded.
-	if sc.NotBefore != nil || sc.ExpiresAt != nil {
-		summary.Condition = &constraintConditionReq{
+		ID:                    sc.ID,
+		Name:                  sc.Name,
+		Purpose:               sc.Purpose,
+		Subject:               resolvedSubjectFromStore(sc),
+		SubjectDisplay:        subjectDisp,
+		Scope:                 resolvedScopeFromStore(sc),
+		ScopeDisplay:          scopeDisp,
+		MaximumPermissions:    resolvedPerms,
+		MaxPermissionCount:    len(sc.MaximumPermissions),
+		AffectedPrincipalCnt:  0, // R4.5: populated from cached count; TODO: compute from preview cache.
+		AffectedPrincipalExact: false,
+		Status:                status,
+		Risk:                  []string{}, // R4.4: empty array; risk assessment not yet implemented.
+		Health:                health,
+		AppliesWhen: appliesWhenResponse{
 			NotBefore: sc.NotBefore,
 			ExpiresAt: sc.ExpiresAt,
-		}
+		},
+		Revision:  strconv.FormatInt(sc.Revision, 10),
+		CreatedBy: createdByRef,
+		CreatedAt: sc.CreatedAt,
+		UpdatedBy: updatedByRef,
+		UpdatedAt: sc.UpdatedAt,
 	}
 
-	// Compute capabilities if actor is available.
+	// Compute capabilities if actor is available (R1: WP0 actions array).
 	if actor != nil && s.capabilitiesService != nil {
 		caps, err := s.capabilitiesService.ComputeResourceCapabilities(ctx, *actor, sc.ID)
 		if err == nil {
-			summary.Capabilities = caps
+			summary.Capabilities = toWPCapabilities(caps)
 		}
 	}
 
@@ -1514,10 +1756,9 @@ func (s *Server) resolveScopeDisplayName(ctx context.Context, scopeType, scopeID
 	return ""
 }
 
-func resolvedSubjectFromStore(sc *store.AccessConstraint, displayName string) resolvedSubject {
+func resolvedSubjectFromStore(sc *store.AccessConstraint) resolvedSubject {
 	rs := resolvedSubject{
-		Kind:        sc.SubjectKind,
-		DisplayName: displayName,
+		Kind: sc.SubjectKind,
 	}
 	if sc.SubjectPrincipalType != nil {
 		rs.PrincipalType = *sc.SubjectPrincipalType
@@ -1531,13 +1772,67 @@ func resolvedSubjectFromStore(sc *store.AccessConstraint, displayName string) re
 	return rs
 }
 
-func resolvePermissionDisplayNames(ids []string) []resolvedPermission {
-	lookup := make(map[string]string, len(permissions.Registry))
-	for _, p := range permissions.Registry {
-		// Use Description as display name; the Permission struct doesn't have
-		// a dedicated DisplayName field.
-		lookup[p.ID] = p.Description
+func resolvedScopeFromStore(sc *store.AccessConstraint) resolvedScope {
+	rs := resolvedScope{Type: sc.ScopeType}
+	if sc.ScopeType == ScopeTypeProject {
+		rs.ProjectID = sc.ScopeID
 	}
+	return rs
+}
+
+// buildSubjectDisplay creates the WP0 ConstraintSubjectDisplay shape.
+func buildSubjectDisplay(sc *store.AccessConstraint, displayName string) subjectDisplayResp {
+	d := subjectDisplayResp{
+		Kind:     sc.SubjectKind,
+		Label:    displayName,
+		Resolved: displayName != "",
+	}
+	switch sc.SubjectKind {
+	case store.ConstraintSubjectPrincipal:
+		if sc.SubjectPrincipalType != nil {
+			d.PrincipalType = *sc.SubjectPrincipalType
+		}
+		d.PrincipalName = displayName
+	case store.ConstraintSubjectGroupClosure:
+		d.GroupName = displayName
+	case store.ConstraintSubjectAllPrincipals:
+		d.Resolved = true
+	}
+	return d
+}
+
+// buildScopeDisplay creates the WP0 ConstraintScopeDisplay shape.
+func buildScopeDisplay(sc *store.AccessConstraint, displayName string) scopeDisplayResp {
+	d := scopeDisplayResp{
+		Type:     sc.ScopeType,
+		Label:    displayName,
+		Resolved: displayName != "",
+	}
+	if sc.ScopeType == ScopeTypeProject && displayName != "" && displayName != sc.ScopeID {
+		d.ProjectName = &displayName
+	}
+	return d
+}
+
+// resolvePrincipalRef resolves a bare user ID to a PrincipalRef (R4.3).
+// Falls back to showing the ID as display name if unresolvable.
+func (s *Server) resolvePrincipalRef(_ context.Context, userID string) *principalRef {
+	if userID == "" {
+		return nil
+	}
+	// Default: use ID as display name. A full resolution would look up
+	// the user from the store, but we use the ID as the fallback to avoid
+	// extra queries on every list/detail call.
+	return &principalRef{
+		Type:        "user",
+		ID:          userID,
+		DisplayName: userID,
+	}
+}
+
+// N3: Uses cached lookup map instead of rebuilding per call.
+func resolvePermissionDisplayNames(ids []string) []resolvedPermission {
+	lookup := getPermissionDisplayNameLookup()
 	result := make([]resolvedPermission, len(ids))
 	for i, id := range ids {
 		result[i] = resolvedPermission{
@@ -1562,15 +1857,25 @@ func computeConstraintStatus(sc *store.AccessConstraint, hc *AccessConstraint) s
 	return "active"
 }
 
-func computeHealth(hc *AccessConstraint) resolutionHealth {
+// computeWPHealth converts the internal health to the WP0 ResolutionHealth shape (R4.2).
+func computeWPHealth(hc *AccessConstraint) wpResolutionHealth {
 	if hc == nil || hc.Degraded {
-		return resolutionHealth{
-			Healthy:  false,
-			Degraded: true,
-			Reason:   "constraint has invalid stored data",
+		return wpResolutionHealth{
+			State: "degraded",
+			UnresolvedReferences: []unresolvedReference{
+				{
+					Field:         "stored_data",
+					ReferenceType: "unknown",
+					ReferenceID:   "",
+					Reason:        "resolution_failed",
+				},
+			},
 		}
 	}
-	return resolutionHealth{Healthy: true}
+	return wpResolutionHealth{
+		State:                "healthy",
+		UnresolvedReferences: []unresolvedReference{},
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1750,9 +2055,9 @@ func (s *Server) draftToStoreConstraint(draft *previewDraftRequest, user UserIde
 		sc.SubjectGroupID = &subject.GroupID
 	}
 
-	if draft.Condition != nil {
-		sc.NotBefore = draft.Condition.NotBefore
-		sc.ExpiresAt = draft.Condition.ExpiresAt
+	if draft.AppliesWhen != nil {
+		sc.NotBefore = draft.AppliesWhen.NotBefore
+		sc.ExpiresAt = draft.AppliesWhen.ExpiresAt
 	}
 
 	return sc, nil
@@ -1789,17 +2094,9 @@ func parseIntOr(s string, defaultVal int) int {
 	return v
 }
 
-// hasUnknownFields re-parses the raw request body and checks for unknown fields.
-// NOTE: This is a best-effort check. We use json.Decoder.DisallowUnknownFields()
-// which can only check top-level fields for our request types.
-func hasUnknownFields(r *http.Request) bool {
-	// This is implemented as a policy for the preview endpoint.
-	// For now, we do basic checking by looking at the content type.
-	// The readJSON + struct tags already restrict what's accepted.
-	// Additional unknown field rejection is handled by the JSON decoder
-	// settings in the caller.
-	return false
-}
+// hasUnknownFields was removed (R2): replaced by readJSONStrict which uses
+// json.NewDecoder.DisallowUnknownFields() as the primary decode path for
+// all mutation and preview endpoints.
 
 // ---------------------------------------------------------------------------
 // Server field extensions (B7 service wiring)

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -131,13 +132,21 @@ func TestB7_ListAccessConstraints(t *testing.T) {
 	assert.GreaterOrEqual(t, result.TotalCount, 3)
 	assert.GreaterOrEqual(t, len(result.Items), 3)
 
-	// Check resolved data is present.
+	// Check resolved data is present (WP0 shape).
 	for _, item := range result.Items {
 		assert.NotEmpty(t, item.ID, "ID should be set")
 		assert.NotEmpty(t, item.Name, "Name should be set")
 		assert.NotEmpty(t, item.Subject.Kind, "Subject.Kind should be set")
 		assert.NotEmpty(t, item.Status, "Status should be set")
+		assert.NotEmpty(t, item.Revision, "Revision should be opaque string")
+		assert.NotNil(t, item.Risk, "Risk should be present (may be empty)")
+		assert.NotEmpty(t, item.Health.State, "Health.State should be set")
+		assert.NotNil(t, item.CreatedBy, "CreatedBy should be PrincipalRef")
 	}
+
+	// R4.7: Collection-level _capabilities should be present.
+	assert.NotNil(t, result.Capabilities, "list should include collection-level _capabilities")
+	assert.NotNil(t, result.Capabilities.Actions, "collection _capabilities should have actions")
 }
 
 func TestB7_ListAccessConstraints_WithFilter(t *testing.T) {
@@ -198,9 +207,28 @@ func TestB7_GetAccessConstraint(t *testing.T) {
 	assert.NotNil(t, detail.Provenance)
 	assert.Contains(t, detail.Provenance.AuditURL, created.ID)
 
-	// ETag header should be set.
+	// R4.1: Revision should be opaque string.
+	assert.Equal(t, strconv.FormatInt(created.Revision, 10), detail.Revision)
+
+	// R4.2: Health should use WP0 shape.
+	assert.NotEmpty(t, detail.Health.State)
+	assert.NotNil(t, detail.Health.UnresolvedReferences)
+
+	// R4.3: CreatedBy/UpdatedBy should be PrincipalRef.
+	assert.NotNil(t, detail.CreatedBy)
+	assert.NotEmpty(t, detail.CreatedBy.Type)
+	assert.NotEmpty(t, detail.CreatedBy.ID)
+
+	// R4.4: Risk should be present (empty array is ok).
+	assert.NotNil(t, detail.Risk)
+
+	// R4.6: AppliesWhen should be present.
+	// (no time bounds set, so both nil)
+
+	// ETag header should be set (opaque string).
 	etag := resp.Header().Get("ETag")
 	assert.NotEmpty(t, etag, "ETag header should be set")
+	assert.Contains(t, etag, strconv.FormatInt(created.Revision, 10))
 }
 
 func TestB7_GetAccessConstraint_NotFound(t *testing.T) {
@@ -276,7 +304,8 @@ func TestB7_CreatePreview(t *testing.T) {
 	body := previewCreateRequest{
 		Operation: "create",
 		Draft: &previewDraftRequest{
-			Name: "preview-test",
+			Name:    "preview-test",
+			Purpose: "Test preview",
 			Subject: subjectSelectorRequest{
 				Kind:          "principal",
 				PrincipalType: "user",
@@ -325,7 +354,8 @@ func TestB7_CreateRequiresPreviewToken(t *testing.T) {
 	targetUserID := pvSeedUser(t, s, "no-token-target")
 
 	body := accessConstraintCreateRequest{
-		Name: "no-token",
+		Name:    "no-token",
+		Purpose: "Test constraint",
 		Subject: subjectSelectorRequest{
 			Kind:          "principal",
 			PrincipalType: "user",
@@ -354,7 +384,8 @@ func TestB7_UpdateRequiresIfMatch(t *testing.T) {
 	created := b7SeedConstraint(t, s, "update-no-ifmatch")
 
 	body := accessConstraintUpdateRequest{
-		Name: "updated-name",
+		Name:    "updated-name",
+		Purpose: "Updated purpose",
 		Subject: subjectSelectorRequest{
 			Kind: "all_principals",
 		},
@@ -377,7 +408,8 @@ func TestB7_UpdateRequiresPreviewToken(t *testing.T) {
 	created := b7SeedConstraint(t, s, "update-no-token")
 
 	body := accessConstraintUpdateRequest{
-		Name: "updated-name",
+		Name:    "updated-name",
+		Purpose: "Updated purpose",
 		Subject: subjectSelectorRequest{
 			Kind: "all_principals",
 		},
@@ -416,7 +448,8 @@ func TestB7_RecoveryDisabledImmutable(t *testing.T) {
 
 	// Try to update.
 	body := accessConstraintUpdateRequest{
-		Name: "updated-name",
+		Name:    "updated-name",
+		Purpose: "Updated purpose",
 		Subject: subjectSelectorRequest{
 			Kind: "all_principals",
 		},
@@ -447,9 +480,11 @@ func TestB7_RecoveryDisabledDeleteImmutable(t *testing.T) {
 	err := s.DisableAccessConstraint(t.Context(), created.ID)
 	require.NoError(t, err)
 
-	// Try to delete with a preview token in query params.
-	resp := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/admin/access-constraints/"+created.ID+"?previewToken=some-token", nil)
+	// R3: Try to delete with a preview token via X-Preview-Token header
+	// (query param fallback was removed — tokens must not appear in URLs).
+	resp := doRequestHeaders(t, srv, http.MethodDelete,
+		"/api/v1/admin/access-constraints/"+created.ID, nil,
+		map[string]string{"X-Preview-Token": "some-token"})
 	assert.Equal(t, http.StatusConflict, resp.Code, "body: %s", resp.Body.String())
 
 	var errResp ErrorResponse
@@ -533,12 +568,19 @@ func TestB7_DetailIncludesCapabilities(t *testing.T) {
 		"/api/v1/admin/access-constraints/"+created.ID, nil)
 	assert.Equal(t, http.StatusOK, resp.Code, "body: %s", resp.Body.String())
 
-	// Parse and check that _capabilities is present.
+	// Parse and check that _capabilities is present with actions array (R1).
 	var raw map[string]json.RawMessage
 	err := json.Unmarshal(resp.Body.Bytes(), &raw)
 	require.NoError(t, err)
-	_, hasCaps := raw["_capabilities"]
+	capsJSON, hasCaps := raw["_capabilities"]
 	assert.True(t, hasCaps, "detail response should include _capabilities")
+
+	// Verify it uses the WP0 actions array shape, not boolean fields.
+	var caps wpCapabilities
+	err = json.Unmarshal(capsJSON, &caps)
+	require.NoError(t, err)
+	assert.NotNil(t, caps.Actions, "_capabilities should have actions array")
+	assert.Contains(t, caps.Actions, "read", "actions should include 'read'")
 }
 
 func TestB7_ListIncludesCapabilities(t *testing.T) {
@@ -554,7 +596,11 @@ func TestB7_ListIncludesCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	for _, item := range result.Items {
 		assert.NotNil(t, item.Capabilities, "each list item should include _capabilities")
+		assert.NotNil(t, item.Capabilities.Actions, "item _capabilities should have actions array")
 	}
+
+	// R4.7: Collection-level _capabilities.
+	assert.NotNil(t, result.Capabilities, "list should have collection-level _capabilities")
 }
 
 // ---------------------------------------------------------------------------
@@ -609,22 +655,22 @@ func TestB7_StatusComputation(t *testing.T) {
 func TestB7_HealthComputation(t *testing.T) {
 	t.Run("healthy", func(t *testing.T) {
 		hc := &AccessConstraint{Degraded: false}
-		health := computeHealth(hc)
-		assert.True(t, health.Healthy)
-		assert.False(t, health.Degraded)
+		health := computeWPHealth(hc)
+		assert.Equal(t, "healthy", health.State)
+		assert.Empty(t, health.UnresolvedReferences)
 	})
 
 	t.Run("degraded", func(t *testing.T) {
 		hc := &AccessConstraint{Degraded: true}
-		health := computeHealth(hc)
-		assert.False(t, health.Healthy)
-		assert.True(t, health.Degraded)
+		health := computeWPHealth(hc)
+		assert.Equal(t, "degraded", health.State)
+		assert.NotEmpty(t, health.UnresolvedReferences)
 	})
 
 	t.Run("nil", func(t *testing.T) {
-		health := computeHealth(nil)
-		assert.False(t, health.Healthy)
-		assert.True(t, health.Degraded)
+		health := computeWPHealth(nil)
+		assert.Equal(t, "degraded", health.State)
+		assert.NotEmpty(t, health.UnresolvedReferences)
 	})
 }
 
@@ -724,7 +770,8 @@ func TestB7_PreviewAndCreate_FullFlow(t *testing.T) {
 	previewBody := previewCreateRequest{
 		Operation: "create",
 		Draft: &previewDraftRequest{
-			Name: "full-flow-boundary",
+			Name:    "full-flow-boundary",
+			Purpose: "Test full flow",
 			Subject: subjectSelectorRequest{
 				Kind:          "principal",
 				PrincipalType: "user",
@@ -748,7 +795,8 @@ func TestB7_PreviewAndCreate_FullFlow(t *testing.T) {
 
 	// Step 2: Create using the preview token.
 	createBody := accessConstraintCreateRequest{
-		Name: "full-flow-boundary",
+		Name:    "full-flow-boundary",
+		Purpose: "Test full flow",
 		Subject: subjectSelectorRequest{
 			Kind:          "principal",
 			PrincipalType: "user",
@@ -787,7 +835,8 @@ func TestB7_PreviewTokenReplay(t *testing.T) {
 	previewBody := previewCreateRequest{
 		Operation: "create",
 		Draft: &previewDraftRequest{
-			Name: "replay-boundary",
+			Name:    "replay-boundary",
+			Purpose: "Test replay",
 			Subject: subjectSelectorRequest{
 				Kind:          "principal",
 				PrincipalType: "user",
@@ -810,7 +859,8 @@ func TestB7_PreviewTokenReplay(t *testing.T) {
 
 	// First create succeeds.
 	createBody := accessConstraintCreateRequest{
-		Name: "replay-boundary",
+		Name:    "replay-boundary",
+		Purpose: "Test replay",
 		Subject: subjectSelectorRequest{
 			Kind:          "principal",
 			PrincipalType: "user",
@@ -828,7 +878,8 @@ func TestB7_PreviewTokenReplay(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, firstResp.Code, "first create should succeed: %s", firstResp.Body.String())
 
 	// Second attempt with same token should fail.
-	createBody.Name = "replay-boundary-2" // Different name to avoid duplicate name error.
+	createBody.Name = "replay-boundary-2"       // Different name to avoid duplicate name error.
+	createBody.Purpose = "Test replay attempt 2" // Keep purpose non-empty.
 	secondResp := doRequest(t, srv, http.MethodPost,
 		"/api/v1/admin/access-constraints", createBody)
 	assert.NotEqual(t, http.StatusCreated, secondResp.Code, "replay should be rejected: %s", secondResp.Body.String())
