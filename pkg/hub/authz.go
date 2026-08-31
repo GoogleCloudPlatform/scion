@@ -481,9 +481,19 @@ func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 		Allowed: kd.Allowed,
 	}
 	if kd.Allowed {
-		// Build reason from the granting binding provenance.
+		// R-4 fix: select a granting binding whose role actually contains
+		// the requested permission (ContainsRequested==true). Previously,
+		// GrantingBindings[0] was used unconditionally, which could name a
+		// binding whose role does not contain the granted permission.
 		if len(kd.Provenance.GrantingBindings) > 0 {
 			gb := kd.Provenance.GrantingBindings[0]
+			// Prefer a binding that contains the requested permission.
+			for _, candidate := range kd.Provenance.GrantingBindings {
+				if candidate.ContainsRequested {
+					gb = candidate
+					break
+				}
+			}
 			d.Reason = "role binding grant"
 			d.MatchedGrant = gb.RoleName
 			d.RoleName = gb.RoleName

@@ -373,6 +373,12 @@ func evaluateBinding(req KernelRequest, cb *CandidateBinding) GrantProvenance {
 	// (since we union all permissions from active bindings).
 	if len(role.Permissions) > 0 {
 		prov.Contributed = true
+		// R-4 fix: record whether this specific role contains the requested
+		// permission. Used by kernelDecisionToDecision to select the correct
+		// granting binding for audit output.
+		if _, hasReq := role.Permissions[req.Permission]; hasReq {
+			prov.ContainsRequested = true
+		}
 	}
 
 	return prov

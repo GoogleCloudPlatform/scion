@@ -47,10 +47,16 @@ type GrantProvenance struct {
 	// is the chain [requesting principal, ..., bound group].
 	MembershipPath []string
 
-	// Contributed is true if this binding successfully contributed the
-	// requested permission. False means it was a candidate but was
-	// rejected for one of the reasons recorded below.
+	// Contributed is true if this binding successfully contributed
+	// permissions to the effective set. False means it was a candidate
+	// but was rejected for one of the reasons recorded below.
 	Contributed bool
+
+	// ContainsRequested is true when the binding's role contains the
+	// specific requested permission (not just any permission). R-4 fix:
+	// used by kernelDecisionToDecision to select the correct granting
+	// binding for Decision.BindingID / RoleName / audit output.
+	ContainsRequested bool
 
 	// ActivationResult records the outcome of evaluating the binding's
 	// activation conditions (notBefore, expiresAt).
