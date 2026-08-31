@@ -314,6 +314,26 @@ UPDATE webchat_thread
 // CreateTopic inserts a new topic and, when ConversationID is set, atomically
 // creates a linked conversations row inside the same transaction.
 func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
+	// DEF-89: Postgres migrations guarantee the conversations table exists,
+	// so generate ConversationID unconditionally when empty — unlike the
+	// SQLite store, which gates on hasConversationsTable() for environments
+	// where the Ent-managed table may not exist yet. The external_ref
+	// derivation (empty string) matches backfillTopicConversations.
+	//
+	// Because generation is unconditional, the legacy no-linkage INSERT
+	// path that the SQLite store retains is dead code here and is removed.
+	// The SQLite store keeps it because hasConversationsTable() can return
+	// false; on Postgres, Init() migrations guarantee the table, so there
+	// is no runtime state where the fallback is reachable.
+	if topic.ConversationID == "" {
+		topic.ConversationID = uuid.New().String()
+	}
+
+	// Creating a linked conversation requires project_id. With DEF-89
+	// this now also covers the auto-generated case; previously, empty
+	// ConversationID + empty ProjectID silently took the legacy path and
+	// inserted a topic with no project_id. That is a tightening — the
+	// handler always provides ProjectID.
 	if topic.ConversationID != "" && topic.ProjectID == "" {
 		return fmt.Errorf("webchat store: project_id is required for topic conversations")
 	}
@@ -321,20 +341,6 @@ func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) er
 	var defaultAgent interface{}
 	if topic.DefaultAgent != "" {
 		defaultAgent = topic.DefaultAgent
-	}
-
-	if topic.ConversationID == "" {
-		// Legacy path: no conversation linkage.
-		const query = `
-INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-`
-		_, err := s.db.ExecContext(ctx, query, topic.ID, topic.ProjectID, topic.Name,
-			topic.IsGeneral, defaultAgent, topic.CreatedBy, topic.CreatedAt)
-		if err != nil {
-			return fmt.Errorf("webchat store: create topic: %w", err)
-		}
-		return nil
 	}
 
 	// Atomic dual-write: topic + conversation in one transaction.
