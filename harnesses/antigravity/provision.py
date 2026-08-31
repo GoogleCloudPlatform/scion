@@ -74,10 +74,10 @@ ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
     [
         scion_harness.env_method(
             "vertex-ai",
-            all_of=["AGY_TOKEN", "GOOGLE_CLOUD_PROJECT"],
+            all_of=["GOOGLE_CLOUD_PROJECT"],
             any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
             env_fallback=True,
-            hint="set AGY_TOKEN, GOOGLE_CLOUD_PROJECT, and GOOGLE_CLOUD_LOCATION",
+            hint="set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION with gcloud-adc",
         ),
         scion_harness.env_method(
             "oauth-token",
@@ -173,7 +173,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         api_key = ctx.read_secret(api_key_name, env_fallback=True)
         if not api_key:
             raise scion_harness.ProvisionError(f"{api_key_name} secret is empty")
-        env_overlay[api_key_name] = api_key
+        env_overlay[api_key_name] = f"${{{api_key_name}}}"
         ctx.info(f"api-key auth: {api_key_name} configured")
 
     elif method == "oauth-token":
