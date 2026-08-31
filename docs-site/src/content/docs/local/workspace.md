@@ -150,7 +150,7 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 |----------|-------------|---------|
 | `SCION_GIT_CLONE_URL` | HTTPS URL of the repository to clone | *(required)* |
 | `SCION_GIT_BRANCH` | Branch to clone | `main` |
-| `SCION_GIT_DEPTH` | Clone depth (set to `0` for full clone, omission or `nil` defaults to shallow depth `1`) | `1` |
+| `SCION_GIT_DEPTH` | Clone depth (set to `0` for full clone, omission defaults to shallow depth `1`) | `1` |
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 
