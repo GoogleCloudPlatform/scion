@@ -732,10 +732,18 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 	principal PrincipalContext,
 	resource ResourceContext,
 ) []Restriction {
-	constraints, err := a.store.ListAccessConstraints(ctx, 200, 0)
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
 	if err != nil {
-		a.logger.Warn("failed to load access constraints", "error", err)
-		return nil // fail-open for constraint loading (constraints are optional)
+		// R-1 fix: deny (fail closed) when constraint loading errors.
+		// The design is explicit: "Store or group resolution errors fail
+		// closed." Returning a deny-all restriction ensures no over-grant.
+		a.logger.Warn("failed to load access constraints (fail-closed)", "error", err)
+		return []Restriction{{
+			Kind:        "access_constraint_error",
+			Description: "constraint loading failed (fail-closed)",
+			// nil Check denies everything.
+		}}
 	}
 	if len(constraints) == 0 {
 		return nil
@@ -779,6 +787,27 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 	)
 
 	return ConstraintsToRestrictions(applicable, time.Now())
+}
+
+// loadAllAccessConstraints loads all access constraints by paging through
+// the store. R-1 fix: the previous call used a fixed limit of 200 which
+// silently truncated constraints beyond that threshold.
+func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	const pageSize = 500
+	var all []*store.AccessConstraint
+	offset := 0
+	for {
+		page, err := a.store.ListAccessConstraints(ctx, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+		offset += len(page)
+	}
+	return all, nil
 }
 
 // =============================================================================

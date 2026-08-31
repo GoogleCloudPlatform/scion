@@ -910,20 +910,30 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 // a "group_closure" subject. Modifying membership of or deleting a
 // constraint-bearing group requires access_constraint.admin permission.
 func (s *Server) isConstraintBearingGroup(ctx context.Context, groupID string) (bool, error) {
-	constraints, err := s.store.ListAccessConstraints(ctx, 0, 0)
-	if err != nil {
-		return false, err
-	}
-	for _, c := range constraints {
-		if c.SubjectKind == store.ConstraintSubjectPrincipal &&
-			c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == "group" &&
-			c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == groupID {
-			return true, nil
+	// R-1 fix: page through all constraints instead of using (0,0) which
+	// defaults to limit=100, silently missing constraint #101+.
+	const pageSize = 500
+	offset := 0
+	for {
+		constraints, err := s.store.ListAccessConstraints(ctx, pageSize, offset)
+		if err != nil {
+			return false, err
 		}
-		if c.SubjectKind == store.ConstraintSubjectGroupClosure &&
-			c.SubjectGroupID != nil && *c.SubjectGroupID == groupID {
-			return true, nil
+		for _, c := range constraints {
+			if c.SubjectKind == store.ConstraintSubjectPrincipal &&
+				c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == "group" &&
+				c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == groupID {
+				return true, nil
+			}
+			if c.SubjectKind == store.ConstraintSubjectGroupClosure &&
+				c.SubjectGroupID != nil && *c.SubjectGroupID == groupID {
+				return true, nil
+			}
 		}
+		if len(constraints) < pageSize {
+			break
+		}
+		offset += len(constraints)
 	}
 	return false, nil
 }

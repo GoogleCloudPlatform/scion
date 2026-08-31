@@ -147,7 +147,7 @@ func (a *AuthzService) applyListScopeConstraints(
 		return scopes
 	}
 
-	constraints, err := a.store.ListAccessConstraints(ctx, 200, 0)
+	constraints, err := a.loadAllAccessConstraints(ctx)
 	if err != nil {
 		// C-2 + R-1: fail closed when constraint loading errors.
 		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load access constraints (fail-closed)",
