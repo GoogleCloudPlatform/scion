@@ -106,28 +106,50 @@ func (s SubjectSelector) Validate() error {
 }
 
 // MatchesPrincipalClosure returns true if this subject selector matches any
-// principal in the given closure. groupMemberships maps group IDs to their
-// effective member principal IDs (used for group_closure matching).
+// principal in the typed closure. The closure uses composite "type:id" keys
+// (e.g. "user:u1", "group:g1", "agent:a1").
+//
+// For SubjectKindPrincipal, the constraint's PrincipalType and PrincipalID
+// are compared against the typed closure entries — a constraint targeting
+// {principal, group, G} matches when "group:G" is in the closure. This
+// ensures consistency with the lockout guard and group-mutation gate, which
+// both honor group-targeted principal constraints.
 func (s SubjectSelector) MatchesPrincipalClosure(
-	principalClosure map[string]struct{},
-	directPrincipalID string,
-	directPrincipalType string,
+	typedClosure map[string]struct{},
 ) bool {
 	switch s.Kind {
 	case SubjectKindPrincipal:
-		if s.PrincipalType != directPrincipalType {
-			return false
-		}
-		_, ok := principalClosure[s.PrincipalID]
+		// Look up the typed key: the constraint's principalType + principalID.
+		key := s.PrincipalType + ":" + s.PrincipalID
+		_, ok := typedClosure[key]
 		return ok
 	case SubjectKindGroupClosure:
 		// A group_closure constraint matches if the group is in the principal's closure.
-		_, ok := principalClosure[s.GroupID]
+		key := "group:" + s.GroupID
+		_, ok := typedClosure[key]
 		return ok
 	case SubjectKindAllPrincipals:
 		return true
 	default:
 		return false
+	}
+}
+
+// NormalizePrincipalType maps concrete principal kinds to the canonical types
+// used in constraint subjects. Dev and federated variants resolve groups
+// through the same paths as their base types and must be treated identically
+// for constraint matching.
+//
+// This is the single canonical normalization — both Decide and ResolveListScopes
+// must call this before comparing against constraint subjects.
+func NormalizePrincipalType(t string) string {
+	switch t {
+	case "user", "dev", "federated_user":
+		return "user"
+	case "agent", "federated_agent":
+		return "agent"
+	default:
+		return t
 	}
 }
 

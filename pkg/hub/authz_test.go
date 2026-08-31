@@ -1244,6 +1244,116 @@ func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
 	assert.NotContains(t, perms, "project.read", "permission outside constraint's maximum set must be excluded")
 }
 
+// ===========================================================================
+// B1 integration tests: fail-closed behavior and type normalization
+// ===========================================================================
+
+// TestGetEffectivePermissions_PrincipalConstraintTargetingGroup verifies that
+// a {principal, group, G} constraint is enforced by getEffectivePermissions
+// when the user is a member of group G.
+// Regression test for B1 fix 1: exact-principal matching fail-open.
+func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("b1-group-constraint-user")
+	groupID := tid("b1-target-group")
+
+	// Create user and group.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "b1group@test.com", DisplayName: "B1GroupUser",
+		Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "b1-target-group", Name: "B1 Target Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: groupID, MemberID: userID,
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Grant agent.read + project.read.
+	rd := createTestRoleDefinition(t, s, "b1-multi-perm-role", store.RoleScopeSystem,
+		[]string{"agent.read", "project.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create a constraint targeting group:b1-target-group that allows only agent.read.
+	groupIDStr := groupID
+	principalType := "group"
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "b1-group-targeting-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &principalType,
+		SubjectPrincipalID:   &groupIDStr,
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+	})
+	require.NoError(t, err)
+
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, perms, "agent.read", "agent.read should survive the constraint")
+	assert.NotContains(t, perms, "project.read",
+		"project.read should be removed by group-targeted principal constraint")
+}
+
+// TestGetEffectivePermissions_ProjectScopeConstraint verifies that project-scoped
+// constraints are applied in getEffectivePermissions.
+// Regression test for B1: constraint intersection on project scope.
+func TestGetEffectivePermissions_ProjectScopeConstraint(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("b1-proj-user")
+	projID := tid("b1-proj")
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "b1proj@test.com", DisplayName: "B1ProjUser",
+		Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "B1 Project", Slug: "b1-proj",
+	}))
+
+	rd := createTestRoleDefinition(t, s, "b1-proj-role", store.RoleScopeProject,
+		[]string{"agent.read", "agent.create"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create project-scoped constraint allowing only agent.read.
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:               "b1-proj-constraint",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          store.RoleScopeProject,
+		ScopeID:            projID,
+		MaximumPermissions: []string{"agent.read"},
+	})
+	require.NoError(t, err)
+
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeProject, projID)
+	require.NoError(t, err)
+
+	assert.Contains(t, perms, "agent.read")
+	assert.NotContains(t, perms, "agent.create",
+		"project-scoped constraint should remove agent.create")
+}
+
 // createTestRoleDefinition creates a custom role definition for tests.
 func createTestRoleDefinition(t *testing.T, s store.Store, name, scopeType string, permissions []string) *store.RoleDefinition {
 	t.Helper()

@@ -602,11 +602,13 @@ func (s *Server) resolveConstraintAdminUsers(ctx context.Context, scopeType, sco
 	}
 
 	// Expand group memberships to find users who get admin via groups.
+	// Fail closed: if we cannot resolve group members, we cannot reliably
+	// determine which users are constraint admins, so the lockout check
+	// must reject the operation rather than proceed with incomplete data.
 	for gid := range adminGroupIDs {
 		members, err := s.store.GetGroupMembers(ctx, gid)
 		if err != nil {
-			slog.Warn("lockout check: failed to get group members", "groupID", gid, "error", err)
-			continue
+			return nil, fmt.Errorf("lockout check: failed to get group members for group %s: %w", gid, err)
 		}
 		for _, m := range members {
 			if m.MemberType == store.GroupMemberTypeUser {
@@ -616,13 +618,13 @@ func (s *Server) resolveConstraintAdminUsers(ctx context.Context, scopeType, sco
 	}
 
 	// Build admin user info with group closure for each user.
+	// Fail closed: if we cannot resolve a user's group closure, we cannot
+	// reliably evaluate group_closure constraints against them.
 	var result []adminUserInfo
 	for uid := range directUserIDs {
 		groupIDs, err := s.store.GetEffectiveGroups(ctx, uid)
 		if err != nil {
-			slog.Warn("lockout check: failed to get effective groups for user",
-				"userID", uid, "error", err)
-			groupIDs = nil
+			return nil, fmt.Errorf("lockout check: failed to get effective groups for user %s: %w", uid, err)
 		}
 		result = append(result, adminUserInfo{
 			userID:   uid,

@@ -17,8 +17,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -1120,18 +1120,11 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		}
 	}
 
-	// Build a bare-ID closure for SubjectSelector matching. The kernel
-	// closure uses typed keys (type:id), but SubjectSelector.MatchesPrincipalClosure
-	// expects bare IDs.
-	bareClosure := make(map[string]struct{}, len(closure))
-	for key := range closure {
-		// Extract the bare ID from "type:id" format.
-		if idx := strings.Index(key, ":"); idx >= 0 {
-			bareClosure[key[idx+1:]] = struct{}{}
-		} else {
-			bareClosure[key] = struct{}{}
-		}
-	}
+	// Normalize all closure keys so that dev/federated variants match
+	// the canonical "user"/"agent" types used in constraint subjects.
+	// The closure already uses typed "type:id" keys; normalization ensures
+	// consistency regardless of how the closure was built.
+	normalizedClosure := normalizeClosureTypes(closure)
 
 	scopeType := ""
 	scopeID := ""
@@ -1143,8 +1136,7 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 	}
 
 	applicable := FilterApplicableConstraints(
-		hubConstraints, bareClosure,
-		principal.ID, string(principal.Kind),
+		hubConstraints, normalizedClosure,
 		scopeType, scopeID,
 	)
 
@@ -1197,6 +1189,38 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 		offset += len(page)
 	}
 	return all, nil
+}
+
+// normalizeClosureTypes normalizes the principal types in a typed closure map.
+// It maps dev/federated variants to their canonical types (user/agent) so
+// constraint subjects using "user" or "agent" match all equivalent types.
+//
+// Keys are expected in "type:id" format. Keys without a colon are passed
+// through unchanged.
+func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
+	normalized := make(map[string]struct{}, len(closure))
+	for key := range closure {
+		if idx := indexOf(key, ':'); idx >= 0 {
+			keyType := key[:idx]
+			keyID := key[idx+1:]
+			normType := NormalizePrincipalType(keyType)
+			normalized[normType+":"+keyID] = struct{}{}
+		} else {
+			normalized[key] = struct{}{}
+		}
+	}
+	return normalized
+}
+
+// indexOf returns the index of the first occurrence of sep in s, or -1.
+// Avoids importing strings for a single use.
+func indexOf(s string, sep byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			return i
+		}
+	}
+	return -1
 }
 
 // =============================================================================
@@ -1561,19 +1585,28 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 // getEffectivePermissions resolves the set of permission IDs granted to a
 // principal via role bindings. Uses the batched query path.
 func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalType, principalID string, scopeType, scopeID string) ([]string, error) {
+	// Normalize principal type: dev/federated variants resolve groups
+	// through the same paths as user/agent and must be treated identically
+	// for constraint matching and group expansion.
+	normalizedType := NormalizePrincipalType(principalType)
+
 	// Build principals: direct principal + group-expanded.
-	principals := []store.PrincipalRef{{Type: principalType, ID: principalID}}
+	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
 	var groupIDs []string
 	var err error
-	switch principalType {
+	switch normalizedType {
 	case store.RoleBindingPrincipalUser:
 		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
 	case store.RoleBindingPrincipalAgent:
 		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for permission expansion",
+		// Fail closed: group resolution failure means we cannot evaluate
+		// group_closure constraints correctly. Return empty permissions
+		// rather than silently skipping group constraints.
+		a.logger.Warn("failed to get effective groups for permission expansion (fail-closed)",
 			"principalType", principalType, "principalID", principalID, "error", err)
+		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
 	}
 	for _, gid := range groupIDs {
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})

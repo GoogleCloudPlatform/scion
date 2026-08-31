@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -167,24 +166,14 @@ func (a *AuthzService) applyListScopeConstraints(
 		}
 	}
 
-	// Build a bare-ID closure for SubjectSelector matching.
-	bareClosure := make(map[string]struct{}, len(closure))
-	for key := range closure {
-		if idx := strings.Index(key, ":"); idx >= 0 {
-			bareClosure[key[idx+1:]] = struct{}{}
-		} else {
-			bareClosure[key] = struct{}{}
-		}
-	}
-
-	// Derive principal context for constraint filtering.
-	principalID, principalType := identityPrincipalIDAndType(identity)
+	// Normalize all closure keys so that dev/federated variants match
+	// the canonical "user"/"agent" types used in constraint subjects.
+	normalizedClosure := normalizeClosureTypes(closure)
 
 	// Check system-scoped constraints first: if any applicable system-scoped
 	// constraint excludes the list permission, return ScopeSetNone.
 	systemApplicable := FilterApplicableConstraints(
-		hubConstraints, bareClosure,
-		principalID, principalType,
+		hubConstraints, normalizedClosure,
 		ScopeTypeSystem, "",
 	)
 	systemRestrictions := ConstraintsToRestrictions(systemApplicable, time.Now())
@@ -201,8 +190,7 @@ func (a *AuthzService) applyListScopeConstraints(
 		var retained []string
 		for _, pid := range projectIDs {
 			projectApplicable := FilterApplicableConstraints(
-				hubConstraints, bareClosure,
-				principalID, principalType,
+				hubConstraints, normalizedClosure,
 				ScopeTypeProject, pid,
 			)
 			projectRestrictions := ConstraintsToRestrictions(projectApplicable, time.Now())
@@ -224,22 +212,6 @@ func (a *AuthzService) applyListScopeConstraints(
 	}
 
 	return scopes
-}
-
-// identityPrincipalIDAndType extracts the principal ID and type string from
-// an Identity for use in constraint filtering.
-func identityPrincipalIDAndType(identity Identity) (string, string) {
-	switch id := identity.(type) {
-	case AgentIdentity:
-		return id.ID(), "agent"
-	case UserIdentity:
-		return id.ID(), "user"
-	default:
-		if identity != nil {
-			return identity.ID(), identity.Type()
-		}
-		return "", ""
-	}
 }
 
 // collectRoleDefinitionIDs extracts unique role definition IDs from bindings.
