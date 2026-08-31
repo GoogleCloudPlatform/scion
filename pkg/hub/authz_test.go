@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1080,6 +1081,167 @@ func TestRealTimeGroupExpansion(t *testing.T) {
 	// Verify user IS project admin now (real-time — no restart needed)
 	result = authz.isProjectOwnerOrAdmin(ctx, tid("realtime-user"), tid("realtime-proj"))
 	assert.True(t, result, "user should IMMEDIATELY be project admin after joining group (real-time expansion)")
+}
+
+// =============================================================================
+// R-2 Regression Tests — Activation Checks and Constraint Intersection
+// =============================================================================
+
+// TestIsSystemAdmin_ExpiredBinding_ReturnsFalse verifies that a super-admin
+// RoleBinding with ExpiresAt in the past does NOT grant system-admin status.
+// Regression test for R-2: IsSystemAdmin now calls isBindingActive to skip
+// expired bindings.
+func TestIsSystemAdmin_ExpiredBinding_ReturnsFalse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("r2-expired-sysadmin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "expired-sysadmin@test.com", DisplayName: "ExpiredSysAdmin",
+		Role: "admin", Status: "active",
+	}))
+
+	// Get the super-admin role definition.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Create a super-admin binding that expired an hour ago.
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ExpiresAt:        &expired,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	result := authz.IsSystemAdmin(ctx, userID)
+	assert.False(t, result, "expired super-admin binding must not grant system-admin status")
+}
+
+// TestIsHubAdmin_FutureBinding_ReturnsFalse verifies that a hub-admin
+// RoleBinding with NotBefore in the future does NOT grant hub-admin status.
+// Regression test for R-2: IsHubAdmin now calls isBindingActive to skip
+// not-yet-active bindings.
+func TestIsHubAdmin_FutureBinding_ReturnsFalse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("r2-future-hubadmin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "future-hubadmin@test.com", DisplayName: "FutureHubAdmin",
+		Role: "member", Status: "active",
+	}))
+
+	// Get the hub-admin role definition.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Create a hub-admin binding that becomes active one hour from now.
+	future := time.Now().Add(1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		NotBefore:        &future,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	result := authz.IsHubAdmin(ctx, userID)
+	assert.False(t, result, "future hub-admin binding (NotBefore in the future) must not grant hub-admin status")
+}
+
+// TestGetEffectivePermissions_ExcludesExpiredBindings verifies that
+// getEffectivePermissions skips expired bindings and only returns
+// permissions from active ones.
+// Regression test for R-2: getEffectivePermissions now calls
+// evaluateActivation to filter out expired/not-yet-active bindings.
+func TestGetEffectivePermissions_ExcludesExpiredBindings(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("r2-perm-expired")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "perm-expired@test.com", DisplayName: "PermExpired",
+		Role: "member", Status: "active",
+	}))
+
+	// Active binding: grants agent.read.
+	rdActive := createTestRoleDefinition(t, s, "r2-active-role", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rdActive.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Expired binding: grants project.read but expired an hour ago.
+	rdExpired := createTestRoleDefinition(t, s, "r2-expired-role", store.RoleScopeSystem, []string{"project.read"})
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rdExpired.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ExpiresAt:        &expired,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, perms, "agent.read", "active binding's permission must be present")
+	assert.NotContains(t, perms, "project.read", "expired binding's permission must be excluded")
+}
+
+// TestGetEffectivePermissions_AppliesConstraintIntersection verifies that
+// getEffectivePermissions applies AccessConstraint intersection to remove
+// permissions excluded by an applicable constraint.
+// Regression test for R-2: getEffectivePermissions now loads access
+// constraints and filters the result through their maximum-permissions sets.
+func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("r2-constraint-user")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "constraint@test.com", DisplayName: "ConstraintUser",
+		Role: "member", Status: "active",
+	}))
+
+	// Grant both agent.read and project.read via a single binding.
+	rd := createTestRoleDefinition(t, s, "r2-multi-perm-role", store.RoleScopeSystem, []string{"agent.read", "project.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create an AccessConstraint that allows only agent.read (excludes project.read).
+	// Use all_principals subject so it applies to our test user.
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:               "r2-test-constraint",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"},
+	})
+	require.NoError(t, err)
+
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, perms, "agent.read", "permission in constraint's maximum set must be present")
+	assert.NotContains(t, perms, "project.read", "permission outside constraint's maximum set must be excluded")
 }
 
 // createTestRoleDefinition creates a custom role definition for tests.
