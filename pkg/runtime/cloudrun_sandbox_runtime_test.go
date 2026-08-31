@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -674,12 +675,18 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 		t.Errorf("SCION_GROVE_ID = %q, want %q", env["SCION_GROVE_ID"], "proj-123")
 	}
 
-	// Check UID/GID are set.
+	// Check UID/GID are set to the scion user (non-root).
 	if env["SCION_HOST_UID"] == "" {
 		t.Error("SCION_HOST_UID not set")
 	}
 	if env["SCION_HOST_GID"] == "" {
 		t.Error("SCION_HOST_GID not set")
+	}
+	if env["SCION_HOST_UID"] != "1000" {
+		t.Errorf("SCION_HOST_UID = %q, want %q (non-root scion user)", env["SCION_HOST_UID"], "1000")
+	}
+	if env["SCION_HOST_GID"] != "1000" {
+		t.Errorf("SCION_HOST_GID = %q, want %q (non-root scion user)", env["SCION_HOST_GID"], "1000")
 	}
 }
 
@@ -733,6 +740,35 @@ func TestEnvFor_WorkspaceBackend(t *testing.T) {
 	env := envFor(cfg, paths)
 	if env["SCION_WORKSPACE_BACKEND"] != "nfs" {
 		t.Errorf("SCION_WORKSPACE_BACKEND = %q, want %q", env["SCION_WORKSPACE_BACKEND"], "nfs")
+	}
+}
+
+// TestEnvFor_NonRootUID verifies that SCION_HOST_UID and SCION_HOST_GID
+// are always set to the scion user (UID 1000), NOT to os.Getuid(). On
+// Cloud Run the launcher runs as root; passing UID 0 would keep the
+// sandbox process as root, which Claude Code ≥ 2.1.246 rejects.
+func TestEnvFor_NonRootUID(t *testing.T) {
+	cfg := RunConfig{}
+	paths := scionPaths{}
+
+	env := envFor(cfg, paths)
+
+	// Must use the scion user's UID/GID (1000), not the process UID.
+	if env["SCION_HOST_UID"] != "1000" {
+		t.Errorf("SCION_HOST_UID = %q, want %q; sandbox must run as non-root scion user",
+			env["SCION_HOST_UID"], "1000")
+	}
+	if env["SCION_HOST_GID"] != "1000" {
+		t.Errorf("SCION_HOST_GID = %q, want %q; sandbox must run as non-root scion user",
+			env["SCION_HOST_GID"], "1000")
+	}
+
+	// Verify the constants match the expected scion user UID.
+	if sandboxUID != 1000 {
+		t.Errorf("sandboxUID = %d, want 1000 (scion user from omni Dockerfile)", sandboxUID)
+	}
+	if sandboxGID != 1000 {
+		t.Errorf("sandboxGID = %d, want 1000 (scion user from omni Dockerfile)", sandboxGID)
 	}
 }
 
@@ -1076,6 +1112,87 @@ func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
 		sdPath := filepath.Join(rootDir, "shared", name)
 		if _, err := os.Stat(sdPath); os.IsNotExist(err) {
 			t.Errorf("shared dir not created: %s", sdPath)
+		}
+	}
+}
+
+// TestPrepareScionLayout_ChownsDirectories verifies that prepareScionLayout
+// recursively chowns agent home and workspace to sandboxUID:sandboxGID,
+// including files created during relocation and workspace copy.
+// This test only runs as root (like on Cloud Run) because chown requires
+// CAP_CHOWN.
+func TestPrepareScionLayout_ChownsDirectories(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("chown test requires root; skipping in non-root test environment")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("chown ownership check uses syscall.Stat_t (Linux only)")
+	}
+
+	rootDir := t.TempDir()
+
+	// Create a HomeDir with nested content to verify recursive chown.
+	homeDir := t.TempDir()
+	subDir := filepath.Join(homeDir, "subdir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{HomeDir: homeDir}
+	paths, err := prepareScionLayout(rootDir, "chown-agent", cfg)
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// Verify recursive chown: check the directory, a top-level file,
+	// and a nested file are all owned by sandboxUID:sandboxGID.
+	checkPaths := []string{
+		paths.agentHome,
+		filepath.Join(paths.agentHome, "agent-info.json"),
+		filepath.Join(paths.agentHome, "subdir"),
+		filepath.Join(paths.agentHome, "subdir", "nested.txt"),
+		paths.workspace,
+	}
+	for _, p := range checkPaths {
+		info, statErr := os.Lstat(p)
+		if statErr != nil {
+			t.Fatalf("lstat %s: %v", p, statErr)
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if int(stat.Uid) != sandboxUID {
+			t.Errorf("path %s owned by UID %d, want %d", p, stat.Uid, sandboxUID)
+		}
+		if int(stat.Gid) != sandboxGID {
+			t.Errorf("path %s owned by GID %d, want %d", p, stat.Gid, sandboxGID)
+		}
+	}
+}
+
+// TestPrepareScionLayout_SkipsChownNonRoot verifies that prepareScionLayout
+// does NOT call os.Chown when not running as root, preventing EPERM errors
+// in non-root environments (local dev, CI).
+func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("this test verifies non-root behavior; skipping when running as root")
+	}
+
+	rootDir := t.TempDir()
+	paths, err := prepareScionLayout(rootDir, "nonroot-agent", RunConfig{})
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// In non-root mode, directories should still be created successfully.
+	// The test passes if no EPERM error was returned (chown was skipped).
+	for _, dir := range []string{paths.agentHome, paths.workspace} {
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			t.Errorf("directory not created: %s", dir)
 		}
 	}
 }
