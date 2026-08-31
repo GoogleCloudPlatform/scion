@@ -31,7 +31,12 @@ import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
-import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
+import {
+  isFeatureEnabled,
+  setFeatureFlag,
+  ACCESS_BOUNDARIES_READ_FLAG,
+  ACCESS_BOUNDARIES_AUTHORING_FLAG,
+} from '../utils/feature-flags.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -833,9 +838,12 @@ function renderFeatureUnavailable(path: string, featureName: string): void {
 
   // Build a minimal unavailable message inside a fresh div.
   const wrapper = document.createElement('div');
-  wrapper.setAttribute('style', 'text-align:center;padding:4rem 2rem;color:#64748b;');
+  wrapper.setAttribute(
+    'style',
+    'text-align:center;padding:4rem 2rem;color:var(--scion-text-muted, #64748b);'
+  );
   wrapper.innerHTML = `
-    <h1 style="font-size:1.5rem;font-weight:700;color:#1e293b;margin:0 0 0.5rem 0;">
+    <h1 style="font-size:1.5rem;font-weight:700;color:var(--scion-text, #1e293b);margin:0 0 0.5rem 0;">
       Feature Unavailable
     </h1>
     <p>${featureName} is not enabled on this hub.</p>
@@ -930,7 +938,8 @@ async function renderRoute(path: string): Promise<void> {
   // Block access boundary routes when the read flag is disabled.
   // Render an unavailable page (not a redirect) so operators get rollout
   // diagnostics instead of a misleading redirect.
-  if (ACCESS_BOUNDARY_ROUTES.has(tag) && !isFeatureEnabled('web.access_boundaries_read')) {
+  if (ACCESS_BOUNDARY_ROUTES.has(tag) && !isFeatureEnabled(ACCESS_BOUNDARIES_READ_FLAG)) {
+    ++navigationId;
     renderFeatureUnavailable(path, 'Access Boundaries');
     return;
   }
@@ -939,8 +948,9 @@ async function renderRoute(path: string): Promise<void> {
   // Inventory and detail pages remain accessible when the read flag is on.
   if (
     ACCESS_BOUNDARY_AUTHORING_ROUTES.has(tag) &&
-    !isFeatureEnabled('web.access_boundaries_authoring')
+    !isFeatureEnabled(ACCESS_BOUNDARIES_AUTHORING_FLAG)
   ) {
+    ++navigationId;
     renderFeatureUnavailable(path, 'Access Boundary Authoring');
     return;
   }
