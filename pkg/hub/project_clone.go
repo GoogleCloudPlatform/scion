@@ -177,7 +177,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			srcMode = src.Labels[store.LabelWorkspaceMode]
 		}
 		switch srcMode {
-		case store.WorkspaceModeShared, store.WorkspaceModeWorktreePerAgent:
+		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
 			if clone.Labels == nil {
 				clone.Labels = make(map[string]string)
 			}
