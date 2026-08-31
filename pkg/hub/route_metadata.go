@@ -804,6 +804,16 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
 	},
+	"/api/v1/admin/access-constraint-previews": {
+		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
+		Classification: RouteHubAdmin,
+		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+	},
+	"/api/v1/admin/access-constraint-previews/": {
+		Pattern: "/api/v1/admin/access-constraint-previews/", RouteID: "admin.accessConstraintPreviews.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+	},
 
 	// -------------------------------------------------------------------------
 	// Authenticated: Usage self-service

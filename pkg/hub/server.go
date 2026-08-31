@@ -779,6 +779,11 @@ type Server struct {
 	// must nil-check before invoking; nil means quota enforcement is disabled.
 	quotaService *QuotaService
 
+	// B3-B6 boundary services — nil-safe; nil means boundary features are disabled.
+	previewService      *PreviewService      // B3 preview engine
+	governanceService   *GovernanceService   // B5 transactional governance
+	capabilitiesService *CapabilitiesService // B6 capabilities computation
+
 	// Per-sender token-bucket limiter for the chat send paths (#1054).
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
@@ -1280,6 +1285,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
 	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
+
+	// Initialize B3-B6 boundary services (preview, governance, capabilities).
+	srv.initBoundaryServices()
 
 	// Wire the caller-permission checker for agent service-account assignment.
 	//
@@ -3867,6 +3875,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/permissions", s.guarded("/api/v1/admin/permissions", s.handleAdminPermissions))
 	s.mux.HandleFunc("/api/v1/admin/access-constraints", s.guarded("/api/v1/admin/access-constraints", s.handleAdminAccessConstraints))
 	s.mux.HandleFunc("/api/v1/admin/access-constraints/", s.guarded("/api/v1/admin/access-constraints/", s.handleAdminAccessConstraintByID))
+	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews", s.guarded("/api/v1/admin/access-constraint-previews", s.handleAdminAccessConstraintPreviews))
+	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews/", s.guarded("/api/v1/admin/access-constraint-previews/", s.handleAdminAccessConstraintPreviews))
 
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.guarded("/api/v1/notifications", s.handleNotifications))

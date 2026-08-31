@@ -106,6 +106,36 @@ const (
 	// the operation affects a boundary-relevant entity and requires impact
 	// review before proceeding.
 	ErrCodeSecurityReviewRequired = "security_review_required"
+
+	// B7 — HTTP API error codes for access boundary operations.
+
+	// ErrCodeResolutionFailed is returned when subject/scope/permission
+	// resolution encounters a fault during preview or commit.
+	ErrCodeResolutionFailed = "resolution_failed"
+
+	// ErrCodeSubjectNotFound is returned when the referenced subject (user,
+	// agent, or group) does not exist.
+	ErrCodeSubjectNotFound = "subject_not_found"
+
+	// ErrCodeScopeNotFound is returned when the referenced scope (project)
+	// does not exist.
+	ErrCodeScopeNotFound = "scope_not_found"
+
+	// ErrCodeScopeMismatch is returned when a boundary is applied outside
+	// its valid scope (e.g. a project boundary queried for another project).
+	ErrCodeScopeMismatch = "scope_mismatch"
+
+	// ErrCodePermissionRegistryChanged is returned when the permission
+	// registry revision changed between preview and commit.
+	ErrCodePermissionRegistryChanged = "permission_registry_changed"
+
+	// ErrCodeRevisionConflict is returned when an If-Match revision does not
+	// match the current revision of the constraint (optimistic concurrency).
+	ErrCodeRevisionConflict = "revision_conflict"
+
+	// ErrCodeRecoveryDisabledImmutable is returned when a mutation targets a
+	// recovery-disabled constraint, which cannot be modified via HTTP.
+	ErrCodeRecoveryDisabledImmutable = "recovery_disabled_immutable"
 )
 
 // writeError writes a JSON error response.
