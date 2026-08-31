@@ -77,6 +77,9 @@ type PreviewService struct {
 
 	// nowFunc is injectable for testing. Defaults to time.Now.
 	nowFunc func() time.Time
+
+	// stopCleanup signals the nonce cleanup goroutine to shut down.
+	stopCleanup chan struct{}
 }
 
 // NewPreviewService creates a new PreviewService.
@@ -84,16 +87,15 @@ func NewPreviewService(s store.Store, authz *AuthzService, logger *slog.Logger) 
 	// Generate a random HMAC key.
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		// Fall back to a less-random key if crypto/rand fails (should not happen).
-		logger.Error("failed to generate HMAC key", "error", err)
-		key = []byte("fallback-preview-hmac-key-not-for-production")
+		panic("crypto/rand failure: cannot produce secure HMAC key: " + err.Error())
 	}
 	ps := &PreviewService{
-		store:   s,
-		authz:   authz,
-		logger:  logger,
-		hmacKey: key,
-		nowFunc: time.Now,
+		store:       s,
+		authz:       authz,
+		logger:      logger,
+		hmacKey:     key,
+		nowFunc:     time.Now,
+		stopCleanup: make(chan struct{}),
 	}
 	// Start nonce cleanup goroutine.
 	go ps.cleanupNonces()
@@ -204,10 +206,16 @@ func (ps *PreviewService) GeneratePreview(ctx context.Context, req PreviewReques
 			Message: "preview is incomplete and cannot be committed",
 		}
 	}
-	if lockout.Safe != nil && !*lockout.Safe {
+	if lockout.Safe == nil || !*lockout.Safe {
+		code := ErrCodeConstraintAdminLockout
+		msg := "mutation would lock out all constraint admins"
+		if lockout.Safe == nil {
+			code = ErrCodePreviewIncomplete
+			msg = "lockout assessment could not be determined: " + lockout.UndeterminedReason
+		}
 		commitBlocked = &CommitBlockedReason{
-			Code:    ErrCodeConstraintAdminLockout,
-			Message: "mutation would lock out all constraint admins",
+			Code:    code,
+			Message: msg,
 		}
 	}
 
@@ -220,8 +228,8 @@ func (ps *PreviewService) GeneratePreview(ctx context.Context, req PreviewReques
 	// Generate preview ID and token.
 	previewID := ps.generatePreviewID()
 
-	token, err := ps.issueToken(previewID, req.Actor, req.Operation, draftHash,
-		req.BaseRevision, stateFingerprint, now)
+	token, err := ps.issueToken(previewID, req.ConstraintID, req.Actor, req.Operation, draftHash,
+		req.BaseRevision, stateFingerprint, completeness.Complete, now)
 	if err != nil {
 		return nil, fmt.Errorf("failed to issue preview token: %w", err)
 	}
@@ -244,7 +252,17 @@ func (ps *PreviewService) GeneratePreview(ctx context.Context, req PreviewReques
 		Intersecting:   intersecting,
 		Warnings:       warnings,
 		CommitBlocked:  commitBlocked,
+		allImpacted:    impactedPrincipals,
 	}
+
+	// Store sync preview for pagination support.
+	ps.asyncJobs.Store(previewID, &PreviewJob{
+		JobID:       previewID,
+		Status:      JobStatusSucceeded,
+		Operation:   req.Operation,
+		Result:      result,
+		allImpacted: impactedPrincipals,
+	})
 
 	return result, nil
 }
@@ -564,9 +582,8 @@ func (ps *PreviewService) resolveGroupClosure(
 	return result, nil
 }
 
-// resolveAllPrincipals resolves "all_principals" — returns a synthetic
-// entry representing everyone, plus resolved users/agents in the scope
-// for actual impact computation.
+// resolveAllPrincipals resolves "all_principals" — returns resolved
+// users and agents in the scope for actual impact computation.
 func (ps *PreviewService) resolveAllPrincipals(
 	ctx context.Context,
 	scope ConstraintScopeRef,
@@ -596,6 +613,27 @@ func (ps *PreviewService) resolveAllPrincipals(
 			p.groupIDs = groups
 			result = append(result, p)
 		}
+
+		// Also resolve project agents.
+		agents, err := ps.store.ListAgents(ctx, store.AgentFilter{ProjectID: scope.ID}, store.ListOptions{Limit: syncPreviewThreshold + 1})
+		if err != nil {
+			ps.logger.Warn("failed to list project agents for all_principals", "project", scope.ID, "error", err)
+		} else if agents != nil {
+			for _, a := range agents.Items {
+				p := resolvedPrincipal{
+					principalType: "agent",
+					principalID:   a.ID,
+					displayName:   a.Name,
+					membershipPaths: []MembershipPath{{
+						Hops:   []PrincipalRef{{Type: "all", ID: "*"}},
+						Direct: true,
+					}},
+				}
+				groups, _ := ps.store.GetEffectiveGroupsForAgent(ctx, a.ID)
+				p.groupIDs = groups
+				result = append(result, p)
+			}
+		}
 	} else {
 		// System scope: list all users.
 		users, err := ps.store.ListUsers(ctx, store.UserFilter{}, store.ListOptions{Limit: syncPreviewThreshold + 1})
@@ -617,6 +655,27 @@ func (ps *PreviewService) resolveAllPrincipals(
 					}},
 				}
 				groups, _ := ps.store.GetEffectiveGroups(ctx, u.ID)
+				p.groupIDs = groups
+				result = append(result, p)
+			}
+		}
+
+		// System scope: also list all agents.
+		agents, err := ps.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: syncPreviewThreshold + 1})
+		if err != nil {
+			ps.logger.Warn("failed to list agents for all_principals", "error", err)
+		} else if agents != nil {
+			for _, a := range agents.Items {
+				p := resolvedPrincipal{
+					principalType: "agent",
+					principalID:   a.ID,
+					displayName:   a.Name,
+					membershipPaths: []MembershipPath{{
+						Hops:   []PrincipalRef{{Type: "all", ID: "*"}},
+						Direct: true,
+					}},
+				}
+				groups, _ := ps.store.GetEffectiveGroupsForAgent(ctx, a.ID)
 				p.groupIDs = groups
 				result = append(result, p)
 			}
@@ -1700,8 +1759,6 @@ func (ps *PreviewService) ListAffectedPrincipals(
 	pageToken string,
 	pageSize int,
 ) (*AffectedPrincipalsPage, error) {
-	// For now, affected principal pages beyond the first require the preview
-	// to be stored. The async job store holds completed previews.
 	jobVal, ok := ps.asyncJobs.Load(previewID)
 	if !ok {
 		return nil, fmt.Errorf("preview %s not found or expired", previewID)
@@ -1719,14 +1776,12 @@ func (ps *PreviewService) ListAffectedPrincipals(
 		}
 	}
 
-	// We need the impacted principals stored somewhere — for sync previews,
-	// the full result is in the preview. Build the page from it.
-	result := job.Result
+	// Paginate over the full impacted principals set, not just the first page.
 	page := ps.buildAffectedPage(
-		result.AffectedPage.Items, // For stored previews
+		job.allImpacted,
 		offset,
 		pageSize,
-		&result.Completeness,
+		&job.Result.Completeness,
 	)
 	return &page, nil
 }
@@ -1742,37 +1797,53 @@ func (ps *PreviewService) GeneratePreviewAsync(ctx context.Context, req PreviewR
 		return nil, fmt.Errorf("invalid preview request: %w", err)
 	}
 
-	draftHash := ps.computeDraftHash(req.Draft)
 	jobID := ps.generatePreviewID()
+	jobCtx, jobCancel := context.WithCancel(context.Background())
 
 	job := &PreviewJob{
 		JobID:     jobID,
 		Status:    JobStatusAccepted,
 		Operation: req.Operation,
+		cancel:    jobCancel,
 	}
 
 	ps.asyncJobs.Store(jobID, job)
 
 	// Run in background.
 	go func() {
-		job.Status = JobStatusRunning
-		ps.asyncJobs.Store(jobID, job)
+		defer jobCancel()
 
-		result, err := ps.GeneratePreview(context.Background(), req)
+		job.mu.Lock()
+		if job.Status == JobStatusCancelled {
+			job.mu.Unlock()
+			return
+		}
+		job.Status = JobStatusRunning
+		job.mu.Unlock()
+
+		result, err := ps.GeneratePreview(jobCtx, req)
+
+		job.mu.Lock()
+		defer job.mu.Unlock()
+
+		// If cancelled while running, do not overwrite status.
+		if job.Status == JobStatusCancelled {
+			return
+		}
+
 		if err != nil {
 			job.Status = JobStatusFailed
 			job.Error = err.Error()
 		} else {
 			job.Status = JobStatusSucceeded
 			job.Result = result
+			job.allImpacted = result.allImpacted
 		}
 
 		// Also store under the preview ID for pagination.
 		if result != nil {
 			ps.asyncJobs.Store(result.PreviewID, job)
 		}
-		ps.asyncJobs.Store(jobID, job)
-		_ = draftHash // referenced in closure
 	}()
 
 	return job, nil
@@ -1788,7 +1859,12 @@ func (ps *PreviewService) GetPreviewJob(ctx context.Context, jobID string) (*Pre
 	if !ok {
 		return nil, fmt.Errorf("invalid job data for %s", jobID)
 	}
-	return job, nil
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	// Return a snapshot to avoid races on the caller side.
+	snapshot := *job
+	snapshot.cancel = nil // don't expose cancel func
+	return &snapshot, nil
 }
 
 // CancelPreviewJob cancels an in-progress async preview job.
@@ -1801,11 +1877,15 @@ func (ps *PreviewService) CancelPreviewJob(ctx context.Context, jobID string) er
 	if !ok {
 		return fmt.Errorf("invalid job data for %s", jobID)
 	}
+	job.mu.Lock()
+	defer job.mu.Unlock()
 	if job.Status != JobStatusAccepted && job.Status != JobStatusRunning {
 		return fmt.Errorf("job %s is not cancellable (status: %s)", jobID, job.Status)
 	}
 	job.Status = JobStatusCancelled
-	ps.asyncJobs.Store(jobID, job)
+	if job.cancel != nil {
+		job.cancel()
+	}
 	return nil
 }
 
@@ -1816,6 +1896,7 @@ func (ps *PreviewService) CancelPreviewJob(ctx context.Context, jobID string) er
 // tokenPayload is the binding vector for a preview token.
 type tokenPayload struct {
 	PreviewID        string `json:"pid"`
+	ConstraintID     string `json:"cid"`
 	ActorKind        string `json:"ak"`
 	ActorID          string `json:"ai"`
 	Operation        string `json:"op"`
@@ -1824,16 +1905,19 @@ type tokenPayload struct {
 	StateFingerprint string `json:"sf"`
 	ExpiresAt        int64  `json:"ea"`
 	Nonce            string `json:"n"`
+	Complete         bool   `json:"cp"`
 }
 
 // issueToken creates a server-signed preview token.
 func (ps *PreviewService) issueToken(
 	previewID string,
+	constraintID string,
 	actor PrincipalContext,
 	operation string,
 	draftHash string,
 	objectRevision int64,
 	stateFingerprint string,
+	complete bool,
 	now time.Time,
 ) (string, error) {
 	// Generate nonce.
@@ -1845,6 +1929,7 @@ func (ps *PreviewService) issueToken(
 
 	payload := tokenPayload{
 		PreviewID:        previewID,
+		ConstraintID:     constraintID,
 		ActorKind:        string(actor.Kind),
 		ActorID:          actor.ID,
 		Operation:        operation,
@@ -1853,6 +1938,7 @@ func (ps *PreviewService) issueToken(
 		StateFingerprint: stateFingerprint,
 		ExpiresAt:        now.Add(previewTokenTTL).Unix(),
 		Nonce:            nonce,
+		Complete:         complete,
 	}
 
 	// Serialize payload.
@@ -1943,14 +2029,6 @@ func (ps *PreviewService) ValidateToken(
 		}
 	}
 
-	// Check single-use (replay prevention).
-	if _, loaded := ps.usedNonces.LoadOrStore(payload.Nonce, now.Add(previewTokenTTL)); loaded {
-		return &TokenValidationError{
-			Code:    ErrCodePreviewTokenReplay,
-			Message: "preview token has already been used",
-		}
-	}
-
 	// Check actor.
 	if string(actor.Kind) != payload.ActorKind || actor.ID != payload.ActorID {
 		return &TokenValidationError{
@@ -1984,11 +2062,19 @@ func (ps *PreviewService) ValidateToken(
 		}
 	}
 
+	// Check completeness (R2: server-side enforcement — incomplete previews cannot commit).
+	if !payload.Complete {
+		return &TokenValidationError{
+			Code:    ErrCodePreviewIncomplete,
+			Message: "preview was incomplete and cannot be used for commit",
+		}
+	}
+
 	// Check state fingerprint (related state may have changed).
 	currentFingerprint := ps.computeStateFingerprint(ctx, PreviewRequest{
 		Operation:    operation,
 		Draft:        draft,
-		ConstraintID: payload.PreviewID,
+		ConstraintID: payload.ConstraintID,
 		BaseRevision: objectRevision,
 		Actor:        actor,
 	}, now)
@@ -1996,6 +2082,14 @@ func (ps *PreviewService) ValidateToken(
 		return &TokenValidationError{
 			Code:    ErrCodePreviewStateMismatch,
 			Message: "related state has changed since preview was generated (group membership, role bindings, etc.)",
+		}
+	}
+
+	// All binding checks passed — now consume the nonce (R3: only after all checks pass).
+	if _, loaded := ps.usedNonces.LoadOrStore(payload.Nonce, now.Add(previewTokenTTL)); loaded {
+		return &TokenValidationError{
+			Code:    ErrCodePreviewTokenReplay,
+			Message: "preview token has already been used",
 		}
 	}
 
@@ -2063,19 +2157,32 @@ func (ps *PreviewService) generatePreviewID() string {
 // ---------------------------------------------------------------------------
 
 // cleanupNonces periodically evicts expired nonces from the used-nonce store.
+// It shuts down when stopCleanup is closed.
 func (ps *PreviewService) cleanupNonces() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		ps.usedNonces.Range(func(key, value interface{}) bool {
-			if expiry, ok := value.(time.Time); ok {
-				if now.After(expiry) {
-					ps.usedNonces.Delete(key)
+	for {
+		select {
+		case <-ps.stopCleanup:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			ps.usedNonces.Range(func(key, value interface{}) bool {
+				if expiry, ok := value.(time.Time); ok {
+					if now.After(expiry) {
+						ps.usedNonces.Delete(key)
+					}
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
+	}
+}
+
+// Close shuts down the PreviewService, stopping the nonce cleanup goroutine.
+func (ps *PreviewService) Close() {
+	if ps.stopCleanup != nil {
+		close(ps.stopCleanup)
 	}
 }
 

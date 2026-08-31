@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -457,6 +459,10 @@ type PreviewResult struct {
 
 	// CommitBlocked is non-nil when the commit would be rejected.
 	CommitBlocked *CommitBlockedReason `json:"commitBlocked,omitempty"`
+
+	// allImpacted stores the full list of impacted principals for pagination.
+	// Not serialized — used internally by ListAffectedPrincipals.
+	allImpacted []ImpactedPrincipal `json:"-"`
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +817,15 @@ type PreviewJob struct {
 
 	// Error is the failure reason when Status is "failed".
 	Error string `json:"error,omitempty"`
+
+	// mu protects Status, Result, Error from concurrent access.
+	mu sync.Mutex `json:"-"`
+
+	// cancel stops the background goroutine when the job is cancelled.
+	cancel context.CancelFunc `json:"-"`
+
+	// allImpacted stores the full set of impacted principals for pagination.
+	allImpacted []ImpactedPrincipal `json:"-"`
 }
 
 // JobProgress tracks async job computation progress.
