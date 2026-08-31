@@ -423,9 +423,10 @@ func TestReconcileBuiltInRole_LegacyIntegerMarkerTriggersReconciliation(t *testi
 	// Run reconciliation — should trigger because PermHash is empty.
 	reconcileBuiltInRoles(ctx, s)
 
-	// After reconciliation, marker should now have the hash.
+	// After reconciliation, marker should now have the hash and the
+	// current revision (hub-member is at revision 2 after S1 fix).
 	updatedMarker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
-	assert.Equal(t, 1, updatedMarker.Revision)
+	assert.Equal(t, 2, updatedMarker.Revision)
 	assert.NotEmpty(t, updatedMarker.PermHash, "marker should have PermHash after reconciliation")
 	assert.Equal(t, permListHash(hubMemberPermissionIDs()), updatedMarker.PermHash)
 }
