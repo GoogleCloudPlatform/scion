@@ -740,7 +740,7 @@ export class ScionProjectMembersEditor extends LitElement {
             this.actionFeedback = {
               message:
                 'Role updated but the old binding could not be removed. You may need to remove it manually.',
-              variant: 'warning',
+              variant: 'danger',
             };
             this.changeDialogOpen = false;
             this.changeMember = null;
