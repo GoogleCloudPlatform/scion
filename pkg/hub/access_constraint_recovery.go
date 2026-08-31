@@ -92,20 +92,10 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actorID string) (*Dis
 		})
 	}
 
-	// Load all active constraints.
-	const pageSize = 500
-	var allConstraints []*store.AccessConstraint
-	offset := 0
-	for {
-		constraints, err := rs.store.ListAccessConstraints(ctx, pageSize, offset)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list constraints: %w", err)
-		}
-		allConstraints = append(allConstraints, constraints...)
-		if len(constraints) < pageSize {
-			break
-		}
-		offset += len(constraints)
+	// Load all constraints using the shared pagination helper.
+	allConstraints, err := rs.listAllConstraints(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Filter to active (non-disabled) constraints.
@@ -154,7 +144,13 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actorID string) (*Dis
 			return nil, fmt.Errorf("audit write failed, disable rolled back: %w", err)
 		}
 
-		// Publish recovery.completed event.
+		rs.logger.Info("all boundaries disabled",
+			"disabled_count", len(disabledIDs),
+			"audit_id", auditID,
+			"actor_id", actorID,
+		)
+
+		// Publish recovery.completed event (N4: fires regardless of audit config).
 		if rs.eventBus != nil {
 			rs.eventBus.Publish(InvalidationEvent{
 				Type:      EventRecoveryCompleted,
@@ -163,17 +159,20 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actorID string) (*Dis
 			})
 		}
 
-		rs.logger.Info("all boundaries disabled",
-			"disabled_count", len(disabledIDs),
-			"audit_id", auditID,
-			"actor_id", actorID,
-		)
-
 		return &DisableAllResult{
 			DisabledCount: len(disabledIDs),
 			DisabledIDs:   disabledIDs,
 			AuditID:       auditID,
 		}, nil
+	}
+
+	// Publish recovery.completed event even when audit is not configured (N4).
+	if rs.eventBus != nil {
+		rs.eventBus.Publish(InvalidationEvent{
+			Type:      EventRecoveryCompleted,
+			EntityID:  "all",
+			Timestamp: rs.nowFunc(),
+		})
 	}
 
 	return &DisableAllResult{
@@ -234,20 +233,10 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actorID string) (*Rec
 		})
 	}
 
-	// Load all constraints and find disabled ones.
-	const pageSize = 500
-	var allConstraints []*store.AccessConstraint
-	offset := 0
-	for {
-		constraints, err := rs.store.ListAccessConstraints(ctx, pageSize, offset)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list constraints: %w", err)
-		}
-		allConstraints = append(allConstraints, constraints...)
-		if len(constraints) < pageSize {
-			break
-		}
-		offset += len(constraints)
+	// Load all constraints using the shared pagination helper.
+	allConstraints, err := rs.listAllConstraints(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var disabledConstraints []*store.AccessConstraint
@@ -305,7 +294,13 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actorID string) (*Rec
 			return nil, fmt.Errorf("recovery audit write failed, recovery rolled back: %w", err)
 		}
 
-		// Publish recovery.completed event.
+		rs.logger.Info("all boundaries recovered",
+			"recovered_count", len(recoveredIDs),
+			"audit_id", auditID,
+			"actor_id", actorID,
+		)
+
+		// Publish recovery.completed event (N4: fires regardless of audit config).
 		if rs.eventBus != nil {
 			rs.eventBus.Publish(InvalidationEvent{
 				Type:      EventRecoveryCompleted,
@@ -314,17 +309,20 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actorID string) (*Rec
 			})
 		}
 
-		rs.logger.Info("all boundaries recovered",
-			"recovered_count", len(recoveredIDs),
-			"audit_id", auditID,
-			"actor_id", actorID,
-		)
-
 		return &RecoveryResult{
 			RecoveredCount: len(recoveredIDs),
 			RecoveredIDs:   recoveredIDs,
 			AuditID:        auditID,
 		}, nil
+	}
+
+	// Publish recovery.completed event even when audit is not configured (N4).
+	if rs.eventBus != nil {
+		rs.eventBus.Publish(InvalidationEvent{
+			Type:      EventRecoveryCompleted,
+			EntityID:  "all",
+			Timestamp: rs.nowFunc(),
+		})
 	}
 
 	return &RecoveryResult{
@@ -351,19 +349,9 @@ func (rs *RecoveryService) rollbackRecovery(ctx context.Context, ids []string) {
 // as read-only provenance. Does NOT expose HTTP disable/enable — that is
 // B7 scope.
 func (rs *RecoveryService) ListRecoveryDisabled(ctx context.Context) ([]*store.AccessConstraint, error) {
-	const pageSize = 500
-	var allConstraints []*store.AccessConstraint
-	offset := 0
-	for {
-		constraints, err := rs.store.ListAccessConstraints(ctx, pageSize, offset)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list constraints: %w", err)
-		}
-		allConstraints = append(allConstraints, constraints...)
-		if len(constraints) < pageSize {
-			break
-		}
-		offset += len(constraints)
+	allConstraints, err := rs.listAllConstraints(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var disabled []*store.AccessConstraint
@@ -373,6 +361,31 @@ func (rs *RecoveryService) ListRecoveryDisabled(ctx context.Context) ([]*store.A
 		}
 	}
 	return disabled, nil
+}
+
+// ---------------------------------------------------------------------------
+// Pagination helper (N3)
+// ---------------------------------------------------------------------------
+
+// listAllConstraints loads all access constraints from the store using
+// cursor-based pagination. Extracted to avoid repeating the pagination
+// loop in DisableAll, RecoverAll, and ListRecoveryDisabled.
+func (rs *RecoveryService) listAllConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	const pageSize = 500
+	var all []*store.AccessConstraint
+	offset := 0
+	for {
+		page, err := rs.store.ListAccessConstraints(ctx, pageSize, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list constraints: %w", err)
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+		offset += len(page)
+	}
+	return all, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -432,4 +445,42 @@ func (rl *RecoveryLock) Holder() string {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	return rl.holder
+}
+
+// AcquireWithContext blocks until the lock is acquired or the context is
+// cancelled/expired. This provides a context-based timeout for lock
+// acquisition, preventing indefinite waits when another recovery operation
+// is in progress.
+//
+// Usage:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+//	defer cancel()
+//	if err := lock.AcquireWithContext(ctx, "instance-1"); err != nil {
+//	    // Lock not acquired within timeout.
+//	}
+//
+// TODO: For multi-instance Postgres deployments, replace the in-process
+// polling with a database advisory lock (pg_advisory_lock) that supports
+// native timeout semantics.
+func (rl *RecoveryLock) AcquireWithContext(ctx context.Context, holderID string) error {
+	// Fast path: try to acquire immediately.
+	if rl.TryAcquire(holderID) {
+		return nil
+	}
+
+	// Poll with backoff until the context expires.
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("recovery lock acquisition timed out: %w", ctx.Err())
+		case <-ticker.C:
+			if rl.TryAcquire(holderID) {
+				return nil
+			}
+		}
+	}
 }

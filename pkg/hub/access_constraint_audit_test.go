@@ -156,6 +156,129 @@ func TestAudit_WriteFailureReturnsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Audit failure compensating action: create is rolled back
+// ---------------------------------------------------------------------------
+
+func TestAudit_CompensatingAction_CreateRolledBack(t *testing.T) {
+	gs, ps, _, s, aw := auditTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "comp-create-admin")
+	actor := PrincipalContext{Kind: "user", ID: adminID}
+
+	pType := "user"
+	pvSeedUser(t, s, "comp-create-target")
+	draft := &store.AccessConstraint{
+		Name:                 "comp-create-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   strPtr(tid("comp-create-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test compensating action on create",
+		CreatedBy:            adminID,
+	}
+
+	result, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation: "create",
+		Draft:     draft,
+		Actor:     actor,
+	})
+	require.NoError(t, err)
+
+	// Inject audit failure.
+	aw.failFunc = func() error { return assert.AnError }
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "create",
+		Draft:        draft,
+		PreviewToken: result.PreviewToken,
+		Actor:        actor,
+	})
+	require.Error(t, err, "commit must fail when audit write fails")
+	assert.Contains(t, err.Error(), "audit write failed")
+
+	// After audit failure, the constraint must NOT be in the store — the
+	// compensating action should have deleted it.
+	constraints, listErr := s.ListAccessConstraints(ctx, 100, 0)
+	require.NoError(t, listErr)
+	for _, c := range constraints {
+		assert.NotEqual(t, "comp-create-boundary", c.Name,
+			"constraint created before audit failure must be removed by compensating action")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2c. Audit failure compensating action: update is restored
+// ---------------------------------------------------------------------------
+
+func TestAudit_CompensatingAction_UpdateRestored(t *testing.T) {
+	gs, ps, _, s, aw := auditTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "comp-update-admin")
+	actor := PrincipalContext{Kind: "user", ID: adminID}
+
+	// Create a constraint first (with working audit).
+	pType := "user"
+	pvSeedUser(t, s, "comp-update-target")
+	draft := &store.AccessConstraint{
+		Name:                 "comp-update-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   strPtr(tid("comp-update-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read", "agent.create"},
+		Purpose:              "test compensating action on update",
+		CreatedBy:            adminID,
+	}
+	created := govCreateAndCommit(t, gs, ps, draft, actor)
+	require.NotNil(t, created)
+
+	// Now prepare an update.
+	updateDraft := &store.AccessConstraint{
+		ID:                   created.ID,
+		Name:                 "comp-update-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   strPtr(tid("comp-update-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"}, // Removed agent.create.
+		Purpose:              "updated purpose",
+		CreatedBy:            adminID,
+	}
+
+	previewResult, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation:    "update",
+		Draft:        updateDraft,
+		ConstraintID: created.ID,
+		BaseRevision: created.Revision,
+		Actor:        actor,
+	})
+	require.NoError(t, err)
+
+	// Inject audit failure.
+	aw.failFunc = func() error { return assert.AnError }
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "update",
+		Draft:        updateDraft,
+		ConstraintID: created.ID,
+		BaseRevision: created.Revision,
+		PreviewToken: previewResult.PreviewToken,
+		Actor:        actor,
+	})
+	require.Error(t, err, "commit must fail when audit write fails")
+	assert.Contains(t, err.Error(), "audit write failed")
+
+	// After audit failure, the constraint must be restored to its previous state.
+	restored, getErr := s.GetAccessConstraint(ctx, created.ID)
+	require.NoError(t, getErr)
+	assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, restored.MaximumPermissions,
+		"constraint must be restored to before-state after audit failure on update")
+}
+
+// ---------------------------------------------------------------------------
 // 3. Audit entry contains no sensitive principal data (redaction test)
 // ---------------------------------------------------------------------------
 
@@ -197,14 +320,51 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	entries := aw.GetEntries()
 	require.Len(t, entries, 1)
 
-	// Verify no sensitive data in audit entry.
 	entry := entries[0]
-	assert.False(t, auditEntryContainsSensitiveData(&entry),
-		"audit entry must not contain sensitive principal data")
 
-	// Verify the entry uses IDs, not names or emails.
-	assert.NotContains(t, entry.ActorID, "@", "actor should be an ID, not an email")
-	assert.Equal(t, adminID, entry.ActorID, "actor should be the admin's ID")
+	// ---------------------------------------------------------------------------
+	// Field-level sensitive data assertions (R2): verify that every field in
+	// BoundaryAuditEntry that could theoretically carry PII is safe.
+	// ---------------------------------------------------------------------------
+
+	// Common PII patterns: email addresses, typical principal/group names.
+	piiPatterns := []string{"@", "user@", "admin@", ".com", ".org"}
+
+	// ActorID should be an opaque identifier, never an email.
+	assert.NotContains(t, entry.ActorID, "@", "ActorID must not contain an email address")
+	assert.Equal(t, adminID, entry.ActorID, "ActorID should be the admin's opaque ID")
+
+	// ConstraintID should not contain principal names, group names, or emails.
+	for _, pat := range piiPatterns {
+		assert.NotContains(t, entry.ConstraintID, pat,
+			"ConstraintID must not contain PII pattern %q", pat)
+	}
+
+	// PreviewID should not contain principal or group identifiers.
+	for _, pat := range piiPatterns {
+		assert.NotContains(t, entry.PreviewID, pat,
+			"PreviewID must not contain PII pattern %q", pat)
+	}
+
+	// DraftHash should not contain principal or group identifiers.
+	for _, pat := range piiPatterns {
+		assert.NotContains(t, entry.DraftHash, pat,
+			"DraftHash must not contain PII pattern %q", pat)
+	}
+
+	// StateFingerprint should not contain principal or group identifiers.
+	for _, pat := range piiPatterns {
+		assert.NotContains(t, entry.StateFingerprint, pat,
+			"StateFingerprint must not contain PII pattern %q", pat)
+	}
+
+	// ImpactCounts are numeric — verify they are non-negative (safe by type).
+	assert.GreaterOrEqual(t, entry.ImpactCounts.AffectedPrincipals, 0,
+		"AffectedPrincipals must be non-negative")
+	assert.GreaterOrEqual(t, entry.ImpactCounts.PermissionsAdded, 0,
+		"PermissionsAdded must be non-negative")
+	assert.GreaterOrEqual(t, entry.ImpactCounts.PermissionsRemoved, 0,
+		"PermissionsRemoved must be non-negative")
 }
 
 // ---------------------------------------------------------------------------

@@ -373,17 +373,3 @@ func safeRate(numerator, denominator int64) float64 {
 	return float64(numerator) / float64(denominator)
 }
 
-// auditEntryContainsSensitiveData checks whether an audit entry contains
-// any sensitive principal data. Used by redaction tests.
-func auditEntryContainsSensitiveData(entry *BoundaryAuditEntry) bool {
-	// Audit entries must NEVER contain:
-	// - Principal lists
-	// - Email addresses
-	// - Group membership details
-	// - Permission details beyond counts
-	//
-	// The entry struct is designed to hold only IDs and counts, so by
-	// construction it should not contain sensitive data. This function
-	// exists as a runtime guard for the redaction test.
-	return false
-}
