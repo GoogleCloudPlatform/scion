@@ -199,8 +199,12 @@ func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *s
 		SetMaximumPermissions(c.MaximumPermissions).
 		SetDisabled(c.Disabled).
 		SetCreatedBy(c.CreatedBy).
-		SetRevision(1).
-		SetPurpose(c.Purpose)
+		SetRevision(1)
+
+	// Only set purpose when non-empty; let the Ent schema default apply otherwise.
+	if c.Purpose != "" {
+		builder.SetPurpose(c.Purpose)
+	}
 
 	if c.SubjectPrincipalType != nil {
 		builder.SetSubjectPrincipalType(*c.SubjectPrincipalType)
@@ -256,6 +260,10 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 		return nil, err
 	}
 
+	// Detect dialect before starting a transaction to avoid deadlocking on
+	// single-connection SQLite backends (MaxOpenConns=1).
+	rowLocks := s.usesRowLocks(ctx)
+
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -264,7 +272,7 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 
 	// Read existing constraint inside transaction for optimistic concurrency.
 	q := tx.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
-	if s.usesRowLocks(ctx) {
+	if rowLocks {
 		q = q.ForUpdate()
 	}
 	existing, err := q.Only(ctx)
@@ -289,8 +297,12 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 		SetScopeID(c.ScopeID).
 		SetMaximumPermissions(c.MaximumPermissions).
 		SetDisabled(c.Disabled).
-		SetRevision(existing.Revision + 1).
-		SetPurpose(c.Purpose)
+		SetRevision(existing.Revision + 1)
+
+	// Only set purpose when non-empty; preserve existing otherwise.
+	if c.Purpose != "" {
+		builder.SetPurpose(c.Purpose)
+	}
 
 	if c.SubjectPrincipalType != nil {
 		builder.SetSubjectPrincipalType(*c.SubjectPrincipalType)
@@ -465,28 +477,24 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 
 	// Apply cursor.
 	if opts.PageToken != "" {
-		cursorTime, cursorID, err := decodeConstraintCursor(opts.PageToken)
+		cursorVal, cursorID, err := decodeConstraintCursor(opts.PageToken)
 		if err != nil {
 			return nil, "", 0, fmt.Errorf("invalid page token: %w", err)
 		}
-		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_time, cursor_id)
+		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_val, cursor_id)
 		if sortDesc {
 			query = query.Where(accessconstraint.Or(
+				constraintFieldLT(sortField, cursorVal),
 				accessconstraint.And(
-					constraintFieldLT(sortField, cursorTime),
-				),
-				accessconstraint.And(
-					constraintFieldEQ(sortField, cursorTime),
+					constraintFieldEQ(sortField, cursorVal),
 					accessconstraint.IDLT(cursorID),
 				),
 			))
 		} else {
 			query = query.Where(accessconstraint.Or(
+				constraintFieldGT(sortField, cursorVal),
 				accessconstraint.And(
-					constraintFieldGT(sortField, cursorTime),
-				),
-				accessconstraint.And(
-					constraintFieldEQ(sortField, cursorTime),
+					constraintFieldEQ(sortField, cursorVal),
 					accessconstraint.IDGT(cursorID),
 				),
 			))
@@ -519,17 +527,16 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 	var nextPageToken string
 	if hasNextPage && len(entities) > 0 {
 		last := entities[len(entities)-1]
-		var cursorTime time.Time
+		var cursorVal string
 		switch sortField {
 		case accessconstraint.FieldUpdated:
-			cursorTime = last.Updated
+			cursorVal = last.Updated.Format(time.RFC3339Nano)
 		case accessconstraint.FieldName:
-			// For name sorting, use created as tie-breaker timestamp.
-			cursorTime = last.Created
+			cursorVal = last.Name
 		default:
-			cursorTime = last.Created
+			cursorVal = last.Created.Format(time.RFC3339Nano)
 		}
-		nextPageToken = encodeConstraintCursor(cursorTime, last.ID.String())
+		nextPageToken = encodeConstraintCursor(cursorVal, last.ID.String())
 	}
 
 	return result, nextPageToken, totalCount, nil
@@ -662,64 +669,66 @@ func (s *AccessConstraintStore) DisableAccessConstraint(ctx context.Context, id 
 // Cursor helpers for access constraint pagination
 // ---------------------------------------------------------------------------
 
-func encodeConstraintCursor(t time.Time, id string) string {
-	raw := t.Format(time.RFC3339Nano) + "," + id
+func encodeConstraintCursor(sortVal string, id string) string {
+	raw := sortVal + "," + id
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
-func decodeConstraintCursor(cursor string) (time.Time, uuid.UUID, error) {
+func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
 	}
 	parts := strings.SplitN(string(raw), ",", 2)
 	if len(parts) != 2 {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("expected 'timestamp,id' format")
-	}
-	ts, err := time.Parse(time.RFC3339Nano, parts[0])
-	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse timestamp: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("expected 'value,id' format")
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("parse id: %w", err)
 	}
-	return ts, id, nil
+	return parts[0], id, nil
 }
 
 // ---------------------------------------------------------------------------
 // Time field comparison helpers for keyset pagination
 // ---------------------------------------------------------------------------
 
-func constraintFieldGT(field string, t time.Time) predicate.AccessConstraint {
+func constraintFieldGT(field string, val string) predicate.AccessConstraint {
 	switch field {
+	case accessconstraint.FieldName:
+		return accessconstraint.NameGT(val)
 	case accessconstraint.FieldUpdated:
+		t, _ := time.Parse(time.RFC3339Nano, val)
 		return accessconstraint.UpdatedGT(t)
-	case accessconstraint.FieldCreated:
-		return accessconstraint.CreatedGT(t)
-	default:
+	default: // created
+		t, _ := time.Parse(time.RFC3339Nano, val)
 		return accessconstraint.CreatedGT(t)
 	}
 }
 
-func constraintFieldLT(field string, t time.Time) predicate.AccessConstraint {
+func constraintFieldLT(field string, val string) predicate.AccessConstraint {
 	switch field {
+	case accessconstraint.FieldName:
+		return accessconstraint.NameLT(val)
 	case accessconstraint.FieldUpdated:
+		t, _ := time.Parse(time.RFC3339Nano, val)
 		return accessconstraint.UpdatedLT(t)
-	case accessconstraint.FieldCreated:
-		return accessconstraint.CreatedLT(t)
-	default:
+	default: // created
+		t, _ := time.Parse(time.RFC3339Nano, val)
 		return accessconstraint.CreatedLT(t)
 	}
 }
 
-func constraintFieldEQ(field string, t time.Time) predicate.AccessConstraint {
+func constraintFieldEQ(field string, val string) predicate.AccessConstraint {
 	switch field {
+	case accessconstraint.FieldName:
+		return accessconstraint.NameEQ(val)
 	case accessconstraint.FieldUpdated:
+		t, _ := time.Parse(time.RFC3339Nano, val)
 		return accessconstraint.UpdatedEQ(t)
-	case accessconstraint.FieldCreated:
-		return accessconstraint.CreatedEQ(t)
-	default:
+	default: // created
+		t, _ := time.Parse(time.RFC3339Nano, val)
 		return accessconstraint.CreatedEQ(t)
 	}
 }

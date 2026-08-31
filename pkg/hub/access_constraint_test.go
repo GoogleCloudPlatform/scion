@@ -110,6 +110,59 @@ func TestSubjectSelector_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		// Orphaned field rejection tests.
+		{
+			name: "principal with orphaned groupId",
+			subject: SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: "user",
+				PrincipalID:   "user1",
+				GroupID:       "group1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "group_closure with orphaned principalId",
+			subject: SubjectSelector{
+				Kind:        SubjectKindGroupClosure,
+				GroupID:     "group1",
+				PrincipalID: "user1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "group_closure with orphaned principalType",
+			subject: SubjectSelector{
+				Kind:          SubjectKindGroupClosure,
+				GroupID:       "group1",
+				PrincipalType: "user",
+			},
+			wantErr: true,
+		},
+		{
+			name: "all_principals with orphaned principalId",
+			subject: SubjectSelector{
+				Kind:        SubjectKindAllPrincipals,
+				PrincipalID: "user1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "all_principals with orphaned principalType",
+			subject: SubjectSelector{
+				Kind:          SubjectKindAllPrincipals,
+				PrincipalType: "user",
+			},
+			wantErr: true,
+		},
+		{
+			name: "all_principals with orphaned groupId",
+			subject: SubjectSelector{
+				Kind:    SubjectKindAllPrincipals,
+				GroupID: "group1",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -138,6 +191,7 @@ func TestConstraintScopeRef_Validate(t *testing.T) {
 		{name: "system scope", scope: ConstraintScopeRef{Type: ScopeTypeSystem}},
 		{name: "project scope", scope: ConstraintScopeRef{Type: ScopeTypeProject, ID: "proj-a"}},
 		{name: "project scope missing ID", scope: ConstraintScopeRef{Type: ScopeTypeProject}, wantErr: true},
+		{name: "system scope with non-empty ID", scope: ConstraintScopeRef{Type: ScopeTypeSystem, ID: "proj-1"}, wantErr: true},
 		{name: "invalid scope type", scope: ConstraintScopeRef{Type: "resource"}, wantErr: true},
 	}
 
