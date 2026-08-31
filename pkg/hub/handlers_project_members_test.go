@@ -233,6 +233,36 @@ func TestProjectMembers_Add_RejectsNonProjectRole(t *testing.T) {
 		"should reject non-project-scoped role")
 }
 
+func TestProjectMembers_Add_RejectsDirectUserOnlyRoleForGroup(t *testing.T) {
+	srv, st, owner, _, project := setupProjectMembersTest(t)
+	ctx := context.Background()
+
+	// Create a group to assign the role to.
+	testGroup := &store.Group{
+		ID:        tid("pm-test-group"),
+		Name:      "Test Group",
+		Slug:      "pm-test-group",
+		GroupType: store.GroupTypeExplicit,
+		CreatedBy: owner.ID,
+	}
+	require.NoError(t, st.CreateGroup(ctx, testGroup))
+
+	// Try to assign project-owner to the group — should return 400.
+	ownerRoleDef, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: ownerRoleDef.ID,
+			PrincipalType:    "group",
+			PrincipalID:      testGroup.ID,
+		})
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"R2: assigning project-owner to a group should return 400, not 500")
+	assert.Contains(t, rec.Body.String(), "direct users")
+}
+
 // ---------------------------------------------------------------------------
 // PATCH /api/v1/projects/{id}/members/{bindingID}
 // ---------------------------------------------------------------------------

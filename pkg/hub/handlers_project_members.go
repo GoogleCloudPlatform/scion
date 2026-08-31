@@ -16,6 +16,7 @@ package hub
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -66,6 +67,15 @@ var validProjectRoles = map[string]bool{
 	store.ProjectRoleOwner:  true,
 	store.ProjectRoleAdmin:  true,
 	store.ProjectRoleMember: true,
+}
+
+// directUserOnlyProjectRoles are project roles that can only be assigned to
+// direct user principals, not groups or agents. This mirrors the frontend's
+// PROJECT_DIRECT_USER_ONLY_ROLES constraint and prevents 500 errors from
+// the store's ErrDirectUserOnly guard.
+var directUserOnlyProjectRoles = map[string]bool{
+	store.ProjectRoleOwner: true,
+	store.ProjectRoleAdmin: true,
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +297,16 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		return
 	}
 
+	// R2: Enforce direct-user-only constraint at the handler level.
+	// project-owner and project-admin can only be assigned to direct user
+	// principals, not groups or agents. This prevents the store's
+	// ErrDirectUserOnly from surfacing as a 500.
+	if directUserOnlyProjectRoles[roleDef.Name] && req.PrincipalType != store.RoleBindingPrincipalUser {
+		BadRequest(w, fmt.Sprintf("role %q can only be assigned to direct users, not %s principals",
+			roleDef.Name, req.PrincipalType))
+		return
+	}
+
 	// Validate lifecycle fields.
 	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
 		BadRequest(w, "expiresAt must be in the future")
@@ -442,6 +462,13 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// R2: Enforce direct-user-only constraint on role change.
+	if directUserOnlyProjectRoles[newRoleDef.Name] && existing.PrincipalType != store.RoleBindingPrincipalUser {
+		BadRequest(w, fmt.Sprintf("role %q can only be assigned to direct users, not %s principals",
+			newRoleDef.Name, existing.PrincipalType))
+		return
+	}
+
 	// Last-owner guard: if changing away from project-owner, ensure at least
 	// one owner remains.
 	oldRoleDef, err := s.store.GetRoleDefinition(ctx, existing.RoleDefinitionID)
@@ -487,18 +514,11 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Atomic role change: delete old binding, create new one.
-	// This is a single logical operation — not the non-atomic
-	// create-then-delete dance the old frontend used.
-	if err := s.store.DeleteRoleBinding(ctx, bindingID); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			NotFound(w, "Role Binding")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
+	// Role change: create-then-delete to prevent data loss.
+	// If the create fails, the user retains their existing role.
+	// A brief duplicate-binding window is harmless (the union of both
+	// project-scoped roles applies). A missing-binding window would be
+	// a silent demotion to no access.
 	newBinding := &store.RoleBinding{
 		RoleDefinitionID: req.RoleDefinitionID,
 		PrincipalType:    existing.PrincipalType,
@@ -514,6 +534,13 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// New binding exists — now safe to delete the old one.
+	if err := s.store.DeleteRoleBinding(ctx, bindingID); err != nil {
+		// Best effort: the new binding is active; log the orphaned old binding.
+		slog.Warn("failed to delete old binding during role change",
+			"old_binding_id", bindingID, "new_binding_id", created.ID, "error", err)
 	}
 
 	slog.Info("project member role changed",
