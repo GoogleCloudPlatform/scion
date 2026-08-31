@@ -392,10 +392,15 @@ func (s *Server) handleExplainEffectivePermissions(
 		scopeType = ScopeTypeSystem
 	}
 
+	// Normalize the principal type for effective permission lookup.
+	// Identity types like "dev", "federated_user" need to map to the
+	// store principal type ("user") for binding queries.
+	principalType := normalizePrincipalType(explainIdentity.Type())
+
 	// Get effective permissions for the principal.
 	effectivePerms, err := s.authzService.getEffectivePermissions(
 		ctx,
-		explainIdentity.Type(),
+		principalType,
 		explainIdentity.ID(),
 		scopeType, scopeID,
 	)
@@ -474,7 +479,7 @@ func (s *Server) handleExplainEffectivePermissions(
 
 		comparePerms, err := s.authzService.getEffectivePermissions(
 			ctx,
-			compareIdentity.Type(),
+			normalizePrincipalType(compareIdentity.Type()),
 			compareIdentity.ID(),
 			scopeType, scopeID,
 		)
@@ -527,6 +532,20 @@ func (s *Server) resolveExplainPrincipal(ctx context.Context, principalID, princ
 		return nil, err
 	}
 	return NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "api"), nil
+}
+
+// normalizePrincipalType maps identity types to store principal types for
+// binding queries. Identity types "dev" and "federated_user" are treated
+// as "user" by the authorization system.
+func normalizePrincipalType(identityType string) string {
+	switch identityType {
+	case "user", "dev", "federated_user":
+		return "user"
+	case "agent", "federated_agent":
+		return "agent"
+	default:
+		return identityType
+	}
 }
 
 // redactCrossPrincipalProvenance redacts sensitive fields from provenance
