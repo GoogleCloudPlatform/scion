@@ -110,7 +110,7 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},
 		ScopeIdentityToken:     {"agent.identity_token"},
-		ScopeProjectRead:       {"project.read"},
+		ScopeProjectRead:       {"agent.list", "agent.read", "project.read"},
 	}
 	for scope, wantIDs := range want {
 		gotIDs := registryPermissionIDsForAgentScope(string(scope))

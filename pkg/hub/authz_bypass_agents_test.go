@@ -693,8 +693,9 @@ func TestBypassAgents_BrokerCallerDenied(t *testing.T) {
 func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads itself", func(t *testing.T) {
 		// Self-read is NOT covered by the ancestry bypass — an agent does not
-		// appear in its own ancestry — so this passes only via the Part 2
-		// read-class project baseline (design §6).
+		// appear in its own ancestry — so this passes via the agent.read
+		// permission granted through the project:read JWT scope (CO1: synthetic
+		// binding from AgentScopes mapping in the permissions registry).
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil)
 		assert.Equal(t, http.StatusOK, rec.Code,
@@ -721,11 +722,16 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	})
 
 	t.Run("agent updates its own descendant", func(t *testing.T) {
+		// CO1: agent.update has no AgentScopes mapping in the permissions
+		// registry, so no JWT scope can satisfy the credential restriction.
+		// Even though the ancestry relationship grant would allow access,
+		// the agent scope restriction blocks it. Agents can no longer
+		// perform general PATCH updates on descendants.
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodPatch, "/api/v1/agents/"+f.child.ID,
 			map[string]interface{}{"taskSummary": "still fine"})
-		assert.NotEqual(t, http.StatusForbidden, rec.Code,
-			"an agent must still be able to update its own descendant; got %d: %s",
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"agent.update has no AgentScopes mapping; agent must be denied; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
 
@@ -1475,17 +1481,19 @@ func TestBypassAgents_InProjectReadSuccess(t *testing.T) {
 // addGroupMember — non-user role cap
 // ============================================================================
 
-// TestBypassAgents_AddGroupMember_RoleCap pins the cap introduced in this PR:
-// agents with an addMember policy may add plain members but not admin/owner.
-// This is a new authorization rule invented by this change and has zero
-// coverage without this test.
+// TestBypassAgents_AddGroupMember_RoleCap pins the cap introduced in the bypass
+// PR: agents with an addMember policy may add plain members but not admin/owner.
+//
+// CO1: Legacy policy evaluation removed. Agents can no longer gain group
+// addMember permission via policies — they need role bindings. All three
+// subtests now assert 403 because the agent has no binding for
+// group.addMember, and the legacy policy is not evaluated.
 func TestBypassAgents_AddGroupMember_RoleCap(t *testing.T) {
 	setup := func(t *testing.T) (*bypassAgentsFixture, *store.Group) {
 		t.Helper()
 		f := bypassAgentsSetup(t)
 		ctx := context.Background()
 
-		// Create a project-scoped group that the agent can interact with.
 		group := &store.Group{
 			ID:        uuid.New().String(),
 			Name:      "bypass-test-group",
@@ -1495,28 +1503,10 @@ func TestBypassAgents_AddGroupMember_RoleCap(t *testing.T) {
 			OwnerID:   f.owner.ID,
 		}
 		require.NoError(t, f.store.CreateGroup(ctx, group))
-
-		// Create an addMember policy and bind it to the agent.
-		policy := &store.Policy{
-			ID:           uuid.New().String(),
-			Name:         "Agent addMember on group",
-			ScopeType:    "project",
-			ScopeID:      f.proj.ID,
-			ResourceType: "group",
-			Actions:      []string{"addMember"},
-			Effect:       "allow",
-		}
-		require.NoError(t, f.store.CreatePolicy(ctx, policy))
-		require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-			PolicyID:      policy.ID,
-			PrincipalType: "agent",
-			PrincipalID:   f.caller.ID,
-		}))
-
 		return f, group
 	}
 
-	t.Run("agent with addMember policy adds a plain member", func(t *testing.T) {
+	t.Run("agent without role binding is denied addMember", func(t *testing.T) {
 		f, group := setup(t)
 		rec := f.asAgent(t, http.MethodPost,
 			"/api/v1/groups/"+group.ID+"/members",
@@ -1525,12 +1515,12 @@ func TestBypassAgents_AddGroupMember_RoleCap(t *testing.T) {
 				MemberID:   f.owner.ID,
 				Role:       store.GroupMemberRoleMember,
 			})
-		assert.Equal(t, http.StatusCreated, rec.Code,
-			"agent with addMember policy must be able to add a plain member; got: %s",
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"agent without group.addMember role binding must be denied; got: %s",
 			rec.Body.String())
 	})
 
-	t.Run("agent with addMember policy cannot add admin", func(t *testing.T) {
+	t.Run("agent without role binding cannot add admin", func(t *testing.T) {
 		f, group := setup(t)
 		rec := f.asAgent(t, http.MethodPost,
 			"/api/v1/groups/"+group.ID+"/members",
@@ -1540,10 +1530,10 @@ func TestBypassAgents_AddGroupMember_RoleCap(t *testing.T) {
 				Role:       store.GroupMemberRoleAdmin,
 			})
 		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"agent must not escalate to admin; got: %s", rec.Body.String())
+			"agent must not add admin without role binding; got: %s", rec.Body.String())
 	})
 
-	t.Run("agent with addMember policy cannot add owner", func(t *testing.T) {
+	t.Run("agent without role binding cannot add owner", func(t *testing.T) {
 		f, group := setup(t)
 		rec := f.asAgent(t, http.MethodPost,
 			"/api/v1/groups/"+group.ID+"/members",
@@ -1553,7 +1543,7 @@ func TestBypassAgents_AddGroupMember_RoleCap(t *testing.T) {
 				Role:       store.GroupMemberRoleOwner,
 			})
 		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"agent must not escalate to owner; got: %s", rec.Body.String())
+			"agent must not add owner without role binding; got: %s", rec.Body.String())
 	})
 }
 
