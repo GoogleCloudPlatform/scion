@@ -339,6 +339,18 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 			runtimeLog.Warn("failed to create shared dir in /scion layout",
 				"name", sd.Name, "error", err)
 		}
+		// When InWorkspace is true, the mount destination is
+		// <workspace>/.scion-volumes/<name> inside the sandbox. The
+		// workspace bind mount maps p.workspace → /workspace, so create
+		// the .scion-volumes/<name> subdirectory on the host side to
+		// ensure the bind mount destination exists.
+		if sd.InWorkspace {
+			iwPath := filepath.Join(p.workspace, ".scion-volumes", sd.Name)
+			if err := os.MkdirAll(iwPath, 0755); err != nil {
+				runtimeLog.Warn("failed to create in-workspace shared dir",
+					"name", sd.Name, "path", iwPath, "error", err)
+			}
+		}
 	}
 
 	return p, nil
@@ -450,7 +462,15 @@ func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
 	}
 	for _, sd := range sharedDirs {
 		sdPath := filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", sd.Name)
-		mounts = append(mounts, fmt.Sprintf("type=bind,source=%s,destination=%s", sdPath, sdPath))
+		mountDst := fmt.Sprintf("/scion-volumes/%s", sd.Name)
+		if sd.InWorkspace {
+			mountDst = fmt.Sprintf("%s/.scion-volumes/%s", sandboxWorkspace, sd.Name)
+		}
+		spec := fmt.Sprintf("type=bind,source=%s,destination=%s", sdPath, mountDst)
+		if sd.ReadOnly {
+			spec += ",readonly"
+		}
+		mounts = append(mounts, spec)
 	}
 	return mounts
 }

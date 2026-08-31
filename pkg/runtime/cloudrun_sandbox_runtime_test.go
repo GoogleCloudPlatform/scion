@@ -552,12 +552,84 @@ func TestMountsFor_WithSharedDirs(t *testing.T) {
 		t.Fatalf("mountsFor() returned %d mounts, want 4 (2 agent + 2 shared)", len(mounts))
 	}
 
-	// Shared dirs should be at indices 2 and 3.
-	if !strings.Contains(mounts[2], "build-cache") {
-		t.Errorf("mounts[2] = %q, want shared dir build-cache", mounts[2])
+	// Shared dirs should be at indices 2 and 3 with /scion-volumes/<name> destination.
+	wantBuildCache := "type=bind,source=/scion/shared/build-cache,destination=/scion-volumes/build-cache"
+	if mounts[2] != wantBuildCache {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], wantBuildCache)
 	}
-	if !strings.Contains(mounts[3], "artifacts") {
-		t.Errorf("mounts[3] = %q, want shared dir artifacts", mounts[3])
+	wantArtifacts := "type=bind,source=/scion/shared/artifacts,destination=/scion-volumes/artifacts"
+	if mounts[3] != wantArtifacts {
+		t.Errorf("mounts[3] = %q, want %q", mounts[3], wantArtifacts)
+	}
+}
+
+// TestMountsFor_SharedDir_InWorkspace verifies that shared dirs with
+// InWorkspace=true are mounted at <workspace>/.scion-volumes/<name>
+// instead of /scion-volumes/<name>.
+func TestMountsFor_SharedDir_InWorkspace(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "data", InWorkspace: true},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3 (2 agent + 1 shared)", len(mounts))
+	}
+
+	want := "type=bind,source=/scion/shared/data,destination=/workspace/.scion-volumes/data"
+	if mounts[2] != want {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], want)
+	}
+}
+
+// TestMountsFor_SharedDir_ReadOnly verifies that shared dirs with
+// ReadOnly=true get the ,readonly suffix on the mount spec.
+func TestMountsFor_SharedDir_ReadOnly(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "ref-data", ReadOnly: true},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3 (2 agent + 1 shared)", len(mounts))
+	}
+
+	want := "type=bind,source=/scion/shared/ref-data,destination=/scion-volumes/ref-data,readonly"
+	if mounts[2] != want {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], want)
+	}
+}
+
+// TestMountsFor_SharedDir_InWorkspaceAndReadOnly verifies that both
+// InWorkspace and ReadOnly flags are respected simultaneously.
+func TestMountsFor_SharedDir_InWorkspaceAndReadOnly(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "configs", InWorkspace: true, ReadOnly: true},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3 (2 agent + 1 shared)", len(mounts))
+	}
+
+	want := "type=bind,source=/scion/shared/configs,destination=/workspace/.scion-volumes/configs,readonly"
+	if mounts[2] != want {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], want)
 	}
 }
 
@@ -962,6 +1034,45 @@ func TestPrepareScionLayout_CreatesDirectories(t *testing.T) {
 
 	// Verify shared dirs exist.
 	for _, name := range []string{"build-cache", "artifacts"} {
+		sdPath := filepath.Join(rootDir, "shared", name)
+		if _, err := os.Stat(sdPath); os.IsNotExist(err) {
+			t.Errorf("shared dir not created: %s", sdPath)
+		}
+	}
+}
+
+// TestPrepareScionLayout_CreatesInWorkspaceSharedDirs verifies that
+// prepareScionLayout creates .scion-volumes/<name> subdirectories under
+// the workspace for shared dirs with InWorkspace=true, so that the bind
+// mount destination exists when the sandbox starts.
+func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad", InWorkspace: true},
+			{Name: "ref-data"},
+		},
+	}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// InWorkspace shared dir should have a directory under workspace.
+	iwPath := filepath.Join(paths.workspace, ".scion-volumes", "scratchpad")
+	if _, err := os.Stat(iwPath); os.IsNotExist(err) {
+		t.Errorf("in-workspace shared dir not created: %s", iwPath)
+	}
+
+	// Non-InWorkspace shared dir should NOT have a directory under workspace.
+	noIWPath := filepath.Join(paths.workspace, ".scion-volumes", "ref-data")
+	if _, err := os.Stat(noIWPath); !os.IsNotExist(err) {
+		t.Errorf("non-InWorkspace shared dir should not be created under workspace: %s", noIWPath)
+	}
+
+	// Both should still have host-side dirs under /scion/shared/.
+	for _, name := range []string{"scratchpad", "ref-data"} {
 		sdPath := filepath.Join(rootDir, "shared", name)
 		if _, err := os.Stat(sdPath); os.IsNotExist(err) {
 			t.Errorf("shared dir not created: %s", sdPath)
