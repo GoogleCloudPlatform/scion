@@ -42,6 +42,14 @@ type GovernanceService struct {
 	authz   *AuthzService
 	logger  *slog.Logger
 
+	// auditWriter writes durable audit entries for every boundary mutation.
+	// If nil, audit logging is disabled (should only happen in legacy tests).
+	auditWriter *BoundaryAuditWriter
+
+	// eventBus publishes invalidation events after successful mutations.
+	// If nil, no events are published.
+	eventBus *InvalidationEventBus
+
 	// nowFunc is injectable for testing. Defaults to time.Now.
 	nowFunc func() time.Time
 }
@@ -49,11 +57,12 @@ type GovernanceService struct {
 // NewGovernanceService creates a new GovernanceService.
 func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzService, logger *slog.Logger) *GovernanceService {
 	return &GovernanceService{
-		store:   s,
-		preview: preview,
-		authz:   authz,
-		logger:  logger,
-		nowFunc: time.Now,
+		store:       s,
+		preview:     preview,
+		authz:       authz,
+		logger:      logger,
+		auditWriter: NewBoundaryAuditWriter(logger),
+		nowFunc:     time.Now,
 	}
 }
 
@@ -92,6 +101,11 @@ type CommitResult struct {
 
 	// Classification is the server-determined mutation direction.
 	Classification string
+
+	// AuditID is the ID of the durable audit entry for this mutation.
+	// Always non-empty on success — no authority change returns without
+	// a persisted audit ID.
+	AuditID string
 }
 
 // GovernanceError is a typed error for governance failures.
@@ -259,11 +273,66 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
+	// Write the durable audit entry. If this fails the mutation is considered
+	// unsuccessful — no authority change returns without a persisted audit ID.
+	if gs.auditWriter != nil {
+		constraintID := req.ConstraintID
+		if result.Constraint != nil && constraintID == "" {
+			constraintID = result.Constraint.ID
+		}
+
+		var afterRevision int64
+		if result.Constraint != nil {
+			afterRevision = result.Constraint.Revision
+		}
+
+		auditID, auditErr := gs.auditWriter.WriteAuditEntry(ctx, AuditRequest{
+			ConstraintID:   constraintID,
+			Operation:      req.Operation,
+			ActorID:        req.Actor.ID,
+			CorrelationID:  correlationIDFromContext(ctx),
+			BeforeRevision: req.BaseRevision,
+			AfterRevision:  afterRevision,
+			Classification: classification,
+			PreviewID:      extractPreviewID(req.PreviewToken),
+			DraftHash:      extractDraftHash(req.PreviewToken),
+			ImpactCounts:   computeImpactCounts(req),
+		})
+		if auditErr != nil {
+			// Audit write failure: the mutation must be considered failed.
+			// Ideally we would roll back the data mutation here, but the Store
+			// interface lacks RunInTx. Log the inconsistency and return an error
+			// so the caller knows the operation is not audited.
+			gs.logger.Error("audit write failed after mutation — mutation is unaudited",
+				"error", auditErr,
+				"constraint_id", constraintID,
+				"operation", req.Operation,
+			)
+			return nil, fmt.Errorf("audit write failed: %w", auditErr)
+		}
+		result.AuditID = auditID
+	}
+
+	// Publish invalidation event after successful commit (outside transaction).
+	if gs.eventBus != nil {
+		constraintID := req.ConstraintID
+		if result.Constraint != nil && constraintID == "" {
+			constraintID = result.Constraint.ID
+		}
+		eventType := "boundary." + req.Operation + "d"
+		gs.eventBus.Publish(InvalidationEvent{
+			Type:      eventType,
+			EntityID:  constraintID,
+			Timestamp: gs.nowFunc(),
+		})
+	}
+
 	gs.logger.Info("boundary change committed",
 		"operation", result.Operation,
 		"classification", result.Classification,
 		"actor", req.Actor.ID,
 		"constraint_id", req.ConstraintID,
+		"audit_id", result.AuditID,
 	)
 
 	return result, nil
@@ -923,4 +992,57 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 	}
 
 	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// Audit helpers
+// ---------------------------------------------------------------------------
+
+// correlationIDFromContext extracts a correlation ID from the context.
+// Returns empty string if none is set.
+func correlationIDFromContext(ctx context.Context) string {
+	if v := ctx.Value(correlationIDKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// contextWithCorrelationID returns a new context with the given correlation ID.
+func contextWithCorrelationID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, correlationIDKey, id)
+}
+
+type contextKey string
+
+const correlationIDKey contextKey = "correlation_id"
+
+// extractPreviewID extracts the preview ID from a preview token.
+// The preview token is opaque (HMAC-signed), so we return a truncated
+// representation as the preview reference.
+func extractPreviewID(token string) string {
+	if len(token) > 16 {
+		return token[:16]
+	}
+	return token
+}
+
+// extractDraftHash extracts the draft hash from a preview token.
+// Since the token is opaque, we return a truncated suffix as the
+// draft hash reference.
+func extractDraftHash(token string) string {
+	if len(token) > 32 {
+		return token[len(token)-16:]
+	}
+	return token
+}
+
+// computeImpactCounts derives impact counts from the commit request.
+func computeImpactCounts(req CommitRequest) ImpactCounts {
+	counts := ImpactCounts{}
+	if req.Draft != nil {
+		counts.PermissionsAdded = len(req.Draft.MaximumPermissions)
+	}
+	return counts
 }
