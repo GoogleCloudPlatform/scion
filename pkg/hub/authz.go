@@ -962,6 +962,7 @@ func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
+	now := time.Now()
 	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
 	groups, err := a.store.GetEffectiveGroups(ctx, userID)
 	if err == nil {
@@ -975,6 +976,10 @@ func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
 	}
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		// R-2: Check activation — expired super-admin binding should not return true.
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -994,6 +999,7 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
+	now := time.Now()
 	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
 	groups, err := a.store.GetEffectiveGroups(ctx, userID)
 	if err == nil {
@@ -1009,6 +1015,10 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 		if b.ScopeType != store.RoleScopeSystem {
 			continue
 		}
+		// R-2: Check activation — expired hub-admin binding should not return true.
+		if !isBindingActive(b, now) {
+			continue
+		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue
@@ -1018,6 +1028,18 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 		}
 	}
 	return false
+}
+
+// isBindingActive checks whether a store RoleBinding is currently active
+// based on its notBefore/expiresAt fields. R-2 fix.
+func isBindingActive(b *store.RoleBinding, now time.Time) bool {
+	if b.NotBefore != nil && now.Before(*b.NotBefore) {
+		return false
+	}
+	if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+		return false
+	}
+	return true
 }
 
 // hubMembersSlug is the slug of the seeded hub-members group.
@@ -1150,6 +1172,10 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		return nil, err
 	}
 
+	// R-2 fix: filter bindings through activation checks (notBefore/expiresAt)
+	// and apply AccessConstraint restrictions. Previously, expired/future
+	// bindings were counted and constraints were never intersected.
+	now := time.Now()
 	seen := make(map[string]bool)
 	var result []string
 	for _, b := range bindings {
@@ -1159,6 +1185,21 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 				continue
 			}
 		}
+		// R-2: Check activation — skip expired and not-yet-active bindings.
+		cb := &CandidateBinding{
+			BindingID: b.ID,
+		}
+		if b.NotBefore != nil {
+			cb.NotBefore = *b.NotBefore
+		}
+		if b.ExpiresAt != nil {
+			cb.ExpiresAt = *b.ExpiresAt
+		}
+		activation := evaluateActivation(cb, now)
+		if !activation.Active {
+			continue
+		}
+
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			a.logger.Warn("failed to resolve role definition for binding",
@@ -1172,6 +1213,41 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 			}
 		}
 	}
+
+	// R-2: Apply AccessConstraint intersection. Load constraints and remove
+	// permissions that are excluded by any applicable constraint.
+	if len(result) > 0 {
+		closure := make(map[string]struct{}, len(principals))
+		for _, p := range principals {
+			closure[p.Type+":"+p.ID] = struct{}{}
+		}
+		resourceCtx := ResourceContext{}
+		if scopeType == store.RoleScopeProject {
+			resourceCtx.ProjectID = scopeID
+		}
+		principal := PrincipalContext{
+			Kind: PrincipalKind(principalType),
+			ID:   principalID,
+		}
+		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+		if len(restrictions) > 0 {
+			var filtered []string
+			for _, permID := range result {
+				blocked := false
+				for _, r := range restrictions {
+					if r.Check == nil || !r.Check(permID) {
+						blocked = true
+						break
+					}
+				}
+				if !blocked {
+					filtered = append(filtered, permID)
+				}
+			}
+			result = filtered
+		}
+	}
+
 	return result, nil
 }
 
