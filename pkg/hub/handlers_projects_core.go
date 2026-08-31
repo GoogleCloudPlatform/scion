@@ -358,7 +358,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	// Apply workspace mode label for git projects with explicit workspace mode.
 	if normalizedRemote != "" {
 		switch req.WorkspaceMode {
-		case store.WorkspaceModeShared, store.WorkspaceModeWorktreePerAgent:
+		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
 			if req.Labels == nil {
 				req.Labels = make(map[string]string)
 			}
