@@ -26,15 +26,13 @@ import (
 // CanDelegate must be called on every path that creates authority. The
 // current wiring:
 //
-//   - Role binding creation: no HTTP handlers exist yet. Future handlers
-//     MUST call CanDelegate before creating a binding.
+//   - Role binding creation (admin): wired in handlers_roles.go:createRoleBinding.
+//   - Project membership: wired in handlers_project_members.go (add/update/delete).
 //   - Group membership: wired in handlers_groups.go:addGroupMember.
 //   - Agent delegation: wired in handlers_agents_core.go:createAgentInProject.
 //   - Scheduled dispatch: wired in server.go:authorizeScheduledAgentCreate.
 //   - Policy routes: removed in CO1 cutover.
-//   - Custom role definition create/update: no HTTP handlers exist yet.
-//     Future handlers MUST call CanDelegate to verify the actor holds all
-//     permissions defined in the custom role.
+//   - Custom role definition create/update: wired in handlers_roles.go:createRoleDefinition.
 
 // GrantType identifies the kind of authority being delegated.
 type GrantType string

@@ -1721,6 +1721,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse project ID to extract UUID (supports {uuid}__{slug} format)
 	projectID := resolveProjectID(projectIDRaw)
 
+	// Check for nested /members path (PM1: project-scoped members API)
+	if strings.HasPrefix(subPath, "members") {
+		memberPath := strings.TrimPrefix(subPath, "members")
+		memberPath = strings.TrimPrefix(memberPath, "/")
+		memberPath = strings.TrimSuffix(memberPath, "/")
+		if memberPath == "" {
+			s.handleProjectMembers(w, r, projectID)
+		} else {
+			s.handleProjectMemberByID(w, r, projectID, memberPath)
+		}
+		return
+	}
+
 	// Check for nested /agents path
 	if strings.HasPrefix(subPath, "agents") {
 		agentPath := strings.TrimPrefix(subPath, "agents")
