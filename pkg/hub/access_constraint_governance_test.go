@@ -158,6 +158,15 @@ func TestGovernance_StalePreviewDetected(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // 2. Two last-admin removals: at most one commits
+//
+// NOTE: This test verifies fingerprint-based serialization via sequential
+// execution, not true goroutine-level parallelism. Both previews are
+// generated against clean state; the first commit succeeds and changes the
+// state fingerprint; the second commit detects the stale fingerprint and
+// fails. This proves that the fingerprint mechanism serializes sequential
+// interleaving, but does not prove serialization under true goroutine-level
+// concurrency (where both goroutines could pass the fingerprint check before
+// either commits).
 // ---------------------------------------------------------------------------
 
 func TestGovernance_TwoLastAdminRemovals_AtMostOneCommits(t *testing.T) {
@@ -588,13 +597,21 @@ func TestGovernance_ProjectScopeContainment(t *testing.T) {
 	assert.Equal(t, "create", result.Operation)
 
 	// Verify governance resolves scope from draft.
-	scopeType, scopeID := gs.resolveScope(CommitRequest{Draft: draft})
+	scopeType, scopeID := gs.resolveScope(ctx, CommitRequest{Draft: draft})
 	assert.Equal(t, store.RoleScopeProject, scopeType)
 	assert.Equal(t, projectID, scopeID)
 }
 
 // ---------------------------------------------------------------------------
 // 10. Concurrent operations: two simultaneous boundary creates
+//
+// NOTE: This test verifies fingerprint-based serialization via sequential
+// execution, not true goroutine-level parallelism. Both previews are
+// generated against clean state; the first commit succeeds; the second
+// commit's preview token has a stale state fingerprint and is rejected.
+// This proves that sequential interleaving is caught by the fingerprint
+// mechanism, but does not prove serialization under true concurrent
+// goroutine execution.
 // ---------------------------------------------------------------------------
 
 func TestGovernance_ConcurrentCreates_AtMostOneSucceeds(t *testing.T) {
@@ -854,6 +871,53 @@ func TestGovernance_ReplaceRoleBinding_LastAdminBlocked(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 12b. ReplaceRoleBinding lockout: actually blocked when last admin is downgraded
+// ---------------------------------------------------------------------------
+
+func TestGovernance_ReplaceRoleBinding_LastAdminActuallyBlocked(t *testing.T) {
+	gs, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	// Use project scope so the dev user's system-scoped super-admin binding
+	// is NOT visible to resolveAdminUsers. This isolates the lockout check
+	// to project-scoped admins only.
+	projectID := pvSeedProject(t, s, "gov-project-lockout-rb")
+
+	userID := pvSeedUser(t, s, "gov-user-lockout-rb")
+	adminRD := createTestRoleDefinition(t, s, "proj-admin-role-lockout-rb", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	binding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create a non-admin role for the replacement.
+	basicRD := createTestRoleDefinition(t, s, "proj-basic-role-lockout-rb", store.RoleScopeProject,
+		[]string{"agent.read"})
+	newBinding := &store.RoleBinding{
+		RoleDefinitionID: basicRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	}
+
+	// Replace should fail because this user is the only admin at project scope.
+	_, err = gs.ReplaceRoleBinding(ctx, binding.ID, newBinding, "")
+	require.Error(t, err, "replace should fail when it would leave zero admins at project scope")
+
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+}
+
+// ---------------------------------------------------------------------------
 // 13. Permission lost between preview and commit
 // ---------------------------------------------------------------------------
 
@@ -968,6 +1032,145 @@ func TestGovernance_RelaxationAuthority_InsufficientAuthority(t *testing.T) {
 
 	// The classification should reflect relaxation.
 	assert.Contains(t, []string{ClassificationRelax, ClassificationMixed}, result.Classification)
+}
+
+// ---------------------------------------------------------------------------
+// 14b. Relaxation authority blocks delete when actor lacks authority
+// ---------------------------------------------------------------------------
+
+func TestGovernance_DeleteRelaxationAuthority_InsufficientAuthority(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	// Create an admin user whose effective permissions do NOT include all the
+	// permissions in the boundary's max set (specifically agent.delete).
+	adminID := pvSeedUser(t, s, "gov-admin-relax-del")
+	adminRD := createTestRoleDefinition(t, s, "partial-admin-role-del", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin, "agent.read", "agent.create"})
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminID, store.RoleScopeSystem, "")
+
+	// Also ensure another admin exists so lockout is not the issue.
+	govSeedAdminUser(t, s, "gov-admin-relax-del-other")
+
+	userID := pvSeedUser(t, s, "gov-user-relax-del-target")
+	basicRD := createTestRoleDefinition(t, s, "basic-role-relax-del", store.RoleScopeSystem,
+		[]string{"agent.read", "agent.create", "agent.delete"})
+	pvSeedRoleBinding(t, s, basicRD.ID, "user", userID, store.RoleScopeSystem, "")
+
+	// Create a constraint with max permissions that include agent.delete
+	// (a permission the admin does NOT hold).
+	draft := &store.AccessConstraint{
+		Name:                 "relax-del-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(userID),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read", "agent.delete", PermissionConstraintAdmin},
+		Purpose:              "relaxation delete authority test",
+		CreatedBy:            adminID,
+	}
+	created := govCreateAndCommit(t, gs, ps, draft, pvTestActor(adminID))
+
+	// Now try to delete the constraint. Delete is ClassificationRelax, so
+	// checkRelaxationAuthority runs. The actor lacks "agent.delete" which is
+	// in the boundary's max set, so delete should be blocked.
+	deletePreview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation:    "delete",
+		ConstraintID: created.ID,
+		BaseRevision: created.Revision,
+		Actor:        pvTestActor(adminID),
+	})
+	require.NoError(t, err)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "delete",
+		ConstraintID: created.ID,
+		BaseRevision: created.Revision,
+		PreviewToken: deletePreview.PreviewToken,
+		Actor:        pvTestActor(adminID),
+	})
+	require.Error(t, err, "delete should fail when actor lacks authority over boundary's max permissions")
+
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, ge.Code)
+}
+
+// ---------------------------------------------------------------------------
+// 14c. Scheduled lockout blocks RoleBinding change
+// ---------------------------------------------------------------------------
+
+func TestGovernance_ReplaceRoleBinding_ScheduledLockout(t *testing.T) {
+	gs, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	// Use project scope so the dev user's system-scoped super-admin binding
+	// is NOT visible to resolveAdminUsers.
+	projectID := pvSeedProject(t, s, "gov-project-sched-lockout-rb")
+
+	// Create two admin users at project scope.
+	user1 := pvSeedUser(t, s, "gov-user-sched-rb-1")
+	user2 := pvSeedUser(t, s, "gov-user-sched-rb-2")
+	adminRD := createTestRoleDefinition(t, s, "proj-admin-role-sched-rb", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	binding1, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      user1,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      user2,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create a scheduled constraint that targets user2 (the other admin),
+	// excluding access_constraint.admin. When this activates, user2 will
+	// lose admin. If we also remove user1's admin binding, zero admins survive.
+	futureTime := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "scheduled-rb-lockout",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(user2),
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projectID,
+		MaximumPermissions:   []string{"agent.read"}, // Excludes access_constraint.admin
+		NotBefore:            &futureTime,
+		Purpose:              "scheduled lockout for RoleBinding test",
+		CreatedBy:            "test",
+	})
+	require.NoError(t, err)
+
+	// Try to replace user1's admin binding with a non-admin role.
+	basicRD := createTestRoleDefinition(t, s, "proj-basic-role-sched-rb", store.RoleScopeProject,
+		[]string{"agent.read"})
+	newBinding := &store.RoleBinding{
+		RoleDefinitionID: basicRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      user1,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	}
+
+	// Without the scheduled-state check this would pass (2 admins currently,
+	// user2 survives). With scheduled-state check, user2 is blocked by the
+	// future constraint, leaving zero admins → lockout error.
+	_, err = gs.ReplaceRoleBinding(ctx, binding1.ID, newBinding, "")
+	require.Error(t, err, "replace should fail: scheduled constraint would block remaining admin")
+
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
 }
 
 // ---------------------------------------------------------------------------

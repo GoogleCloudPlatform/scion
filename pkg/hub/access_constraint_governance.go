@@ -150,7 +150,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	}
 
 	// Determine scope for lockout check.
-	scopeType, scopeID := gs.resolveScope(req)
+	scopeType, scopeID := gs.resolveScope(ctx, req)
 
 	// Compute server classification by re-running the preview engine logic.
 	classification, err := gs.classifyOperation(ctx, req, now)
@@ -172,9 +172,36 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
-	// Steps b, i, j: Re-read, apply mutation, and commit atomically.
-	// The store-level create/update already uses transactions with revision
-	// checks. We rely on those plus the token validation above for atomicity.
+	// Steps b, i, j: Re-read, apply mutation, and commit.
+	//
+	// KNOWN LIMITATION — TOCTOU window between governance checks and store
+	// mutation:
+	//
+	// The checks above (token validation, re-authorization, lockout,
+	// relaxation authority) and the store mutation below are separate
+	// operations — there is no wrapping database transaction. The Store
+	// interface does not expose a RunInTx(ctx, func(tx Store) error) method,
+	// so a true atomic check-then-mutate is architecturally impossible
+	// without interface changes.
+	//
+	// What mitigates the window:
+	//   - The preview token's state fingerprint detects most concurrent
+	//     modifications (stale token → reject).
+	//   - For updates, the store-level revision check rejects concurrent
+	//     writes to the same constraint.
+	//
+	// What the mitigations do NOT catch:
+	//   - Concurrent creates: two goroutines can both pass the fingerprint
+	//     check before either commits, and both succeed.
+	//   - Adjacent state changes: admin role bindings removed concurrently
+	//     between the lockout check and the mutation.
+	//
+	// Under single-instance deployment the TOCTOU window is narrow. Under
+	// multi-instance deployment this gap must be closed.
+	//
+	// TODO: Add Store.RunInTx(ctx context.Context, fn func(tx Store) error)
+	// error so governance can wrap checks + mutation in one database
+	// transaction.
 	var result *CommitResult
 	switch req.Operation {
 	case "create":
@@ -250,7 +277,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 // Uses getEffectivePermissions instead of Decide to avoid requiring a full
 // Identity object — the governance service operates at the principal level.
 func (gs *GovernanceService) reauthorizeActor(ctx context.Context, req CommitRequest) error {
-	scopeType, scopeID := gs.resolveScope(req)
+	scopeType, scopeID := gs.resolveScope(ctx, req)
 	actorPerms, err := gs.authz.getEffectivePermissions(
 		ctx,
 		NormalizePrincipalType(string(req.Actor.Kind)),
@@ -379,18 +406,21 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 	// Determine which permissions are being restored (relaxed).
 	var restoredPerms []string
 	if req.Operation == "delete" {
-		// Delete restores all permissions the boundary was removing.
+		// Delete restores all permissions the boundary was removing. Ideally
+		// restoredPerms would contain every permission NOT in the boundary's
+		// max set (the permissions the boundary was restricting), but we lack
+		// a full permission registry to enumerate "everything else."
+		//
+		// Conservative approach: require the actor to hold authority over all
+		// permissions in the boundary's max set. Rationale: the boundary
+		// governs these permissions; deleting it restores unrestricted access
+		// to them (and more). If the actor does not even hold authority over
+		// the permissions the boundary explicitly allows, they should not be
+		// able to remove the boundary.
 		if req.ConstraintID != "" {
 			existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
 			if err == nil {
-				// All permissions NOT in the boundary's max set are being restored.
-				maxSet := make(map[string]struct{}, len(existing.MaximumPermissions))
-				for _, p := range existing.MaximumPermissions {
-					maxSet[p] = struct{}{}
-				}
-				// We'd need the full registry to know exactly which permissions
-				// are restored. For now, require the actor has admin authority.
-				// This is conservative but correct.
+				restoredPerms = append(restoredPerms, existing.MaximumPermissions...)
 			}
 		}
 	} else if req.Operation == "update" && req.Draft != nil {
@@ -555,15 +585,7 @@ func (gs *GovernanceService) CheckRoleBindingChange(ctx context.Context, binding
 		return nil, fmt.Errorf("failed to load role definition: %w", err)
 	}
 
-	hasConstraintAdmin := false
-	for _, p := range rd.Permissions {
-		if p == PermissionConstraintAdmin {
-			hasConstraintAdmin = true
-			break
-		}
-	}
-
-	if !hasConstraintAdmin {
+	if !roleHasConstraintAdmin(rd) {
 		return &AdjacentDomainCheck{ReviewRequired: false}, nil
 	}
 
@@ -612,13 +634,7 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 		return nil, fmt.Errorf("failed to load old role definition: %w", err)
 	}
 
-	oldHasAdmin := false
-	for _, p := range oldRD.Permissions {
-		if p == PermissionConstraintAdmin {
-			oldHasAdmin = true
-			break
-		}
-	}
+	oldHasAdmin := roleHasConstraintAdmin(oldRD)
 
 	// Check if new binding's role includes access_constraint.admin.
 	newRD, err := gs.store.GetRoleDefinition(ctx, newBinding.RoleDefinitionID)
@@ -626,13 +642,7 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 		return nil, fmt.Errorf("failed to load new role definition: %w", err)
 	}
 
-	newHasAdmin := false
-	for _, p := range newRD.Permissions {
-		if p == PermissionConstraintAdmin {
-			newHasAdmin = true
-			break
-		}
-	}
+	newHasAdmin := roleHasConstraintAdmin(newRD)
 
 	// If downgrading from admin, enforce lockout invariant.
 	if oldHasAdmin && !newHasAdmin {
@@ -641,25 +651,26 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 		}
 	}
 
-	// Delete old binding then create new one.
-	// The store operations are individually atomic. We perform them in quick
-	// succession to minimize the window. A true database-level atomic swap
-	// would require a store-level transaction method — this is the best we
-	// can do with the current store interface.
-	if err := gs.store.DeleteRoleBinding(ctx, oldBindingID); err != nil {
-		return nil, fmt.Errorf("failed to delete old binding: %w", err)
-	}
-
+	// Create new binding first, then delete old one.
+	//
+	// Order rationale: create-then-delete means the failure mode is "both
+	// bindings active" (overly permissive but detectable and recoverable)
+	// rather than "zero bindings" (data loss). This is a strictly better
+	// failure mode given that the Store interface lacks transaction support.
+	//
+	// TODO: Migrate to a true atomic swap when Store gains RunInTx support.
 	created, err := gs.store.CreateRoleBinding(ctx, newBinding)
 	if err != nil {
-		// Attempt to re-create the old binding on failure.
-		gs.logger.Error("failed to create replacement binding; attempting rollback",
-			"old_binding_id", oldBindingID, "error", err)
-		if _, rollbackErr := gs.store.CreateRoleBinding(ctx, existing); rollbackErr != nil {
-			gs.logger.Error("CRITICAL: rollback of old binding failed",
-				"old_binding_id", oldBindingID, "error", rollbackErr)
-		}
 		return nil, fmt.Errorf("failed to create replacement binding: %w", err)
+	}
+
+	if err := gs.store.DeleteRoleBinding(ctx, oldBindingID); err != nil {
+		// The new binding already exists. Log the error — the system is now
+		// overly permissive (both bindings active) but this is detectable
+		// and recoverable, unlike the data-loss alternative.
+		gs.logger.Error("failed to delete old binding after creating replacement; both bindings now active",
+			"old_binding_id", oldBindingID, "new_binding_id", created.ID, "error", err)
+		return nil, fmt.Errorf("failed to delete old binding: %w", err)
 	}
 
 	return created, nil
@@ -708,11 +719,8 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 				if err != nil {
 					continue
 				}
-				for _, p := range rd.Permissions {
-					if p == PermissionConstraintAdmin {
-						hasOtherAdmin = true
-						break
-					}
+				if roleHasConstraintAdmin(rd) {
+					hasOtherAdmin = true
 				}
 				if hasOtherAdmin {
 					break
@@ -726,12 +734,98 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 		surviving++
 	}
 
-	_ = now // used for future scheduled-state checks
-
 	if surviving == 0 {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
 			Message: "removing this role binding would leave zero constraint admins",
+		}
+	}
+
+	// Check scheduled state: constraints with future activation windows
+	// (NotBefore in the future) or those currently active may further
+	// restrict admin permissions. Use IsActiveInMostRestrictiveState to
+	// include future-activating constraints in the evaluation, matching
+	// the approach in assessLockout.
+	constraints, err := gs.store.ListConstraintsForScope(ctx, binding.ScopeType, binding.ScopeID)
+	if err != nil {
+		return &GovernanceError{
+			Code:    ErrCodeConstraintAdminLockout,
+			Message: fmt.Sprintf("failed to load constraints for scheduled-state lockout check: %v", err),
+		}
+	}
+
+	// Filter to constraints that restrict admin in most-restrictive state
+	// (including future-activating ones that have not yet expired).
+	var restricting []*store.AccessConstraint
+	for _, c := range constraints {
+		if c.Disabled {
+			continue
+		}
+		cond := ConstraintCondition{}
+		if c.NotBefore != nil {
+			cond.NotBefore = *c.NotBefore
+		}
+		if c.ExpiresAt != nil {
+			cond.ExpiresAt = *c.ExpiresAt
+		}
+		if !cond.IsActiveInMostRestrictiveState(now) {
+			continue
+		}
+		if constraintAllowsPermissionStore(c, PermissionConstraintAdmin) {
+			continue
+		}
+		restricting = append(restricting, c)
+	}
+
+	if len(restricting) > 0 {
+		// Re-evaluate surviving admins against scheduled constraints.
+		scheduledSurviving := 0
+		for _, au := range adminUsers {
+			// Skip the user whose binding is being removed (if they lost admin above).
+			if binding.PrincipalType == "user" && au.userID == binding.PrincipalID {
+				// Check if they had other admin bindings.
+				otherBindings, lookupErr := gs.store.ListRoleBindingsForPrincipals(ctx,
+					[]store.PrincipalRef{{Type: "user", ID: au.userID}}, nil, nil)
+				if lookupErr != nil {
+					continue
+				}
+				hasOtherAdmin := false
+				for _, ob := range otherBindings {
+					if ob.ID == binding.ID {
+						continue
+					}
+					rd, rdErr := gs.store.GetRoleDefinition(ctx, ob.RoleDefinitionID)
+					if rdErr != nil {
+						continue
+					}
+					if roleHasConstraintAdmin(rd) {
+						hasOtherAdmin = true
+						break
+					}
+				}
+				if !hasOtherAdmin {
+					continue // This user lost admin — skip.
+				}
+			}
+
+			// Check if any restricting constraint matches this user.
+			blocked := false
+			for _, c := range restricting {
+				if gs.preview.constraintMatchesUser(ctx, c, au) {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				scheduledSurviving++
+			}
+		}
+
+		if scheduledSurviving == 0 {
+			return &GovernanceError{
+				Code:    ErrCodeConstraintAdminLockout,
+				Message: "removing this role binding would leave zero constraint admins when scheduled constraints activate",
+			}
 		}
 	}
 
@@ -742,13 +836,24 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 // Helpers
 // ---------------------------------------------------------------------------
 
+// roleHasConstraintAdmin checks whether a role definition includes the
+// access_constraint.admin permission.
+func roleHasConstraintAdmin(rd *store.RoleDefinition) bool {
+	for _, p := range rd.Permissions {
+		if p == PermissionConstraintAdmin {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveScope determines the scope for a commit request.
-func (gs *GovernanceService) resolveScope(req CommitRequest) (string, string) {
+func (gs *GovernanceService) resolveScope(ctx context.Context, req CommitRequest) (string, string) {
 	if req.Draft != nil {
 		return req.Draft.ScopeType, req.Draft.ScopeID
 	}
 	if req.ConstraintID != "" {
-		sc, err := gs.store.GetAccessConstraint(context.Background(), req.ConstraintID)
+		sc, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
 		if err == nil {
 			return sc.ScopeType, sc.ScopeID
 		}
@@ -812,10 +917,8 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 		if err != nil {
 			continue
 		}
-		for _, p := range rd.Permissions {
-			if p == PermissionConstraintAdmin {
-				return true, nil
-			}
+		if roleHasConstraintAdmin(rd) {
+			return true, nil
 		}
 	}
 
