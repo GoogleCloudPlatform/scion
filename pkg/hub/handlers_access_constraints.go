@@ -232,7 +232,6 @@ type accessBoundarySummary struct {
 	SubjectDisplay        subjectDisplayResp   `json:"subjectDisplay"`
 	Scope                 resolvedScope        `json:"scope"`
 	ScopeDisplay          scopeDisplayResp     `json:"scopeDisplay"`
-	MaximumPermissions    []resolvedPermission `json:"maximumPermissions"`
 	MaxPermissionCount    int                  `json:"maximumPermissionCount"`
 	AffectedPrincipalCnt  int                  `json:"affectedPrincipalCount"`
 	AffectedPrincipalExact bool                `json:"affectedPrincipalCountExact"`
@@ -245,15 +244,19 @@ type accessBoundarySummary struct {
 	CreatedAt             time.Time            `json:"createdAt"`
 	UpdatedBy             *principalRef        `json:"updatedBy"`
 	UpdatedAt             time.Time            `json:"updatedAt"`
-	Capabilities          *wpCapabilities      `json:"_capabilities,omitempty"`
+	Capabilities          *wpCapabilities      `json:"_capabilities"`
 }
 
 // accessBoundaryDetail is the full record with temporal impact, lockout, provenance.
+// MaximumPermissions lives here (not on summary) per WP0 contract:
+// the summary carries only maximumPermissionCount, while the detail
+// includes the full resolved permission array.
 type accessBoundaryDetail struct {
 	accessBoundarySummary
-	TemporalImpact []TemporalImpact   `json:"temporalImpact,omitempty"`
-	Lockout        *LockoutAssessment `json:"lockout,omitempty"`
-	Provenance     *provenanceLinks   `json:"provenance,omitempty"`
+	MaximumPermissions []resolvedPermission `json:"maximumPermissions"`
+	TemporalImpact     []TemporalImpact     `json:"temporalImpact,omitempty"`
+	Lockout            *LockoutAssessment   `json:"lockout,omitempty"`
+	Provenance         *provenanceLinks     `json:"provenance,omitempty"`
 }
 
 type resolvedSubject struct {
@@ -316,7 +319,7 @@ type accessBoundaryListResponse struct {
 	Items         []accessBoundarySummary `json:"items"`
 	NextPageToken string                  `json:"nextPageToken,omitempty"`
 	TotalCount    int                     `json:"totalCount"`
-	Capabilities  *wpCapabilities         `json:"_capabilities,omitempty"`
+	Capabilities  *wpCapabilities         `json:"_capabilities"`
 }
 
 // auditEventResponse wraps a single audit entry for the API.
@@ -514,7 +517,8 @@ func (s *Server) listAccessConstraints(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Collection-level _capabilities (R4.7): gates "New boundary" control.
-	var collectionCaps *wpCapabilities
+	// Default to empty actions array so _capabilities is always present (WP0 contract).
+	collectionCaps := &wpCapabilities{Actions: []string{}}
 	if actor != nil && s.capabilitiesService != nil {
 		bc, err := s.capabilitiesService.ComputeCapabilities(r.Context(), *actor, ScopeTypeSystem, "")
 		if err == nil {
@@ -1651,9 +1655,6 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 	// Resolve scope display name.
 	scopeDisplayName := s.resolveScopeDisplayName(ctx, sc.ScopeType, sc.ScopeID)
 
-	// Resolve permission display names (uses cached lookup — N3).
-	resolvedPerms := resolvePermissionDisplayNames(sc.MaximumPermissions)
-
 	// Compute status.
 	status := computeConstraintStatus(sc, hc)
 
@@ -1678,7 +1679,6 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 		SubjectDisplay:        subjectDisp,
 		Scope:                 resolvedScopeFromStore(sc),
 		ScopeDisplay:          scopeDisp,
-		MaximumPermissions:    resolvedPerms,
 		MaxPermissionCount:    len(sc.MaximumPermissions),
 		AffectedPrincipalCnt:  0, // R4.5: populated from cached count; TODO: compute from preview cache.
 		AffectedPrincipalExact: false,
@@ -1697,6 +1697,8 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 	}
 
 	// Compute capabilities if actor is available (R1: WP0 actions array).
+	// Default to empty actions array so _capabilities is always present (WP0 contract).
+	summary.Capabilities = &wpCapabilities{Actions: []string{}}
 	if actor != nil && s.capabilitiesService != nil {
 		caps, err := s.capabilitiesService.ComputeResourceCapabilities(ctx, *actor, sc.ID)
 		if err == nil {
@@ -1713,6 +1715,9 @@ func (s *Server) buildBoundaryDetail(ctx context.Context, sc *store.AccessConstr
 	detail := accessBoundaryDetail{
 		accessBoundarySummary: summary,
 	}
+
+	// MaximumPermissions lives on detail only (WP0 contract: summary has count only).
+	detail.MaximumPermissions = resolvePermissionDisplayNames(sc.MaximumPermissions)
 
 	// Add provenance links.
 	detail.Provenance = &provenanceLinks{

@@ -904,7 +904,49 @@ func TestB7_UnauthenticatedAccess(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 16. Method not allowed
+// 16. Strict JSON: unknown fields rejected (R2)
+// ---------------------------------------------------------------------------
+
+func TestB7_StrictJSON_RejectsUnknownFields(t *testing.T) {
+	srv, s := b7TestServer(t)
+	_ = pvSeedUser(t, s, "strict-json-target")
+
+	// Build a valid preview-create request with an extra unknown field.
+	// Use raw JSON so we can inject a field not in previewCreateRequest.
+	rawBody := `{
+		"operation": "create",
+		"draft": {
+			"name": "strict-json-test",
+			"purpose": "Test strict JSON",
+			"subject": {"kind": "all_principals"},
+			"scope": {"type": "system"},
+			"maximumPermissions": ["agent.read"]
+		},
+		"bogus": true
+	}`
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/admin/access-constraint-previews",
+		bytes.NewBufferString(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"request with unknown field should be rejected; body: %s", rec.Body.String())
+
+	// Verify the error message mentions the unknown field.
+	var errResp ErrorResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &errResp)
+	require.NoError(t, err)
+	assert.Contains(t, errResp.Error.Message, "bogus",
+		"error message should mention the unknown field name")
+}
+
+// ---------------------------------------------------------------------------
+// 17. Method not allowed
 // ---------------------------------------------------------------------------
 
 func TestB7_MethodNotAllowed(t *testing.T) {
