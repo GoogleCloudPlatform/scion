@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -939,4 +940,134 @@ func TestRolesAPI_NonAdmin_CreateBinding_WithUnheldPermissions(t *testing.T) {
 		ScopeType:        "system",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Lifecycle fields (notBefore / expiresAt) — C9
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_CreateRoleBinding_WithLifecycleFields(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("rb-lifecycle-user")
+	seedRolesTestUser(t, s, userID, "rb-lifecycle-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "lifecycle-test-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	notBefore := time.Now().Add(1 * time.Hour).Truncate(time.Second).UTC()
+	expiresAt := time.Now().Add(24 * time.Hour).Truncate(time.Second).UTC()
+
+	// Create binding with lifecycle fields.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+		NotBefore:        &notBefore,
+		ExpiresAt:        &expiresAt,
+	})
+
+	assert.NotEmpty(t, binding.ID)
+	require.NotNil(t, binding.NotBefore, "notBefore should be returned")
+	require.NotNil(t, binding.ExpiresAt, "expiresAt should be returned")
+	assert.True(t, binding.NotBefore.Equal(notBefore), "notBefore round-trip: want %v got %v", notBefore, *binding.NotBefore)
+	assert.True(t, binding.ExpiresAt.Equal(expiresAt), "expiresAt round-trip: want %v got %v", expiresAt, *binding.ExpiresAt)
+}
+
+func TestRolesAPI_CreateRoleBinding_ExpiresAtInPast(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "past-expiry-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	past := time.Now().Add(-1 * time.Hour).UTC()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      DevUserID,
+		ScopeType:        "system",
+		ExpiresAt:        &past,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "expiresAt must be in the future")
+}
+
+func TestRolesAPI_CreateRoleBinding_ExpiresAtBeforeNotBefore(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "bad-window-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	notBefore := time.Now().Add(24 * time.Hour).UTC()
+	expiresAt := time.Now().Add(1 * time.Hour).UTC()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      DevUserID,
+		ScopeType:        "system",
+		NotBefore:        &notBefore,
+		ExpiresAt:        &expiresAt,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "expiresAt must be after notBefore")
+}
+
+func TestRolesAPI_CreateRoleBinding_WithOnlyNotBefore(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("rb-notbefore-only-user")
+	seedRolesTestUser(t, s, userID, "rb-notbefore-only-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "notbefore-only-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	notBefore := time.Now().Add(1 * time.Hour).Truncate(time.Second).UTC()
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+		NotBefore:        &notBefore,
+	})
+
+	require.NotNil(t, binding.NotBefore, "notBefore should be persisted")
+	assert.Nil(t, binding.ExpiresAt, "expiresAt should be nil when not set")
+}
+
+func TestRolesAPI_CreateRoleBinding_WithOnlyExpiresAt(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("rb-expiresat-only-user")
+	seedRolesTestUser(t, s, userID, "rb-expiresat-only-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "expiresat-only-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	expiresAt := time.Now().Add(24 * time.Hour).Truncate(time.Second).UTC()
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+		ExpiresAt:        &expiresAt,
+	})
+
+	assert.Nil(t, binding.NotBefore, "notBefore should be nil when not set")
+	require.NotNil(t, binding.ExpiresAt, "expiresAt should be persisted")
 }

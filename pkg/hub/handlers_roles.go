@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -46,11 +47,13 @@ type updateRoleDefinitionRequest struct {
 
 // createRoleBindingRequest is the payload for POST /api/v1/admin/role-bindings.
 type createRoleBindingRequest struct {
-	RoleDefinitionID string `json:"roleDefinitionId"`
-	PrincipalType    string `json:"principalType"`
-	PrincipalID      string `json:"principalId"`
-	ScopeType        string `json:"scopeType"`
-	ScopeID          string `json:"scopeId"`
+	RoleDefinitionID string     `json:"roleDefinitionId"`
+	PrincipalType    string     `json:"principalType"`
+	PrincipalID      string     `json:"principalId"`
+	ScopeType        string     `json:"scopeType"`
+	ScopeID          string     `json:"scopeId"`
+	NotBefore        *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
 }
 
 // listRoleDefinitionsResponse wraps the list result for the API.
@@ -542,6 +545,16 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
+	// Validate lifecycle fields.
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
+		BadRequest(w, "expiresAt must be in the future")
+		return
+	}
+	if req.NotBefore != nil && req.ExpiresAt != nil && !req.ExpiresAt.After(*req.NotBefore) {
+		BadRequest(w, "expiresAt must be after notBefore")
+		return
+	}
+
 	// CanDelegate check: security invariant — the actor must hold all
 	// permissions granted by the target role.
 	if s.authzService != nil {
@@ -563,6 +576,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		PrincipalID:      req.PrincipalID,
 		ScopeType:        req.ScopeType,
 		ScopeID:          req.ScopeID,
+		NotBefore:        req.NotBefore,
+		ExpiresAt:        req.ExpiresAt,
 		CreatedBy:        user.ID(),
 	}
 
