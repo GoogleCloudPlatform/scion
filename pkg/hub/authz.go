@@ -370,6 +370,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// If the kernel denied, check named relationship grants. These
 	// replace the legacy bypasses (owner, ancestor, progeny) with
 	// documented, traceable grant paths.
+	decision := kernelDecisionToDecision(kernelResult, permissionID)
 	if !kernelResult.Allowed {
 		if relDecision, ok := a.checkRelationshipGrants(ctx, principal, request.Resource, request.Action, permissionID, credential); ok {
 			// Apply credential restrictions to relationship grants too.
@@ -381,17 +382,15 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				}
 			}
 			if relDecision.Allowed {
-				result := decorateDecision(relDecision, principal, credential)
-				if a.decisionAuditEmitter != nil {
-					a.emitDecisionAudit(ctx, request, result)
-				}
-				return result
+				decision = relDecision
 			}
 		}
 	}
 
-	// ── Step 10: Agent delegation ceiling (post-kernel) ───────────────
-	decision := kernelDecisionToDecision(kernelResult, permissionID)
+	// ── Step 10: Agent delegation ceiling (post-decision) ────────────
+	// Applies to ALL allowed decisions regardless of grant source
+	// (kernel or relationship grant). C-1 fix: previously only ran on
+	// kernel-allowed decisions because Step 9 returned early.
 	if decision.Allowed && isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
 			if getDelegationCeilingCache(ctx) == nil {

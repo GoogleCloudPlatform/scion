@@ -778,6 +778,100 @@ func TestGolden_AgentDelegationCeiling(t *testing.T) {
 }
 
 // =============================================================================
+// Golden Decision 10b: Agent allowed via relationship grant + delegation ceiling
+// =============================================================================
+
+// TestGolden_AgentRelationshipGrantDelegationCeiling verifies that the delegation
+// ceiling is enforced on relationship-grant allows, not just kernel allows.
+//
+// C-1 fix: previously, Step 9 (checkRelationshipGrants) returned early before
+// Step 10 (checkDelegationCeiling) could run, allowing an agent whose delegator
+// lost permissions to retain access through ancestor/progeny grants.
+//
+// Setup: agent in project Alpha accesses a resource in project Beta. The kernel
+// denies (synthetic binding is scoped to Alpha), but the agent's ID is in the
+// resource's Ancestry, so the ancestor relationship grant fires. A delegation
+// edge scoped to Beta + user holding project-owner in Beta lets the ceiling
+// pass. Removing the user's Beta binding causes the ceiling to deny.
+//
+// Reference: design.md §6 frozen decision 4 — delegation ceilings run after
+// the union of grants and can only reduce.
+func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+
+	ceilingUserID := tid("golden-relceil-user")
+	ceilingAgentID := tid("golden-relceil-agent")
+
+	// User gets project-owner in both Alpha and Beta.
+	createDCUser(t, f.store, ceilingUserID, "relceil-user@golden.test",
+		f.projectAlpha.ID, store.ProjectRoleOwner)
+	// Add a second binding for Beta (user already exists from Alpha call).
+	betaRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: betaRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      ceilingUserID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectBeta.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create agent in Alpha with the user as owner.
+	createDCAgent(t, f.store, ceilingAgentID, f.projectAlpha.ID,
+		ceilingUserID, AgentRoleFull)
+
+	assertNotSystemAdmin(t, f.authz, ctx, ceilingUserID)
+
+	// Delegation edge scoped to Beta: user → agent.
+	createDCEdge(t, f.store,
+		store.DelegationPrincipalUser, ceilingUserID,
+		store.DelegationPrincipalAgent, ceilingAgentID,
+		store.RoleScopeProject, f.projectBeta.ID, string(AgentRoleFull))
+
+	agent := dcAgentIdentity(ceilingAgentID, f.projectAlpha.ID, AgentRoleFull)
+
+	// Resource in Beta with the AGENT's ID in Ancestry. This triggers:
+	//  - Kernel deny: synthetic binding scoped to Alpha, resource in Beta.
+	//  - Ancestor relationship grant: agent is in Ancestry.
+	//  - Scope restriction passes: project.read is in agent scopes.
+	//  - Ceiling: edge scoped to Beta exists, user holds permission in Beta.
+	resource := Resource{
+		Type: "project", ID: f.projectBeta.ID,
+		Ancestry: []string{ceilingAgentID},
+	}
+
+	// ALLOWED: relationship grant fires (kernel denied), ceiling passes.
+	decision := f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	assert.True(t, decision.Allowed,
+		"agent should be allowed via ancestry relationship grant when ceiling passes; got reason: %s", decision.Reason)
+	assert.Contains(t, decision.Reason, "relationship grant",
+		"allow should come from relationship grant, not kernel")
+
+	// Remove user's Beta binding — delegator loses the permission.
+	bindings, err := f.store.ListRoleBindingsForPrincipal(ctx,
+		store.RoleBindingPrincipalUser, ceilingUserID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.projectBeta.ID {
+			require.NoError(t, f.store.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	// DENIED: relationship grant fires, but the delegation ceiling now
+	// denies because the delegator no longer holds the permission. Before
+	// the C-1 fix, this would incorrectly return allowed because Step 9
+	// returned early before Step 10 (ceiling check).
+	decision = f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	assert.False(t, decision.Allowed,
+		"agent MUST be denied via ceiling even when allowed by relationship grant (C-1 fix)")
+	assert.Contains(t, decision.Reason, "delegator",
+		"denial reason should reference the delegator")
+}
+
+// =============================================================================
 // Golden Decision 11: Agent accessing progeny secrets
 // =============================================================================
 
