@@ -16,10 +16,13 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -54,6 +57,26 @@ type BuiltInRole struct {
 // reconciled revision for a built-in role.
 func builtInRoleRevisionKey(roleName string) string {
 	return "builtin_role.revision." + roleName
+}
+
+// builtInRoleMarker stores both the code-declared revision and a hash of
+// the resolved permission list. This ensures reconciliation fires when
+// either the revision is bumped OR the dynamic permission list changes
+// (e.g., a new permission is added to the registry, expanding the
+// super-admin set).
+type builtInRoleMarker struct {
+	Revision int    `json:"revision"`
+	PermHash string `json:"permHash"`
+}
+
+// permListHash returns a truncated SHA-256 hex digest of the sorted
+// permission list. The sort ensures determinism regardless of input order.
+func permListHash(perms []string) string {
+	sorted := make([]string, len(perms))
+	copy(sorted, perms)
+	sort.Strings(sorted)
+	h := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return hex.EncodeToString(h[:8]) // 16 hex chars — enough for change detection
 }
 
 // BuiltInRoles returns the authoritative list of built-in role definitions.
@@ -528,7 +551,16 @@ func reconcileBuiltInRoles(ctx context.Context, s store.Store) {
 }
 
 // reconcileBuiltInRole creates or updates a single built-in role definition.
+// R-6: The applied-revision marker now includes a hash of the resolved
+// permission list. This ensures reconciliation fires when the dynamic
+// permission list changes (e.g., a new permission added to the registry
+// expands the super-admin set), even if the code revision is unchanged.
 func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) {
+	codeMarker := builtInRoleMarker{
+		Revision: role.Revision,
+		PermHash: permListHash(role.Permissions),
+	}
+
 	existing, err := s.GetRoleDefinitionByName(ctx, role.Name, role.ScopeType)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -549,62 +581,81 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 				"name", role.Name, "error", err)
 			return
 		}
-		// Record the applied revision.
-		recordBuiltInRoleRevision(ctx, s, role.Name, role.Revision)
+		// Record the applied revision marker.
+		recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
 		slog.Info("seeded role definition",
-			"name", role.Name, "scope_type", role.ScopeType, "revision", role.Revision)
+			"name", role.Name, "scope_type", role.ScopeType,
+			"revision", role.Revision, "perm_hash", codeMarker.PermHash)
 		return
 	}
 
 	// Role exists — check if reconciliation is needed.
-	appliedRevision := getAppliedBuiltInRoleRevision(ctx, s, role.Name)
-	if appliedRevision >= role.Revision {
-		return // already at or beyond the code revision
+	applied := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
+	if applied.Revision > role.Revision {
+		return // stored revision is higher — operator override, do not downgrade
 	}
+	if applied.Revision == role.Revision && applied.PermHash == codeMarker.PermHash {
+		return // same revision with matching permission hash — no changes needed
+	}
+	// Reconcile: either the code revision is higher, or the permission list
+	// changed at the same revision (R-6: dynamic lists like allPermissionIDs).
 
-	// Code revision is higher — update the permissions.
+	// Code revision is higher OR permission list changed — update permissions.
 	if err := s.UpdateSystemRoleDefinitionPermissions(ctx, existing.ID, role.Permissions); err != nil {
 		slog.Warn("failed to reconcile role definition permissions",
-			"name", role.Name, "from_revision", appliedRevision,
+			"name", role.Name, "from_revision", applied.Revision,
 			"to_revision", role.Revision, "error", err)
 		return
 	}
-	recordBuiltInRoleRevision(ctx, s, role.Name, role.Revision)
+	recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
 	slog.Info("reconciled role definition permissions",
-		"name", role.Name, "from_revision", appliedRevision,
+		"name", role.Name, "from_revision", applied.Revision,
 		"to_revision", role.Revision,
+		"perm_hash", codeMarker.PermHash,
 		"permissions_count", len(role.Permissions))
 }
 
-// getAppliedBuiltInRoleRevision reads the last-applied revision for a built-in
-// role from hub settings. Returns 0 if no revision has been recorded.
-func getAppliedBuiltInRoleRevision(ctx context.Context, s store.Store, roleName string) int {
+// getAppliedBuiltInRoleMarker reads the last-applied revision marker for a
+// built-in role from hub settings. Returns a zero marker if no revision has
+// been recorded. Backward-compatible: legacy integer-only markers are parsed
+// as revision-only (empty PermHash), which always triggers reconciliation
+// on the first startup after the R-6 fix.
+func getAppliedBuiltInRoleMarker(ctx context.Context, s store.Store, roleName string) builtInRoleMarker {
 	setting, err := s.GetHubSetting(ctx, builtInRoleRevisionKey(roleName))
 	if err != nil {
-		return 0 // not yet recorded
+		return builtInRoleMarker{} // not yet recorded
 	}
+
+	// Try new marker format first.
+	var marker builtInRoleMarker
+	if err := json.Unmarshal(setting.Value, &marker); err == nil && marker.PermHash != "" {
+		return marker
+	}
+
+	// Backward compat: parse legacy integer revision.
 	var rev int
-	if err := json.Unmarshal(setting.Value, &rev); err != nil {
-		// Try parsing as string (legacy or quoted format)
-		var revStr string
-		if err2 := json.Unmarshal(setting.Value, &revStr); err2 == nil {
-			if parsed, err3 := strconv.Atoi(revStr); err3 == nil {
-				return parsed
-			}
-		}
-		return 0
+	if err := json.Unmarshal(setting.Value, &rev); err == nil {
+		return builtInRoleMarker{Revision: rev}
 	}
-	return rev
+	// Try string-encoded integer (legacy quoted format).
+	var revStr string
+	if err := json.Unmarshal(setting.Value, &revStr); err == nil {
+		if parsed, err2 := strconv.Atoi(revStr); err2 == nil {
+			return builtInRoleMarker{Revision: parsed}
+		}
+	}
+	return builtInRoleMarker{}
 }
 
-// recordBuiltInRoleRevision writes the applied revision for a built-in role
-// to hub settings. Best-effort; failures are logged.
-func recordBuiltInRoleRevision(ctx context.Context, s store.Store, roleName string, revision int) {
-	revJSON, _ := json.Marshal(revision)
+// recordBuiltInRoleMarker writes the applied revision marker for a built-in
+// role to hub settings. Best-effort; failures are logged.
+func recordBuiltInRoleMarker(ctx context.Context, s store.Store, roleName string, marker builtInRoleMarker) {
+	markerJSON, _ := json.Marshal(marker)
 	if _, err := s.UpsertHubSetting(ctx, builtInRoleRevisionKey(roleName),
-		revJSON, "system", -1, "seeded"); err != nil {
-		slog.Warn("failed to record built-in role revision",
-			"role", roleName, "revision", revision, "error", err)
+		markerJSON, "system", -1, "seeded"); err != nil {
+		slog.Warn("failed to record built-in role revision marker",
+			"role", roleName, "revision", marker.Revision,
+			"perm_hash", marker.PermHash, "error", err)
 	}
 }
 

@@ -322,12 +322,96 @@ func TestReconcileBuiltInRoles_RevisionTracking(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	// After initial reconciliation, revision should be stored
+	// After initial reconciliation, marker should be stored with revision and hash.
 	for _, role := range BuiltInRoles() {
-		rev := getAppliedBuiltInRoleRevision(ctx, s, role.Name)
-		assert.Equal(t, role.Revision, rev,
+		marker := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
+		assert.Equal(t, role.Revision, marker.Revision,
 			"role %s should have revision %d after reconciliation", role.Name, role.Revision)
+		assert.Equal(t, permListHash(role.Permissions), marker.PermHash,
+			"role %s should have matching perm hash after reconciliation", role.Name)
 	}
+}
+
+// TestReconcileBuiltInRole_PermHashChangeTriggersUpdate verifies that when
+// the permission list changes at the same revision, reconciliation still
+// fires and updates the role definition. This is the R-6 fix: dynamic
+// permission lists (super-admin, agent roles) must converge even when the
+// code revision is unchanged.
+func TestReconcileBuiltInRole_PermHashChangeTriggersUpdate(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	// Pick the hub-member role for a controlled test.
+	roleName := store.SystemRoleHubMember
+
+	// Fetch the current role definition.
+	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	originalPerms := rd.Permissions
+
+	// Simulate a prior reconciliation that recorded the SAME revision but a
+	// DIFFERENT permission hash (as if the permission list had been different
+	// in a previous code version).
+	staleMarker := builtInRoleMarker{
+		Revision: 1,
+		PermHash: "stale_hash_does_not_match",
+	}
+	recordBuiltInRoleMarker(ctx, s, roleName, staleMarker)
+
+	// Strip a permission from the DB to verify reconciliation restores it.
+	require.Greater(t, len(originalPerms), 1, "precondition: role must have >1 permission")
+	strippedPerms := originalPerms[:len(originalPerms)-1]
+	require.NoError(t, s.UpdateSystemRoleDefinitionPermissions(ctx, rd.ID, strippedPerms))
+
+	// Verify precondition: permission is missing.
+	rd2, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	require.Equal(t, len(strippedPerms), len(rd2.Permissions),
+		"precondition: permission should be stripped")
+
+	// Run reconciliation — should trigger because permHash doesn't match.
+	reconcileBuiltInRoles(ctx, s)
+
+	// Verify permissions were restored.
+	rd3, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, hubMemberPermissionIDs(), rd3.Permissions,
+		"reconciliation should restore the full permission list when hash changes")
+
+	// Verify the marker was updated with the correct hash.
+	marker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
+	assert.Equal(t, permListHash(hubMemberPermissionIDs()), marker.PermHash,
+		"marker should have the updated perm hash")
+}
+
+// TestReconcileBuiltInRole_LegacyIntegerMarkerTriggersReconciliation verifies
+// that a legacy integer-only revision marker (pre-R-6) triggers reconciliation
+// because it has an empty PermHash, which never matches.
+func TestReconcileBuiltInRole_LegacyIntegerMarkerTriggersReconciliation(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	roleName := store.SystemRoleHubMember
+
+	// Write a legacy integer marker (simulating a pre-R-6 deployment).
+	revJSON, _ := json.Marshal(1)
+	_, err := s.UpsertHubSetting(ctx, builtInRoleRevisionKey(roleName),
+		revJSON, "system", -1, "seeded")
+	require.NoError(t, err)
+
+	// Verify the legacy marker parses correctly.
+	marker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
+	assert.Equal(t, 1, marker.Revision)
+	assert.Empty(t, marker.PermHash, "legacy marker should have empty PermHash")
+
+	// Run reconciliation — should trigger because PermHash is empty.
+	reconcileBuiltInRoles(ctx, s)
+
+	// After reconciliation, marker should now have the hash.
+	updatedMarker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
+	assert.Equal(t, 1, updatedMarker.Revision)
+	assert.NotEmpty(t, updatedMarker.PermHash, "marker should have PermHash after reconciliation")
+	assert.Equal(t, permListHash(hubMemberPermissionIDs()), updatedMarker.PermHash)
 }
 
 // =============================================================================
