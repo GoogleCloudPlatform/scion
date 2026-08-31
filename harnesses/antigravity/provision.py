@@ -170,8 +170,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     elif method == "api-key":
         api_key_name = resolved.env_key or "GEMINI_API_KEY"
-        api_key = ctx.read_secret(api_key_name, env_fallback=True)
-        if not api_key:
+        # Validate key exists and is non-empty; overlay uses shell interpolation.
+        if not ctx.read_secret(api_key_name, env_fallback=True):
             raise scion_harness.ProvisionError(f"{api_key_name} secret is empty")
         env_overlay[api_key_name] = f"${{{api_key_name}}}"
         ctx.info(f"api-key auth: {api_key_name} configured")
@@ -294,7 +294,7 @@ def _set_model_provider(home: str, provider: str) -> None:
                 scion_harness.atomic_write_json(settings_path, data)
                 return
         except (OSError, json.JSONDecodeError):
-            pass
+            pass  # Fall through; _prestage_onboarding handles initial creation.
     # File doesn't exist yet — _prestage_onboarding creates it.
     # modelProvider will be set there when auth_method == "api-key".
 
