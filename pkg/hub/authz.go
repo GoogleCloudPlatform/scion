@@ -417,7 +417,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// 7c. Access constraints (AC1).
-	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
 	restrictions = append(restrictions, acRestrictions...)
 
 	// ── Step 8: Evaluate via AK1 kernel ───────────────────────────────
@@ -534,17 +534,18 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 }
 
 func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Identity) ([]store.PrincipalRef, error) {
-	principals := []store.PrincipalRef{{Type: identity.Type(), ID: identity.ID()}}
+	// Normalize the identity type to canonical form (dev→user,
+	// federated_agent→agent, etc.) using the single canonical normalization.
+	normalizedType := NormalizePrincipalType(identity.Type())
+	principals := []store.PrincipalRef{{Type: normalizedType, ID: identity.ID()}}
 	var (
 		groups []string
 		err    error
 	)
-	switch identity.Type() {
-	case "user", "dev", "federated_user":
-		principals[0].Type = "user"
+	switch normalizedType {
+	case "user":
 		groups, err = a.store.GetEffectiveGroups(ctx, identity.ID())
-	case "agent", "federated_agent":
-		principals[0].Type = "agent"
+	case "agent":
 		groups, err = a.store.GetEffectiveGroupsForAgent(ctx, identity.ID())
 	default:
 		return principals, nil
@@ -1092,7 +1093,6 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
-	principal PrincipalContext,
 	resource ResourceContext,
 ) []Restriction {
 	// R-1 fix: page through all constraints instead of capping at 200.
@@ -1662,11 +1662,7 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		if scopeType == store.RoleScopeProject {
 			resourceCtx.ProjectID = scopeID
 		}
-		principal := PrincipalContext{
-			Kind: PrincipalKind(principalType),
-			ID:   principalID,
-		}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
 		if len(restrictions) > 0 {
 			var filtered []string
 			for _, permID := range result {
