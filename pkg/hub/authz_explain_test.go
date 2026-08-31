@@ -422,3 +422,96 @@ func TestExplainAPI_EffectivePermissionsMode(t *testing.T) {
 			"each permission provenance must have a permission ID")
 	}
 }
+
+// =============================================================================
+// Explain API: ComparePrincipalID authorization (C1 fix)
+// =============================================================================
+
+// TestExplainAPI_ComparePrincipalID_RequiresAuditRead verifies that a
+// non-admin user receives 403 when setting comparePrincipalId in
+// effective_permissions mode (C1 fix).
+func TestExplainAPI_ComparePrincipalID_RequiresAuditRead(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a non-admin user.
+	memberID := tid("explain-compare-member")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: memberID, Email: "compare-member@test.com",
+		DisplayName: "Compare Member", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, memberID)
+
+	// Non-admin tries to compare their permissions with another principal.
+	body := map[string]interface{}{
+		"resource": map[string]interface{}{
+			"type": "project",
+			"id":   tid("some-project"),
+		},
+		"action":             "read",
+		"mode":               "effective_permissions",
+		"comparePrincipalId": tid("another-user"),
+	}
+
+	bodyBytes, _ := json.Marshal(body)
+	req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", bodyBytes,
+		NewAuthenticatedUser(memberID, "compare-member@test.com", "Compare Member", "member", "api"))
+	rec := httptest.NewRecorder()
+	srv.handleAuthzExplain(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"non-admin must be denied comparePrincipalId access")
+
+	// Verify JSON error response.
+	var errResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Contains(t, errResp, "error",
+		"forbidden response should contain error field")
+}
+
+// TestExplainAPI_ComparePrincipalID_AdminAllowed verifies that an admin
+// user can use comparePrincipalId in effective_permissions mode.
+func TestExplainAPI_ComparePrincipalID_AdminAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a target user for comparison.
+	targetID := tid("explain-compare-target")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: "compare-target@test.com",
+		DisplayName: "Compare Target", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	project := &store.Project{
+		ID:        tid("explain-compare-project"),
+		Name:      "Compare Test",
+		Slug:      "compare-test",
+		CreatedBy: DevUserID,
+		OwnerID:   DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Admin (dev user) compares with another user.
+	body := map[string]interface{}{
+		"resource": map[string]interface{}{
+			"type":      "project",
+			"id":        project.ID,
+			"projectId": project.ID,
+		},
+		"action":                "read",
+		"mode":                  "effective_permissions",
+		"comparePrincipalId":    targetID,
+		"comparePrincipalKind":  "user",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/authz/explain", body)
+	require.Equal(t, http.StatusOK, rec.Code, "admin should be allowed: %s", rec.Body.String())
+
+	var resp explainResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// Comparison result should be present.
+	require.NotNil(t, resp.CompareResult,
+		"admin comparison should return CompareResult")
+}

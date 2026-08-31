@@ -200,7 +200,7 @@ type explainResponse struct {
 	MatchedPolicy string              `json:"matchedPolicy,omitempty"`
 	MatchedGrant  string              `json:"matchedGrant,omitempty"`
 	PolicyID      string              `json:"policyId,omitempty"`
-	Trace         []DecisionStep      `json:"trace"`
+	Trace         []DecisionStep      `json:"trace,omitempty"`
 	Provenance    *DecisionProvenance `json:"provenance,omitempty"`
 
 	// EffectivePermissions is populated in "effective_permissions" mode.
@@ -329,7 +329,7 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	// Handle effective_permissions mode: return full effective permission set
 	// with per-permission provenance.
 	if req.Mode == "effective_permissions" {
-		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal)
+		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal, isSuperAdmin)
 		return
 	}
 
@@ -361,9 +361,6 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		Trace:         decision.ExplainTrace,
 		Provenance:    provenance,
 	}
-	if resp.Trace == nil {
-		resp.Trace = []DecisionStep{}
-	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -372,6 +369,15 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 // of the explain endpoint. It returns the full effective permission set
 // with per-permission provenance showing which grant sourced each permission
 // and which boundary (if any) capped it.
+//
+// NOTE: Performance — this runs a full Decide() call for each permission in
+// the effective set. For principals with many permissions (e.g., super-admin
+// with 50+ permissions), this results in N full authz pipeline evaluations.
+// The shared work (principal closure, bindings, roles, restrictions) is
+// identical across all N calls and could be cached. This is acceptable for
+// the explain API (low-volume diagnostic endpoint) but should be optimized
+// if usage patterns change. TODO: cache shared authz context across the
+// per-permission Decide loop.
 func (s *Server) handleExplainEffectivePermissions(
 	w http.ResponseWriter,
 	ctx context.Context,
@@ -379,7 +385,16 @@ func (s *Server) handleExplainEffectivePermissions(
 	explainIdentity Identity,
 	resource Resource,
 	isCrossPrincipal bool,
+	isSuperAdmin bool,
 ) {
+	// C1 fix: ComparePrincipalID reveals another principal's effective
+	// permissions. Require the same hub.audit.read gate used for PrincipalID.
+	if req.ComparePrincipalID != "" {
+		if !isSuperAdmin {
+			writeForbidden(w, "comparison requires hub.audit.read")
+			return
+		}
+	}
 	scopeType := ""
 	scopeID := ""
 	if resource.ParentType == "project" && resource.ParentID != "" {
@@ -466,7 +481,6 @@ func (s *Server) handleExplainEffectivePermissions(
 		Allowed:              len(effectivePerms) > 0,
 		Reason:               fmt.Sprintf("%d effective permissions", len(effectivePerms)),
 		EffectivePermissions: permProvenance,
-		Trace:                []DecisionStep{},
 	}
 
 	// Handle comparison with another principal.
@@ -494,9 +508,15 @@ func (s *Server) handleExplainEffectivePermissions(
 			compareSet[p] = true
 		}
 
+		principalBID := req.ComparePrincipalID
+		if isCrossPrincipal {
+			// N3 fix: redact the comparison principal ID in cross-principal
+			// requests for defense in depth.
+			principalBID = "[redacted]"
+		}
 		result := &PermissionCompareResult{
 			PrincipalAID: explainIdentity.ID(),
-			PrincipalBID: req.ComparePrincipalID,
+			PrincipalBID: principalBID,
 		}
 
 		for _, p := range effectivePerms {

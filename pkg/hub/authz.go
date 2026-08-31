@@ -1148,17 +1148,22 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		scopeType, scopeID,
 	)
 
-	restrictions := ConstraintsToRestrictions(applicable, time.Now())
+	// R1 fix: capture time once to avoid TOCTOU between ConstraintsToRestrictions
+	// and the enrichment loop. Two separate time.Now() calls could diverge at
+	// a constraint's active-window boundary, breaking the positional 1:1
+	// correspondence.
+	now := time.Now()
+	restrictions := ConstraintsToRestrictions(applicable, now)
 
 	// Enrich restrictions with boundary metadata. ConstraintsToRestrictions
 	// builds the Description with constraint name/ID but does not populate the
 	// structured boundary fields added for provenance explain. We match each
 	// restriction back to its source constraint by position (1:1 correspondence
 	// with the applicable list, skipping nil/inactive which ConstraintsToRestrictions
-	// also skips).
+	// also skips — guaranteed identical because we use the same `now` value).
 	ri := 0
 	for _, c := range applicable {
-		if c == nil || !c.IsActive(time.Now()) {
+		if c == nil || !c.IsActive(now) {
 			continue
 		}
 		if ri < len(restrictions) {
