@@ -137,3 +137,17 @@ Use these commands to manage schedules and events in your project:
 * **Cleanup obligation**: Recurring schedules fire indefinitely until paused or deleted. Always delete them when the task or project they serve is completed.
 * **Check before creating**: Run `scion schedule list` to check for existing schedules before creating new ones. Duplicate schedules will deliver duplicate messages.
 * **Command mismatch**: `cancel` is strictly for one-shot events. `pause` and `delete` are strictly for recurring schedules. Using the wrong command on a schedule type will return an error.
+
+---
+
+## Security & Authorization
+
+To ensure platform security and isolate team activities, schedules and scheduled events are protected using **Owner-Based Access Control** (OBAC) and project-scoped policy structures:
+
+- **Owner-Based Access Control**: Only the creator (the owner) of a schedule or scheduled event, or a system-wide administrator, has the authority to retrieve, update, pause, resume, cancel, or delete a schedule/event. If another user or agent attempts to modify or view a schedule they do not own, the Hub API denies access immediately.
+- **Project-Scoped Group Policies**: Scheduled events require project-scoped policies. During project creation or template synchronization, Scion automatically backfills and seeds scheduled event policies bound directly to the project's members group (i.e. `project:<slug>:members`).
+- **Required Permissions**: To perform scheduler actions, the caller's token must have the appropriate permission in the project scope:
+  - **Creating/Scheduling**: Requires `scheduled_event.create`
+  - **Listing/Viewing**: Requires `scheduled_event.list` and `scheduled_event.read`
+  - **Modifying/Pausing**: Requires `scheduled_event.update`
+  - **Deleting/Cancelling**: Requires `scheduled_event.delete`

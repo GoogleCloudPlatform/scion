@@ -443,6 +443,46 @@ If you see logs but they aren't linked to traces in the Cloud Trace waterfall:
   1. Inspect running processes inside the agent container and terminate the duplicate PID.
   2. Recreate the agent to clean up the telemetry socket and state files.
 
+## Conversation Model Migration: Messaging Divergence Diagnostics Board
+
+During the migration to the new conversation model (Tranche G), Scion Hub runs active dual-routing and dual-read validation. To monitor this process in real-time, administrators can query a read-only diagnostics board endpoint:
+
+`GET /api/v1/admin/messaging/divergence`
+
+### Endpoint Authorization
+Access is strictly permission-gated. Callers must possess the `hub.diagnostics.read` permission (which is included in the `hub-admin` curated role set) to query the board.
+
+### Response Schema
+
+The response returns process uptime and real-time divergence counters, along with critical machine-readable caveats explaining the exact context of the values:
+
+```json
+{
+  "hub_id": "replica-node-1",
+  "process_start_time": "2026-08-30T00:00:00Z",
+  "process_uptime": "12h30m5s",
+  "matches": 14205,
+  "mismatches": 12,
+  "comparisons": 14217,
+  "fallbacks": 5,
+  "caveats": {
+    "scope": "per_replica_since_boot",
+    "scope_detail": "These counters live in process memory and reset when the replica restarts. They reflect only this replica's traffic, identified by hub_id.",
+    "mismatch_composition": "The mismatches count conflates two unrelated signals: routing-key disagreement (ComputeDivergenceMatch) and prior-message conversation_id inconsistency (CheckConversationConsistency). This board cannot separate them.",
+    "consistency_check_fails_open": "CheckConversationConsistency returns true (no mismatch increment) on ListMessages query errors, on empty resolved conversation IDs, and when insufficient data prevents lookup. A low mismatch count does not imply agreement — it is equally consistent with agreement, query errors, or insufficient lookup data.",
+    "not_go_no_go": "This board is NOT the Tranche G go/no-go input. The offline recomputation report is the artifact that answers the go/no-go question.",
+    "counter_snapshot": "All counters are read independently via separate atomic loads and may not correspond to a single instant. comparisons is computed as matches + mismatches from those independent reads, so the triple is arithmetically consistent but not a true snapshot. Ratios derived from these values (e.g. mismatch rate, fallback percentage) are approximate."
+  }
+}
+```
+
+### Metrics Definitions
+
+- **matches**: Number of times dual-routing matches (routing-key agreement).
+- **mismatches**: Number of times disagreement is detected (routing-key disagreement or prior conversation consistency mismatches).
+- **comparisons**: Arithmetic sum of `matches` + `mismatches` (internally consistent but approximate).
+- **fallbacks**: Number of read-path fallback attempts to old routing configurations during the switch.
+
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration
