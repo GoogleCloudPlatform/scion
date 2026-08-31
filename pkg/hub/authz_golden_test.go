@@ -1282,3 +1282,69 @@ func TestGolden_C1_GroupOwnerCannotEscalateToProjectOwner(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"C1 positive control: actual project owner should delete project")
 }
+
+// =============================================================================
+// C-2 regression test: AccessConstraints applied to ResolveListScopes
+// =============================================================================
+
+// TestResolveListScopes_AccessConstraintExcludesListPermission verifies that an
+// active AccessConstraint excluding project.list from a principal causes
+// ResolveListScopes to return ScopeSetNone.
+//
+// C-2 fix: ResolveListScopes previously never loaded or applied
+// AccessConstraints, so a principal whose project.list was removed by an
+// operator boundary still received full list visibility.
+func TestResolveListScopes_AccessConstraintExcludesListPermission(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("c2-list-user")
+	projectID := tid("c2-list-project")
+
+	// Create user + project + project-member binding (which includes project.list).
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "c2list@test.com", DisplayName: "C2 List User",
+		Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Slug: "c2-list-project", Name: "C2 List Project",
+	}))
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	user := NewAuthenticatedUser(userID, "c2list@test.com", "C2 List User", "member", "api")
+
+	// Without constraint: user should see the project.
+	scopes := authz.ResolveListScopes(ctx, user, "project.list")
+	assert.False(t, scopes.IsNone(),
+		"without constraint, user with project-member binding should have list visibility")
+	assert.True(t, scopes.Contains(projectID),
+		"user should see their project")
+
+	// Create an AccessConstraint that excludes project.list for all principals.
+	// MaximumPermissions is an allowlist — NOT including project.list means it's excluded.
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:               "c2-deny-project-list",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"}, // project.list NOT included
+		CreatedBy:          "test",
+	})
+	require.NoError(t, err)
+
+	// With constraint: user should get ScopeSetNone because the constraint
+	// excludes project.list at system scope.
+	scopes = authz.ResolveListScopes(ctx, user, "project.list")
+	assert.True(t, scopes.IsNone(),
+		"C-2 fix: active boundary excluding project.list must return empty list scope")
+}

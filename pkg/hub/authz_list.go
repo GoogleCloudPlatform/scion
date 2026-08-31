@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -99,6 +100,12 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	// allowed project, since credential restrictions can only reduce authority.
 	scopes = applyCredentialCaveats(identity, scopes)
 
+	// Step 7: Apply AccessConstraints (C-2 fix).
+	// Load applicable constraints for the principal closure and check whether
+	// any active constraint excludes the list permission. Constraints can only
+	// reduce the authorized scope set, never expand it.
+	scopes = a.applyListScopeConstraints(ctx, principalClosure, identity, permissionID, scopes)
+
 	return scopes
 }
 
@@ -120,6 +127,119 @@ func applyCredentialCaveats(identity Identity, scopes ScopeSet) ScopeSet {
 		}
 	}
 	return scopes
+}
+
+// applyListScopeConstraints loads active access constraints and applies them
+// to the resolved scope set. If any applicable constraint excludes the list
+// permission, the affected scope(s) are removed.
+//
+// C-2 fix: ResolveListScopes previously never loaded or applied
+// AccessConstraints, allowing a principal whose list permission was removed
+// by an operator boundary to retain full list visibility.
+func (a *AuthzService) applyListScopeConstraints(
+	ctx context.Context,
+	closure map[string]struct{},
+	identity Identity,
+	permissionID string,
+	scopes ScopeSet,
+) ScopeSet {
+	if scopes.IsNone() {
+		return scopes
+	}
+
+	constraints, err := a.store.ListAccessConstraints(ctx, 200, 0)
+	if err != nil {
+		// C-2 + R-1: fail closed when constraint loading errors.
+		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load access constraints (fail-closed)",
+			"error", err, "permission", permissionID)
+		return ScopeSetNone()
+	}
+	if len(constraints) == 0 {
+		return scopes
+	}
+
+	// Convert store constraints to hub AccessConstraint.
+	var hubConstraints []*AccessConstraint
+	for _, sc := range constraints {
+		hc := storeToHubAccessConstraint(sc)
+		if hc != nil {
+			hubConstraints = append(hubConstraints, hc)
+		}
+	}
+
+	// Build a bare-ID closure for SubjectSelector matching.
+	bareClosure := make(map[string]struct{}, len(closure))
+	for key := range closure {
+		if idx := strings.Index(key, ":"); idx >= 0 {
+			bareClosure[key[idx+1:]] = struct{}{}
+		} else {
+			bareClosure[key] = struct{}{}
+		}
+	}
+
+	// Derive principal context for constraint filtering.
+	principalID, principalType := identityPrincipalIDAndType(identity)
+
+	// Check system-scoped constraints first: if any applicable system-scoped
+	// constraint excludes the list permission, return ScopeSetNone.
+	systemApplicable := FilterApplicableConstraints(
+		hubConstraints, bareClosure,
+		principalID, principalType,
+		ScopeTypeSystem, "",
+	)
+	systemRestrictions := ConstraintsToRestrictions(systemApplicable, time.Now())
+	for _, r := range systemRestrictions {
+		if r.Check == nil || !r.Check(permissionID) {
+			return ScopeSetNone()
+		}
+	}
+
+	// For explicit project sets, check project-scoped constraints and remove
+	// projects where a constraint excludes the list permission.
+	projectIDs := scopes.ProjectIDs()
+	if len(projectIDs) > 0 {
+		var retained []string
+		for _, pid := range projectIDs {
+			projectApplicable := FilterApplicableConstraints(
+				hubConstraints, bareClosure,
+				principalID, principalType,
+				ScopeTypeProject, pid,
+			)
+			projectRestrictions := ConstraintsToRestrictions(projectApplicable, time.Now())
+			blocked := false
+			for _, r := range projectRestrictions {
+				if r.Check == nil || !r.Check(permissionID) {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				retained = append(retained, pid)
+			}
+		}
+		if len(retained) == 0 {
+			return ScopeSetNone()
+		}
+		return ScopeSetExplicit(retained...)
+	}
+
+	return scopes
+}
+
+// identityPrincipalIDAndType extracts the principal ID and type string from
+// an Identity for use in constraint filtering.
+func identityPrincipalIDAndType(identity Identity) (string, string) {
+	switch id := identity.(type) {
+	case AgentIdentity:
+		return id.ID(), "agent"
+	case UserIdentity:
+		return id.ID(), "user"
+	default:
+		if identity != nil {
+			return identity.ID(), identity.Type()
+		}
+		return "", ""
+	}
 }
 
 // collectRoleDefinitionIDs extracts unique role definition IDs from bindings.
