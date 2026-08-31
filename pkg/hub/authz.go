@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -48,9 +50,7 @@ const (
 	ActionVerify       Action = "verify"
 	ActionMint         Action = "mint"
 	// ActionAssign covers binding a resource to a principal that will act with
-	// it — currently attaching a GCP service account to an agent. Declared here
-	// so policies can be written against it; the assignment call sites still
-	// check ActionRead and are converted separately.
+	// it — currently attaching a GCP service account to an agent.
 	ActionAssign         Action = "assign"
 	ActionInvite         Action = "invite"
 	ActionSuspend        Action = "suspend"
@@ -153,8 +153,8 @@ type DecisionStep struct {
 type Decision struct {
 	Allowed        bool   // Whether access is allowed
 	Reason         string // Human-readable explanation
-	PolicyID       string // ID of the matched policy (if any)
-	PolicyName     string // Name of the matched policy (if any)
+	BindingID      string // ID of the matched role binding (if any)
+	RoleName       string // Name of the matched role (if any)
 	Scope          string // Scope level that decided (hub, project, resource)
 	MatchedGrant   string // Audit-ready matched grant identifier
 	MatchedPolicy  string // Audit-ready matched policy identifier
@@ -167,10 +167,9 @@ type Decision struct {
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
-	Scope             string   `json:"scope"`
-	PoliciesEvaluated int      `json:"policiesEvaluated"`
-	Matched           bool     `json:"matched"`
-	EffectiveGroups   []string `json:"effectiveGroups,omitempty"`
+	Scope           string   `json:"scope"`
+	Matched         bool     `json:"matched"`
+	EffectiveGroups []string `json:"effectiveGroups,omitempty"`
 }
 
 // DecisionAuditEmitter is an interface for emitting decision audit records.
@@ -178,7 +177,7 @@ type DecisionAuditEmitter interface {
 	EmitDecisionAudit(ctx context.Context, record *store.DecisionAuditRecord)
 }
 
-// AuthzService provides authorization checks using the policy evaluation engine.
+// AuthzService provides authorization checks using the AK1 kernel.
 type AuthzService struct {
 	store                   store.Store
 	logger                  *slog.Logger
@@ -191,6 +190,10 @@ type AuthzService struct {
 	// is cached; a false result is re-queried on every call so that the
 	// latch catches up as soon as the backfill completes.
 	backfillDone atomic.Bool
+
+	// relationshipResolver handles progeny relationship grants. Lazily
+	// initialized on first use.
+	relationshipResolver *RelationshipGrantResolver
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -199,6 +202,7 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 		store:                   s,
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
+		relationshipResolver:    NewRelationshipGrantResolver(s),
 	}
 }
 
@@ -208,9 +212,8 @@ func (a *AuthzService) SetDecisionAuditEmitter(emitter DecisionAuditEmitter) {
 }
 
 // CheckAccess evaluates whether the given identity is allowed to perform
-// the specified action on the resource. Legacy callers that do not know a
-// canonical permission ID pass an empty string; the role-binding evaluation
-// step is skipped when no permission is supplied.
+// the specified action on the resource. All authorization decisions route
+// through the AK1 kernel — there are no privileged early-allow bypasses.
 func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resource Resource, action Action) Decision {
 	return a.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
@@ -220,9 +223,9 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 	})
 }
 
-// Decide evaluates an authorization request. Credential caveats are applied
-// before legacy principal baselines, so a scoped credential can never inherit
-// an admin or super-admin bypass from its principal.
+// Decide evaluates an authorization request through the AK1 kernel.
+// All grants are traced to either a RoleBinding or a named relationship grant.
+// All reductions are traced to a named restriction. No undocumented bypasses.
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
 	if principal.Identity == nil {
@@ -242,95 +245,173 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		credential = credentialContextForIdentity(principal.Identity)
 	}
 
-	// Initialize explain trace if requested
-	var trace []DecisionStep
-	if request.Explain {
-		trace = make([]DecisionStep, 0)
-		trace = append(trace, DecisionStep{Step: "principal_resolved", Detail: string(principal.Kind) + ":" + principal.ID})
-		credDetail := string(credential.Kind) + " credential"
-		if credential.ID != "" {
-			credDetail += ", id=" + credential.ID
-		}
-		trace = append(trace, DecisionStep{Step: "credential_checked", Detail: credDetail})
+	// Unsupported principal kinds — fail closed.
+	switch principal.Kind {
+	case PrincipalKindFederatedService:
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
+	case PrincipalKindBroker:
+		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
 	}
 
-	var decision Decision
-	switch principal.Kind {
-	case PrincipalKindUser, PrincipalKindDev, PrincipalKindFederatedUser:
-		user, ok := principal.Identity.(UserIdentity)
-		if !ok {
-			decision = Decision{Allowed: false, Reason: "invalid user identity"}
-			break
-		}
-		if credential.Kind == CredentialKindUAT {
-			user = NewScopedUserIdentity(user, credential.ProjectID, credential.Scopes)
-		}
-		decision = a.checkAccessForUser(ctx, user, request.Resource, request.Action, request.Permission)
-	case PrincipalKindAgent, PrincipalKindFederatedAgent:
-		agent, ok := principal.Identity.(AgentIdentity)
-		if !ok {
-			decision = Decision{Allowed: false, Reason: "invalid agent identity"}
-			break
-		}
-		// Ensure delegation ceiling cache is available for this request.
-		if getDelegationCeilingCache(ctx) == nil {
-			ctx = contextWithDelegationCeilingCache(ctx)
-		}
-		decision = a.checkAccessForAgent(ctx, agent, request.Resource, request.Action)
+	// Resolve permission ID. When the caller provides an explicit permission,
+	// use it; otherwise derive from resource type + action.
+	permissionID := request.Permission
+	if permissionID == "" {
+		permissionID = derivePermissionID(request.Resource.Type, request.Action)
+	}
 
-		// Step 2.5: Live delegation ceiling (Phase 1G).
-		// If the agent was allowed by policy/role, verify the delegation chain
-		// still supports it. The ceiling intersects with, not replaces, the
-		// existing permission determination.
-		if decision.Allowed {
-			var ceilingExplain *[]DecisionStep
-			if request.Explain && trace != nil {
-				ceilingExplain = &trace
+	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
+	// UAT tokens are project-scoped. Resources outside the token's project
+	// are denied before kernel evaluation. This is a credential constraint,
+	// not a bypass — it can only narrow, never widen.
+	if credential.Kind == CredentialKindUAT {
+		if user, ok := principal.Identity.(UserIdentity); ok {
+			if scoped, ok := user.(*ScopedUserIdentity); ok {
+				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
+					return decorateDecision(*denied, principal, credential)
+				}
 			}
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), ceilingExplain)
+		}
+	}
+
+	// ── Step 2: Resolve principal closure ─────────────────────────────
+	principals, err := a.authorizationPrincipals(ctx, principal.Identity)
+	if err != nil {
+		a.logger.Warn("failed to resolve authorization principals",
+			"principal_id", principal.ID, "error", err)
+		return decorateDecision(Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}, principal, credential)
+	}
+
+	// Build typed principal closure map (O2: type:id composite keys).
+	closure := make(map[string]struct{}, len(principals))
+	membershipPaths := make(map[string][]string, len(principals))
+	for _, p := range principals {
+		key := p.Type + ":" + p.ID
+		closure[key] = struct{}{}
+		membershipPaths[key] = []string{p.ID}
+	}
+
+	// ── Step 3: Load active role bindings (batched) ───────────────────
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		a.logger.Warn("failed to load role bindings",
+			"principal_id", principal.ID, "error", err)
+		return decorateDecision(Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}, principal, credential)
+	}
+
+	// ── Step 4: Load role definitions ─────────────────────────────────
+	roleDefIDs := collectRoleDefinitionIDs(bindings)
+	roleDefs, err := a.loadRoleDefinitions(ctx, roleDefIDs)
+	if err != nil {
+		a.logger.Warn("failed to load role definitions",
+			"principal_id", principal.ID, "error", err)
+		return decorateDecision(Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}, principal, credential)
+	}
+
+	// ── Step 5: Convert to CandidateBindings ──────────────────────────
+	candidates := toCandidateBindings(bindings)
+
+	// ── Step 5b: Agent synthetic bindings from JWT scopes ─────────────
+	// Agents derive project-scoped permissions from their JWT token scopes.
+	// This creates a synthetic project-scoped binding so the kernel can
+	// evaluate agent permissions through the standard pipeline.
+	if isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok && agent.ProjectID() != "" {
+			synthCandidates, synthRoles := a.buildAgentSyntheticBindings(agent)
+			candidates = append(candidates, synthCandidates...)
+			for k, v := range synthRoles {
+				roleDefs[k] = v
+			}
+		}
+	}
+
+	// ── Step 6: Build resource context ────────────────────────────────
+	resourceCtx := ResourceContext{
+		ResourceType: request.Resource.Type,
+		ResourceID:   request.Resource.ID,
+		OwnerID:      request.Resource.OwnerID,
+		ProjectID:    projectIDForResource(request.Resource),
+		Ancestry:     request.Resource.Ancestry,
+	}
+
+	// ── Step 7: Build restrictions ────────────────────────────────────
+	var restrictions []Restriction
+
+	// 7a. UAT credential scope restriction.
+	if credential.Kind == CredentialKindUAT && len(credential.Scopes) > 0 {
+		restrictions = append(restrictions, uatScopeRestriction(credential.Scopes))
+	}
+
+	// 7b. Agent JWT scope restriction.
+	if isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			restrictions = append(restrictions, agentScopeRestriction(agent))
+		}
+	}
+
+	// 7c. Access constraints (AC1).
+	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+	restrictions = append(restrictions, acRestrictions...)
+
+	// ── Step 8: Evaluate via AK1 kernel ───────────────────────────────
+	kernelReq := KernelRequest{
+		Permission:        permissionID,
+		PrincipalClosure:  closure,
+		MembershipPaths:   membershipPaths,
+		Resource:          resourceCtx,
+		CandidateBindings: candidates,
+		RoleDefinitions:   roleDefs,
+		Restrictions:      restrictions,
+		Now:               time.Now(),
+	}
+	kernelResult := Evaluate(kernelReq)
+
+	// ── Step 9: Relationship grants (checked alongside kernel) ────────
+	// If the kernel denied, check named relationship grants. These
+	// replace the legacy bypasses (owner, ancestor, progeny) with
+	// documented, traceable grant paths.
+	decision := kernelDecisionToDecision(kernelResult, permissionID)
+	if !kernelResult.Allowed {
+		if relDecision, ok := a.checkRelationshipGrants(ctx, principal, request.Resource, request.Action, permissionID, credential); ok {
+			// Apply credential restrictions to relationship grants too.
+			for _, r := range restrictions {
+				if r.Check == nil || !r.Check(permissionID) {
+					relDecision.Allowed = false
+					relDecision.Reason = "relationship grant restricted by " + r.Kind
+					break
+				}
+			}
+			if relDecision.Allowed {
+				decision = relDecision
+			}
+		}
+	}
+
+	// ── Step 10: Agent delegation ceiling (post-decision) ────────────
+	// Applies to ALL allowed decisions regardless of grant source
+	// (kernel or relationship grant). C-1 fix: previously only ran on
+	// kernel-allowed decisions because Step 9 returned early.
+	if decision.Allowed && isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			if getDelegationCeilingCache(ctx) == nil {
+				ctx = contextWithDelegationCeilingCache(ctx)
+			}
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil)
 			if ceilingErr != nil {
-				// Fail-closed for all non-read-only operations
 				if !isReadOnlyOperation(request.Action) {
 					decision.Allowed = false
 					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
 				}
-				// For read-only operations (read, list, verify), log and allow
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
 			}
 		}
-	case PrincipalKindFederatedService:
-		decision = Decision{Allowed: false, Reason: "federated service identities are not supported"}
-	case PrincipalKindBroker:
-		decision = Decision{Allowed: false, Reason: "broker identities are not supported by policy authorization"}
-	default:
-		decision = Decision{Allowed: false, Reason: "unknown identity type"}
-	}
-
-	// Attach explain trace
-	if request.Explain && trace != nil {
-		// Check admin bypass
-		adminDetail := "not admin, skipped"
-		if user, ok := principal.Identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-			adminDetail = "admin bypass active"
-		}
-		trace = append(trace, DecisionStep{Step: "admin_bypass_checked", Detail: adminDetail})
-
-		resultDetail := "denied: " + decision.Reason
-		if decision.Allowed {
-			resultDetail = "allowed by " + decision.Reason
-			if decision.PolicyName != "" {
-				resultDetail += " (policy: " + decision.PolicyName + ")"
-			}
-		}
-		trace = append(trace, DecisionStep{Step: "decision", Detail: resultDetail})
-		decision.ExplainTrace = trace
 	}
 
 	result := decorateDecision(decision, principal, credential)
 
-	// Emit decision audit if emitter is configured
+	// Emit decision audit if emitter is configured.
 	if a.decisionAuditEmitter != nil {
 		a.emitDecisionAudit(ctx, request, result)
 	}
@@ -351,17 +432,6 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		return makeAllowed(len(resources)), nil
-	}
-
-	principals, err := a.authorizationPrincipals(ctx, identity)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := a.store.GetPoliciesForPrincipals(ctx, principals); err != nil {
-		return nil, err
-	}
 	if GetIdentityFromContext(ctx) != identity {
 		ctx = contextWithIdentity(ctx, identity)
 	}
@@ -371,9 +441,6 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 			return nil, err
 		}
 		decision := a.DecideFromContext(ctx, resources[i], ActionRead)
-		if decision.Reason == "policy lookup error" {
-			return nil, errors.New("authorization policy lookup failed")
-		}
 		allowed[i] = decision.Allowed
 	}
 	return allowed, nil
@@ -404,12 +471,384 @@ func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Ide
 	return principals, nil
 }
 
-func makeAllowed(n int) []bool {
-	allowed := make([]bool, n)
-	for i := range allowed {
-		allowed[i] = true
+// =============================================================================
+// Kernel result → Decision conversion
+// =============================================================================
+
+// kernelDecisionToDecision converts a KernelDecision to the external Decision type.
+func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
+	d := Decision{
+		Allowed: kd.Allowed,
 	}
-	return allowed
+	if kd.Allowed {
+		// R-4 fix: select a granting binding whose role actually contains
+		// the requested permission (ContainsRequested==true). Previously,
+		// GrantingBindings[0] was used unconditionally, which could name a
+		// binding whose role does not contain the granted permission.
+		if len(kd.Provenance.GrantingBindings) > 0 {
+			gb := kd.Provenance.GrantingBindings[0]
+			// Prefer a binding that contains the requested permission.
+			for _, candidate := range kd.Provenance.GrantingBindings {
+				if candidate.ContainsRequested {
+					gb = candidate
+					break
+				}
+			}
+			d.Reason = "role binding grant"
+			d.MatchedGrant = gb.RoleName
+			d.RoleName = gb.RoleName
+			d.BindingID = gb.BindingID
+			d.Scope = gb.ScopeType
+		} else {
+			d.Reason = "kernel allow"
+		}
+	} else {
+		if len(kd.Provenance.DenyReasons) > 0 {
+			d.Reason = kd.Provenance.DenyReasons[0]
+		} else {
+			d.Reason = "default deny"
+		}
+	}
+	return d
+}
+
+// =============================================================================
+// Relationship grants (replacing legacy bypasses)
+// =============================================================================
+
+// checkRelationshipGrants evaluates named relationship grants. These replace
+// the legacy owner, ancestor, and progeny bypasses with documented, traceable
+// grant paths. Returns (decision, true) if a relationship grant applied,
+// (zero, false) otherwise.
+func (a *AuthzService) checkRelationshipGrants(
+	ctx context.Context,
+	principal PrincipalContext,
+	resource Resource,
+	action Action,
+	permissionID string,
+	credential CredentialContext,
+) (Decision, bool) {
+	// 1. Ancestry-based transitive access.
+	// Any principal (user or agent) in the resource's creation chain has
+	// access. This replaces the old canAccessAsAncestor bypass with a named
+	// relationship grant. Hub-attested ancestry is enforced for agents.
+	if canAccessAsAncestor(principal.ID, resource) {
+		// For agents, verify ancestry is hub-attested.
+		if isAgentPrincipal(principal.Kind) {
+			if !AncestryIsHubAttested(principal.Identity) {
+				return Decision{}, false
+			}
+		}
+		return Decision{
+			Allowed:      true,
+			Reason:       "relationship grant: ancestor access",
+			Scope:        ScopeTypeRelationship,
+			MatchedGrant: "ancestor",
+		}, true
+	}
+
+	// 2. Resource owner access.
+	// The resource creator retains access to their own resources. This
+	// replaces the old owner bypass. Exception: ActionAssign on hub-scoped
+	// gcp_service_account requires current hub membership (D7 constraint).
+	if isUserPrincipal(principal.Kind) && resource.OwnerID != "" && resource.OwnerID == principal.ID {
+		if action == ActionAssign && resource.Type == "gcp_service_account" &&
+			resource.ParentType == "" && resource.ParentID == "" {
+			// Hub-scoped SA assign: owner bypass suppressed, fall through to
+			// hub membership check below.
+		} else {
+			return Decision{
+				Allowed:      true,
+				Reason:       "relationship grant: resource owner",
+				Scope:        ScopeTypeRelationship,
+				MatchedGrant: "owner",
+			}, true
+		}
+	}
+
+	// 3. Hub-scoped service-account assign for current hub members.
+	// Current hub members may assign hub-scoped SAs. This is a narrow
+	// code-defined grant that replaces the old hub-member baseline.
+	if isUserPrincipal(principal.Kind) &&
+		action == ActionAssign && resource.Type == "gcp_service_account" &&
+		resource.ParentType == "" && resource.ParentID == "" {
+		if a.isCurrentHubMember(ctx, principal.ID) {
+			return Decision{
+				Allowed:      true,
+				Reason:       "relationship grant: hub member hub-scoped assign",
+				Scope:        "hub",
+				MatchedGrant: "hub-member-assign",
+			}, true
+		}
+	}
+
+	// 4. Progeny relationship grants (agents only).
+	// Agent reads on secrets, env vars, and skill injections via the
+	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
+	// policy pattern.
+	if isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			result := a.relationshipResolver.CheckProgenyAccess(ctx, agent, resource, action)
+			if result.Allowed {
+				return Decision{
+					Allowed:      true,
+					Reason:       "relationship grant: " + string(result.RelationshipType),
+					Scope:        ScopeTypeRelationship,
+					MatchedGrant: result.Provenance.RoleName,
+					BindingID:    result.Provenance.BindingID,
+				}, true
+			}
+		}
+	}
+
+	return Decision{}, false
+}
+
+// =============================================================================
+// Agent synthetic binding construction
+// =============================================================================
+
+// buildAgentSyntheticBindings creates synthetic project-scoped CandidateBindings
+// from an agent's JWT token scopes. This translates the agent's token-based
+// authority into kernel-evaluable bindings so the agent's project-scoped
+// permissions flow through the standard evaluation pipeline.
+func (a *AuthzService) buildAgentSyntheticBindings(agent AgentIdentity) ([]CandidateBinding, map[string]*RolePermissions) {
+	scopes := agent.Scopes()
+	if len(scopes) == 0 {
+		return nil, nil
+	}
+
+	// Map scopes to permission IDs.
+	permIDs := agentScopesToPermissionIDs(scopes)
+	if len(permIDs) == 0 {
+		return nil, nil
+	}
+
+	synthRoleID := "synthetic:agent-jwt:" + agent.ID()
+	permSet := make(map[string]struct{}, len(permIDs))
+	for _, id := range permIDs {
+		permSet[id] = struct{}{}
+	}
+
+	roleDefs := map[string]*RolePermissions{
+		synthRoleID: {
+			RoleID:      synthRoleID,
+			RoleName:    "agent-jwt-scope",
+			ScopeType:   ScopeTypeProject,
+			Permissions: permSet,
+		},
+	}
+
+	candidates := []CandidateBinding{{
+		BindingID:        "synthetic:agent-project:" + agent.ID(),
+		RoleDefinitionID: synthRoleID,
+		PrincipalType:    "agent",
+		PrincipalID:      agent.ID(),
+		ScopeType:        ScopeTypeProject,
+		ScopeID:          agent.ProjectID(),
+	}}
+
+	return candidates, roleDefs
+}
+
+// agentScopesToPermissionIDs maps agent JWT token scopes to canonical permission IDs
+// by looking up each scope in the permissions registry.
+func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
+	scopeSet := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		scopeSet[string(s)] = true
+	}
+	var ids []string
+	for _, p := range permissions.Registry {
+		for _, s := range p.AgentScopes {
+			if scopeSet[s] {
+				ids = append(ids, p.ID)
+				break
+			}
+		}
+	}
+	return ids
+}
+
+// =============================================================================
+// Restriction builders
+// =============================================================================
+
+// uatScopeRestriction builds a kernel Restriction from UAT credential scopes.
+// Only permissions whose agent scope strings match the UAT scopes are allowed.
+func uatScopeRestriction(scopes []string) Restriction {
+	// UAT scopes are in "resource:action" format. Map them to permission IDs.
+	scopeSet := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		scopeSet[s] = true
+	}
+	// Build the set of allowed permission IDs from the scopes.
+	allowed := make(map[string]struct{})
+	for _, p := range permissions.Registry {
+		scopeKey := p.Resource + ":" + p.Action
+		if scopeSet[scopeKey] {
+			allowed[p.ID] = struct{}{}
+		}
+	}
+	return Restriction{
+		Kind:        "credential_scope",
+		Description: "UAT credential scope restriction",
+		Check: func(permissionID string) bool {
+			_, ok := allowed[permissionID]
+			return ok
+		},
+	}
+}
+
+// agentScopeRestriction builds a kernel Restriction from agent JWT token scopes.
+// Only permissions that map to the agent's declared scopes are allowed.
+func agentScopeRestriction(agent AgentIdentity) Restriction {
+	scopes := agent.Scopes()
+	if len(scopes) == 0 {
+		// No scopes: deny everything (fail closed).
+		return Restriction{
+			Kind:        "credential_scope",
+			Description: "agent JWT has no scopes (fail closed)",
+		}
+	}
+	scopeSet := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		scopeSet[string(s)] = true
+	}
+	allowed := make(map[string]struct{})
+	for _, p := range permissions.Registry {
+		for _, s := range p.AgentScopes {
+			if scopeSet[s] {
+				allowed[p.ID] = struct{}{}
+				break
+			}
+		}
+	}
+	return Restriction{
+		Kind:        "credential_scope",
+		Description: "agent JWT scope restriction",
+		Check: func(permissionID string) bool {
+			_, ok := allowed[permissionID]
+			return ok
+		},
+	}
+}
+
+// loadAccessConstraintRestrictions loads active access constraints from the
+// store and converts them to kernel restrictions.
+func (a *AuthzService) loadAccessConstraintRestrictions(
+	ctx context.Context,
+	closure map[string]struct{},
+	principal PrincipalContext,
+	resource ResourceContext,
+) []Restriction {
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		// R-1 fix: deny (fail closed) when constraint loading errors.
+		// The design is explicit: "Store or group resolution errors fail
+		// closed." Returning a deny-all restriction ensures no over-grant.
+		a.logger.Warn("failed to load access constraints (fail-closed)", "error", err)
+		return []Restriction{{
+			Kind:        "access_constraint_error",
+			Description: "constraint loading failed (fail-closed)",
+			// nil Check denies everything.
+		}}
+	}
+	if len(constraints) == 0 {
+		return nil
+	}
+
+	// Convert store constraints to hub AccessConstraint and filter.
+	var hubConstraints []*AccessConstraint
+	for _, sc := range constraints {
+		hc := storeToHubAccessConstraint(sc)
+		if hc != nil {
+			hubConstraints = append(hubConstraints, hc)
+		}
+	}
+
+	// Build a bare-ID closure for SubjectSelector matching. The kernel
+	// closure uses typed keys (type:id), but SubjectSelector.MatchesPrincipalClosure
+	// expects bare IDs.
+	bareClosure := make(map[string]struct{}, len(closure))
+	for key := range closure {
+		// Extract the bare ID from "type:id" format.
+		if idx := strings.Index(key, ":"); idx >= 0 {
+			bareClosure[key[idx+1:]] = struct{}{}
+		} else {
+			bareClosure[key] = struct{}{}
+		}
+	}
+
+	scopeType := ""
+	scopeID := ""
+	if resource.ProjectID != "" {
+		scopeType = ScopeTypeProject
+		scopeID = resource.ProjectID
+	} else {
+		scopeType = ScopeTypeSystem
+	}
+
+	applicable := FilterApplicableConstraints(
+		hubConstraints, bareClosure,
+		principal.ID, string(principal.Kind),
+		scopeType, scopeID,
+	)
+
+	return ConstraintsToRestrictions(applicable, time.Now())
+}
+
+// loadAllAccessConstraints loads all access constraints by paging through
+// the store. R-1 fix: the previous call used a fixed limit of 200 which
+// silently truncated constraints beyond that threshold.
+func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	const pageSize = 500
+	var all []*store.AccessConstraint
+	offset := 0
+	for {
+		page, err := a.store.ListAccessConstraints(ctx, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+		offset += len(page)
+	}
+	return all, nil
+}
+
+// =============================================================================
+// Permission resolution
+// =============================================================================
+
+// derivePermissionID derives a canonical permission ID from a resource type
+// and action string. Falls back to "resourceType.action" format when no
+// registry match exists.
+func derivePermissionID(resourceType string, action Action) string {
+	actionStr := string(action)
+	// Look for an exact match in the permissions registry.
+	for _, p := range permissions.Registry {
+		if p.Resource == resourceType && p.Action == actionStr {
+			return p.ID
+		}
+	}
+	// Fallback: construct from resource type and action.
+	return resourceType + "." + actionStr
+}
+
+// =============================================================================
+// Helper functions
+// =============================================================================
+
+func isAgentPrincipal(kind PrincipalKind) bool {
+	return kind == PrincipalKindAgent || kind == PrincipalKindFederatedAgent
+}
+
+func isUserPrincipal(kind PrincipalKind) bool {
+	return kind == PrincipalKindUser || kind == PrincipalKindDev || kind == PrincipalKindFederatedUser
 }
 
 func principalContextForIdentity(identity Identity) PrincipalContext {
@@ -467,535 +906,12 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)
 	if decision.MatchedPolicy == "" {
-		decision.MatchedPolicy = decision.PolicyID
+		decision.MatchedPolicy = decision.BindingID
 	}
 	if decision.MatchedGrant == "" {
-		decision.MatchedGrant = decision.PolicyName
+		decision.MatchedGrant = decision.RoleName
 	}
 	return decision
-}
-
-// checkAccessForUser evaluates access for a user principal.
-func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action, permissionID string) Decision {
-	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
-	if scopedIdentity, ok := user.(*ScopedUserIdentity); ok {
-		if denied := a.enforceUATConstraints(scopedIdentity, resource, action); denied != nil {
-			return *denied
-		}
-	}
-
-	// 1. Admin bypass. Scoped UAT credentials must not inherit hub-admin
-	// semantics from the underlying user after their project/scope constraints
-	// pass; they continue through owner, project membership, and policy grants.
-	if IsUnscopedLocalPlatformAdmin(user) {
-		return Decision{
-			Allowed: true,
-			Reason:  "admin bypass",
-		}
-	}
-
-	// 2. Owner bypass
-	//
-	// ⚠️ D7 exception: the OwnerID lever must NOT confer assignment of a
-	// hub-scoped service account. A former hub member who created the SA must
-	// not be able to assign it solely via OwnerID; current hub membership is
-	// required (step 2.7). The owner bypass is suppressed for ActionAssign on
-	// parentless gcp_service_account resources (parentless == hub-scoped,
-	// because gcpServiceAccountResource sets ParentType/ParentID only for
-	// project-scoped SAs).
-	//
-	// Other actions (read, delete, verify) on owned resources are unaffected:
-	// the creator keeps those rights. Only assignment requires the additional
-	// hub membership check. Admin bypass (step 1) is not affected.
-	if resource.OwnerID != "" && resource.OwnerID == user.ID() {
-		if action != ActionAssign || resource.Type != "gcp_service_account" ||
-			resource.ParentType != "" || resource.ParentID != "" {
-			return Decision{
-				Allowed: true,
-				Reason:  "resource owner",
-			}
-		}
-		// Fall through to step 2.7, which checks current hub membership.
-	}
-
-	// 2.5. Ancestry-based transitive access
-	if canAccessAsAncestor(user.ID(), resource) {
-		return Decision{
-			Allowed: true,
-			Reason:  "ancestor access",
-		}
-	}
-
-	// 2.6. Project owner/admin bypass: any user with role=owner or role=admin
-	// in the project's members group has the same access as the project's
-	// creator-owner. This applies to the project resource itself and to all
-	// resources scoped to the project (agents, members group, etc.).
-	if projectID := projectIDForResource(resource); projectID != "" {
-		if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
-			return Decision{
-				Allowed: true,
-				Reason:  "project owner/admin",
-			}
-		}
-	}
-
-	// 2.7. Hub-scoped service-account assign baseline (D5).
-	//
-	// Current hub members may assign hub-scoped SAs. This is the Option B
-	// code baseline ruled by ptone: a narrow code path for current hub members,
-	// not a seed policy, because the policy engine has no hub-scope resource arm
-	// and a hub-scoped policy would over-match.
-	//
-	// Four properties are load-bearing:
-	//
-	//   1. Position. This runs AFTER the owner and project-owner baselines
-	//      (which already allowed the creator and project admins) and BEFORE
-	//      policy evaluation. It is therefore revocable by an explicit deny
-	//      policy, and it does not shadow any baseline that already applied.
-	//   2. The parentless guard. gcpServiceAccountResource gives a project
-	//      parent only to project-scoped SAs; hub-scoped SAs are parentless.
-	//      This arm fires only for parentless resources, which means it cannot
-	//      match project-scoped SAs — they have a parent and are handled by
-	//      the per-project assign policy in seed.go.
-	//   3. Current hub membership. The user must be a current member of the
-	//      hub-members group. OwnerID (CreatedBy) alone is NOT sufficient:
-	//      a former hub member who created the SA loses assign when removed
-	//      from the group. This is D7's OwnerID lever constraint.
-	//   4. Action + type. Only ActionAssign on gcp_service_account.
-	if action == ActionAssign && resource.Type == "gcp_service_account" &&
-		resource.ParentType == "" && resource.ParentID == "" {
-		if a.isCurrentHubMember(ctx, user.ID()) {
-			return Decision{
-				Allowed: true,
-				Reason:  "hub member hub-scoped assign baseline",
-				Scope:   "hub",
-			}
-		}
-	}
-
-	// 3. Role binding permission check (Phase 2 D4 second-path).
-	// When a canonical permission ID is supplied, check whether the user
-	// holds that permission through any system-scoped role binding. This is
-	// the path that enables scoped admin: a non-super-admin user with the
-	// hub-admin role binding can access hub operations they have permissions
-	// for, without holding the super-admin bypass.
-	if permissionID != "" {
-		effectivePerms, err := a.getEffectivePermissions(ctx, "user", user.ID(), store.RoleScopeSystem, "")
-		if err != nil {
-			a.logger.Warn("failed to get effective permissions for user", "userID", user.ID(), "error", err.Error())
-		} else {
-			for _, p := range effectivePerms {
-				if p == permissionID {
-					return Decision{
-						Allowed:       true,
-						Reason:        "role binding grant",
-						MatchedGrant:  permissionID,
-						PrincipalKind: PrincipalKindUser,
-					}
-				}
-			}
-		}
-	}
-
-	// 4. Build principal refs: direct user + effective groups
-	principals := []store.PrincipalRef{
-		{Type: "user", ID: user.ID()},
-	}
-
-	groupIDs, err := a.store.GetEffectiveGroups(ctx, user.ID())
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for user", "userID", user.ID(), "error", err.Error())
-	}
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-	}
-
-	// 5. Fetch and evaluate policies
-	policies, err := a.store.GetPoliciesForPrincipals(ctx, principals)
-	if err != nil {
-		a.logger.Warn("failed to get policies for principals", "error", err)
-		return Decision{Allowed: false, Reason: "policy lookup error"}
-	}
-
-	return a.evaluatePolicies(policies, resource, action)
-}
-
-// checkAccessForAgent evaluates access for an agent principal.
-func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdentity, resource Resource, action Action) Decision {
-	// 0. Ancestry-based transitive access
-	if canAccessAsAncestor(agent.ID(), resource) {
-		return Decision{
-			Allowed: true,
-			Reason:  "ancestor access",
-		}
-	}
-
-	// 1. Build principal refs: direct agent + effective groups
-	principals := []store.PrincipalRef{
-		{Type: "agent", ID: agent.ID()},
-	}
-
-	groupIDs, err := a.store.GetEffectiveGroupsForAgent(ctx, agent.ID())
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for agent", "agent_id", agent.ID(), "error", err.Error())
-	}
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-	}
-
-	// 2. Fetch and evaluate policies
-	policies, err := a.store.GetPoliciesForPrincipals(ctx, principals)
-	if err != nil {
-		a.logger.Warn("failed to get policies for agent principals", "error", err)
-		return Decision{Allowed: false, Reason: "policy lookup error"}
-	}
-
-	decision := a.evaluatePolicies(policies, resource, action)
-	if decision.PolicyID != "" {
-		return decision
-	}
-
-	// 3. Project-scoped read baseline.
-	//
-	// An agent may perform read-class actions on resources in its own project.
-	// This codifies the project-isolation gate these paths already relied on
-	// before #591; it grants nothing that was not already reachable — it
-	// consolidates the hand-rolled per-handler isolation checks into one
-	// enforced location.
-	//
-	// Four properties are load-bearing; do not change them casually:
-	//
-	//   1. Position. This runs *after* policy evaluation, which returns any
-	//      matched policy — allow or deny — before we get here. That makes the
-	//      baseline revocable: an admin can bind an explicit deny policy to the
-	//      project's implicit "project:<slug>:agents" group and it wins. Moving
-	//      this block earlier would make the baseline unconditional.
-	//   2. The pid != "" guard. Resources with no project (broker, template,
-	//      the GitHub App config, hub-scoped resources) yield "" from
-	//      projectIDForResource. Without the guard, "" would equal an agent's
-	//      empty ProjectID and the baseline would allow everything.
-	//   3. Read-class is ActionRead and ActionList only. Deliberately not
-	//      ActionAttach (PTY/exec/message mutate a running agent), not
-	//      ActionCreate (gated by token scope in authorizeAgentCreate), and no
-	//      mutating action.
-	//   4. It grants nothing new relative to pre-#591 behaviour.
-	if isReadClassAction(action) {
-		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
-			return Decision{
-				Allowed: true,
-				Reason:  "agent project read baseline",
-				Scope:   "project",
-			}
-		}
-	}
-
-	// 3b. Project-scoped service-account assign baseline.
-	//
-	// An agent may assign a GCP service account that lives in its own project.
-	// Today the assignment gate checks ActionRead, which step 3 above already
-	// allows for exactly this set of service accounts. svc-accnt P3 converts
-	// that check to ActionAssign so the IAM actAs gate has a resource-shaped
-	// place to hang. Without this arm the conversion would deny every agent
-	// caller hub-wide, because checkAccessForAgent has no admin or owner
-	// bypass and no seeded policy grants assign. The security in that change
-	// comes from the GCP actAs check, not from narrowing the Hub policy layer.
-	//
-	// It is a separate arm rather than an addition to isReadClassAction on
-	// purpose: read-class is deliberately narrow, and widening it would grant
-	// assign on every resource type instead of this one.
-	//
-	// The four properties documented on step 3 apply here unchanged — in
-	// particular the position after policy evaluation, which keeps this
-	// revocable by an explicit deny bound to the project's implicit
-	// "project:<slug>:agents" group, and the pid != "" guard. A fifth is
-	// specific to this arm:
-	//
-	//   5. It preserves the step 3 project-baseline path exactly, and only
-	//      that path. Under ActionRead an agent could also reach :483 via a
-	//      hand-authored read policy (step 2) or a delegation condition
-	//      (step 4), and this arm deliberately does not preserve either,
-	//      because a grant to read a service account is not a grant to assign
-	//      one — reproducing them would over-grant on the very surface this
-	//      change exists to gate. Both are empty for agents on
-	//      gcp_service_account in default configuration, so nothing breaks out
-	//      of the box; an operator who wrote one loses agent assign and must
-	//      grant assign explicitly. Do not cite this arm as
-	//      "reachability-preserving" without that qualification.
-	//
-	// ⚠️ WHAT CONFINES THIS ARM, and read the next paragraph before citing
-	// anything else. The confinement is `pid != ""` in the predicate
-	// immediately below, combined with gcpServiceAccountResource giving a
-	// project parent only to project-scoped accounts. A hub-scoped account is
-	// parentless, so projectIDForResource yields "" and this arm cannot fire
-	// for it. That is a property of the authorization engine and of the
-	// resource builder. It does not depend on any handler.
-	//
-	// Do NOT justify this arm by the scope check in createAgentInProject. An
-	// earlier version of this comment did exactly that, naming the
-	// `sa.ScopeID != projectID` equality as an enforcing mechanism. That check
-	// was replaced by sa.ReachableFromProject in a44b2950, which admits
-	// hub-scoped accounts from every project — so the stated justification
-	// became false while the arm it justified stayed correct for a reason the
-	// comment had not recorded. A confinement argument that names a call site
-	// can be invalidated by a commit to that call site, silently. Name engine
-	// properties only.
-	//
-	// The human half of this baseline is the per-project assign policy in
-	// seed.go (projectAssignPolicyName), confined by the SAME engine property
-	// read the other way: this arm by `pid != ""` here, that policy by
-	// `pid == ""` in matchesResource, which refuses to match a project-scoped
-	// policy against a parentless resource (#595). One discipline in two
-	// places, not two unrelated accidents. Neither side needs a code-side
-	// revocation to stay confined, and neither should grow one.
-	//
-	// Goal 2 makes hub-scoped accounts assignable across projects. That does
-	// not breach this arm — a hub-scoped account stays parentless, so this arm
-	// still cannot fire for it, which is the fail-closed outcome §8.2 rules
-	// correct: hub-scoped accounts are assignable by hub admins and the
-	// account's creator and nobody else. If you are here to make hub-scoped
-	// accounts broadly assignable, that is task #19 and this arm is NOT the
-	// place to do it; widening `pid != ""` would grant every agent every
-	// service account on the hub.
-	if action == ActionAssign && resource.Type == "gcp_service_account" {
-		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
-			return Decision{
-				Allowed: true,
-				Reason:  "agent project service-account assign baseline",
-				Scope:   "project",
-			}
-		}
-	}
-
-	// 4. Delegation fallback: check policies with delegation conditions
-	return a.checkDelegation(ctx, agent, resource, action, policies)
-}
-
-// isReadClassAction reports whether an action is read-class for the purposes of
-// the agent project baseline. Read-class is deliberately narrow: read and list
-// only. See checkAccessForAgent for why.
-func isReadClassAction(a Action) bool {
-	return a == ActionRead || a == ActionList
-}
-
-// checkDelegation handles the delegation fallback for agents.
-func (a *AuthzService) checkDelegation(ctx context.Context, agent AgentIdentity, resource Resource, action Action, _ []store.Policy) Decision {
-	// Find policies with delegation conditions that match the resource
-	// We look at all policies that have delegation conditions
-	allPolicies, err := a.store.ListPolicies(ctx, store.PolicyFilter{}, store.ListOptions{Limit: 200})
-	if err != nil {
-		a.logger.Warn("failed to list policies for delegation check", "error", err)
-		return Decision{Allowed: false, Reason: "default deny"}
-	}
-
-	for _, policy := range allPolicies.Items {
-		if policy.Conditions == nil {
-			continue
-		}
-		if policy.Conditions.DelegatedFrom == nil && policy.Conditions.DelegatedFromGroup == "" {
-			continue
-		}
-
-		// Check if the policy matches the resource and action
-		if !matchesResource(policy, resource) || !matchesAction(policy, action) {
-			continue
-		}
-
-		// Check if the policy's time conditions are valid
-		if !evaluateTimeConditions(policy.Conditions) {
-			continue
-		}
-
-		// Check delegation access via the store (verifies creator, enabled flag, etc.)
-		allowed, err := a.store.CheckDelegatedAccess(ctx, agent.ID(), policy.Conditions)
-		if err != nil {
-			a.logger.Warn("delegation check failed", "agent_id", agent.ID(), "policyID", policy.ID, "error", err)
-			continue
-		}
-
-		// If store-level delegation didn't match, check ancestry chain.
-		// This supports progeny access: the DelegatedFrom principal may be
-		// an ancestor (not the direct creator) of this agent.
-		//
-		// Phase 1G security fix 3: the ancestry fallback is gated on
-		// AncestryIsHubAttested. For federated agents, the ancestry array
-		// is a remote claim and must not be used for local delegation
-		// matching. Federated ancestry was already validated at auth time
-		// (fixes 1 and 2), but fix 3 is the load-bearing fix — it does
-		// not depend on optional AllowedRootUsers config.
-		if !allowed && policy.Conditions.DelegatedFrom != nil && AncestryIsHubAttested(agent) {
-			ancestry := agent.Ancestry()
-			for _, ancestorID := range ancestry {
-				if policy.Conditions.DelegatedFrom.PrincipalID == ancestorID {
-					allowed = true
-					break
-				}
-			}
-		}
-
-		if allowed && policy.Effect == "allow" {
-			return Decision{
-				Allowed:    true,
-				Reason:     "delegated access",
-				PolicyID:   policy.ID,
-				PolicyName: policy.Name,
-				Scope:      policy.ScopeType,
-			}
-		}
-	}
-
-	return Decision{Allowed: false, Reason: "default deny"}
-}
-
-// evaluatePolicies applies the policy evaluation loop against a set of policies.
-// Policies are expected to be ordered by a deterministic total order (ascending):
-//
-//  1. scope_type: hub < project < resource (more specific scope wins)
-//  2. priority: lower number < higher number (higher priority wins)
-//  3. policy_kind: default < explicit (explicit wins over default at same priority)
-//  4. created: earlier < later (later-created wins as tiebreaker)
-//  5. id: lexicographic order (stable final tiebreaker)
-//
-// The evaluation uses "last match wins at same or higher scope level": as we iterate
-// through the sorted policies, each matching policy overwrites the previous match if
-// it is at the same scope level or a more specific (higher) scope level. This means:
-//
-//   - Resource-scoped policy overrides project-scoped and hub-scoped policies (local override)
-//   - Project-scoped policy overrides hub-scoped policies (local override)
-//   - Within the same scope, higher priority wins (comes later in sort)
-//   - At same scope and priority, explicit kind wins over default kind (comes later)
-//   - At same scope, priority, and kind, later-created wins (comes later)
-//
-// This preserves local override behavior: a project admin can override hub-level
-// policies for their project, and resource-specific policies override broader scopes.
-func (a *AuthzService) evaluatePolicies(policies []store.Policy, resource Resource, action Action) Decision {
-	var matched *Decision
-
-	for _, policy := range policies {
-		if !matchesResource(policy, resource) {
-			continue
-		}
-		if !matchesAction(policy, action) {
-			continue
-		}
-		if !evaluateConditions(policy, resource) {
-			continue
-		}
-
-		d := Decision{
-			Allowed:    policy.Effect == "allow",
-			Reason:     "policy match",
-			PolicyID:   policy.ID,
-			PolicyName: policy.Name,
-			Scope:      policy.ScopeType,
-		}
-
-		if matched == nil {
-			matched = &d
-			continue
-		}
-
-		// Compare scope levels: resource > project > hub
-		matchedLevel := scopeLevel(matched.Scope)
-		newLevel := scopeLevel(d.Scope)
-
-		if newLevel > matchedLevel {
-			// Lower scope (more specific) overrides
-			matched = &d
-		} else if newLevel == matchedLevel {
-			// Same scope: later policy (higher priority number) overrides
-			matched = &d
-		}
-	}
-
-	if matched != nil {
-		return *matched
-	}
-
-	return Decision{Allowed: false, Reason: "default deny"}
-}
-
-// scopeLevel returns a numeric level for scope ordering (higher = more specific).
-func scopeLevel(scope string) int {
-	switch scope {
-	case "hub":
-		return 0
-	case "project":
-		return 1
-	case "resource":
-		return 2
-	default:
-		return -1
-	}
-}
-
-// matchesAction checks if a policy's actions include the requested action.
-// Supports wildcard "*".
-func matchesAction(policy store.Policy, action Action) bool {
-	for _, a := range policy.Actions {
-		if a == "*" || Action(a) == action {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesResource checks if a policy applies to the given resource.
-func matchesResource(policy store.Policy, resource Resource) bool {
-	// Resource type must match or be wildcard
-	if policy.ResourceType != "*" && policy.ResourceType != resource.Type {
-		return false
-	}
-
-	// If policy specifies a resource ID, it must match
-	if policy.ResourceID != "" && policy.ResourceID != resource.ID {
-		return false
-	}
-
-	// Scope matching
-	switch policy.ScopeType {
-	case "project":
-		// A project-scoped policy applies only to resources that resolve to
-		// that project. Parentless / hub-scoped resources resolve to "" and
-		// must NOT match — fail closed rather than falling through (#595).
-		//
-		// There is deliberately no outer `policy.ScopeID != ""` guard: a
-		// project-scoped policy with an empty ScopeID must match nothing, not
-		// everything. pid == "" is already rejected, and a non-empty pid can
-		// never equal an empty ScopeID, so the two clauses cover it.
-		if pid := projectIDForResource(resource); pid == "" || pid != policy.ScopeID {
-			return false
-		}
-	case "resource":
-		// Policy scoped to a specific resource
-		if policy.ScopeID != "" && resource.ID != policy.ScopeID {
-			return false
-		}
-	}
-
-	return true
-}
-
-// evaluateConditions checks policy conditions against the resource.
-func evaluateConditions(policy store.Policy, resource Resource) bool {
-	if policy.Conditions == nil {
-		return true
-	}
-
-	// Label conditions: all must match (AND semantics)
-	if len(policy.Conditions.Labels) > 0 {
-		for k, v := range policy.Conditions.Labels {
-			if resource.Labels[k] != v {
-				return false
-			}
-		}
-	}
-
-	// Time conditions
-	if !evaluateTimeConditions(policy.Conditions) {
-		return false
-	}
-
-	return true
 }
 
 // enforceUATConstraints checks the project and scope restrictions carried by a
@@ -1050,77 +966,30 @@ func projectIDForResource(r Resource) string {
 	return ""
 }
 
-// isProjectOwnerOrAdmin reports whether the user has project-owner or
-// project-admin role in the given project. Uses role bindings as the sole
-// source of truth (Phase 1F: legacy group-based fallback removed).
-func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
-	if userID == "" || projectID == "" {
-		return false
-	}
-
-	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
-	if err != nil || membership == nil {
-		return false
-	}
-	return membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin
-}
-
-// getEffectivePermissions resolves the set of permission IDs granted to a
-// principal via role bindings. It collects all bindings for the principal,
-// filters by scope, resolves each binding's role definition, and returns a
-// deduplicated list of permission IDs.
-func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalType, principalID string, scopeType, scopeID string) ([]string, error) {
-	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
-	if err != nil {
-		return nil, err
-	}
-
-	seen := make(map[string]bool)
-	var result []string
-
-	for _, b := range bindings {
-		// Filter by scope: system bindings always apply; project bindings
-		// apply only if the scope matches.
-		if b.ScopeType == store.RoleScopeProject {
-			if scopeType != store.RoleScopeProject || b.ScopeID != scopeID {
-				continue
-			}
-		}
-
-		// Resolve role definition to get permissions
-		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil {
-			a.logger.Warn("failed to resolve role definition for binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", err)
-			continue
-		}
-
-		for _, permID := range rd.Permissions {
-			if !seen[permID] {
-				seen[permID] = true
-				result = append(result, permID)
-			}
-		}
-	}
-
-	return result, nil
-}
-
 // IsSystemAdmin checks whether the given user has a system-scoped super-admin
-// role binding. This is the role-binding-based authority check (Phase 1F),
-// complementing the fast-path IsUnscopedLocalPlatformAdmin which uses
-// User.Role == "admin". The startup reconciliation ensures these always agree.
+// role binding. Uses the batched query path.
 func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
-	// Check if the user has a super-admin role binding directly.
-	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	now := time.Now()
+	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
+	groups, err := a.store.GetEffectiveGroups(ctx, userID)
+	if err == nil {
+		for _, gid := range groups {
+			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+		}
+	}
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 	if err != nil {
 		return false
 	}
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		// R-2: Check activation — expired super-admin binding should not return true.
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -1135,20 +1004,29 @@ func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
 }
 
 // IsHubAdmin checks whether the given user has a system-scoped hub-admin
-// role binding. A user with the super-admin role binding is NOT implicitly
-// a hub-admin by this check — the caller must combine the results of
-// IsHubAdmin and IsSystemAdmin (or IsUnscopedLocalPlatformAdmin) to get
-// the full picture.
+// role binding.
 func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
-	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	now := time.Now()
+	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
+	groups, err := a.store.GetEffectiveGroups(ctx, userID)
+	if err == nil {
+		for _, gid := range groups {
+			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+		}
+	}
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 	if err != nil {
 		return false
 	}
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		// R-2: Check activation — expired hub-admin binding should not return true.
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -1162,41 +1040,256 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 	return false
 }
 
-// hubMembersSlug is the slug of the seeded hub-members group. It is the same
-// value seed.go uses when creating the group; kept as a constant so tests and
-// production code agree on the lookup key.
+// isBindingActive checks whether a store RoleBinding is currently active
+// based on its notBefore/expiresAt fields. R-2 fix.
+func isBindingActive(b *store.RoleBinding, now time.Time) bool {
+	if b.NotBefore != nil && now.Before(*b.NotBefore) {
+		return false
+	}
+	if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+		return false
+	}
+	return true
+}
+
+// hubMembersSlug is the slug of the seeded hub-members group.
 const hubMembersSlug = "hub-members"
 
 // isCurrentHubMember reports whether the user is a current member of the
-// hub-members group. "Current" means an active membership record exists; a
-// former member who was removed returns false regardless of OwnerID on any
-// resource they created. This is the D7 OwnerID lever constraint: the SA
-// creator is not sufficient to assign, only current hub membership is.
+// hub-members group.
 func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bool {
 	if userID == "" {
 		return false
 	}
 	group, err := a.store.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil {
-		// Group does not exist or lookup failed: not a member.
 		return false
 	}
 	_, err = a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
-	// Any role (member, admin, owner) counts as current membership.
 	return err == nil
 }
 
-// evaluateTimeConditions checks time-based conditions.
-func evaluateTimeConditions(conditions *store.PolicyConditions) bool {
-	if conditions == nil {
-		return true
+// storeToHubAccessConstraint converts a store AccessConstraint to a hub
+// AccessConstraint. Returns nil if the store constraint is nil.
+func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
+	if sc == nil {
+		return nil
 	}
+	hc := &AccessConstraint{
+		ID:                 sc.ID,
+		Name:               sc.Name,
+		MaximumPermissions: sc.MaximumPermissions,
+		Disabled:           sc.Disabled,
+	}
+	// Map subject.
+	hc.Subject = SubjectSelector{
+		Kind: SubjectKind(sc.SubjectKind),
+	}
+	if sc.SubjectPrincipalType != nil {
+		hc.Subject.PrincipalType = *sc.SubjectPrincipalType
+	}
+	if sc.SubjectPrincipalID != nil {
+		hc.Subject.PrincipalID = *sc.SubjectPrincipalID
+	}
+	if sc.SubjectGroupID != nil {
+		hc.Subject.GroupID = *sc.SubjectGroupID
+	}
+	// Map scope.
+	hc.Scope = ConstraintScopeRef{
+		Type: sc.ScopeType,
+		ID:   sc.ScopeID,
+	}
+	// Map condition/time window.
+	if sc.NotBefore != nil {
+		hc.Condition.NotBefore = *sc.NotBefore
+	}
+	if sc.ExpiresAt != nil {
+		hc.Condition.ExpiresAt = *sc.ExpiresAt
+	}
+	return hc
+}
+
+// isProjectOwnerOrAdmin reports whether the user has project-owner or
+// project-admin role in the given project. Uses the batched query path.
+func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
+	if userID == "" || projectID == "" {
+		return false
+	}
+
+	// 1. Direct user membership (existing behavior).
+	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
+	if err == nil && membership != nil {
+		if membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin {
+			return true
+		}
+	}
+
+	// 2. Group-expanded: check if any of the user's groups have owner/admin
+	//    role binding on this project.
+	groupIDs, err := a.store.GetEffectiveGroups(ctx, userID)
+	if err != nil || len(groupIDs) == 0 {
+		return false
+	}
+
+	// Build principals for batched query.
+	var principals []store.PrincipalRef
+	for _, gid := range groupIDs {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+	}
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return false
+	}
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			continue
+		}
+		if rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+// getEffectivePermissions resolves the set of permission IDs granted to a
+// principal via role bindings. Uses the batched query path.
+func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalType, principalID string, scopeType, scopeID string) ([]string, error) {
+	// Build principals: direct principal + group-expanded.
+	principals := []store.PrincipalRef{{Type: principalType, ID: principalID}}
+	var groupIDs []string
+	var err error
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
+	case store.RoleBindingPrincipalAgent:
+		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		a.logger.Warn("failed to get effective groups for permission expansion",
+			"principalType", principalType, "principalID", principalID, "error", err)
+	}
+	for _, gid := range groupIDs {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+	}
+
+	// Use batched query.
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// R-2 fix: filter bindings through activation checks (notBefore/expiresAt)
+	// and apply AccessConstraint restrictions. Previously, expired/future
+	// bindings were counted and constraints were never intersected.
 	now := time.Now()
-	if conditions.ValidFrom != nil && now.Before(*conditions.ValidFrom) {
-		return false
+	seen := make(map[string]bool)
+	var result []string
+	for _, b := range bindings {
+		// Filter by scope.
+		if b.ScopeType == store.RoleScopeProject {
+			if scopeType != store.RoleScopeProject || b.ScopeID != scopeID {
+				continue
+			}
+		}
+		// R-2: Check activation — skip expired and not-yet-active bindings.
+		cb := &CandidateBinding{
+			BindingID: b.ID,
+		}
+		if b.NotBefore != nil {
+			cb.NotBefore = *b.NotBefore
+		}
+		if b.ExpiresAt != nil {
+			cb.ExpiresAt = *b.ExpiresAt
+		}
+		activation := evaluateActivation(cb, now)
+		if !activation.Active {
+			continue
+		}
+
+		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			a.logger.Warn("failed to resolve role definition for binding",
+				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", err)
+			continue
+		}
+		for _, permID := range rd.Permissions {
+			if !seen[permID] {
+				seen[permID] = true
+				result = append(result, permID)
+			}
+		}
 	}
-	if conditions.ValidUntil != nil && now.After(*conditions.ValidUntil) {
-		return false
+
+	// R-2: Apply AccessConstraint intersection. Load constraints and remove
+	// permissions that are excluded by any applicable constraint.
+	if len(result) > 0 {
+		closure := make(map[string]struct{}, len(principals))
+		for _, p := range principals {
+			closure[p.Type+":"+p.ID] = struct{}{}
+		}
+		resourceCtx := ResourceContext{}
+		if scopeType == store.RoleScopeProject {
+			resourceCtx.ProjectID = scopeID
+		}
+		principal := PrincipalContext{
+			Kind: PrincipalKind(principalType),
+			ID:   principalID,
+		}
+		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+		if len(restrictions) > 0 {
+			var filtered []string
+			for _, permID := range result {
+				blocked := false
+				for _, r := range restrictions {
+					if r.Check == nil || !r.Check(permID) {
+						blocked = true
+						break
+					}
+				}
+				if !blocked {
+					filtered = append(filtered, permID)
+				}
+			}
+			result = filtered
+		}
 	}
-	return true
+
+	return result, nil
+}
+
+// makeAllowed creates a slice of n true values.
+func makeAllowed(n int) []bool {
+	allowed := make([]bool, n)
+	for i := range allowed {
+		allowed[i] = true
+	}
+	return allowed
+}
+
+// =============================================================================
+// Legacy compatibility: scope/action helpers used by other files
+// =============================================================================
+
+// scopeLevel returns a numeric level for scope ordering (higher = more specific).
+// Retained for compatibility with audit and response code.
+func scopeLevel(scope string) int {
+	switch scope {
+	case "hub":
+		return 0
+	case "project":
+		return 1
+	case "resource":
+		return 2
+	default:
+		return -1
+	}
+}
+
+// isReadClassAction reports whether an action is read-class.
+func isReadClassAction(a Action) bool {
+	return a == ActionRead || a == ActionList
 }

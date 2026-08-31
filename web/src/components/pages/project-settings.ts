@@ -27,7 +27,6 @@ import type {
   PageData,
   Project,
   Template,
-  AdminGroup,
   GitHubAppProjectStatus,
   GitHubTokenPermissions,
   RuntimeBroker,
@@ -44,7 +43,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
-import '../shared/group-member-editor.js';
+import '../shared/project-members-editor.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -126,9 +125,6 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private deleteLoading = false;
-
-  @state()
-  private membersGroup: AdminGroup | null = null;
 
   @state()
   private settings: ProjectSettings = {};
@@ -826,7 +822,7 @@ export class ScionPageProjectSettings extends LitElement {
         this.activeResourcesTab = tab;
       }
     }
-    void this.loadProject().then(() => this.loadMembersGroup());
+    void this.loadProject();
     void this.loadHubPreStartHook();
     void this.loadDropdownTemplates();
     void this.loadResolvedSettings();
@@ -947,37 +943,6 @@ export class ScionPageProjectSettings extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load dropdown templates:', err);
-    }
-  }
-
-  private async loadMembersGroup(): Promise<void> {
-    if (!this.project) {
-      console.warn('[project-settings] loadMembersGroup: project not loaded yet, skipping');
-      return;
-    }
-    const projectUUID = this.project.id;
-    try {
-      const url = `/api/v1/groups?projectId=${encodeURIComponent(projectUUID)}&groupType=explicit&limit=10`;
-      console.debug('[project-settings] loadMembersGroup:', url);
-      const response = await apiFetch(url);
-      if (response.ok) {
-        const data = (await response.json()) as { groups?: AdminGroup[] } | AdminGroup[];
-        const groups = Array.isArray(data) ? data : data.groups || [];
-        console.debug(
-          '[project-settings] groups for project:',
-          groups.length,
-          groups.map((g) => g.slug)
-        );
-        // Find the members group (slug pattern: project:<slug>:members)
-        this.membersGroup = groups.find((g) => g.slug?.endsWith(':members')) || null;
-        if (!this.membersGroup) {
-          console.warn('[project-settings] no :members group found for project', projectUUID);
-        }
-      } else {
-        console.warn('[project-settings] loadMembersGroup response not ok:', response.status);
-      }
-    } catch (err) {
-      console.error('[project-settings] Failed to load project members group:', err);
     }
   }
 
@@ -1344,17 +1309,13 @@ export class ScionPageProjectSettings extends LitElement {
       </div>
 
       ${this.renderConfigSection()} ${this.renderGitHubAppSection()}
-      ${this.membersGroup
-        ? html`
-            <scion-group-member-editor
-              groupId=${this.membersGroup.id}
-              ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
-              compact
-              sectionTitle="Members"
-              sectionDescription="Users and groups with access to this project. To make this project visible to all hub users, add the hub-members group."
-            ></scion-group-member-editor>
-          `
-        : ''}
+      <scion-project-members-editor
+        projectId=${this.project.id}
+        ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
+        compact
+        sectionTitle="Members"
+        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
+      ></scion-project-members-editor>
       ${this.renderResourcesSection()}
       ${this.pageData?.user
         ? html`

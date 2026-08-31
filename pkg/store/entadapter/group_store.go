@@ -27,7 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -278,6 +278,8 @@ func (s *GroupStore) UpdateGroup(ctx context.Context, g *store.Group) error {
 }
 
 // DeleteGroup removes a group by ID.
+// It cascades to delete group memberships and any role bindings bound to the group
+// principal, preventing orphan role bindings.
 func (s *GroupStore) DeleteGroup(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -288,6 +290,18 @@ func (s *GroupStore) DeleteGroup(ctx context.Context, id string) error {
 	_, _ = s.client.GroupMembership.Delete().
 		Where(groupmembership.GroupIDEQ(uid)).
 		Exec(ctx)
+
+	// Delete role bindings where this group is the bound principal,
+	// preventing orphan bindings after group removal.
+	_, err = s.client.RoleBinding.Delete().
+		Where(
+			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalTypeGroup),
+			rolebinding.PrincipalIDEQ(id),
+		).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("deleting role bindings for group %s: %w", id, mapError(err))
+	}
 
 	err = s.client.Group.DeleteOneID(uid).Exec(ctx)
 	if err != nil {
@@ -323,6 +337,12 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 			return nil, err
 		}
 		query.Where(group.ProjectIDEQ(projectUID))
+	}
+	if filter.Search != "" {
+		query.Where(group.Or(
+			group.NameContainsFold(filter.Search),
+			group.SlugContainsFold(filter.Search),
+		))
 	}
 
 	// Get total count before pagination unless this is a bounded scan.
@@ -827,6 +847,51 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 	return result, nil
 }
 
+// maxParentGroupDepth caps the BFS depth when walking ancestor groups.
+// This is a safety limit to bound query cost in pathological hierarchies;
+// in practice group nesting should be shallow.
+const maxParentGroupDepth = 32
+
+// GetParentGroups returns all ancestor groups of the given group — groups that
+// transitively contain this group as a child — via BFS through the
+// parent_groups edge. The group itself is NOT included in the result.
+// BFS is capped at maxParentGroupDepth levels.
+func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
+	uid, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	visited := make(map[uuid.UUID]bool)
+	visited[uid] = true // mark self as visited to avoid including it in results
+	var result []string
+	queue := []uuid.UUID{uid}
+
+	for depth := 0; len(queue) > 0 && depth < maxParentGroupDepth; depth++ {
+		nextQueue := make([]uuid.UUID, 0)
+		for _, current := range queue {
+			parents, err := s.client.Group.Query().
+				Where(group.IDEQ(current)).
+				QueryParentGroups().
+				All(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, p := range parents {
+				if !visited[p.ID] {
+					visited[p.ID] = true
+					result = append(result, p.ID.String())
+					nextQueue = append(nextQueue, p.ID)
+				}
+			}
+		}
+		queue = nextQueue
+	}
+
+	return result, nil
+}
+
 // GetGroupByProjectID retrieves the project_agents group associated with a project.
 func (s *GroupStore) GetGroupByProjectID(ctx context.Context, projectID string) (*store.Group, error) {
 	uid, err := parseUUID(projectID)
@@ -916,80 +981,6 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	}
 
 	return result, nil
-}
-
-// CheckDelegatedAccess checks whether an agent's delegation relationship
-// satisfies the given policy conditions.
-func (s *GroupStore) CheckDelegatedAccess(ctx context.Context, agentID string, conditions *store.PolicyConditions) (bool, error) {
-	if conditions == nil {
-		return false, nil
-	}
-	if conditions.DelegatedFrom == nil && conditions.DelegatedFromGroup == "" {
-		return false, nil
-	}
-
-	uid, err := parseUUID(agentID)
-	if err != nil {
-		return false, err
-	}
-
-	a, err := s.client.Agent.Query().
-		Where(agent.IDEQ(uid)).
-		Only(ctx)
-	if err != nil {
-		return false, mapError(err)
-	}
-
-	// Check delegation_enabled flag
-	if !a.DelegationEnabled {
-		return false, nil
-	}
-
-	// created_by is a polymorphic principal reference: it may be a user or
-	// another agent. Delegation only flows from a *user* creator, so resolve
-	// the creator as a user by ID and bail out when there is none (no creator,
-	// or the creator is an agent rather than a user).
-	if a.CreatedBy == nil {
-		return false, nil
-	}
-	creator, err := s.client.User.Get(ctx, *a.CreatedBy)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return false, nil
-		}
-		return false, mapError(err)
-	}
-
-	// Suspended creators cannot be delegation sources
-	if creator.Status == user.StatusSuspended {
-		return false, nil
-	}
-
-	// Check DelegatedFrom condition (direct creator match)
-	if conditions.DelegatedFrom != nil {
-		if conditions.DelegatedFrom.PrincipalType == "user" &&
-			conditions.DelegatedFrom.PrincipalID == creator.ID.String() {
-			return true, nil
-		}
-		// DelegatedFrom was specified but didn't match
-		return false, nil
-	}
-
-	// Check DelegatedFromGroup condition (creator is in specified group)
-	if conditions.DelegatedFromGroup != "" {
-		creatorGroups, err := s.GetEffectiveGroups(ctx, creator.ID.String())
-		if err != nil {
-			return false, err
-		}
-		for _, gid := range creatorGroups {
-			if gid == conditions.DelegatedFromGroup {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-
-	return false, nil
 }
 
 // CountGroupMembersByRole counts how many members of a group have the given role.

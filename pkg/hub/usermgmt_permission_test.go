@@ -90,6 +90,22 @@ func TestUserMgmtPermissionConversion(t *testing.T) {
 		}
 	}
 
+	// CO1: admin user needs super-admin role binding for authorization.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get super-admin role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("create super-admin role binding: %v", err)
+	}
+
 	// Give hub-admin user a hub-admin role binding
 	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	if err != nil {

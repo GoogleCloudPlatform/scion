@@ -82,17 +82,12 @@ func fakeBrokerServer(statusCode int, body *BrokerImageStatusResponse) *httptest
 
 func setupImageStatusTest(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	db, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	srv := &Server{
-		store:        db,
-		imageChecker: imagecheck.NewChecker(),
-		authzService: NewAuthzService(db, nil),
-	}
+	// CO1: use testServer to get a fully-initialized server with migrated
+	// store, role definitions, and dev user role bindings. The image status
+	// admin user also needs a super-admin role binding for broker dispatch.
+	srv, db := testServer(t)
+	srv.imageChecker = imagecheck.NewChecker()
+	createTestUserWithRole(t, db, tid("image-status-admin"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
 	return srv, db
 }
 

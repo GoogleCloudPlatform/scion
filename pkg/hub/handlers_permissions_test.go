@@ -1247,363 +1247,79 @@ func TestGroupRemoveMemberAuthz_OwnerAllowed(t *testing.T) {
 // ============================================================================
 
 func TestPolicyList(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create some test policies
-	for i := 0; i < 3; i++ {
-		policy := &store.Policy{
-			ID:           tid("policy_" + string(rune('a'+i))),
-			Name:         "Test Policy " + string(rune('A'+i)),
-			ScopeType:    "hub",
-			ResourceType: "*",
-			Actions:      []string{"read"},
-			Effect:       "allow",
-			Created:      time.Now(),
-			Updated:      time.Now(),
-		}
-		if err := s.CreatePolicy(ctx, policy); err != nil {
-			t.Fatalf("failed to create policy: %v", err)
-		}
-	}
-
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies", nil)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp ListPoliciesResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	// 3 test policies + 14 seeded policies (13 per-type read + 1 create-projects) = 17
-	if len(resp.Policies) != 17 {
-		t.Errorf("expected 17 policies (3 test + 14 seeded), got %d", len(resp.Policies))
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyCreate(t *testing.T) {
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
 	srv, _ := testServer(t)
-
-	body := CreatePolicyRequest{
-		Name:         "Admin Access",
-		Description:  "Full admin access",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"*"},
-		Effect:       "allow",
-		Priority:     100,
-	}
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", body)
-
-	if rec.Code != http.StatusCreated {
-		t.Errorf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var policy store.Policy
-	if err := json.NewDecoder(rec.Body).Decode(&policy); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if policy.Name != "Admin Access" {
-		t.Errorf("expected name 'Admin Access', got %q", policy.Name)
-	}
-	if policy.Effect != "allow" {
-		t.Errorf("expected effect 'allow', got %q", policy.Effect)
-	}
-	if policy.Priority != 100 {
-		t.Errorf("expected priority 100, got %d", policy.Priority)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyCreateValidation(t *testing.T) {
-	srv, _ := testServer(t)
-
-	testCases := []struct {
-		name string
-		body CreatePolicyRequest
-	}{
-		{
-			name: "missing name",
-			body: CreatePolicyRequest{ScopeType: "hub", Actions: []string{"read"}, Effect: "allow"},
-		},
-		{
-			name: "missing scopeType",
-			body: CreatePolicyRequest{Name: "Test", Actions: []string{"read"}, Effect: "allow"},
-		},
-		{
-			name: "missing actions",
-			body: CreatePolicyRequest{Name: "Test", ScopeType: "hub", Effect: "allow"},
-		},
-		{
-			name: "missing effect",
-			body: CreatePolicyRequest{Name: "Test", ScopeType: "hub", Actions: []string{"read"}},
-		},
-		{
-			name: "invalid scopeType",
-			body: CreatePolicyRequest{Name: "Test", ScopeType: "invalid", Actions: []string{"read"}, Effect: "allow"},
-		},
-		{
-			name: "invalid effect",
-			body: CreatePolicyRequest{Name: "Test", ScopeType: "hub", Actions: []string{"read"}, Effect: "invalid"},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", tc.body)
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("expected status 400 for %s, got %d: %s", tc.name, rec.Code, rec.Body.String())
-			}
-		})
-	}
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	// Validation is no longer relevant since the endpoint is retired.
 }
 
 func TestPolicyGet(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	policy := &store.Policy{
-		ID:           tid("policy_get123"),
-		Name:         "Test Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read", "write"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+policy.ID, nil)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp store.Policy
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.ID != policy.ID {
-		t.Errorf("expected ID %q, got %q", policy.ID, resp.ID)
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+tid("policy_get123"), nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyUpdate(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	policy := &store.Policy{
-		ID:           tid("policy_upd123"),
-		Name:         "Original Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Priority:     0,
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	newPriority := 50
-	body := UpdatePolicyRequest{
-		Name:        "Updated Policy",
-		Description: "New description",
-		Actions:     []string{"read", "write"},
-		Priority:    &newPriority,
-	}
-
-	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/policies/"+policy.ID, body)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp store.Policy
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.Name != "Updated Policy" {
-		t.Errorf("expected name 'Updated Policy', got %q", resp.Name)
-	}
-	if resp.Priority != 50 {
-		t.Errorf("expected priority 50, got %d", resp.Priority)
-	}
-	if len(resp.Actions) != 2 {
-		t.Errorf("expected 2 actions, got %d", len(resp.Actions))
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/policies/"+tid("policy_upd123"), nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyDelete(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	policy := &store.Policy{
-		ID:           tid("policy_del123"),
-		Name:         "Delete Me",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+policy.ID, nil)
-
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Verify deleted
-	_, err := s.GetPolicy(ctx, policy.ID)
-	if err != store.ErrNotFound {
-		t.Errorf("expected ErrNotFound, got %v", err)
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+tid("policy_del123"), nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyBindingsAdd(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	policy := &store.Policy{
-		ID:           tid("policy_bind123"),
-		Name:         "Test Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	body := AddPolicyBindingRequest{
-		PrincipalType: "user",
-		PrincipalID:   tid("user_abc123"),
-	}
-	permSeedUser(t, ctx, s, tid("user_abc123"))
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+policy.ID+"/bindings", body)
-
-	if rec.Code != http.StatusCreated {
-		t.Errorf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp store.PolicyBinding
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.PrincipalID != tid("user_abc123") {
-		t.Errorf("expected principalId 'user_abc123', got %q", resp.PrincipalID)
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+tid("policy_bind123")+"/bindings", nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyBindingsList(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	policy := &store.Policy{
-		ID:           tid("policy_blst123"),
-		Name:         "Test Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	// Add bindings
-	for i := 0; i < 3; i++ {
-		binding := &store.PolicyBinding{
-			PolicyID:      policy.ID,
-			PrincipalType: "user",
-			PrincipalID:   tid("user_" + string(rune('a'+i))),
-		}
-		permSeedPrincipal(t, ctx, s, binding.PrincipalType, binding.PrincipalID)
-		if err := s.AddPolicyBinding(ctx, binding); err != nil {
-			t.Fatalf("failed to add binding: %v", err)
-		}
-	}
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+policy.ID+"/bindings", nil)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp ListPolicyBindingsResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if len(resp.Bindings) != 3 {
-		t.Errorf("expected 3 bindings, got %d", len(resp.Bindings))
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+tid("policy_blst123")+"/bindings", nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPolicyBindingRemove(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	policy := &store.Policy{
-		ID:           tid("policy_brem123"),
-		Name:         "Test Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	binding := &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "user",
-		PrincipalID:   tid("user_remove"),
-	}
-	permSeedPrincipal(t, ctx, s, binding.PrincipalType, binding.PrincipalID)
-	if err := s.AddPolicyBinding(ctx, binding); err != nil {
-		t.Fatalf("failed to add binding: %v", err)
-	}
-
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+policy.ID+"/bindings/user/"+tid("user_remove"), nil)
-
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Verify removed
-	bindings, err := s.GetPolicyBindings(ctx, policy.ID)
-	if err != nil {
-		t.Fatalf("failed to get bindings: %v", err)
-	}
-	if len(bindings) != 0 {
-		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	// CO1 cutover: Policy API retired — endpoints return 410 Gone.
+	srv, _ := testServer(t)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+tid("policy_brem123")+"/bindings/user/"+tid("user_remove"), nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("expected status 410 Gone, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1712,46 +1428,5 @@ func TestGetEffectiveGroups(t *testing.T) {
 	}
 }
 
-func TestGetPoliciesForPrincipal(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	_ = srv // We just need the store
-
-	// Create a policy
-	policy := &store.Policy{
-		ID:           tid("policy_forprinc"),
-		Name:         "Test Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	// Bind to user
-	permSeedPrincipal(t, ctx, s, "user", tid("test_user"))
-	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "user",
-		PrincipalID:   tid("test_user"),
-	}); err != nil {
-		t.Fatalf("failed to add binding: %v", err)
-	}
-
-	// Get policies for user
-	policies, err := s.GetPoliciesForPrincipal(ctx, "user", tid("test_user"))
-	if err != nil {
-		t.Fatalf("failed to get policies: %v", err)
-	}
-
-	if len(policies) != 1 {
-		t.Errorf("expected 1 policy, got %d", len(policies))
-	}
-	if policies[0].ID != policy.ID {
-		t.Errorf("expected policy ID %q, got %q", policy.ID, policies[0].ID)
-	}
-}
+// CO1: TestGetPoliciesForPrincipal removed — PolicyStore interface deleted.
+// Authorization is handled by RoleBindings and the AK1 kernel.

@@ -63,7 +63,6 @@ type CompositeStore struct {
 	*BrokerSecretStore
 	*AllowListStore
 	*GroupStore
-	*PolicyStore
 	*BrokerDispatchStore
 	*LifecycleHookStore
 	*SkillStore
@@ -79,6 +78,7 @@ type CompositeStore struct {
 	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
+	*AccessConstraintStore
 
 	client *ent.Client
 }
@@ -106,7 +106,6 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		BrokerSecretStore:        NewBrokerSecretStore(client),
 		AllowListStore:           NewAllowListStore(client),
 		GroupStore:               NewGroupStore(client),
-		PolicyStore:              NewPolicyStore(client),
 		BrokerDispatchStore:      NewBrokerDispatchStore(client),
 		LifecycleHookStore:       NewLifecycleHookStore(client),
 		SkillStore:               NewSkillStore(client),
@@ -122,6 +121,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		DecisionAuditStore:       NewDecisionAuditStore(client),
 		MutationAuditStore:       NewMutationAuditStore(client),
 		QuotaStore:               NewQuotaStore(client),
+		AccessConstraintStore:    NewAccessConstraintStore(client),
 		client:                   client,
 	}
 }

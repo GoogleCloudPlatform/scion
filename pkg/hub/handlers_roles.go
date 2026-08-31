@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -46,11 +47,13 @@ type updateRoleDefinitionRequest struct {
 
 // createRoleBindingRequest is the payload for POST /api/v1/admin/role-bindings.
 type createRoleBindingRequest struct {
-	RoleDefinitionID string `json:"roleDefinitionId"`
-	PrincipalType    string `json:"principalType"`
-	PrincipalID      string `json:"principalId"`
-	ScopeType        string `json:"scopeType"`
-	ScopeID          string `json:"scopeId"`
+	RoleDefinitionID string     `json:"roleDefinitionId"`
+	PrincipalType    string     `json:"principalType"`
+	PrincipalID      string     `json:"principalId"`
+	ScopeType        string     `json:"scopeType"`
+	ScopeID          string     `json:"scopeId"`
+	NotBefore        *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
 }
 
 // listRoleDefinitionsResponse wraps the list result for the API.
@@ -483,8 +486,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalType is required")
 		return
 	}
-	if req.PrincipalType != store.RoleBindingPrincipalUser && req.PrincipalType != store.RoleBindingPrincipalAgent {
-		BadRequest(w, "principalType must be \"user\" or \"agent\"")
+	if req.PrincipalType != store.RoleBindingPrincipalUser && req.PrincipalType != store.RoleBindingPrincipalAgent && req.PrincipalType != store.RoleBindingPrincipalGroup {
+		BadRequest(w, "principalType must be \"user\", \"agent\", or \"group\"")
 		return
 	}
 	if req.PrincipalID == "" {
@@ -510,12 +513,45 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		req.PrincipalID = resolvedUser.ID
 	}
 
+	// Verify group exists for group principals.
+	// Try UUID first, fall back to slug lookup (mirrors email→UUID for users).
+	if req.PrincipalType == store.RoleBindingPrincipalGroup {
+		g, err := s.store.GetGroup(r.Context(), req.PrincipalID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				g, err = s.store.GetGroupBySlug(r.Context(), req.PrincipalID)
+				if err != nil {
+					if errors.Is(err, store.ErrNotFound) {
+						BadRequest(w, "group not found: "+req.PrincipalID)
+					} else {
+						writeErrorFromErr(w, err, "")
+					}
+					return
+				}
+			} else {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+		}
+		req.PrincipalID = g.ID
+	}
+
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
 		BadRequest(w, "scopeType must be \"system\" or \"project\"")
 		return
 	}
 	if req.ScopeType == store.RoleScopeProject && req.ScopeID == "" {
 		BadRequest(w, "scope_id is required when scope_type is 'project'")
+		return
+	}
+
+	// Validate lifecycle fields.
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
+		BadRequest(w, "expiresAt must be in the future")
+		return
+	}
+	if req.NotBefore != nil && req.ExpiresAt != nil && !req.ExpiresAt.After(*req.NotBefore) {
+		BadRequest(w, "expiresAt must be after notBefore")
 		return
 	}
 
@@ -540,6 +576,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		PrincipalID:      req.PrincipalID,
 		ScopeType:        req.ScopeType,
 		ScopeID:          req.ScopeID,
+		NotBefore:        req.NotBefore,
+		ExpiresAt:        req.ExpiresAt,
 		CreatedBy:        user.ID(),
 	}
 
@@ -569,8 +607,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 }
 
 func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
+	ctx := r.Context()
+
 	// Verify the binding exists before deleting.
-	_, err := s.store.GetRoleBinding(r.Context(), id)
+	binding, err := s.store.GetRoleBinding(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
@@ -580,7 +620,38 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	if err := s.store.DeleteRoleBinding(r.Context(), id); err != nil {
+	// PM1: last-owner protection — cannot delete the last direct-user
+	// project-owner binding. Every project must retain at least one.
+	//
+	// Known limitation (O2): The count-then-delete sequence is not
+	// transactional, so two concurrent deletions of different owner bindings
+	// could both pass the check and leave the project with zero owners.
+	// Risk is low (requires simultaneous admin operations on the same
+	// project) and is mitigated by the offline recovery command (RC1)
+	// which can detect and repair orphaned projects. This matches the
+	// AC1 TOCTOU pattern accepted elsewhere in the authorization layer.
+	if binding.ScopeType == store.RoleScopeProject && binding.PrincipalType == store.RoleBindingPrincipalUser {
+		roleDef, rdErr := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		if rdErr != nil {
+			slog.Error("last-owner check: failed to look up project-owner role definition", "error", rdErr)
+			writeErrorFromErr(w, rdErr, "")
+			return
+		}
+		if binding.RoleDefinitionID == roleDef.ID {
+			ownerCount, countErr := s.countDirectOwnerBindings(ctx, binding.ScopeID)
+			if countErr != nil {
+				writeErrorFromErr(w, countErr, "")
+				return
+			}
+			if ownerCount <= 1 {
+				writeError(w, http.StatusConflict, "LAST_OWNER",
+					"Cannot remove the last project owner — every project must retain at least one direct user owner", nil)
+				return
+			}
+		}
+	}
+
+	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
 			return

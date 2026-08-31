@@ -18,16 +18,50 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// seedRolesTestUser creates a user in the store if it does not already exist.
+// The store requires user principals to exist before role bindings can reference them.
+func seedRolesTestUser(t *testing.T, s store.Store, id, email string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetUser(ctx, id); err == nil {
+		return // already exists
+	}
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: id, Email: email, DisplayName: email, Role: "member", Status: "active",
+	}))
+}
+
+// seedRolesTestAgent creates an agent in the store with a minimal project,
+// so role bindings referencing agent principals pass existence validation.
+func seedRolesTestAgent(t *testing.T, s store.Store, agentID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetAgent(ctx, agentID); err == nil {
+		return // already exists
+	}
+	// Ensure project exists for the agent.
+	if _, err := s.GetProject(ctx, projectID); err != nil {
+		_ = s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "roles-test-project", Slug: "roles-test-project",
+		})
+	}
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: agentID, Name: "roles-test-agent", ProjectID: projectID,
+	}))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -279,7 +313,10 @@ func TestRolesAPI_MethodNotAllowed_Roles(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRolesAPI_CreateRoleBinding(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	userID := tid("rb-some-user")
+	seedRolesTestUser(t, s, userID, "rb-some-user@test.local")
 
 	// Create a custom role first.
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -292,14 +329,14 @@ func TestRolesAPI_CreateRoleBinding(t *testing.T) {
 	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-user-id",
+		PrincipalID:      userID,
 		ScopeType:        "system",
 	})
 
 	assert.NotEmpty(t, binding.ID)
 	assert.Equal(t, role.ID, binding.RoleDefinitionID)
 	assert.Equal(t, "user", binding.PrincipalType)
-	assert.Equal(t, "some-user-id", binding.PrincipalID)
+	assert.Equal(t, userID, binding.PrincipalID)
 	assert.Equal(t, "system", binding.ScopeType)
 }
 
@@ -328,8 +365,8 @@ func TestRolesAPI_CreateRoleBinding_InvalidPrincipalType(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: "some-id",
-		PrincipalType:    "group",
-		PrincipalID:      "g1",
+		PrincipalType:    "organization",
+		PrincipalID:      "o1",
 		ScopeType:        "system",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -386,7 +423,10 @@ func TestRolesAPI_CreateRoleBinding_SuperAdmin_Blocked(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	listUserID := tid("rb-list-user")
+	seedRolesTestUser(t, s, listUserID, "rb-list-user@test.local")
 
 	// Create a binding so the list is non-empty.
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -397,7 +437,7 @@ func TestRolesAPI_ListRoleBindings(t *testing.T) {
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "list-user",
+		PrincipalID:      listUserID,
 		ScopeType:        "system",
 	})
 
@@ -410,7 +450,10 @@ func TestRolesAPI_ListRoleBindings(t *testing.T) {
 }
 
 func TestRolesAPI_DeleteRoleBinding(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	delUserID := tid("rb-del-user")
+	seedRolesTestUser(t, s, delUserID, "rb-del-user@test.local")
 
 	// Create a custom role and binding.
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -421,7 +464,7 @@ func TestRolesAPI_DeleteRoleBinding(t *testing.T) {
 	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "del-user",
+		PrincipalID:      delUserID,
 		ScopeType:        "system",
 	})
 
@@ -437,7 +480,10 @@ func TestRolesAPI_DeleteRoleBinding_NotFound(t *testing.T) {
 }
 
 func TestRolesAPI_ListBindingsForUser(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	targetUserID := tid("rb-target-user")
+	seedRolesTestUser(t, s, targetUserID, "rb-target-user@test.local")
 
 	// Create a custom role and bind it to a specific user.
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -448,11 +494,11 @@ func TestRolesAPI_ListBindingsForUser(t *testing.T) {
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "target-user-123",
+		PrincipalID:      targetUserID,
 		ScopeType:        "system",
 	})
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings/user/target-user-123", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings/user/"+targetUserID, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var resp listRoleBindingsResponse
@@ -561,7 +607,11 @@ func TestValidatePermissionIDs_Empty(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRolesAPI_CreateRoleBinding_AgentPrincipal(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	agentID := tid("rb-some-agent")
+	projectID := tid("rb-agent-project")
+	seedRolesTestAgent(t, s, agentID, projectID)
 
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
 		Name:        "agent-binding-role",
@@ -572,14 +622,108 @@ func TestRolesAPI_CreateRoleBinding_AgentPrincipal(t *testing.T) {
 	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "agent",
-		PrincipalID:      "some-agent-id",
+		PrincipalID:      agentID,
 		ScopeType:        "project",
-		ScopeID:          "some-project-id",
+		ScopeID:          projectID,
 	})
 
 	assert.Equal(t, "agent", binding.PrincipalType)
-	assert.Equal(t, "some-agent-id", binding.PrincipalID)
+	assert.Equal(t, agentID, binding.PrincipalID)
 	assert.Equal(t, "project", binding.ScopeType)
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create a group so the group existence check passes
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("rb-test-group"), Slug: "rb-test-group", Name: "RB Test Group",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "group-binding-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      tid("rb-test-group"),
+		ScopeType:        "system",
+	})
+
+	assert.Equal(t, "group", binding.PrincipalType)
+	assert.Equal(t, tid("rb-test-group"), binding.PrincipalID)
+	assert.Equal(t, "system", binding.ScopeType)
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal_NotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "group-notfound-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Try to create a binding for a non-existent group
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      "00000000-0000-0000-0000-000000000099",
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "group not found")
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal_BySlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create a group with a known slug.
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: tid("slug-resolve-group"), Slug: "my-team-slug", Name: "Slug Resolve Group",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "slug-resolve-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Use the slug as principalId — should resolve to the UUID.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      "my-team-slug",
+		ScopeType:        "system",
+	})
+
+	assert.Equal(t, "group", binding.PrincipalType)
+	assert.Equal(t, tid("slug-resolve-group"), binding.PrincipalID, "principalId should be resolved to UUID")
+}
+
+func TestRolesAPI_CreateRoleBinding_GroupPrincipal_NeitherUUIDNorSlug(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "neither-uuid-nor-slug-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// A non-UUID string that also doesn't match any slug.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      "nonexistent-slug",
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "group not found")
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +794,9 @@ func doRequestAsIdentity(t *testing.T, srv *Server, identity Identity, method, p
 func setupNonAdminUser(t *testing.T, st store.Store, perms []string) *AuthenticatedUser {
 	t.Helper()
 	ctx := t.Context()
+
+	// Ensure the user exists in the store (CreateRoleBinding validates principal existence).
+	seedRolesTestUser(t, st, nonAdminUserID, nonAdminUserEmail)
 
 	user := NewAuthenticatedUser(nonAdminUserID, nonAdminUserEmail, "Scoped Admin", "member", "api")
 
@@ -743,6 +890,9 @@ func TestRolesAPI_NonAdmin_UpdateRole_WithUnheldPermissions(t *testing.T) {
 func TestRolesAPI_NonAdmin_CreateBinding_WithHeldPermissions(t *testing.T) {
 	srv, st := testServer(t)
 
+	otherUserID := tid("rb-other-user-held")
+	seedRolesTestUser(t, st, otherUserID, "rb-other-user-held@test.local")
+
 	// Give non-admin user role_binding.create, role_binding.read, and agent.read.
 	user := setupNonAdminUser(t, st, []string{"role_binding.create", "role_binding.read", "agent.read"})
 
@@ -758,7 +908,7 @@ func TestRolesAPI_NonAdmin_CreateBinding_WithHeldPermissions(t *testing.T) {
 	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-other-user",
+		PrincipalID:      otherUserID,
 		ScopeType:        "system",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -766,6 +916,9 @@ func TestRolesAPI_NonAdmin_CreateBinding_WithHeldPermissions(t *testing.T) {
 
 func TestRolesAPI_NonAdmin_CreateBinding_WithUnheldPermissions(t *testing.T) {
 	srv, st := testServer(t)
+
+	otherUserID := tid("rb-other-user-unheld")
+	seedRolesTestUser(t, st, otherUserID, "rb-other-user-unheld@test.local")
 
 	// Give non-admin user role_binding.create, role_binding.read, and agent.read
 	// but NOT user.suspend.
@@ -783,8 +936,138 @@ func TestRolesAPI_NonAdmin_CreateBinding_WithUnheldPermissions(t *testing.T) {
 	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-other-user",
+		PrincipalID:      otherUserID,
 		ScopeType:        "system",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Lifecycle fields (notBefore / expiresAt) — C9
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_CreateRoleBinding_WithLifecycleFields(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("rb-lifecycle-user")
+	seedRolesTestUser(t, s, userID, "rb-lifecycle-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "lifecycle-test-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	notBefore := time.Now().Add(1 * time.Hour).Truncate(time.Second).UTC()
+	expiresAt := time.Now().Add(24 * time.Hour).Truncate(time.Second).UTC()
+
+	// Create binding with lifecycle fields.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+		NotBefore:        &notBefore,
+		ExpiresAt:        &expiresAt,
+	})
+
+	assert.NotEmpty(t, binding.ID)
+	require.NotNil(t, binding.NotBefore, "notBefore should be returned")
+	require.NotNil(t, binding.ExpiresAt, "expiresAt should be returned")
+	assert.True(t, binding.NotBefore.Equal(notBefore), "notBefore round-trip: want %v got %v", notBefore, *binding.NotBefore)
+	assert.True(t, binding.ExpiresAt.Equal(expiresAt), "expiresAt round-trip: want %v got %v", expiresAt, *binding.ExpiresAt)
+}
+
+func TestRolesAPI_CreateRoleBinding_ExpiresAtInPast(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "past-expiry-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	past := time.Now().Add(-1 * time.Hour).UTC()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      DevUserID,
+		ScopeType:        "system",
+		ExpiresAt:        &past,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "expiresAt must be in the future")
+}
+
+func TestRolesAPI_CreateRoleBinding_ExpiresAtBeforeNotBefore(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "bad-window-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	notBefore := time.Now().Add(24 * time.Hour).UTC()
+	expiresAt := time.Now().Add(1 * time.Hour).UTC()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      DevUserID,
+		ScopeType:        "system",
+		NotBefore:        &notBefore,
+		ExpiresAt:        &expiresAt,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "expiresAt must be after notBefore")
+}
+
+func TestRolesAPI_CreateRoleBinding_WithOnlyNotBefore(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("rb-notbefore-only-user")
+	seedRolesTestUser(t, s, userID, "rb-notbefore-only-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "notbefore-only-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	notBefore := time.Now().Add(1 * time.Hour).Truncate(time.Second).UTC()
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+		NotBefore:        &notBefore,
+	})
+
+	require.NotNil(t, binding.NotBefore, "notBefore should be persisted")
+	assert.Nil(t, binding.ExpiresAt, "expiresAt should be nil when not set")
+}
+
+func TestRolesAPI_CreateRoleBinding_WithOnlyExpiresAt(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("rb-expiresat-only-user")
+	seedRolesTestUser(t, s, userID, "rb-expiresat-only-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "expiresat-only-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	expiresAt := time.Now().Add(24 * time.Hour).Truncate(time.Second).UTC()
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+		ExpiresAt:        &expiresAt,
+	})
+
+	assert.Nil(t, binding.NotBefore, "notBefore should be nil when not set")
+	require.NotNil(t, binding.ExpiresAt, "expiresAt should be persisted")
 }

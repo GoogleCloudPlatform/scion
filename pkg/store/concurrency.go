@@ -97,6 +97,11 @@ const (
 	// at boot time.
 	LockBundledResources AdvisoryLockKey = 0x5C100010
 
+	// LockRecoveryAuthz guards the offline authorization recovery command
+	// (scion server recover-authz). It prevents concurrent recovery
+	// operations and ensures no server is running during recovery.
+	LockRecoveryAuthz AdvisoryLockKey = 0x5C100020
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011

@@ -131,11 +131,12 @@ func skillDiscoverProject(t *testing.T, srv *Server, s store.Store, suffix, toke
 func skillDiscoverAdmin(t *testing.T, s store.Store, id string) *store.User {
 	t.Helper()
 	ctx := context.Background()
-	admin := &store.User{ID: tid(id), Email: id + "@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
-	if err := s.CreateUser(ctx, admin); err != nil {
+	// CO1: admin needs a super-admin role binding, not just the Role field.
+	createTestUserWithRole(t, s, tid(id), id+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, tid(id))
+	if err != nil {
 		t.Fatal(err)
 	}
-	ensureHubMembership(ctx, s, admin.ID)
 	return admin
 }
 

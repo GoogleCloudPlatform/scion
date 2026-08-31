@@ -75,10 +75,14 @@ func msgAuthzSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Add member to the project members group so policies apply.
 	msgAuthzAddProjectMember(t, s, member.ID, projectID, "msg-authz-project", store.GroupMemberRoleMember)
+
+	// CO1: Seed a super-admin user for msgAuthzAdminIdentity(). The AK1
+	// kernel requires role bindings — the User.Role field alone is not enough.
+	createTestUserWithRole(t, s, tid("msg-superadmin"), "admin@test.com", "admin", store.SystemRoleSuperAdmin)
 
 	return srv, s, owner, member, projectID
 }

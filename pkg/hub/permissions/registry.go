@@ -36,6 +36,7 @@ const (
 	ResourceRole              = "role"
 	ResourceRoleBinding       = "role_binding"
 	ResourceScheduledEvent    = "scheduled_event"
+	ResourceAccessConstraint  = "access_constraint"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -222,6 +223,10 @@ var Registry = []Permission{
 	{ID: "role_binding.read", Resource: ResourceRoleBinding, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 	{ID: "role_binding.create", Resource: ResourceRoleBinding, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+
+	// Access constraint management (AC1 — Operator Access Constraint Backend)
+	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionManage, CapabilityKind: CapabilityScope, Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
+	{ID: "access_constraint.read", Resource: ResourceAccessConstraint, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read access constraints", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 
 	// Scheduled event / recurring schedule permissions (project-scoped)
 	{ID: "scheduled_event.read", Resource: ResourceScheduledEvent, Action: ActionRead, CapabilityKind: CapabilityResource, Description: "Read a scheduled event", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},

@@ -598,154 +598,49 @@ func secretMetaToEnvVar(m secret.SecretMeta) store.EnvVar {
 	}
 }
 
+// =============================================================================
+// Progeny policy helpers for secrets
+// =============================================================================
+//
+// RG1 migration note: The RelationshipGrantResolver (authz_relationship.go)
+// provides the target replacement for these DelegatedFrom Policy rows. At CO1
+// cutover, the resolver is wired into the evaluator and these functions become
+// no-ops — the AllowProgeny flag on the resource serves as the relationship
+// record. Until then, Policy rows are still created here so that the existing
+// checkDelegation path (authz.go) continues to grant progeny access for newly
+// created resources.
+
 // progenyPolicyName returns the canonical policy name for a progeny secret policy.
 func progenyPolicyName(secretID string) string {
 	return "progeny-secret-access:" + secretID
 }
 
-// ensureProgenyPolicy creates or deletes the implicit progeny policy for a secret
-// based on the allowProgeny flag. It is called after a secret is created or updated.
-func (s *Server) ensureProgenyPolicy(ctx context.Context, meta *secret.SecretMeta) {
-	if meta.Scope != store.ScopeUser {
-		return
-	}
+// ensureProgenyPolicy is a no-op after CO1 cutover. Progeny access is now
+// handled by the RelationshipGrantResolver (authz_relationship.go) using the
+// AllowProgeny flag on the secret and the agent's hub-attested ancestry.
+func (s *Server) ensureProgenyPolicy(_ context.Context, _ *secret.SecretMeta) {}
 
-	policyName := progenyPolicyName(meta.ID)
-
-	if meta.AllowProgeny {
-		// Check if policy already exists
-		existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-		if err != nil {
-			s.envSecretLog.Warn("failed to check for existing progeny policy", "secret", meta.Name, "error", err)
-			return
-		}
-		if existing.TotalCount > 0 {
-			return // Policy already exists
-		}
-
-		// Create implicit policy
-		policy := &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         policyName,
-			Description:  "Implicit policy granting progeny agents read access to secret " + meta.Name,
-			ScopeType:    store.PolicyScopeResource,
-			ScopeID:      meta.ID,
-			ResourceType: "secret",
-			ResourceID:   meta.ID,
-			Actions:      []string{"read"},
-			Effect:       store.PolicyEffectAllow,
-			Conditions: &store.PolicyConditions{
-				DelegatedFrom: &store.DelegatedFromCondition{
-					PrincipalType: "user",
-					PrincipalID:   meta.CreatedBy,
-				},
-			},
-			Labels: map[string]string{
-				"scion.dev/managed-by":   "progeny-secret-access",
-				"scion.dev/secret-key":   meta.Name,
-				"scion.dev/secret-id":    meta.ID,
-				"scion.dev/secret-scope": meta.Scope,
-			},
-			CreatedBy: meta.CreatedBy,
-		}
-		if err := s.store.CreatePolicy(ctx, policy); err != nil {
-			s.envSecretLog.Warn("failed to create progeny policy", "secret", meta.Name, "error", err)
-		}
-	} else {
-		// Delete implicit policy if it exists
-		s.deleteProgenyPolicy(ctx, meta.ID)
-	}
-}
-
-// deleteProgenyPolicy removes the implicit progeny policy for a secret by its ID.
-func (s *Server) deleteProgenyPolicy(ctx context.Context, secretID string) {
-	policyName := progenyPolicyName(secretID)
-	existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	if err != nil {
-		s.envSecretLog.Warn("failed to look up progeny policy for deletion", "secretID", secretID, "error", err)
-		return
-	}
-	for _, p := range existing.Items {
-		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.envSecretLog.Warn("failed to delete progeny policy", "policyID", p.ID, "error", err)
-		}
-	}
-}
+// deleteProgenyPolicy is a no-op after CO1 cutover.
+func (s *Server) deleteProgenyPolicy(_ context.Context, _ string) {}
 
 // =============================================================================
 // Progeny policy helpers for env vars
 // =============================================================================
+//
+// RG1 migration note: same as secrets above. See RelationshipGrantResolver
+// (authz_relationship.go) for the target model. CO1 converts these to no-ops.
 
 // envVarProgenyPolicyName returns the canonical policy name for a progeny env var policy.
 func envVarProgenyPolicyName(envVarID string) string {
 	return "progeny-envvar-access:" + envVarID
 }
 
-// ensureEnvVarProgenyPolicy creates or deletes the implicit progeny policy for an
-// env var based on the allowProgeny flag.
-func (s *Server) ensureEnvVarProgenyPolicy(ctx context.Context, ev *store.EnvVar) {
-	if ev.Scope != store.ScopeUser {
-		return
-	}
+// ensureEnvVarProgenyPolicy is a no-op after CO1 cutover. Progeny access is
+// now handled by the RelationshipGrantResolver (authz_relationship.go).
+func (s *Server) ensureEnvVarProgenyPolicy(_ context.Context, _ *store.EnvVar) {}
 
-	policyName := envVarProgenyPolicyName(ev.ID)
-
-	if ev.AllowProgeny {
-		existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-		if err != nil {
-			s.envSecretLog.Warn("failed to check for existing env var progeny policy", "envVar", ev.Key, "error", err)
-			return
-		}
-		if existing.TotalCount > 0 {
-			return
-		}
-
-		policy := &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         policyName,
-			Description:  "Implicit policy granting progeny agents read access to env var " + ev.Key,
-			ScopeType:    store.PolicyScopeResource,
-			ScopeID:      ev.ID,
-			ResourceType: "envvar",
-			ResourceID:   ev.ID,
-			Actions:      []string{"read"},
-			Effect:       store.PolicyEffectAllow,
-			Conditions: &store.PolicyConditions{
-				DelegatedFrom: &store.DelegatedFromCondition{
-					PrincipalType: "user",
-					PrincipalID:   ev.CreatedBy,
-				},
-			},
-			Labels: map[string]string{
-				"scion.dev/managed-by":   "progeny-envvar-access",
-				"scion.dev/envvar-key":   ev.Key,
-				"scion.dev/envvar-id":    ev.ID,
-				"scion.dev/envvar-scope": ev.Scope,
-			},
-			CreatedBy: ev.CreatedBy,
-		}
-		if err := s.store.CreatePolicy(ctx, policy); err != nil {
-			s.envSecretLog.Warn("failed to create env var progeny policy", "envVar", ev.Key, "error", err)
-		}
-	} else {
-		s.deleteEnvVarProgenyPolicy(ctx, ev.ID)
-	}
-}
-
-// deleteEnvVarProgenyPolicy removes the implicit progeny policy for an env var by its ID.
-func (s *Server) deleteEnvVarProgenyPolicy(ctx context.Context, envVarID string) {
-	policyName := envVarProgenyPolicyName(envVarID)
-	existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	if err != nil {
-		s.envSecretLog.Warn("failed to look up env var progeny policy for deletion", "envVarID", envVarID, "error", err)
-		return
-	}
-	for _, p := range existing.Items {
-		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.envSecretLog.Warn("failed to delete env var progeny policy", "policyID", p.ID, "error", err)
-		}
-	}
-}
+// deleteEnvVarProgenyPolicy is a no-op after CO1 cutover.
+func (s *Server) deleteEnvVarProgenyPolicy(_ context.Context, _ string) {}
 
 func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {

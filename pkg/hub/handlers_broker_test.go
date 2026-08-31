@@ -41,6 +41,8 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	srv, s = testServer(t)
 	ctx := context.Background()
 
+	// CO1: Create users with role bindings. The AK1 kernel evaluates role
+	// bindings, not the User.Role field.
 	alice = &store.User{
 		ID:          tid("user-broker-alice"),
 		Email:       "broker-alice@test.com",
@@ -61,19 +63,25 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	}
 	require.NoError(t, s.CreateUser(ctx, bob))
 
-	admin = &store.User{
-		ID:          tid("user-broker-admin"),
-		Email:       "broker-admin@test.com",
-		DisplayName: "Admin",
-		Role:        store.UserRoleAdmin,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, admin))
+	// CO1: Admin user needs a super-admin role binding for admin bypass.
+	// Use createTestUserWithRole which creates user + role binding together.
+	adminID := tid("user-broker-admin")
+	createTestUserWithRole(t, s, adminID, "broker-admin@test.com", "admin", store.SystemRoleSuperAdmin)
+	adminUser, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+	admin = adminUser
 
-	// Add alice and bob to hub-members group
+	// Add alice, bob, and admin to hub-members group
 	ensureHubMembership(ctx, s, alice.ID)
 	ensureHubMembership(ctx, s, bob.ID)
+	ensureHubMembership(ctx, s, admin.ID)
+
+	// CO1: Grant runtime_broker.read to all users so they can access the
+	// GET /api/v1/runtime-brokers/:id endpoint (the inline authz check
+	// uses resource type "runtime_broker" rather than the canonical "broker").
+	grantUserRuntimeBrokerAccess(t, s, alice.ID)
+	grantUserRuntimeBrokerAccess(t, s, bob.ID)
+	grantUserRuntimeBrokerAccess(t, s, admin.ID)
 
 	// Create a project owned by alice
 	project = &store.Project{
@@ -86,17 +94,11 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
-	// Add bob as a project member so he can create agents (project-level authz)
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-	require.NoError(t, err)
-	_ = s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    membersGroup.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   bob.ID,
-		Role:       store.GroupMemberRoleMember,
-	})
+	// CO1: Add bob as a project member via role binding so he can create
+	// agents (project-level authz).
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleMember)
 
 	// Create a broker owned by alice directly in the store
 	broker = &store.RuntimeBroker{

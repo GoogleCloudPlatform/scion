@@ -41,8 +41,8 @@ export interface PrincipalChangeDetail {
 
 @customElement('scion-principal-picker')
 export class ScionPrincipalPicker extends LitElement {
-  /** Controls which input mode to show: 'user' (autocomplete) or 'agent' (plain text). */
-  @property() principalType: 'user' | 'agent' = 'user';
+  /** Controls which input mode to show: 'user' (autocomplete), 'agent' (plain text), or 'group' (autocomplete). */
+  @property() principalType: 'user' | 'agent' | 'group' = 'user';
 
   /** Current selected principal ID. */
   @property() value = '';
@@ -71,6 +71,8 @@ export class ScionPrincipalPicker extends LitElement {
     super.disconnectedCallback();
     if (this.searchDebounceTimer) clearTimeout(this.searchDebounceTimer);
     if (this.blurTimeoutId) clearTimeout(this.blurTimeoutId);
+    if (this.groupSearchDebounceTimer) clearTimeout(this.groupSearchDebounceTimer);
+    if (this.groupBlurTimeoutId) clearTimeout(this.groupBlurTimeoutId);
   }
 
   static override styles = css`
@@ -140,17 +142,34 @@ export class ScionPrincipalPicker extends LitElement {
       this.searchQuery = '';
       this.searchResults = [];
       this.searchOpen = false;
+      this.groupSearchQuery = '';
+      this.groupSearchResults = [];
+      this.groupSearchOpen = false;
     }
   }
 
+  // Group search autocomplete state
+  @state() private groupSearchQuery = '';
+  @state() private groupSearchResults: Array<{ id: string; name: string; slug: string }> = [];
+  @state() private groupSearchLoading = false;
+  @state() private groupSearchOpen = false;
+  private groupSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private groupBlurTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private groupSearchRequestId = 0;
+  private groupSelectedViaDropdown = false;
+
   private get resolvedLabel(): string {
     if (this.label) return this.label;
-    return this.principalType === 'user' ? 'User' : 'Agent ID';
+    if (this.principalType === 'user') return 'User';
+    if (this.principalType === 'group') return 'Group';
+    return 'Agent ID';
   }
 
   private get resolvedPlaceholder(): string {
     if (this.placeholder) return this.placeholder;
-    return this.principalType === 'user' ? 'Search by name or email...' : 'Enter agent ID';
+    if (this.principalType === 'user') return 'Search by name or email...';
+    if (this.principalType === 'group') return 'Search by group name...';
+    return 'Enter agent ID';
   }
 
   // ---------------------------------------------------------------------------
@@ -244,6 +263,9 @@ export class ScionPrincipalPicker extends LitElement {
     if (this.principalType === 'user') {
       return this.renderUserSearch();
     }
+    if (this.principalType === 'group') {
+      return this.renderGroupSearch();
+    }
     return this.renderAgentInput();
   }
 
@@ -297,6 +319,117 @@ export class ScionPrincipalPicker extends LitElement {
                             ${user.displayName
                               ? html`<span class="user-email">${user.email}</span>`
                               : nothing}
+                          </div>
+                        `
+                      )}
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Group search logic
+  // ---------------------------------------------------------------------------
+
+  private handleGroupSearchInput(e: Event): void {
+    const value = (e.target as HTMLInputElement).value;
+    this.groupSearchQuery = value;
+    this.groupSelectedViaDropdown = false;
+
+    if (this.groupSearchDebounceTimer) {
+      clearTimeout(this.groupSearchDebounceTimer);
+    }
+
+    if (value.trim().length < 2) {
+      this.groupSearchResults = [];
+      this.groupSearchOpen = false;
+      this.emitChange(value.trim(), value.trim());
+      return;
+    }
+
+    this.groupSearchDebounceTimer = setTimeout(() => {
+      void this.searchGroups(value.trim());
+      this.emitChange(value.trim(), '');
+    }, 250);
+  }
+
+  private async searchGroups(query: string): Promise<void> {
+    const requestId = ++this.groupSearchRequestId;
+    this.groupSearchLoading = true;
+    this.groupSearchOpen = true;
+    try {
+      const response = await apiFetch(`/api/v1/groups?search=${encodeURIComponent(query)}&limit=10`);
+      if (requestId !== this.groupSearchRequestId) return;
+      if (response.ok) {
+        const data = (await response.json()) as {
+          groups?: Array<{ id: string; name: string; slug: string }>;
+        };
+        this.groupSearchResults = data.groups || [];
+      }
+    } catch (err) {
+      if (requestId !== this.groupSearchRequestId) return;
+      console.error('Failed to search groups:', err);
+      this.groupSearchResults = [];
+    } finally {
+      if (requestId === this.groupSearchRequestId) {
+        this.groupSearchLoading = false;
+      }
+    }
+  }
+
+  private selectGroup(group: { id: string; name: string; slug: string }): void {
+    this.groupSearchQuery = `${group.name} (${group.slug})`;
+    this.groupSearchOpen = false;
+    this.groupSearchResults = [];
+    this.groupSelectedViaDropdown = true;
+    this.emitChange(group.id, group.name);
+  }
+
+  private renderGroupSearch() {
+    return html`
+      <div class="user-search-container">
+        <sl-input
+          label=${this.resolvedLabel}
+          placeholder=${this.resolvedPlaceholder}
+          value=${this.groupSearchQuery}
+          type="text"
+          autocomplete="off"
+          ?disabled=${this.disabled}
+          @sl-input=${this.handleGroupSearchInput}
+          @sl-focus=${() => {
+            if (this.groupSearchResults.length > 0) this.groupSearchOpen = true;
+          }}
+          @sl-blur=${() => {
+            this.groupBlurTimeoutId = setTimeout(() => {
+              this.groupSearchOpen = false;
+              if (!this.groupSelectedViaDropdown && this.groupSearchQuery.trim()) {
+                this.emitChange(this.groupSearchQuery.trim(), '');
+              }
+            }, 200);
+          }}
+        ></sl-input>
+        ${this.groupSearchOpen
+          ? html`
+              <div class="user-search-dropdown">
+                ${this.groupSearchLoading
+                  ? html`<div class="user-search-loading">
+                      <sl-spinner></sl-spinner> Searching...
+                    </div>`
+                  : this.groupSearchResults.length === 0
+                    ? html`<div class="user-search-empty">No groups found</div>`
+                    : this.groupSearchResults.map(
+                        (group) => html`
+                          <div
+                            class="user-search-option"
+                            @mousedown=${(e: Event) => {
+                              e.preventDefault();
+                              this.selectGroup(group);
+                            }}
+                          >
+                            <span class="user-name">${group.name}</span>
+                            <span class="user-email">${group.slug}</span>
                           </div>
                         `
                       )}

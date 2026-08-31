@@ -92,7 +92,7 @@ func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzReque
 		Reason:         decision.Reason,
 		MatchedPolicy:  decision.MatchedPolicy,
 		MatchedGrant:   decision.MatchedGrant,
-		PolicyID:       decision.PolicyID,
+		PolicyID:       decision.BindingID,
 		Sampled:        sampled,
 	}
 
@@ -166,29 +166,6 @@ func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAu
 	}()
 }
 
-// sanitizePolicySummary returns a compact JSON summary of a policy, safe for audit.
-// No secrets or raw condition values are included.
-func sanitizePolicySummary(p *store.Policy) string {
-	if p == nil {
-		return ""
-	}
-	summary := map[string]interface{}{
-		"name":         p.Name,
-		"effect":       p.Effect,
-		"resourceType": p.ResourceType,
-		"actions":      p.Actions,
-		"scopeType":    p.ScopeType,
-	}
-	if p.ResourceID != "" {
-		summary["resourceId"] = p.ResourceID
-	}
-	b, err := json.Marshal(summary)
-	if err != nil {
-		return fmt.Sprintf(`{"name":%q}`, p.Name)
-	}
-	return string(b)
-}
-
 // =============================================================================
 // Explain API Handler
 // =============================================================================
@@ -244,8 +221,8 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	explainIdentity := identity
 	// Explaining for a different principal reveals authorization internals and
 	// is restricted to users with hub.audit.read (super-admin only). The Decide
-	// check routes through checkAccessForUser, so the step-1 super-admin bypass
-	// grants this automatically without a seed policy.
+	// check evaluates via the AK1 kernel, so the super-admin role binding
+	// grants this automatically.
 	isSuperAdmin := false
 	if user, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.Decide(ctx, AuthzRequest{
@@ -308,7 +285,7 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		Reason:        decision.Reason,
 		MatchedPolicy: decision.MatchedPolicy,
 		MatchedGrant:  decision.MatchedGrant,
-		PolicyID:      decision.PolicyID,
+		PolicyID:      decision.BindingID,
 		Trace:         decision.ExplainTrace,
 	}
 	if resp.Trace == nil {

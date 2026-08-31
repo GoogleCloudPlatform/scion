@@ -71,6 +71,34 @@ func (_c *RoleBindingCreate) SetNillableScopeID(v *string) *RoleBindingCreate {
 	return _c
 }
 
+// SetNotBefore sets the "not_before" field.
+func (_c *RoleBindingCreate) SetNotBefore(v time.Time) *RoleBindingCreate {
+	_c.mutation.SetNotBefore(v)
+	return _c
+}
+
+// SetNillableNotBefore sets the "not_before" field if the given value is not nil.
+func (_c *RoleBindingCreate) SetNillableNotBefore(v *time.Time) *RoleBindingCreate {
+	if v != nil {
+		_c.SetNotBefore(*v)
+	}
+	return _c
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (_c *RoleBindingCreate) SetExpiresAt(v time.Time) *RoleBindingCreate {
+	_c.mutation.SetExpiresAt(v)
+	return _c
+}
+
+// SetNillableExpiresAt sets the "expires_at" field if the given value is not nil.
+func (_c *RoleBindingCreate) SetNillableExpiresAt(v *time.Time) *RoleBindingCreate {
+	if v != nil {
+		_c.SetExpiresAt(*v)
+	}
+	return _c
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_c *RoleBindingCreate) SetCreatedBy(v string) *RoleBindingCreate {
 	_c.mutation.SetCreatedBy(v)
@@ -251,6 +279,14 @@ func (_c *RoleBindingCreate) createSpec() (*RoleBinding, *sqlgraph.CreateSpec) {
 		_spec.SetField(rolebinding.FieldScopeID, field.TypeString, value)
 		_node.ScopeID = value
 	}
+	if value, ok := _c.mutation.NotBefore(); ok {
+		_spec.SetField(rolebinding.FieldNotBefore, field.TypeTime, value)
+		_node.NotBefore = &value
+	}
+	if value, ok := _c.mutation.ExpiresAt(); ok {
+		_spec.SetField(rolebinding.FieldExpiresAt, field.TypeTime, value)
+		_node.ExpiresAt = &value
+	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(rolebinding.FieldCreatedBy, field.TypeString, value)
 		_node.CreatedBy = value
@@ -391,6 +427,42 @@ func (u *RoleBindingUpsert) SetScopeID(v string) *RoleBindingUpsert {
 // UpdateScopeID sets the "scope_id" field to the value that was provided on create.
 func (u *RoleBindingUpsert) UpdateScopeID() *RoleBindingUpsert {
 	u.SetExcluded(rolebinding.FieldScopeID)
+	return u
+}
+
+// SetNotBefore sets the "not_before" field.
+func (u *RoleBindingUpsert) SetNotBefore(v time.Time) *RoleBindingUpsert {
+	u.Set(rolebinding.FieldNotBefore, v)
+	return u
+}
+
+// UpdateNotBefore sets the "not_before" field to the value that was provided on create.
+func (u *RoleBindingUpsert) UpdateNotBefore() *RoleBindingUpsert {
+	u.SetExcluded(rolebinding.FieldNotBefore)
+	return u
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (u *RoleBindingUpsert) ClearNotBefore() *RoleBindingUpsert {
+	u.SetNull(rolebinding.FieldNotBefore)
+	return u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *RoleBindingUpsert) SetExpiresAt(v time.Time) *RoleBindingUpsert {
+	u.Set(rolebinding.FieldExpiresAt, v)
+	return u
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *RoleBindingUpsert) UpdateExpiresAt() *RoleBindingUpsert {
+	u.SetExcluded(rolebinding.FieldExpiresAt)
+	return u
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *RoleBindingUpsert) ClearExpiresAt() *RoleBindingUpsert {
+	u.SetNull(rolebinding.FieldExpiresAt)
 	return u
 }
 
@@ -537,6 +609,48 @@ func (u *RoleBindingUpsertOne) SetScopeID(v string) *RoleBindingUpsertOne {
 func (u *RoleBindingUpsertOne) UpdateScopeID() *RoleBindingUpsertOne {
 	return u.Update(func(s *RoleBindingUpsert) {
 		s.UpdateScopeID()
+	})
+}
+
+// SetNotBefore sets the "not_before" field.
+func (u *RoleBindingUpsertOne) SetNotBefore(v time.Time) *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.SetNotBefore(v)
+	})
+}
+
+// UpdateNotBefore sets the "not_before" field to the value that was provided on create.
+func (u *RoleBindingUpsertOne) UpdateNotBefore() *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.UpdateNotBefore()
+	})
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (u *RoleBindingUpsertOne) ClearNotBefore() *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.ClearNotBefore()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *RoleBindingUpsertOne) SetExpiresAt(v time.Time) *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *RoleBindingUpsertOne) UpdateExpiresAt() *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *RoleBindingUpsertOne) ClearExpiresAt() *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.ClearExpiresAt()
 	})
 }
 
@@ -853,6 +967,48 @@ func (u *RoleBindingUpsertBulk) SetScopeID(v string) *RoleBindingUpsertBulk {
 func (u *RoleBindingUpsertBulk) UpdateScopeID() *RoleBindingUpsertBulk {
 	return u.Update(func(s *RoleBindingUpsert) {
 		s.UpdateScopeID()
+	})
+}
+
+// SetNotBefore sets the "not_before" field.
+func (u *RoleBindingUpsertBulk) SetNotBefore(v time.Time) *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.SetNotBefore(v)
+	})
+}
+
+// UpdateNotBefore sets the "not_before" field to the value that was provided on create.
+func (u *RoleBindingUpsertBulk) UpdateNotBefore() *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.UpdateNotBefore()
+	})
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (u *RoleBindingUpsertBulk) ClearNotBefore() *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.ClearNotBefore()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *RoleBindingUpsertBulk) SetExpiresAt(v time.Time) *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *RoleBindingUpsertBulk) UpdateExpiresAt() *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *RoleBindingUpsertBulk) ClearExpiresAt() *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.ClearExpiresAt()
 	})
 }
 

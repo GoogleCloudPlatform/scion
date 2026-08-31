@@ -2438,14 +2438,16 @@ type RoleDefinition struct {
 
 // RoleBinding connects a principal to a role definition, optionally scoped.
 type RoleBinding struct {
-	ID               string    `json:"id"`
-	RoleDefinitionID string    `json:"roleDefinitionId"`
-	PrincipalType    string    `json:"principalType"` // "user", "agent"
-	PrincipalID      string    `json:"principalId"`
-	ScopeType        string    `json:"scopeType"` // "system", "project"
-	ScopeID          string    `json:"scopeId"`   // "" for system, project ID for project
-	CreatedBy        string    `json:"createdBy"`
-	CreatedAt        time.Time `json:"createdAt"`
+	ID               string     `json:"id"`
+	RoleDefinitionID string     `json:"roleDefinitionId"`
+	PrincipalType    string     `json:"principalType"` // "user", "agent", "group"
+	PrincipalID      string     `json:"principalId"`
+	ScopeType        string     `json:"scopeType"` // "system", "project"
+	ScopeID          string     `json:"scopeId"`   // "" for system, project ID for project
+	NotBefore        *time.Time `json:"notBefore"` // Binding is inactive before this time (kernel evaluates)
+	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
+	CreatedBy        string     `json:"createdBy"`
+	CreatedAt        time.Time  `json:"createdAt"`
 }
 
 // ProjectMembership is a convenience view of role bindings scoped to a project.
@@ -2491,6 +2493,7 @@ const (
 const (
 	RoleBindingPrincipalUser  = "user"
 	RoleBindingPrincipalAgent = "agent"
+	RoleBindingPrincipalGroup = "group"
 )
 
 // =============================================================================
@@ -2707,4 +2710,35 @@ const (
 	LimitMaxAgentsPerProject = "max_agents_per_project"
 	LimitMaxProjectsPerUser  = "max_projects_per_user"
 	LimitMaxMembersPerGroup  = "max_members_per_group"
+)
+
+// =============================================================================
+// Access Constraints (AC1 — Operator Access Constraint Backend)
+// =============================================================================
+
+// AccessConstraint is a named maximum-permissions boundary. It can only
+// reduce otherwise granted authority — it cannot create authority.
+type AccessConstraint struct {
+	ID                   string     `json:"id"`
+	Name                 string     `json:"name"`
+	SubjectKind          string     `json:"subjectKind"`          // "principal", "group_closure", "all_principals"
+	SubjectPrincipalType *string    `json:"subjectPrincipalType"` // "user", "agent", "group" (when subjectKind=principal)
+	SubjectPrincipalID   *string    `json:"subjectPrincipalId"`   // Principal ID (when subjectKind=principal)
+	SubjectGroupID       *string    `json:"subjectGroupId"`       // Group ID (when subjectKind=group_closure)
+	ScopeType            string     `json:"scopeType"`            // "system" or "project"
+	ScopeID              string     `json:"scopeId"`              // "" for system, project ID for project
+	MaximumPermissions   []string   `json:"maximumPermissions"`   // Allowlist of permission IDs
+	NotBefore            *time.Time `json:"notBefore"`            // Constraint inactive before this time
+	ExpiresAt            *time.Time `json:"expiresAt"`            // Constraint inactive after this time
+	Disabled             bool       `json:"disabled"`             // True when deactivated by offline recovery
+	CreatedBy            string     `json:"createdBy"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// AccessConstraint subject kinds
+const (
+	ConstraintSubjectPrincipal     = "principal"
+	ConstraintSubjectGroupClosure  = "group_closure"
+	ConstraintSubjectAllPrincipals = "all_principals"
 )

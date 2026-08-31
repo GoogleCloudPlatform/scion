@@ -246,52 +246,6 @@ func (u *UserWithCapabilities) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// PolicyWithCapabilities wraps a store.Policy with capability annotations.
-type PolicyWithCapabilities struct {
-	store.Policy
-	Cap *Capabilities `json:"_capabilities,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Policy.
-func (p PolicyWithCapabilities) MarshalJSON() ([]byte, error) {
-	type PolicyAlias store.Policy
-	return json.Marshal(&struct {
-		PolicyAlias
-		Cap     *Capabilities `json:"_capabilities,omitempty"`
-		GroveID string        `json:"groveId,omitempty"`
-	}{
-		PolicyAlias: PolicyAlias(p.Policy),
-		Cap:         p.Cap,
-		// For policies, GroveID is the ScopeID if ScopeType is "project"
-		GroveID: func() string {
-			if p.ScopeType == store.PolicyScopeProject {
-				return p.ScopeID
-			}
-			return ""
-		}(),
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to handle embedded store.Policy and legacy fields.
-func (p *PolicyWithCapabilities) UnmarshalJSON(data []byte) error {
-	type PolicyAlias store.Policy
-	aux := &struct {
-		*PolicyAlias
-		Cap     *Capabilities `json:"_capabilities,omitempty"`
-		GroveID string        `json:"groveId,omitempty"`
-	}{
-		PolicyAlias: (*PolicyAlias)(&p.Policy),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	p.Cap = aux.Cap
-	if p.ScopeType == store.PolicyScopeProject && p.ScopeID == "" && aux.GroveID != "" {
-		p.ScopeID = aux.GroveID
-	}
-	return nil
-}
-
 // RuntimeBrokerWithCapabilities wraps a store.RuntimeBroker with capability annotations.
 type RuntimeBrokerWithCapabilities struct {
 	store.RuntimeBroker

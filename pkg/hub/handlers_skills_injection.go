@@ -820,76 +820,25 @@ func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 // Progeny policy helpers for skill injections
 // =============================================================================
+//
+// RG1 migration note: The RelationshipGrantResolver (authz_relationship.go)
+// provides the target replacement for these DelegatedFrom Policy rows. At CO1
+// cutover, the resolver is wired into the evaluator and these functions become
+// no-ops. Until then, Policy rows are still created here so that the existing
+// checkDelegation path (authz.go) continues to grant progeny access for newly
+// created resources.
 
 // skillProgenyPolicyName returns the canonical policy name for a progeny skill injection policy.
 func skillProgenyPolicyName(skillInjectionID string) string {
 	return "progeny-skill-access:" + skillInjectionID
 }
 
-// ensureSkillProgenyPolicy creates or deletes the implicit progeny policy for a
-// skill injection based on the allowProgeny flag.
-func (s *Server) ensureSkillProgenyPolicy(ctx context.Context, si *store.SkillInjection) {
-	if si.Scope != store.SkillInjectionScopeUser {
-		return
-	}
+// ensureSkillProgenyPolicy is a no-op after CO1 cutover. Progeny access is
+// now handled by the RelationshipGrantResolver (authz_relationship.go).
+func (s *Server) ensureSkillProgenyPolicy(_ context.Context, _ *store.SkillInjection) {}
 
-	policyName := skillProgenyPolicyName(si.ID)
-
-	if si.AllowProgeny {
-		existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-		if err != nil {
-			s.envSecretLog.Warn("failed to check for existing skill progeny policy", "skillInjection", si.SkillURI, "error", err)
-			return
-		}
-		if existing.TotalCount > 0 {
-			return
-		}
-
-		policy := &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         policyName,
-			Description:  "Implicit policy granting progeny agents access to skill injection " + si.SkillURI,
-			ScopeType:    store.PolicyScopeResource,
-			ScopeID:      si.ID,
-			ResourceType: "skill_injection",
-			ResourceID:   si.ID,
-			Actions:      []string{"read"},
-			Effect:       store.PolicyEffectAllow,
-			Conditions: &store.PolicyConditions{
-				DelegatedFrom: &store.DelegatedFromCondition{
-					PrincipalType: "user",
-					PrincipalID:   si.CreatedBy,
-				},
-			},
-			Labels: map[string]string{
-				"scion.dev/managed-by":          "progeny-skill-access",
-				"scion.dev/skill-injection-id":  si.ID,
-				"scion.dev/skill-injection-uri": si.SkillURI,
-			},
-			CreatedBy: si.CreatedBy,
-		}
-		if err := s.store.CreatePolicy(ctx, policy); err != nil {
-			s.envSecretLog.Warn("failed to create skill progeny policy", "skillInjection", si.SkillURI, "error", err)
-		}
-	} else {
-		s.deleteSkillProgenyPolicy(ctx, si.ID)
-	}
-}
-
-// deleteSkillProgenyPolicy removes the implicit progeny policy for a skill injection by its ID.
-func (s *Server) deleteSkillProgenyPolicy(ctx context.Context, skillInjectionID string) {
-	policyName := skillProgenyPolicyName(skillInjectionID)
-	existing, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	if err != nil {
-		s.envSecretLog.Warn("failed to look up skill progeny policy for deletion", "skillInjectionID", skillInjectionID, "error", err)
-		return
-	}
-	for _, p := range existing.Items {
-		if err := s.store.DeletePolicy(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.envSecretLog.Warn("failed to delete skill progeny policy", "policyID", p.ID, "error", err)
-		}
-	}
-}
+// deleteSkillProgenyPolicy is a no-op after CO1 cutover.
+func (s *Server) deleteSkillProgenyPolicy(_ context.Context, _ string) {}
 
 // =============================================================================
 // Shared helpers

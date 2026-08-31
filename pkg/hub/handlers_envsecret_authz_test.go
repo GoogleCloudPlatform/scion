@@ -441,6 +441,7 @@ func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 
 func TestEnvVar_BrokerScope_AdminAccess(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{

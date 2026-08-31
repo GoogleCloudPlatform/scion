@@ -16,6 +16,7 @@ import (
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -80,6 +81,8 @@ type Client struct {
 	config
 	// Schema is the client for creating, migrating and dropping schema.
 	Schema *migrate.Schema
+	// AccessConstraint is the client for interacting with the AccessConstraint builders.
+	AccessConstraint *AccessConstraintClient
 	// AccessPolicy is the client for interacting with the AccessPolicy builders.
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
@@ -205,6 +208,7 @@ func NewClient(opts ...Option) *Client {
 
 func (c *Client) init() {
 	c.Schema = migrate.NewSchema(c.driver)
+	c.AccessConstraint = NewAccessConstraintClient(c.config)
 	c.AccessPolicy = NewAccessPolicyClient(c.config)
 	c.Agent = NewAgentClient(c.config)
 	c.AgentCredential = NewAgentCredentialClient(c.config)
@@ -354,6 +358,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 	return &Tx{
 		ctx:                      ctx,
 		config:                   cfg,
+		AccessConstraint:         NewAccessConstraintClient(cfg),
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
@@ -430,6 +435,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 	return &Tx{
 		ctx:                      ctx,
 		config:                   cfg,
+		AccessConstraint:         NewAccessConstraintClient(cfg),
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
@@ -493,7 +499,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 // Debug returns a new debug-client. It's used to get verbose logging on specific operations.
 //
 //	client.Debug().
-//		AccessPolicy.
+//		AccessConstraint.
 //		Query().
 //		Count(ctx)
 func (c *Client) Debug() *Client {
@@ -516,15 +522,16 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.AccessPolicy, c.Agent, c.AgentCredential, c.AgentSessionMetrics,
-		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
-		c.BrokerSecret, c.ChatLinkCode, c.Conversation, c.ConversationParticipant,
-		c.DecisionAudit, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
+		c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
+		c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode, c.Conversation,
+		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RoleBinding, c.RoleDefinition,
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
@@ -539,15 +546,16 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.AccessPolicy, c.Agent, c.AgentCredential, c.AgentSessionMetrics,
-		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
-		c.BrokerSecret, c.ChatLinkCode, c.Conversation, c.ConversationParticipant,
-		c.DecisionAudit, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
+		c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
+		c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode, c.Conversation,
+		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RoleBinding, c.RoleDefinition,
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
@@ -561,6 +569,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 // Mutate implements the ent.Mutator interface.
 func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 	switch m := m.(type) {
+	case *AccessConstraintMutation:
+		return c.AccessConstraint.mutate(ctx, m)
 	case *AccessPolicyMutation:
 		return c.AccessPolicy.mutate(ctx, m)
 	case *AgentMutation:
@@ -677,6 +687,139 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UserAccessToken.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("ent: unknown mutation type %T", m)
+	}
+}
+
+// AccessConstraintClient is a client for the AccessConstraint schema.
+type AccessConstraintClient struct {
+	config
+}
+
+// NewAccessConstraintClient returns a client for the AccessConstraint from the given config.
+func NewAccessConstraintClient(c config) *AccessConstraintClient {
+	return &AccessConstraintClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `accessconstraint.Hooks(f(g(h())))`.
+func (c *AccessConstraintClient) Use(hooks ...Hook) {
+	c.hooks.AccessConstraint = append(c.hooks.AccessConstraint, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `accessconstraint.Intercept(f(g(h())))`.
+func (c *AccessConstraintClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AccessConstraint = append(c.inters.AccessConstraint, interceptors...)
+}
+
+// Create returns a builder for creating a AccessConstraint entity.
+func (c *AccessConstraintClient) Create() *AccessConstraintCreate {
+	mutation := newAccessConstraintMutation(c.config, OpCreate)
+	return &AccessConstraintCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AccessConstraint entities.
+func (c *AccessConstraintClient) CreateBulk(builders ...*AccessConstraintCreate) *AccessConstraintCreateBulk {
+	return &AccessConstraintCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AccessConstraintClient) MapCreateBulk(slice any, setFunc func(*AccessConstraintCreate, int)) *AccessConstraintCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AccessConstraintCreateBulk{err: fmt.Errorf("calling to AccessConstraintClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AccessConstraintCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AccessConstraintCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AccessConstraint.
+func (c *AccessConstraintClient) Update() *AccessConstraintUpdate {
+	mutation := newAccessConstraintMutation(c.config, OpUpdate)
+	return &AccessConstraintUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AccessConstraintClient) UpdateOne(_m *AccessConstraint) *AccessConstraintUpdateOne {
+	mutation := newAccessConstraintMutation(c.config, OpUpdateOne, withAccessConstraint(_m))
+	return &AccessConstraintUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AccessConstraintClient) UpdateOneID(id uuid.UUID) *AccessConstraintUpdateOne {
+	mutation := newAccessConstraintMutation(c.config, OpUpdateOne, withAccessConstraintID(id))
+	return &AccessConstraintUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AccessConstraint.
+func (c *AccessConstraintClient) Delete() *AccessConstraintDelete {
+	mutation := newAccessConstraintMutation(c.config, OpDelete)
+	return &AccessConstraintDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AccessConstraintClient) DeleteOne(_m *AccessConstraint) *AccessConstraintDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AccessConstraintClient) DeleteOneID(id uuid.UUID) *AccessConstraintDeleteOne {
+	builder := c.Delete().Where(accessconstraint.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AccessConstraintDeleteOne{builder}
+}
+
+// Query returns a query builder for AccessConstraint.
+func (c *AccessConstraintClient) Query() *AccessConstraintQuery {
+	return &AccessConstraintQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAccessConstraint},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AccessConstraint entity by its id.
+func (c *AccessConstraintClient) Get(ctx context.Context, id uuid.UUID) (*AccessConstraint, error) {
+	return c.Query().Where(accessconstraint.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AccessConstraintClient) GetX(ctx context.Context, id uuid.UUID) *AccessConstraint {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AccessConstraintClient) Hooks() []Hook {
+	return c.hooks.AccessConstraint
+}
+
+// Interceptors returns the client interceptors.
+func (c *AccessConstraintClient) Interceptors() []Interceptor {
+	return c.inters.AccessConstraint
+}
+
+func (c *AccessConstraintClient) mutate(ctx context.Context, m *AccessConstraintMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AccessConstraintCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AccessConstraintUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AccessConstraintUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AccessConstraintDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AccessConstraint mutation op: %q", m.Op())
 	}
 }
 
@@ -8680,13 +8823,13 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		AccessPolicy, Agent, AgentCredential, AgentSessionMetrics, AllowListEntry,
-		ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode,
-		Conversation, ConversationParticipant, DecisionAudit, DelegationEdge,
-		EntitlementBinding, EnvVar, GCPServiceAccount, GitHubResolutionCache,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentSessionMetrics,
+		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret,
+		ChatLinkCode, Conversation, ConversationParticipant, DecisionAudit,
+		DelegationEdge, EntitlementBinding, EnvVar, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
@@ -8695,13 +8838,13 @@ type (
 		UsageReservation, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
-		AccessPolicy, Agent, AgentCredential, AgentSessionMetrics, AllowListEntry,
-		ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode,
-		Conversation, ConversationParticipant, DecisionAudit, DelegationEdge,
-		EntitlementBinding, EnvVar, GCPServiceAccount, GitHubResolutionCache,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentSessionMetrics,
+		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret,
+		ChatLinkCode, Conversation, ConversationParticipant, DecisionAudit,
+		DelegationEdge, EntitlementBinding, EnvVar, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,

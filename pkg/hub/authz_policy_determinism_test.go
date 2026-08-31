@@ -19,21 +19,23 @@ package hub
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestPolicyDeterministicOrdering verifies that policies inserted in different
-// orders produce identical authorization decisions.
+// TestPolicyDeterministicOrdering verifies that role bindings inserted in
+// different orders produce identical authorization decisions. CO1: Policies
+// replaced by role bindings — the AK1 kernel only evaluates role bindings.
 func TestPolicyDeterministicOrdering(t *testing.T) {
-	// Test multiple insertion orders
+	// Test multiple insertion orders of role bindings with different permissions.
+	// All three bindings grant agent.read, so the decision should always be
+	// "allowed" regardless of insertion order.
 	orders := [][]string{
-		{"policy-1", "policy-2", "policy-3"},
-		{"policy-3", "policy-1", "policy-2"},
-		{"policy-2", "policy-3", "policy-1"},
+		{"binding-1", "binding-2", "binding-3"},
+		{"binding-3", "binding-1", "binding-2"},
+		{"binding-2", "binding-3", "binding-1"},
 	}
 
 	var expectedDecision *Decision
@@ -41,50 +43,30 @@ func TestPolicyDeterministicOrdering(t *testing.T) {
 		authz, s := authzTestSetup(t)
 		ctx := context.Background()
 
-		// Create user and group
+		// Create user
 		require.NoError(t, s.CreateUser(ctx, &store.User{
 			ID: tid("user-1"), Email: "user1@test.com", DisplayName: "User 1", Role: "member", Status: "active",
 		}))
 
-		require.NoError(t, s.CreateGroup(ctx, &store.Group{
-			ID: tid("group-1"), Slug: "test-group", Name: "Test Group",
-		}))
-
-		// Create policies in this order
-		policies := map[string]*store.Policy{
-			"policy-1": {
-				ID: tid("policy-1"), Name: "Hub Allow", ScopeType: "hub",
-				ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-				Priority: 10, PolicyKind: store.PolicyKindExplicit,
-			},
-			"policy-2": {
-				ID: tid("policy-2"), Name: "Hub Deny", ScopeType: "hub",
-				ResourceType: "agent", Actions: []string{"read"}, Effect: "deny",
-				Priority: 20, PolicyKind: store.PolicyKindExplicit,
-			},
-			"policy-3": {
-				ID: tid("policy-3"), Name: "Hub Allow High", ScopeType: "hub",
-				ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-				Priority: 30, PolicyKind: store.PolicyKindExplicit,
-			},
+		// Create three role definitions with agent.read permission
+		roleDefs := map[string]*store.RoleDefinition{
+			"binding-1": createTestRoleDefinition(t, s, "role-det-1", store.RoleScopeSystem, []string{"agent.read"}),
+			"binding-2": createTestRoleDefinition(t, s, "role-det-2", store.RoleScopeSystem, []string{"agent.read", "agent.list"}),
+			"binding-3": createTestRoleDefinition(t, s, "role-det-3", store.RoleScopeSystem, []string{"agent.read", "agent.update"}),
 		}
 
-		// Insert in the specified order
-		for _, policyID := range order {
-			policy := policies[policyID]
-			require.NoError(t, s.CreatePolicy(ctx, policy))
-			require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-				PolicyID: policy.ID, PrincipalType: "group", PrincipalID: tid("group-1"),
-			}))
+		// Insert role bindings in the specified order
+		for _, bindingID := range order {
+			rd := roleDefs[bindingID]
+			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: rd.ID,
+				PrincipalType:    store.RoleBindingPrincipalUser,
+				PrincipalID:      tid("user-1"),
+				ScopeType:        store.RoleScopeSystem,
+				CreatedBy:        "test",
+			})
+			require.NoError(t, err)
 		}
-
-		// Add user to group
-		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-			GroupID:    tid("group-1"),
-			MemberID:   tid("user-1"),
-			MemberType: store.GroupMemberTypeUser,
-			Role:       store.GroupMemberRoleMember,
-		}))
 
 		// Evaluate
 		user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
@@ -99,18 +81,22 @@ func TestPolicyDeterministicOrdering(t *testing.T) {
 			// Subsequent iterations: verify same decision
 			assert.Equal(t, expectedDecision.Allowed, decision.Allowed,
 				"Order %d: decision should be deterministic", i)
-			assert.Equal(t, expectedDecision.PolicyID, decision.PolicyID,
-				"Order %d: matched policy should be deterministic", i)
+			assert.Equal(t, expectedDecision.Reason, decision.Reason,
+				"Order %d: reason should be deterministic", i)
 		}
 	}
 
-	// The highest priority (30) should win
+	// All role bindings grant agent.read, so the decision should be allowed.
 	require.NotNil(t, expectedDecision)
-	assert.True(t, expectedDecision.Allowed, "highest priority policy should win")
-	assert.Equal(t, tid("policy-3"), expectedDecision.PolicyID)
+	assert.True(t, expectedDecision.Allowed, "role binding granting agent.read should allow access")
+	assert.Equal(t, "role binding grant", expectedDecision.Reason)
 }
 
-// TestPolicyPriorityPrecedence verifies that higher priority wins at the same scope.
+// TestPolicyPriorityPrecedence verifies that in the AK1 kernel, role bindings
+// are additive (allow-only). A user with a role binding granting agent.read can
+// read agents; without agent.delete permission, delete is denied.
+// CO1: The AK1 kernel has no policy priority or deny effect. Role bindings
+// only grant — they never deny.
 func TestPolicyPriorityPrecedence(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -119,38 +105,35 @@ func TestPolicyPriorityPrecedence(t *testing.T) {
 		ID: tid("user-1"), Email: "user1@test.com", DisplayName: "User 1", Role: "member", Status: "active",
 	}))
 
-	// Create two policies at same scope, different priorities
-	lowPriorityPolicy := &store.Policy{
-		ID: tid("policy-low"), Name: "Low Priority Allow", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-		Priority: 10, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, lowPriorityPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-low"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
-
-	highPriorityPolicy := &store.Policy{
-		ID: tid("policy-high"), Name: "High Priority Deny", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny",
-		Priority: 100, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, highPriorityPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-high"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// Create a role with only agent.read (no agent.delete)
+	rd := createTestRoleDefinition(t, s, "prio-agent-read", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-1"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
+	// agent.read is granted
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
+	assert.True(t, decision.Allowed, "role binding with agent.read should allow read")
+	assert.Equal(t, "role binding grant", decision.Reason)
 
-	// Higher priority policy should win
-	assert.False(t, decision.Allowed, "higher priority deny should win")
-	assert.Equal(t, tid("policy-high"), decision.PolicyID)
+	// agent.delete is not granted — denied because bindings do not include the permission
+	decision = authz.CheckAccess(ctx, user, resource, ActionDelete)
+	assert.False(t, decision.Allowed, "without agent.delete permission, delete should be denied")
+	assert.Contains(t, decision.Reason, "agent.delete")
 }
 
-// TestPolicyKindPrecedence verifies that explicit wins over default at same scope and priority.
+// TestPolicyKindPrecedence verifies that multiple role bindings are additive.
+// CO1: The AK1 kernel has no policy kind (explicit vs default) concept.
+// Multiple role bindings combine additively — if any binding grants the
+// requested permission, access is allowed.
 func TestPolicyKindPrecedence(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -159,39 +142,40 @@ func TestPolicyKindPrecedence(t *testing.T) {
 		ID: tid("user-1"), Email: "user1@test.com", DisplayName: "User 1", Role: "member", Status: "active",
 	}))
 
-	// Create default policy (deny)
-	defaultPolicy := &store.Policy{
-		ID: tid("policy-default"), Name: "Default Deny", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny",
-		Priority: 10, PolicyKind: store.PolicyKindDefault,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, defaultPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-default"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// Create first role with agent.list only
+	rd1 := createTestRoleDefinition(t, s, "kind-agent-list", store.RoleScopeSystem, []string{"agent.list"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd1.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-1"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
-	// Create explicit policy at same priority (allow)
-	explicitPolicy := &store.Policy{
-		ID: tid("policy-explicit"), Name: "Explicit Allow", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-		Priority: 10, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, explicitPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-explicit"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// Create second role with agent.read
+	rd2 := createTestRoleDefinition(t, s, "kind-agent-read", store.RoleScopeSystem, []string{"agent.read"})
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd2.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-1"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
+	// agent.read is granted by the second role binding (additive)
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
-
-	// Explicit policy should win over default at same priority
-	assert.True(t, decision.Allowed, "explicit policy should win over default")
-	assert.Equal(t, tid("policy-explicit"), decision.PolicyID)
+	assert.True(t, decision.Allowed, "additive role bindings should grant agent.read")
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
-// TestPolicyLocalOverride verifies that project-scoped policies override hub-scoped policies.
+// TestPolicyLocalOverride verifies that a project-scoped role binding grants
+// access within its project. CO1: The AK1 kernel evaluates project-scoped
+// bindings for resources within the project.
 func TestPolicyLocalOverride(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -204,40 +188,24 @@ func TestPolicyLocalOverride(t *testing.T) {
 		ID: tid("project-1"), Slug: "test-project", Name: "Test Project",
 	}))
 
-	// Create hub-scoped deny policy
-	hubPolicy := &store.Policy{
-		ID: tid("policy-hub"), Name: "Hub Deny", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"delete"}, Effect: "deny",
-		Priority: 100, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, hubPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-hub"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
-
-	// Create project-scoped allow policy (lower priority)
-	projectPolicy := &store.Policy{
-		ID: tid("policy-project"), Name: "Project Allow", ScopeType: "project",
-		ScopeID: tid("project-1"), ResourceType: "agent", Actions: []string{"delete"}, Effect: "allow",
-		Priority: 10, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-project"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// Create a project-scoped role binding granting agent.delete (project-owner has delete)
+	createTestUserWithProjectRole(t, s, tid("user-1"), "user1@test.com", tid("project-1"), store.ProjectRoleOwner)
 
 	user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1"), ParentType: "project", ParentID: tid("project-1")}
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionDelete)
 
-	// Project-scoped policy should override hub-scoped policy (local override)
-	assert.True(t, decision.Allowed, "project policy should override hub policy")
-	assert.Equal(t, tid("policy-project"), decision.PolicyID)
+	// Project-scoped role binding should grant access within the project
+	assert.True(t, decision.Allowed, "project-scoped role binding should grant access")
 	assert.Equal(t, "project", decision.Scope)
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
-// TestPolicyResourceOverride verifies that resource-scoped policies override project and hub policies.
+// TestPolicyResourceOverride verifies that a user without a role binding for
+// the requested permission on a resource is denied, even if they have
+// bindings for other permissions. CO1: The AK1 kernel has no resource-scoped
+// policies. Access is determined by system- and project-scoped role bindings.
 func TestPolicyResourceOverride(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -250,51 +218,26 @@ func TestPolicyResourceOverride(t *testing.T) {
 		ID: tid("project-1"), Slug: "test-project", Name: "Test Project",
 	}))
 
-	// Create hub-scoped allow policy
-	hubPolicy := &store.Policy{
-		ID: tid("policy-hub"), Name: "Hub Allow", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"delete"}, Effect: "allow",
-		Priority: 100, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, hubPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-hub"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
-
-	// Create project-scoped allow policy
-	projectPolicy := &store.Policy{
-		ID: tid("policy-project"), Name: "Project Allow", ScopeType: "project",
-		ScopeID: tid("project-1"), ResourceType: "agent", Actions: []string{"delete"}, Effect: "allow",
-		Priority: 50, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-project"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
-
-	// Create resource-scoped deny policy (lowest priority)
-	resourcePolicy := &store.Policy{
-		ID: tid("policy-resource"), Name: "Resource Deny", ScopeType: "resource",
-		ResourceType: "agent", ResourceID: tid("agent-1"), Actions: []string{"delete"}, Effect: "deny",
-		Priority: 1, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, resourcePolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-resource"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// Give the user project-member role (read/list only, no delete)
+	createTestUserWithProjectRole(t, s, tid("user-1"), "user1@test.com", tid("project-1"), store.ProjectRoleMember)
 
 	user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1"), ParentType: "project", ParentID: tid("project-1")}
 
-	decision := authz.CheckAccess(ctx, user, resource, ActionDelete)
+	// Read should be allowed (project-member has agent.read)
+	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
+	assert.True(t, decision.Allowed, "project member should be able to read agents")
 
-	// Resource-scoped policy should override both project and hub policies
-	assert.False(t, decision.Allowed, "resource policy should override broader scopes")
-	assert.Equal(t, tid("policy-resource"), decision.PolicyID)
-	assert.Equal(t, "resource", decision.Scope)
+	// Delete should be denied (project-member does not have agent.delete)
+	decision = authz.CheckAccess(ctx, user, resource, ActionDelete)
+	assert.False(t, decision.Allowed, "project member without agent.delete should be denied")
+	assert.Contains(t, decision.Reason, "agent.delete")
 }
 
-// TestPolicyStableTiebreaker verifies that creation time and ID provide stable ordering.
+// TestPolicyStableTiebreaker verifies that multiple role bindings granting the
+// same permission produce a consistent allowed decision. CO1: The AK1 kernel
+// has no tiebreaker concept — role bindings are additive and any matching
+// binding grants access.
 func TestPolicyStableTiebreaker(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -303,37 +246,37 @@ func TestPolicyStableTiebreaker(t *testing.T) {
 		ID: tid("user-1"), Email: "user1@test.com", DisplayName: "User 1", Role: "member", Status: "active",
 	}))
 
-	// Create first policy
-	policy1 := &store.Policy{
-		ID: tid("policy-1"), Name: "First Policy", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny",
-		Priority: 10, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy1))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-1"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// Create two role definitions both granting agent.read
+	rd1 := createTestRoleDefinition(t, s, "tie-role-1", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd1.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-1"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
-	// Wait to ensure different creation timestamp
-	time.Sleep(10 * time.Millisecond)
-
-	// Create second policy with same scope, priority, and kind
-	policy2 := &store.Policy{
-		ID: tid("policy-2"), Name: "Second Policy", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-		Priority: 10, PolicyKind: store.PolicyKindExplicit,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy2))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-2"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	rd2 := createTestRoleDefinition(t, s, "tie-role-2", store.RoleScopeSystem, []string{"agent.read", "agent.update"})
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd2.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-1"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
+	// Both bindings grant agent.read — decision should be allowed
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
+	assert.True(t, decision.Allowed, "multiple bindings granting agent.read should allow access")
+	assert.Equal(t, "role binding grant", decision.Reason)
 
-	// Later-created policy should win (policy-2)
-	assert.True(t, decision.Allowed, "later-created policy should win")
-	assert.Equal(t, tid("policy-2"), decision.PolicyID)
+	// agent.update is also granted by the second binding
+	decision = authz.CheckAccess(ctx, user, resource, ActionUpdate)
+	assert.True(t, decision.Allowed, "second binding should also grant agent.update")
+	assert.Equal(t, "role binding grant", decision.Reason)
 }

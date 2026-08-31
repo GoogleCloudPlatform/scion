@@ -20,14 +20,15 @@ const (
 // assistantDenied lists commands removed in assistant mode (relative to human).
 // Uses dot-separated command paths: "hub.auth", "config.migrate", etc.
 var assistantDenied = map[string]bool{
-	"hub.auth":         true,
-	"hub.token":        true,
-	"grove.reconnect":  true,
-	"config.migrate":   true,
-	"config.cd-config": true,
-	"config.cd-grove":  true,
-	"cdw":              true,
-	"clean":            true,
+	"hub.auth":             true,
+	"hub.token":            true,
+	"grove.reconnect":      true,
+	"config.migrate":       true,
+	"config.cd-config":     true,
+	"config.cd-grove":      true,
+	"cdw":                  true,
+	"clean":                true,
+	"server.recover-authz": true,
 }
 
 // agentAllowed lists commands available in agent mode.

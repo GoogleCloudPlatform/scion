@@ -132,11 +132,11 @@ func TestAuthorizeSSESubjects_MixedAllowedDenied_AllFail(t *testing.T) {
 }
 
 func TestAuthorizeSSESubjects_ProjectSubject_AdminAllowed(t *testing.T) {
+	// CO1: admin role alone is insufficient — needs super-admin role binding.
 	ws := &WebServer{
-		authzService: NewAuthzService(&mockAuthzStore{}, nil),
+		authzService: NewAuthzService(mockSuperAdminStore("admin-1"), nil),
 	}
 	req := httptest.NewRequest("GET", "/events", nil)
-	// Admin role gets short-circuited in ComputeCapabilitiesBatch.
 	user := &webSessionUser{UserID: "admin-1", Email: "admin@b.com", Role: "admin"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
@@ -260,13 +260,44 @@ func TestValidateSSESubjects_WildcardRootRejected(t *testing.T) {
 	}
 }
 
+// mockSuperAdminStore returns a mockAuthzStore pre-configured with a
+// super-admin role binding for the given user ID. This allows the AK1
+// kernel to grant all permissions without a real database.
+func mockSuperAdminStore(userID string) *mockAuthzStore {
+	rdID := "mock-rd-super-admin"
+	return &mockAuthzStore{
+		roleBindings: []*store.RoleBinding{{
+			ID:               "mock-rb-super-admin",
+			RoleDefinitionID: rdID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      userID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemReconcileCreatedBy,
+		}},
+		roleDefinitions: map[string]*store.RoleDefinition{
+			rdID: {
+				ID:          rdID,
+				Name:        store.SystemRoleSuperAdmin,
+				ScopeType:   store.RoleScopeSystem,
+				Permissions: allPermissionIDs(),
+			},
+		},
+	}
+}
+
 // --- mock store for authz tests ---
 
 // mockAuthzStore satisfies store.Store for NewAuthzService. Only the methods
 // called by ComputeCapabilitiesBatch's dependency chain are implemented;
 // the embedded interface satisfies everything else at the signature level.
+//
+// Optional fields allow tests to inject role bindings and role definitions
+// so the CO1 kernel can resolve permissions without a real database.
 type mockAuthzStore struct {
 	store.Store // embed to satisfy interface
+
+	roleBindings    []*store.RoleBinding
+	roleDefinitions map[string]*store.RoleDefinition
 }
 
 func (m *mockAuthzStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
@@ -274,10 +305,6 @@ func (m *mockAuthzStore) GetEffectiveGroups(_ context.Context, _ string) ([]stri
 }
 
 func (m *mockAuthzStore) GetEffectiveGroupsForAgent(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-
-func (m *mockAuthzStore) GetPoliciesForPrincipals(_ context.Context, _ []store.PrincipalRef) ([]store.Policy, error) {
 	return nil, nil
 }
 
@@ -305,6 +332,31 @@ func (m *mockAuthzStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ st
 	return nil, nil
 }
 
-func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, _ string) (*store.RoleDefinition, error) {
+func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, id string) (*store.RoleDefinition, error) {
+	if m.roleDefinitions != nil {
+		if rd, ok := m.roleDefinitions[id]; ok {
+			return rd, nil
+		}
+	}
 	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	result := make(map[string]*store.RoleDefinition, len(ids))
+	for _, id := range ids {
+		if m.roleDefinitions != nil {
+			if rd, ok := m.roleDefinitions[id]; ok {
+				result[id] = rd
+			}
+		}
+	}
+	return result, nil
+}
+
+func (m *mockAuthzStore) ListRoleBindingsForPrincipals(_ context.Context, _ []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
+	return m.roleBindings, nil
+}
+
+func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*store.AccessConstraint, error) {
+	return nil, nil
 }

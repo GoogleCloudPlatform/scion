@@ -327,20 +327,23 @@ func TestSchedulerNoHandlers(t *testing.T) {
 // timer scheduling. It only implements the ScheduledEventStore methods needed
 // by the Scheduler; all other Store interface methods panic if called.
 type mockScheduledEventStore struct {
-	store.Store // embed to satisfy the interface; unused methods panic
-	mu          sync.Mutex
-	events      map[string]*store.ScheduledEvent
-	agents      map[string]*store.Agent
-	projects    map[string]*store.Project
-	users       map[string]*store.User
+	store.Store     // embed to satisfy the interface; unused methods panic
+	mu              sync.Mutex
+	events          map[string]*store.ScheduledEvent
+	agents          map[string]*store.Agent
+	projects        map[string]*store.Project
+	users           map[string]*store.User
+	roleBindings    []*store.RoleBinding
+	roleDefinitions map[string]*store.RoleDefinition
 }
 
 func newMockStore() *mockScheduledEventStore {
 	return &mockScheduledEventStore{
-		events:   make(map[string]*store.ScheduledEvent),
-		agents:   make(map[string]*store.Agent),
-		projects: make(map[string]*store.Project),
-		users:    make(map[string]*store.User),
+		events:          make(map[string]*store.ScheduledEvent),
+		agents:          make(map[string]*store.Agent),
+		projects:        make(map[string]*store.Project),
+		users:           make(map[string]*store.User),
+		roleDefinitions: make(map[string]*store.RoleDefinition),
 	}
 }
 
@@ -574,6 +577,40 @@ func (m *mockScheduledEventStore) GetHubSetting(_ context.Context, _ string) (*s
 
 func (m *mockScheduledEventStore) ListSkillInjections(_ context.Context, _, _ string) ([]store.SkillInjection, error) {
 	return nil, nil
+}
+
+func (m *mockScheduledEventStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockScheduledEventStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*store.AccessConstraint, error) {
+	return nil, nil
+}
+
+func (m *mockScheduledEventStore) ListRoleBindingsForPrincipals(_ context.Context, principals []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []*store.RoleBinding
+	for _, b := range m.roleBindings {
+		for _, p := range principals {
+			if b.PrincipalType == p.Type && b.PrincipalID == p.ID {
+				result = append(result, b)
+			}
+		}
+	}
+	return result, nil
+}
+
+func (m *mockScheduledEventStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[string]*store.RoleDefinition)
+	for _, id := range ids {
+		if rd, ok := m.roleDefinitions[id]; ok {
+			result[id] = rd
+		}
+	}
+	return result, nil
 }
 
 // getEvent returns a snapshot of an event by ID (test helper, no error).
@@ -1494,6 +1531,24 @@ func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 		Role:        "admin",
 		Status:      store.UserStatusActive,
 	}
+
+	// CO1 cutover: role bindings required. Grant super-admin to the admin user.
+	saRoleDefID := "rd-super-admin"
+	ms.roleDefinitions[saRoleDefID] = &store.RoleDefinition{
+		ID:          saRoleDefID,
+		Name:        store.SystemRoleSuperAdmin,
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.create"},
+		System:      true,
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID:               "rb-admin-sa",
+		RoleDefinitionID: saRoleDefID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      "admin-user",
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
 
 	srv := newEventHandlerTestServer(ms)
 	srv.authzService = NewAuthzService(ms, slog.Default())

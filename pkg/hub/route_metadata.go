@@ -544,18 +544,17 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Policies (super-admin-only: policy permissions are not in
-	// the hub-admin role, so only super-admins pass via the step-1 bypass)
+	// Policies: CO1 cutover — all handlers return 410 Gone. Route guard
+	// relaxed from RouteHubAdmin to RouteAuthenticated so the 410 reaches
+	// the caller. OBS-5 removed policy.read/policy.list from all roles.
 	// -------------------------------------------------------------------------
 	"/api/v1/policies": {
 		Pattern: "/api/v1/policies", RouteID: "policies.list",
-		Classification: RouteHubAdmin,
-		Permission:     "policy.read", Resource: "policy", Action: "read",
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/policies/": {
 		Pattern: "/api/v1/policies/", RouteID: "policies.byId",
-		Classification: RouteHubAdmin,
-		Permission:     "policy.read", Resource: "policy", Action: "read",
+		Classification: RouteAuthenticated,
 	},
 
 	// -------------------------------------------------------------------------
@@ -790,6 +789,20 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+	},
+
+	// -------------------------------------------------------------------------
+	// Hub admin: Access Constraints (AC1)
+	// -------------------------------------------------------------------------
+	"/api/v1/admin/access-constraints": {
+		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
+		Classification: RouteHubAdmin,
+		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+	},
+	"/api/v1/admin/access-constraints/": {
+		Pattern: "/api/v1/admin/access-constraints/", RouteID: "admin.accessConstraints.byId",
+		Classification: RouteHubAdmin,
+		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
 	},
 
 	// -------------------------------------------------------------------------

@@ -949,7 +949,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create project members group and policies (simulates project creation handler)
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Add member to project members group
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:gcp-authz-project:members")

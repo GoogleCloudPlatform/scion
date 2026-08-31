@@ -17,8 +17,12 @@
 /**
  * Admin Role Bindings page component
  *
- * List, create, and delete role bindings. Supports pagination and
- * CanDelegate enforcement via server-side 403 handling.
+ * Unified role assignment workflow. Supports:
+ * - Principal selection (user/agent/group) with autocomplete
+ * - Role selection filtered by scope type
+ * - Assignment lifecycle (NotBefore/ExpiresAt) via Advanced section
+ * - Group principal validation (prevents super-admin/project-owner for groups)
+ * - Pagination, create, delete with CanDelegate enforcement via server-side 403
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -27,6 +31,12 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
 import '../shared/principal-picker.js';
+import {
+  SYSTEM_DIRECT_USER_ONLY_ROLES,
+  getLifecycleStatus,
+  formatDateTime,
+  getPrincipalIcon,
+} from '../shared/role-binding-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,6 +54,8 @@ interface RoleBinding {
   createdBy: string;
   createdByDisplayName?: string;
   createdAt: string;
+  notBefore?: string;
+  expiresAt?: string;
 }
 
 interface RoleDefinition {
@@ -74,6 +86,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
   // Role name lookup cache
   @state() private roleNameMap: Record<string, string> = {};
+  // Role scope type lookup
+  @state() private roleScopeMap: Record<string, string> = {};
 
   // Dialog state
   @state() private showCreateDialog = false;
@@ -87,9 +101,18 @@ export class ScionPageAdminRoleBindings extends LitElement {
   @state() private formScopeType = 'system';
   @state() private formScopeId = '';
 
+  // Advanced lifecycle fields
+  @state() private showAdvanced = false;
+  @state() private formNotBefore = '';
+  @state() private formExpiresAt = '';
+
   // Action state
   @state() private actionInProgress = false;
-  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
+  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
+    null;
+
+  // Validation warning (e.g. group assigned to direct-user-only role)
+  @state() private formValidationWarning = '';
 
   static override styles = css`
     :host {
@@ -101,6 +124,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
       align-items: center;
       justify-content: space-between;
       margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 0.75rem;
     }
 
     .header h1 {
@@ -159,16 +184,54 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     .principal-info {
       display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .principal-icon {
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .principal-icon.user {
+      background: var(--sl-color-primary-100, #dbeafe);
+      color: var(--sl-color-primary-600, #2563eb);
+    }
+
+    .principal-icon.group {
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-600, #d97706);
+    }
+
+    .principal-icon.agent {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-600, #16a34a);
+    }
+
+    .principal-icon sl-icon {
+      font-size: 0.75rem;
+    }
+
+    .principal-details {
+      display: flex;
       flex-direction: column;
+      min-width: 0;
     }
 
-    .principal-id {
+    .principal-name {
       font-weight: 500;
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.8125rem;
+      font-size: 0.875rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .principal-type {
+    .principal-type-label {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
     }
@@ -193,6 +256,38 @@ export class ScionPageAdminRoleBindings extends LitElement {
     .meta-text {
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
+    }
+
+    /* Lifecycle status badges */
+    .lifecycle-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 500;
+    }
+
+    .lifecycle-badge.active {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .lifecycle-badge.expired {
+      background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+
+    .lifecycle-badge.pending {
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #b45309);
+    }
+
+    .lifecycle-detail {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.125rem;
     }
 
     .pagination {
@@ -304,9 +399,95 @@ export class ScionPageAdminRoleBindings extends LitElement {
       font-weight: 500;
     }
 
+    .validation-warning {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      background: var(--sl-color-warning-50, #fffbeb);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      border-radius: var(--scion-radius, 0.5rem);
+      color: var(--sl-color-warning-700, #b45309);
+      font-size: 0.8125rem;
+      margin-bottom: 1rem;
+    }
+
+    .validation-warning sl-icon {
+      flex-shrink: 0;
+    }
+
+    /* Advanced section */
+    .advanced-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      padding: 0.5rem 0;
+      border: none;
+      background: none;
+      width: 100%;
+      text-align: left;
+    }
+
+    .advanced-toggle:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .advanced-toggle sl-icon {
+      transition: transform 0.2s ease;
+    }
+
+    .advanced-toggle.open sl-icon {
+      transform: rotate(90deg);
+    }
+
+    .advanced-content {
+      padding: 0.75rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-radius: var(--scion-radius, 0.5rem);
+      margin-bottom: 1rem;
+    }
+
+    .advanced-content .form-group {
+      margin-bottom: 0.75rem;
+    }
+
+    .advanced-content .form-group:last-child {
+      margin-bottom: 0;
+    }
+
+    .lifecycle-hint {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.25rem;
+    }
+
+    .lifecycle-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--sl-color-primary-600, #2563eb);
+      margin-top: 0.25rem;
+    }
+
+    .lifecycle-indicator sl-icon {
+      font-size: 0.75rem;
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
+      }
+
+      .header h1 {
+        font-size: 1.25rem;
+      }
+
+      th, td {
+        padding: 0.5rem 0.75rem;
       }
     }
   `;
@@ -348,12 +529,15 @@ export class ScionPageAdminRoleBindings extends LitElement {
       this.totalCount = bindingsData.totalCount || 0;
       this.roles = rolesData.items || [];
 
-      // Build role name lookup
-      const map: Record<string, string> = {};
+      // Build role name and scope lookups
+      const nameMap: Record<string, string> = {};
+      const scopeMap: Record<string, string> = {};
       for (const role of this.roles) {
-        map[role.id] = role.name;
+        nameMap[role.id] = role.name;
+        scopeMap[role.id] = role.scopeType;
       }
-      this.roleNameMap = map;
+      this.roleNameMap = nameMap;
+      this.roleScopeMap = scopeMap;
     } catch (err) {
       console.error('Failed to load role bindings:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load role bindings';
@@ -395,6 +579,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
     }
   }
 
+  // formatDateTime, getLifecycleStatus, and getPrincipalIcon are imported
+  // from ../shared/role-binding-utils.js
+
   // ---------------------------------------------------------------------------
   // Pagination
   // ---------------------------------------------------------------------------
@@ -412,15 +599,58 @@ export class ScionPageAdminRoleBindings extends LitElement {
   private openCreateDialog(): void {
     this.formPrincipalType = 'user';
     this.formPrincipalId = '';
-    this.formRoleId = this.roles.length > 0 ? this.roles[0].id : '';
+    this.formRoleId = '';
     this.formScopeType = 'system';
     this.formScopeId = '';
+    this.showAdvanced = false;
+    this.formNotBefore = '';
+    this.formExpiresAt = '';
+    this.formValidationWarning = '';
     this.showCreateDialog = true;
   }
 
   private openDeleteDialog(binding: RoleBinding): void {
     this.deletingBinding = binding;
     this.showDeleteDialog = true;
+  }
+
+  /**
+   * Roles available for the current principal type, filtered by scope type.
+   * Group principals cannot be assigned direct-user-only roles.
+   */
+  private get filteredRoles(): RoleDefinition[] {
+    let filtered = this.roles;
+
+    // Filter by scope type compatibility
+    if (this.formScopeType === 'system') {
+      filtered = filtered.filter((r) => r.scopeType === 'system');
+    } else if (this.formScopeType === 'project') {
+      filtered = filtered.filter((r) => r.scopeType === 'project');
+    }
+
+    // Groups cannot be assigned to direct-user-only roles
+    if (this.formPrincipalType === 'group') {
+      filtered = filtered.filter(
+        (r) => !SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name)
+      );
+    }
+
+    return filtered;
+  }
+
+  /**
+   * Update validation state when principal type or role changes.
+   */
+  private updateValidation(): void {
+    if (this.formPrincipalType === 'group' && this.formRoleId) {
+      const roleName = this.roleNameMap[this.formRoleId];
+      if (roleName && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(roleName)) {
+        this.formValidationWarning = `"${roleName}" can only be assigned to individual users, not groups.`;
+        this.formRoleId = '';
+        return;
+      }
+    }
+    this.formValidationWarning = '';
   }
 
   // ---------------------------------------------------------------------------
@@ -431,16 +661,26 @@ export class ScionPageAdminRoleBindings extends LitElement {
     this.actionInProgress = true;
     this.actionFeedback = null;
     try {
+      const body: Record<string, string> = {
+        roleDefinitionId: this.formRoleId,
+        principalType: this.formPrincipalType,
+        principalId: this.formPrincipalId.trim(),
+        scopeType: this.formScopeType,
+        scopeId: this.formScopeType === 'project' ? this.formScopeId.trim() : '',
+      };
+
+      // Include lifecycle fields only when set
+      if (this.formNotBefore) {
+        body.notBefore = new Date(this.formNotBefore).toISOString();
+      }
+      if (this.formExpiresAt) {
+        body.expiresAt = new Date(this.formExpiresAt).toISOString();
+      }
+
       const res = await apiFetch('/api/v1/admin/role-bindings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roleDefinitionId: this.formRoleId,
-          principalType: this.formPrincipalType,
-          principalId: this.formPrincipalId.trim(),
-          scopeType: this.formScopeType,
-          scopeId: this.formScopeType === 'project' ? this.formScopeId.trim() : '',
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
@@ -499,7 +739,26 @@ export class ScionPageAdminRoleBindings extends LitElement {
     if (!this.formPrincipalId.trim()) return false;
     if (!this.formRoleId) return false;
     if (this.formScopeType === 'project' && !this.formScopeId.trim()) return false;
+
+    // Block group principals for direct-user-only roles
+    if (this.formPrincipalType === 'group' && this.formRoleId) {
+      const roleName = this.roleNameMap[this.formRoleId];
+      if (roleName && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(roleName)) return false;
+    }
+
+    // Validate lifecycle dates: expiresAt must be after notBefore
+    if (this.formNotBefore && this.formExpiresAt) {
+      const nb = new Date(this.formNotBefore).getTime();
+      const ea = new Date(this.formExpiresAt).getTime();
+      if (!isNaN(nb) && !isNaN(ea) && ea <= nb) return false;
+    }
+
     return true;
+  }
+
+  /** True when any lifecycle condition is set. */
+  private get hasLifecycleConditions(): boolean {
+    return !!(this.formNotBefore || this.formExpiresAt);
   }
 
   // ---------------------------------------------------------------------------
@@ -541,7 +800,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
             : ''}
           <sl-button variant="primary" size="small" @click=${() => this.openCreateDialog()}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-            Create Binding
+            Assign Role
           </sl-button>
         </div>
       </div>
@@ -585,7 +844,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <div class="empty-state">
           <sl-icon name="link-45deg"></sl-icon>
           <h2>No Role Bindings Found</h2>
-          <p>Create a role binding to assign roles to users.</p>
+          <p>Assign a role to grant access to users, agents, or groups.</p>
         </div>
       `;
     }
@@ -598,7 +857,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
               <th>Principal</th>
               <th>Role</th>
               <th>Scope</th>
-              <th class="hide-mobile">Scope ID</th>
+              <th class="hide-mobile">Status</th>
               <th class="hide-mobile">Created</th>
               <th>Actions</th>
             </tr>
@@ -613,20 +872,60 @@ export class ScionPageAdminRoleBindings extends LitElement {
   }
 
   private renderBindingRow(binding: RoleBinding) {
+    const lifecycleStatus = getLifecycleStatus(binding);
+    const hasLifecycle = !!(binding.notBefore || binding.expiresAt);
+
     return html`
       <tr>
         <td>
           <div class="principal-info">
-            <span class="principal-id">${binding.principalDisplayName || binding.principalId}</span>
-            <span class="principal-type">${binding.principalType}</span>
+            <div class="principal-icon ${binding.principalType}">
+              <sl-icon name="${getPrincipalIcon(binding.principalType)}"></sl-icon>
+            </div>
+            <div class="principal-details">
+              <span class="principal-name">${binding.principalDisplayName || binding.principalId}</span>
+              <span class="principal-type-label">${binding.principalType}</span>
+            </div>
           </div>
         </td>
         <td>${this.getRoleName(binding.roleDefinitionId)}</td>
-        <td><span class="scope-badge">${binding.scopeType}</span></td>
-        <td class="hide-mobile">
+        <td>
+          <span class="scope-badge">${binding.scopeType}</span>
           ${binding.scopeId
-            ? html`<span class="scope-id">${binding.scopeDisplayName || binding.scopeId}</span>`
-            : html`<span class="meta-text">—</span>`}
+            ? html`<br /><span class="scope-id">${binding.scopeDisplayName || binding.scopeId}</span>`
+            : ''}
+        </td>
+        <td class="hide-mobile">
+          ${hasLifecycle
+            ? html`
+                <span class="lifecycle-badge ${lifecycleStatus}">
+                  <sl-icon
+                    name=${lifecycleStatus === 'active'
+                      ? 'check-circle'
+                      : lifecycleStatus === 'expired'
+                        ? 'x-circle'
+                        : 'clock'}
+                  ></sl-icon>
+                  ${lifecycleStatus === 'active'
+                    ? 'Active'
+                    : lifecycleStatus === 'expired'
+                      ? 'Expired'
+                      : 'Scheduled'}
+                </span>
+                ${binding.expiresAt && lifecycleStatus !== 'expired'
+                  ? html`<div class="lifecycle-detail">
+                      Expires ${formatDateTime(binding.expiresAt)}
+                    </div>`
+                  : ''}
+                ${binding.notBefore && lifecycleStatus === 'pending'
+                  ? html`<div class="lifecycle-detail">
+                      Activates ${formatDateTime(binding.notBefore)}
+                    </div>`
+                  : ''}
+              `
+            : html`<span class="lifecycle-badge active">
+                <sl-icon name="check-circle"></sl-icon> Active
+              </span>`}
         </td>
         <td class="hide-mobile">
           <span class="meta-text">${this.formatRelativeTime(binding.createdAt)}</span>
@@ -670,7 +969,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Dialogs
+  // Create Dialog — "Assign Role" form
   // ---------------------------------------------------------------------------
 
   private renderCreateDialog() {
@@ -678,12 +977,22 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     return html`
       <sl-dialog
-        label="Create Role Binding"
+        label="Assign Role"
         open
         @sl-request-close=${() => {
           if (!this.actionInProgress) this.showCreateDialog = false;
         }}
       >
+        ${this.formValidationWarning
+          ? html`
+              <div class="validation-warning">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                ${this.formValidationWarning}
+              </div>
+            `
+          : ''}
+
+        <!-- Step 1: Select principal -->
         <div class="form-group">
           <sl-select
             label="Principal Type"
@@ -691,39 +1000,77 @@ export class ScionPageAdminRoleBindings extends LitElement {
             @sl-change=${(e: Event) => {
               this.formPrincipalType = (e.target as HTMLSelectElement).value;
               this.formPrincipalId = '';
+              this.updateValidation();
             }}
           >
-            <sl-option value="user">User</sl-option>
-            <sl-option value="agent">Agent</sl-option>
+            <sl-option value="user">
+              <sl-icon slot="prefix" name="person"></sl-icon>
+              User
+            </sl-option>
+            <sl-option value="agent">
+              <sl-icon slot="prefix" name="cpu"></sl-icon>
+              Agent
+            </sl-option>
+            <sl-option value="group">
+              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              Group
+            </sl-option>
           </sl-select>
         </div>
         <div class="form-group">
           <scion-principal-picker
-            .principalType=${this.formPrincipalType as 'user' | 'agent'}
+            .principalType=${this.formPrincipalType as 'user' | 'agent' | 'group'}
             @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
               this.formPrincipalId = e.detail.principalId;
             }}
           ></scion-principal-picker>
         </div>
+
+        <!-- Step 2: Select role -->
         <div class="form-group">
           <sl-select
             label="Role"
             .value=${this.formRoleId}
             @sl-change=${(e: Event) => {
               this.formRoleId = (e.target as HTMLSelectElement).value;
+              // Auto-set scope type to match the role's scope type
+              const scopeType = this.roleScopeMap[this.formRoleId];
+              if (scopeType) {
+                this.formScopeType = scopeType;
+              }
+              this.updateValidation();
             }}
           >
-            ${this.roles.map(
-              (role) => html` <sl-option value=${role.id}>${role.name}</sl-option> `
-            )}
+            ${this.filteredRoles.length === 0
+              ? html`<sl-option value="" disabled>No roles available for this scope</sl-option>`
+              : this.filteredRoles.map(
+                  (role) => html`
+                    <sl-option value=${role.id}>
+                      ${role.name}
+                      <small style="color: var(--scion-text-muted, #64748b)">
+                        (${role.scopeType})
+                      </small>
+                    </sl-option>
+                  `
+                )}
           </sl-select>
         </div>
+
+        <!-- Step 3: Select scope -->
         <div class="form-group">
           <sl-select
-            label="Scope Type"
+            label="Scope"
             .value=${this.formScopeType}
             @sl-change=${(e: Event) => {
               this.formScopeType = (e.target as HTMLSelectElement).value;
+              // Re-filter roles when scope type changes
+              if (
+                this.formRoleId &&
+                this.roleScopeMap[this.formRoleId] !== this.formScopeType
+              ) {
+                this.formRoleId = '';
+              }
+              this.updateValidation();
             }}
           >
             <sl-option value="system">System</sl-option>
@@ -734,8 +1081,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
           ? html`
               <div class="form-group">
                 <sl-input
-                  label="Scope ID (Project ID)"
-                  placeholder="Project ID"
+                  label="Project ID"
+                  placeholder="Enter project ID"
                   .value=${this.formScopeId}
                   @sl-input=${(e: Event) => {
                     this.formScopeId = (e.target as HTMLInputElement).value;
@@ -745,6 +1092,84 @@ export class ScionPageAdminRoleBindings extends LitElement {
               </div>
             `
           : ''}
+
+        <!-- Advanced: Assignment lifecycle -->
+        <button
+          class="advanced-toggle ${this.showAdvanced ? 'open' : ''}"
+          @click=${() => {
+            this.showAdvanced = !this.showAdvanced;
+          }}
+        >
+          <sl-icon name="chevron-right"></sl-icon>
+          Advanced
+          ${this.hasLifecycleConditions
+            ? html`<span class="lifecycle-indicator">
+                <sl-icon name="clock-history"></sl-icon>
+                Lifecycle conditions set
+              </span>`
+            : ''}
+        </button>
+
+        ${this.showAdvanced
+          ? html`
+              <div class="advanced-content">
+                <div class="form-group">
+                  <sl-input
+                    label="Activate After (Not Before)"
+                    type="datetime-local"
+                    .value=${this.formNotBefore}
+                    @sl-input=${(e: Event) => {
+                      this.formNotBefore = (e.target as HTMLInputElement).value;
+                    }}
+                    clearable
+                  ></sl-input>
+                  <div class="lifecycle-hint">
+                    Optional. The binding will not take effect until this date/time.
+                  </div>
+                </div>
+                <div class="form-group">
+                  <sl-input
+                    label="Expires On"
+                    type="datetime-local"
+                    .value=${this.formExpiresAt}
+                    @sl-input=${(e: Event) => {
+                      this.formExpiresAt = (e.target as HTMLInputElement).value;
+                    }}
+                    clearable
+                  ></sl-input>
+                  <div class="lifecycle-hint">
+                    Optional. The binding will automatically expire after this date/time.
+                  </div>
+                </div>
+                ${this.formExpiresAt
+                  ? (() => {
+                      const ea = new Date(this.formExpiresAt).getTime();
+                      if (!isNaN(ea) && ea < Date.now()) {
+                        return html`
+                          <div class="validation-warning">
+                            <sl-icon name="exclamation-triangle"></sl-icon>
+                            This expiration date is in the past. The binding will be created already expired.
+                          </div>
+                        `;
+                      }
+                      if (this.formNotBefore) {
+                        const nb = new Date(this.formNotBefore).getTime();
+                        if (!isNaN(nb) && !isNaN(ea) && ea <= nb) {
+                          return html`
+                            <div class="validation-warning">
+                              <sl-icon name="exclamation-triangle"></sl-icon>
+                              Expiration must be after the activation date.
+                            </div>
+                          `;
+                        }
+                      }
+                      return nothing;
+                    })()
+                  : ''}
+              </div>
+            `
+          : ''}
+
         <sl-button
           slot="footer"
           variant="default"
@@ -760,18 +1185,22 @@ export class ScionPageAdminRoleBindings extends LitElement {
           ?loading=${this.actionInProgress}
           ?disabled=${!this.createFormValid}
           @click=${() => this.createBinding()}
-          >Create Binding</sl-button
+          >Assign Role</sl-button
         >
       </sl-dialog>
     `;
   }
+
+  // ---------------------------------------------------------------------------
+  // Delete Dialog
+  // ---------------------------------------------------------------------------
 
   private renderDeleteDialog() {
     if (!this.showDeleteDialog || !this.deletingBinding) return nothing;
 
     return html`
       <sl-dialog
-        label="Delete Role Binding"
+        label="Remove Role Assignment"
         open
         @sl-request-close=${() => {
           if (!this.actionInProgress) {
@@ -781,9 +1210,10 @@ export class ScionPageAdminRoleBindings extends LitElement {
         }}
       >
         <p>
-          Are you sure you want to delete this role binding for
-          <strong>${this.deletingBinding.principalDisplayName || this.deletingBinding.principalId}</strong>
-          (${this.getRoleName(this.deletingBinding.roleDefinitionId)})?
+          Are you sure you want to remove the
+          <strong>${this.getRoleName(this.deletingBinding.roleDefinitionId)}</strong>
+          role from
+          <strong>${this.deletingBinding.principalDisplayName || this.deletingBinding.principalId}</strong>?
         </p>
         <p class="delete-warning">This action cannot be undone.</p>
         <sl-button
@@ -801,7 +1231,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
           variant="danger"
           ?loading=${this.actionInProgress}
           @click=${() => this.deleteBinding()}
-          >Delete Binding</sl-button
+          >Remove Assignment</sl-button
         >
       </sl-dialog>
     `;

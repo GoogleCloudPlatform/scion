@@ -138,6 +138,18 @@ func TestDeleteTemplate_Authz_GlobalAllowedForAdmin(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, admin))
 	ensureHubMembership(ctx, s, admin.ID)
 
+	// Grant super-admin role binding (CO1 cutover: role bindings required)
+	saRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: saRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
 	rec := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/templates/"+tplID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "admin should be able to delete global template: %s", rec.Body.String())
 
@@ -171,7 +183,7 @@ func TestCloneTemplate_Authz_DestinationChecked(t *testing.T) {
 		Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	body := map[string]interface{}{
 		"name":    "Clone Into Project",

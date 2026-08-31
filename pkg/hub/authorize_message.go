@@ -138,7 +138,7 @@ func (s *Server) authorizeUserToAgent(
 	}
 
 	// target.mode == project → require agent.message permission on the project
-	// (goes through checkAccessForUser including UAT caveat intersection).
+	// (evaluated via AK1 kernel including UAT credential caveat intersection).
 	if targetAgent.MessageMode == store.MessageModeProject {
 		decision := s.authzService.CheckAccess(ctx, userIdent, targetResource, ActionMessage)
 		if decision.Allowed {

@@ -1478,9 +1478,9 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// createProjectMembersGroupAndPolicy should not return an error even though
+	// createProjectMembersGroup should not return an error even though
 	// the owner user does not exist. It should retry without OwnerID.
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// The members group must still have been created.
 	membersSlug := "project:" + project.Slug + ":members"

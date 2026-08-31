@@ -155,6 +155,7 @@ func TestGCPSA_Delete_HubScoped_AdminAllowed(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, admin))
 	ensureHubMembership(ctx, s, admin.ID)
+	grantSuperAdminRole(t, s, admin.ID)
 
 	sa := newHubScopedSA("sa-hub-del-admin", "hub-del-admin@hub.iam.gserviceaccount.com")
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
