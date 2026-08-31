@@ -2731,9 +2731,32 @@ type AccessConstraint struct {
 	NotBefore            *time.Time `json:"notBefore"`            // Constraint inactive before this time
 	ExpiresAt            *time.Time `json:"expiresAt"`            // Constraint inactive after this time
 	Disabled             bool       `json:"disabled"`             // True when deactivated by offline recovery
+	Revision             int64      `json:"revision"`             // Monotonic revision counter for optimistic concurrency
+	Purpose              string     `json:"purpose"`              // Human-readable description of why this constraint exists
+	UpdatedBy            string     `json:"updatedBy,omitempty"`  // Principal who last modified
 	CreatedBy            string     `json:"createdBy"`
 	CreatedAt            time.Time  `json:"createdAt"`
 	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// AccessConstraintListOptions defines filtering, sorting, and cursor-based
+// pagination for ListAccessConstraintsFiltered.
+type AccessConstraintListOptions struct {
+	// Cursor-based pagination
+	PageSize  int
+	PageToken string // opaque cursor
+
+	// Filters
+	SubjectKind          string // "principal", "group_closure", "all_principals"
+	SubjectPrincipalType string // "user", "agent", "group"
+	ScopeType            string // "system", "project"
+	ScopeID              string
+	Status               string // derived: "active", "scheduled", "expired", "recovery_disabled"
+	NameContains         string // case-insensitive search
+
+	// Sort
+	SortBy    string // "name", "created", "updated"
+	SortOrder string // "asc", "desc"
 }
 
 // AccessConstraint subject kinds
@@ -2741,4 +2764,11 @@ const (
 	ConstraintSubjectPrincipal     = "principal"
 	ConstraintSubjectGroupClosure  = "group_closure"
 	ConstraintSubjectAllPrincipals = "all_principals"
+)
+
+// AccessConstraint subject principal types
+const (
+	ConstraintPrincipalTypeUser  = "user"
+	ConstraintPrincipalTypeAgent = "agent"
+	ConstraintPrincipalTypeGroup = "group"
 )

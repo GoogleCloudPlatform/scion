@@ -362,7 +362,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	updated, err := s.store.UpdateAccessConstraint(r.Context(), existing)
+	updated, err := s.store.UpdateAccessConstraint(r.Context(), existing, 0)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Access Constraint")

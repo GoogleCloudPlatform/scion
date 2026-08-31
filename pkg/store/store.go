@@ -1927,6 +1927,7 @@ type QuotaStore interface {
 type AccessConstraintStore interface {
 	// CreateAccessConstraint creates a new access constraint.
 	// Returns ErrAlreadyExists if a constraint with the same name and scope exists.
+	// Sets revision=1 on insert.
 	CreateAccessConstraint(ctx context.Context, c *AccessConstraint) (*AccessConstraint, error)
 
 	// GetAccessConstraint retrieves an access constraint by ID.
@@ -1935,7 +1936,9 @@ type AccessConstraintStore interface {
 
 	// UpdateAccessConstraint updates an existing access constraint.
 	// Returns ErrNotFound if the constraint doesn't exist.
-	UpdateAccessConstraint(ctx context.Context, c *AccessConstraint) (*AccessConstraint, error)
+	// Increments revision atomically. If expectedRevision > 0, returns
+	// ErrRevisionConflict if the stored revision differs (optimistic concurrency).
+	UpdateAccessConstraint(ctx context.Context, c *AccessConstraint, expectedRevision int64) (*AccessConstraint, error)
 
 	// DeleteAccessConstraint deletes an access constraint by ID.
 	// Returns ErrNotFound if the constraint doesn't exist.
@@ -1943,7 +1946,13 @@ type AccessConstraintStore interface {
 
 	// ListAccessConstraints returns all access constraints with pagination.
 	// limit of 0 defaults to 100. Maximum allowed limit is 1000.
+	// Kept for callers that page through all constraints (loadAllAccessConstraints).
 	ListAccessConstraints(ctx context.Context, limit, offset int) ([]*AccessConstraint, error)
+
+	// ListAccessConstraintsFiltered returns access constraints with SQL-level
+	// filtering, sorting, and cursor-based pagination.
+	// Returns: items, nextPageToken, totalCount, error.
+	ListAccessConstraintsFiltered(ctx context.Context, opts AccessConstraintListOptions) ([]*AccessConstraint, string, int, error)
 
 	// CountAccessConstraints returns the total number of access constraints.
 	CountAccessConstraints(ctx context.Context) (int, error)
