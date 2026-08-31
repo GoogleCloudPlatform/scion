@@ -221,8 +221,8 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	explainIdentity := identity
 	// Explaining for a different principal reveals authorization internals and
 	// is restricted to users with hub.audit.read (super-admin only). The Decide
-	// check routes through checkAccessForUser, so the step-1 super-admin bypass
-	// grants this automatically without a seed policy.
+	// check evaluates via the AK1 kernel, so the super-admin role binding
+	// grants this automatically.
 	isSuperAdmin := false
 	if user, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.Decide(ctx, AuthzRequest{

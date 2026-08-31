@@ -708,10 +708,9 @@ func (s *Server) createProjectRoleBinding(ctx context.Context, projectID, princi
 // This replaces the old pattern of adding hub-members as a nested group member
 // of the project's members group. Best-effort; failures are logged.
 //
-// NOTE(PM1/O1): This function is intentionally not wired into production paths
-// yet. Visibility currently flows through the legacy ensureProjectMemberReadPolicy
-// bridge. This will be activated when CO1 removes legacy policies and rewires
-// the evaluator to use RoleBinding permissions directly.
+// TODO(PM1): Wire into handleCreateProject. The legacy
+// ensureProjectMemberReadPolicy bridge has been removed (CO1 cutover);
+// this function provides the RoleBinding-based replacement.
 func (s *Server) ensureHubMembersProjectVisibility(ctx context.Context, project *store.Project) {
 	group, err := s.store.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {
@@ -900,14 +899,6 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 	// CO1 cutover: legacy project policies are no longer needed.
 	// All authorization routes through AK1 kernel using RoleBindings.
 }
-
-// ensureLegacyProjectPolicies is a no-op after CO1 cutover.
-// All project-scoped authorization is now handled by RoleBindings.
-func (s *Server) ensureLegacyProjectPolicies(_ context.Context, _ *store.Project, _ string) {}
-
-// ensureProjectMemberReadPolicy is a no-op after CO1 cutover.
-// Member read permissions are now handled by project-scoped RoleBindings.
-func (s *Server) ensureProjectMemberReadPolicy(_ context.Context, _ *store.Project, _ string) {}
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
 // It prefers projects/<slug> and falls back to groves/<slug> for backward compatibility

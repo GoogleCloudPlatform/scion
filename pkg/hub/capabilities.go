@@ -182,8 +182,8 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	}
 
 	// Project owner/admin short-circuit: full access on project and project-scoped
-	// resources. Mirrors the bypass in checkAccessForUser so capability lists
-	// match what the user can actually do.
+	// resources. Mirrors the kernel evaluation so capability lists match what
+	// the user can actually do.
 	if user, ok := identity.(UserIdentity); ok {
 		if projectID := projectIDForResource(resource); projectID != "" {
 			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {

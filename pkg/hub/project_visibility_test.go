@@ -244,61 +244,28 @@ func TestGetProject_CheckAccess_NonMemberReadDenied(t *testing.T) {
 		"non-member should be denied read on project; reason=%q", decision.Reason)
 }
 
-// TestNarrowHubMemberReadAll_DeletesWildcardPolicy verifies that after CO1
-// cutover, no per-type hub-member-read-* policies are seeded — all
-// authorization is handled by RoleBindings. The narrowHubMemberReadAll
-// function is now a no-op, and seedPolicy no longer creates policies.
-func TestNarrowHubMemberReadAll_DeletesWildcardPolicy(t *testing.T) {
+// TestNarrowHubMemberReadAll_RoleBindingBased verifies that after CO1
+// cutover, authorization is handled by RoleBindings — the hub-members
+// group exists and policies are no longer seeded (PolicyStore removed).
+func TestNarrowHubMemberReadAll_RoleBindingBased(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	// After CO1 cutover, no wildcard policy should exist.
-	wildcardPolicies, err := s.ListPolicies(ctx, store.PolicyFilter{
-		Name:      "hub-member-read-all",
-		ScopeType: "hub",
-	}, store.ListOptions{Limit: 10})
-	require.NoError(t, err)
-	assert.Empty(t, wildcardPolicies.Items,
-		"wildcard hub-member-read-all should not exist after CO1 cutover")
-
-	// After CO1 cutover, per-type policies are also not seeded — authorization
-	// is handled by role bindings on the hub-members group instead.
-	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding", "hub"} {
-		policies, err := s.ListPolicies(ctx, store.PolicyFilter{
-			Name:      "hub-member-read-" + rt,
-			ScopeType: "hub",
-		}, store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Empty(t, policies.Items,
-			"hub-member-read-%s policy should not exist after CO1 cutover (authorization via role bindings)", rt)
-	}
-
-	// Verify hub-members group exists with a role binding instead.
+	// Verify hub-members group exists with a role binding.
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	require.NoError(t, err)
 	assert.NotEmpty(t, group.ID, "hub-members group should exist")
 }
 
-// TestEnsureProjectMemberReadPolicy_CreatesReadPolicies verifies that after
-// CO1 cutover, ensureProjectMemberReadPolicy is a no-op — no per-project
-// read policies are created. Project access is handled by project-scoped
-// role bindings (project-member, project-admin, project-owner).
-func TestEnsureProjectMemberReadPolicy_CreatesReadPolicies(t *testing.T) {
+// TestEnsureProjectMemberReadPolicy_RoleBindingBased verifies that after
+// CO1 cutover, project access is handled by project-scoped role bindings
+// (project-member, project-admin, project-owner) and the project members
+// group exists. PolicyStore has been removed — no policies are created.
+func TestEnsureProjectMemberReadPolicy_RoleBindingBased(t *testing.T) {
 	_, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	// After CO1 cutover, per-project member-read policies are not created.
-	for _, rt := range []string{"project", "agent"} {
-		policyName := "project:" + project.Slug + ":member-read-" + rt
-		policies, err := s.ListPolicies(ctx, store.PolicyFilter{
-			Name: policyName,
-		}, store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Empty(t, policies.Items,
-			"member-read-%s policy should not exist after CO1 cutover (authorization via role bindings)", rt)
-	}
-
-	// Instead, verify the project members group exists (role bindings handle access).
+	// Verify the project members group exists (role bindings handle access).
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err)
 	assert.NotEmpty(t, membersGroup.ID,

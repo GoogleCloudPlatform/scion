@@ -108,9 +108,6 @@ type Store interface {
 	// Group operations (Hub Permissions System)
 	GroupStore
 
-	// Policy operations (Hub Permissions System)
-	PolicyStore
-
 	// User Access Token operations
 	UserAccessTokenStore
 
@@ -934,54 +931,10 @@ type PrincipalRef struct {
 	ID   string // Principal UUID
 }
 
-// PolicyStore defines policy-related persistence operations.
-type PolicyStore interface {
-	// CreatePolicy creates a new policy record.
-	CreatePolicy(ctx context.Context, policy *Policy) error
-
-	// GetPolicy retrieves a policy by ID.
-	// Returns ErrNotFound if the policy doesn't exist.
-	GetPolicy(ctx context.Context, id string) (*Policy, error)
-
-	// UpdatePolicy updates an existing policy.
-	// Returns ErrNotFound if the policy doesn't exist.
-	UpdatePolicy(ctx context.Context, policy *Policy) error
-
-	// DeletePolicy removes a policy by ID.
-	// Also removes all policy bindings.
-	// Returns ErrNotFound if the policy doesn't exist.
-	DeletePolicy(ctx context.Context, id string) error
-
-	// ListPolicies returns policies matching the filter criteria.
-	ListPolicies(ctx context.Context, filter PolicyFilter, opts ListOptions) (*ListResult[Policy], error)
-
-	// AddPolicyBinding binds a principal (user, group, or agent) to a policy.
-	// Returns ErrAlreadyExists if the binding already exists.
-	AddPolicyBinding(ctx context.Context, binding *PolicyBinding) error
-
-	// RemovePolicyBinding removes a binding from a policy.
-	// Returns ErrNotFound if the binding doesn't exist.
-	RemovePolicyBinding(ctx context.Context, policyID, principalType, principalID string) error
-
-	// GetPolicyBindings returns all bindings for a policy.
-	GetPolicyBindings(ctx context.Context, policyID string) ([]PolicyBinding, error)
-
-	// GetPoliciesForPrincipal returns all policies bound to a specific principal.
-	GetPoliciesForPrincipal(ctx context.Context, principalType, principalID string) ([]Policy, error)
-
-	// GetPoliciesForPrincipals returns all policies bound to any of the given principals.
-	// Results are ordered by scope_type then priority ASC.
-	GetPoliciesForPrincipals(ctx context.Context, principals []PrincipalRef) ([]Policy, error)
-}
-
-// PolicyFilter defines criteria for filtering policies.
-type PolicyFilter struct {
-	Name         string // Filter by policy name
-	ScopeType    string // Filter by scope type (hub, project, resource)
-	ScopeID      string // Filter by scope ID
-	ResourceType string // Filter by resource type
-	Effect       string // Filter by effect (allow, deny)
-}
+// R-5: PolicyStore interface and PolicyFilter removed — CO1 cutover
+// deleted the legacy evaluator and all production Policy reads/writes.
+// Ent schema files (policy.go, policybinding.go) retained for now per
+// brief constraint (schema migration out of scope).
 
 // =============================================================================
 // User Access Tokens (UATs)

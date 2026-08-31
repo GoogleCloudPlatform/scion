@@ -1293,13 +1293,3 @@ func scopeLevel(scope string) int {
 func isReadClassAction(a Action) bool {
 	return a == ActionRead || a == ActionList
 }
-
-// permissionToScope maps a permission ID to a UAT scope string.
-// Format: "resource.action" → "resource:action".
-func permissionToScope(permissionID string) string {
-	parts := strings.SplitN(permissionID, ".", 2)
-	if len(parts) == 2 {
-		return parts[0] + ":" + parts[1]
-	}
-	return permissionID
-}

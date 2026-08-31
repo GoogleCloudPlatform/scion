@@ -1428,46 +1428,5 @@ func TestGetEffectiveGroups(t *testing.T) {
 	}
 }
 
-func TestGetPoliciesForPrincipal(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	_ = srv // We just need the store
-
-	// Create a policy
-	policy := &store.Policy{
-		ID:           tid("policy_forprinc"),
-		Name:         "Test Policy",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		t.Fatalf("failed to create policy: %v", err)
-	}
-
-	// Bind to user
-	permSeedPrincipal(t, ctx, s, "user", tid("test_user"))
-	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "user",
-		PrincipalID:   tid("test_user"),
-	}); err != nil {
-		t.Fatalf("failed to add binding: %v", err)
-	}
-
-	// Get policies for user
-	policies, err := s.GetPoliciesForPrincipal(ctx, "user", tid("test_user"))
-	if err != nil {
-		t.Fatalf("failed to get policies: %v", err)
-	}
-
-	if len(policies) != 1 {
-		t.Errorf("expected 1 policy, got %d", len(policies))
-	}
-	if policies[0].ID != policy.ID {
-		t.Errorf("expected policy ID %q, got %q", policy.ID, policies[0].ID)
-	}
-}
+// CO1: TestGetPoliciesForPrincipal removed — PolicyStore interface deleted.
+// Authorization is handled by RoleBindings and the AK1 kernel.

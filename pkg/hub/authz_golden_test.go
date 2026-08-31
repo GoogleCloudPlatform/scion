@@ -219,39 +219,10 @@ func newGoldenFixture(t *testing.T) *goldenFixture {
 	require.NoError(t, s.CreateAgent(ctx, f.agentAlpha))
 	require.NoError(t, s.CreateAgent(ctx, f.agentBeta))
 
-	// --- Per-project member policies (matching seed.go behavior) ---
-	// member-read-project/agent and member-create-agents policies for alpha
-	for _, rt := range []string{"project", "agent"} {
-		policy := &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         "project:golden-alpha:member-read-" + rt,
-			ScopeType:    "project",
-			ScopeID:      f.projectAlpha.ID,
-			ResourceType: rt,
-			Actions:      []string{"read", "list"},
-			Effect:       "allow",
-		}
-		require.NoError(t, s.CreatePolicy(ctx, policy))
-		require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-			PolicyID: policy.ID, PrincipalType: "group", PrincipalID: f.alphaMembersGroup.ID,
-		}))
-	}
-
-	// member-create-agents for alpha
-	createAgentsPolicy := &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         "project:golden-alpha:member-create-agents",
-		ScopeType:    "project",
-		ScopeID:      f.projectAlpha.ID,
-		ResourceType: "agent",
-		Actions:      []string{"create", "stop_all", "message"},
-		Effect:       "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, createAgentsPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: createAgentsPolicy.ID, PrincipalType: "group",
-		PrincipalID: f.alphaMembersGroup.ID,
-	}))
+	// CO1: Legacy per-project member policies removed. Authorization is
+	// handled exclusively by RoleBindings and the AK1 kernel. The
+	// createTestUserWithProjectRole helper above creates the necessary
+	// project-scoped RoleBindings.
 
 	// --- Progeny resources (CO1: relationship grants replace DelegatedFrom policies) ---
 	// The RelationshipGrantResolver uses store.ListProgenySecrets/EnvVars/SkillInjections

@@ -1391,8 +1391,7 @@ func TestSetProjectInjectedSkills_AllowProgenyRejected(t *testing.T) {
 // user-scoped skill injection with AllowProgeny=true creates an implicit
 // progeny policy.
 func TestAddUserInjectedSkill_AllowProgenyCreatesPolicy(t *testing.T) {
-	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
-	ctx := context.Background()
+	srv, _, _, alice, _ := setupInjectedSkillsTest(t)
 
 	body := api.SkillInjectionEntry{
 		SkillURI:     "skill://scion/progeny-skill@1.0",
@@ -1406,13 +1405,8 @@ func TestAddUserInjectedSkill_AllowProgenyCreatesPolicy(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
 	require.NotEmpty(t, entry.ID)
 
-	// CO1: ensureSkillProgenyPolicy is a no-op — progeny access is handled by
-	// the RelationshipGrantResolver. Verify no legacy policy is created.
-	policyName := "progeny-skill-access:" + entry.ID
-	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount,
-		"CO1: progeny policy must NOT be created — RelationshipGrantResolver handles progeny access")
+	// CO1: progeny access is handled by the RelationshipGrantResolver;
+	// no legacy policy is created (PolicyStore removed).
 }
 
 // TestRemoveUserInjectedSkill_AllowProgenyDeletesPolicy verifies that removing
@@ -1475,10 +1469,5 @@ func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
 	require.Len(t, sis, 1, "bulk replace should result in exactly one entry")
 	assert.Equal(t, "skill://scion/new-progeny-skill@2.0", sis[0].SkillURI)
 
-	// CO1: no progeny policies should exist — they are no longer created.
-	newPolicyName := "progeny-skill-access:" + sis[0].ID
-	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: newPolicyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount,
-		"CO1: no progeny policy should exist — RelationshipGrantResolver handles progeny access")
+	// CO1: progeny policies no longer exist (PolicyStore removed).
 }

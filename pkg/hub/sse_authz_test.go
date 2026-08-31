@@ -308,10 +308,6 @@ func (m *mockAuthzStore) GetEffectiveGroupsForAgent(_ context.Context, _ string)
 	return nil, nil
 }
 
-func (m *mockAuthzStore) GetPoliciesForPrincipals(_ context.Context, _ []store.PrincipalRef) ([]store.Policy, error) {
-	return nil, nil
-}
-
 func (m *mockAuthzStore) ListGroups(_ context.Context, _ store.GroupFilter, _ store.ListOptions) (*store.ListResult[store.Group], error) {
 	return &store.ListResult[store.Group]{}, nil
 }

@@ -47,16 +47,9 @@ func (s *authorizedListHandlerFailingStore) checkListOptions(opts store.ListOpti
 	}
 }
 
-func (s *authorizedListHandlerFailingStore) GetPoliciesForPrincipals(ctx context.Context, principals []store.PrincipalRef) ([]store.Policy, error) {
-	if s.failPolicyRead != nil {
-		return nil, s.failPolicyRead
-	}
-	return s.Store.GetPoliciesForPrincipals(ctx, principals)
-}
-
-// CO1: authorization now uses ListRoleBindingsForPrincipals instead of
-// GetPoliciesForPrincipals. Intercept the same failPolicyRead error here
-// so the "authorization read error" subtest triggers a fail-closed denial.
+// CO1: authorization uses ListRoleBindingsForPrincipals exclusively.
+// Intercept failPolicyRead here so the "authorization read error"
+// subtest triggers a fail-closed denial.
 func (s *authorizedListHandlerFailingStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
 	if s.failPolicyRead != nil {
 		return nil, s.failPolicyRead

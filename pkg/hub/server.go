@@ -1354,9 +1354,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 
 	// PG1: Reconcile built-in role definitions with curated, versioned
-	// permission lists. This replaces the old seedRoleDefinitions +
-	// backfillHubAdminRolePermissions flow. Roles are created if missing, or
-	// updated if the code revision is higher than the stored revision.
+	// permission lists. Roles are created if missing, or updated if the
+	// code revision is higher than the stored revision.
 	// Must run BEFORE seedDefaultGroupsAndBindings so the hub-member role exists.
 	reconcileBuiltInRoles(ctx, s)
 
@@ -1364,13 +1363,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// hub-member role to that group. This replaces ~13 individual seeded policies
 	// and the hub-member-create-projects policy with a single role binding.
 	seedDefaultGroupsAndBindings(ctx, s)
-
-	// CO1: Legacy policy backfills are no-ops. All authorization uses
-	// RoleBindings and the AK1 kernel.
-	backfillProjectAssignPolicies(ctx, s)
-	backfillProjectMessageAction(ctx, s)
-	backfillProjectMemberReadPolicies(ctx, s)
-	backfillScheduledEventPermissions(ctx, s)
 
 	// Seed system limit definitions for the quota/limits subsystem (Phase 2B).
 	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.

@@ -412,21 +412,9 @@ func TestDelegationCeiling_FederatedAncestryNotUsedForDelegation(t *testing.T) {
 	createDCProject(t, s, projectID, "dc-test-fed-project-2")
 	createDCUser(t, s, localUserID, "local@test.com", projectID, store.ProjectRoleOwner)
 
-	// Create a policy with DelegatedFrom condition matching the local user
-	require.NoError(t, s.CreatePolicy(ctx, &store.Policy{
-		ID:           tid("dc-pol-fed-2"),
-		Name:         "delegated-test-policy",
-		Effect:       "allow",
-		ScopeType:    "project",
-		ScopeID:      projectID,
-		ResourceType: "agent",
-		Actions:      []string{"read"},
-		Conditions: &store.PolicyConditions{
-			DelegatedFrom: &store.DelegatedFromCondition{
-				PrincipalID: localUserID,
-			},
-		},
-	}))
+	// CO1: Legacy DelegatedFrom policy removed. Authorization is handled by
+	// RoleBindings and the AK1 kernel; the delegation ceiling test below
+	// verifies that federated agents cannot leverage ancestry claims.
 
 	// Federated agent claiming this local user as ancestor
 	federatedAgent := NewFederatedAgentIdentity(

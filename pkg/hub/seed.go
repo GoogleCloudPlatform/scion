@@ -423,10 +423,6 @@ func seedDefaultGroupsAndBindings(ctx context.Context, s store.Store) {
 	seedHubMemberRoleBinding(ctx, s, group.ID)
 }
 
-// seedLegacyHubMemberPolicies is a no-op after CO1 cutover. The AK1 kernel
-// uses RoleBindings exclusively — no legacy policy seeding is needed.
-func seedLegacyHubMemberPolicies(_ context.Context, _ store.Store, _ string) {}
-
 // seedHubMemberRoleBinding creates a system-scoped RoleBinding of the
 // hub-member role to the hub-members group. Idempotent — skips if the
 // binding already exists.
@@ -456,55 +452,6 @@ func seedHubMemberRoleBinding(ctx context.Context, s store.Store, hubMembersGrou
 	slog.Info("seeded hub-member role binding for hub-members group",
 		"group_id", hubMembersGroupID, "role_definition_id", rd.ID)
 }
-
-// ensureProjectAssignPolicy is a no-op after CO1 cutover. Service-account
-// assign is now handled by project-scoped RoleBindings.
-func ensureProjectAssignPolicy(_ context.Context, _ store.Store, _ *store.Project, _ string) {}
-
-// backfillProjectAssignPolicies is a no-op after CO1 cutover.
-// Assign permissions are now handled by project-scoped RoleBindings.
-func backfillProjectAssignPolicies(_ context.Context, _ store.Store) {}
-
-// backfillProjectMessageAction is a no-op after CO1 cutover.
-// Message permissions are now handled by project-scoped RoleBindings.
-func backfillProjectMessageAction(_ context.Context, _ store.Store) {}
-
-// backfillProjectMemberReadPolicies is a no-op after CO1 cutover.
-// Member read permissions are now handled by project-scoped RoleBindings.
-func backfillProjectMemberReadPolicies(_ context.Context, _ store.Store) {}
-
-// backfillScheduledEventPermissions is a no-op after CO1 cutover.
-// Scheduled event permissions are now handled by project-scoped RoleBindings.
-func backfillScheduledEventPermissions(_ context.Context, _ store.Store) {}
-
-// ensureProjectMemberReadPolicies is a no-op after CO1 cutover.
-// Member read permissions are now handled by project-scoped RoleBindings.
-func ensureProjectMemberReadPolicies(_ context.Context, _ store.Store, _ *store.Project, _ string) {}
-
-// narrowHubMemberReadAll is a no-op after CO1 cutover.
-// Hub-member read permissions are now handled by system-scoped RoleBindings.
-func narrowHubMemberReadAll(_ context.Context, _ store.Store, _ string) {}
-
-// ensureProjectScheduledEventPolicy is a no-op after CO1 cutover.
-// Scheduled event permissions are now handled by project-scoped RoleBindings.
-func ensureProjectScheduledEventPolicy(_ context.Context, _ store.Store, _ *store.Project, _ string) {
-}
-
-// backfillHubAdminRolePermissions is a no-op after CO1 cutover.
-// Hub-admin role permissions are now reconciled by reconcileBuiltInRoles
-// with versioned revision tracking.
-func backfillHubAdminRolePermissions(_ context.Context, _ store.Store) {}
-
-// seedPolicyTombstoneKey and hasSeedPolicyTombstone removed in CO1 review
-// Round 1 (OBS-4): zero callers after policy seeding functions became no-ops.
-
-// seedPolicy is a no-op after CO1 cutover. All authorization is handled
-// by RoleBindings and the AK1 kernel — no new Policies are seeded.
-func seedPolicy(_ context.Context, _ store.Store, _ string, _ interface{}) {}
-
-// backfillSeededPolicyOrigin is a no-op after CO1 cutover.
-// Policy origin tracking is no longer needed.
-func backfillSeededPolicyOrigin(_ context.Context, _ store.Store, _ []string) {}
 
 // seedDevUser ensures the development pseudo-user exists in the store.
 // This is needed because Ent enforces foreign key constraints on owner_id,
@@ -880,10 +827,6 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		return fmt.Errorf("backfill user role bindings: %w", err)
 	}
 
-	// CO1 cutover: backfillProjectRoleBindings removed — C1 security fix.
-	// Project role bindings are granted through proper RBAC assignment,
-	// not inferred from group membership roles.
-
 	return nil
 }
 
@@ -948,15 +891,6 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 	if created > 0 {
 		slog.Info("backfilled user role bindings", "created", created)
 	}
-	return nil
-}
-
-// backfillProjectRoleBindings — CO1 cutover: removed (C1 security fix).
-// This function previously inferred project role bindings from group membership
-// roles, which constituted a privilege-escalation vector: a members-group owner
-// could be auto-promoted to project-owner. Project role bindings must now be
-// granted through explicit RBAC assignment only.
-func backfillProjectRoleBindings(_ context.Context, _ store.Store) error {
 	return nil
 }
 

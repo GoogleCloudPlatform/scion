@@ -479,7 +479,7 @@ func defaultServerHealthCheck(addr string) (running bool, err error) {
 		}
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Any HTTP response means a server is listening.
 	return true, nil
 }
