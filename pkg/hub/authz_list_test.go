@@ -461,7 +461,7 @@ func TestApplyCredentialCaveats_Agent(t *testing.T) {
 			ProjectID: "proj-a",
 		},
 	}
-	agent.AgentTokenClaims.Subject = "agent-1"
+	agent.Subject = "agent-1"
 
 	result := applyCredentialCaveats(agent, ScopeSetExplicit("proj-a", "proj-b"))
 	want := ScopeSetExplicit("proj-a")
@@ -478,7 +478,7 @@ func TestApplyCredentialCaveats_AgentAll(t *testing.T) {
 			ProjectID: "proj-a",
 		},
 	}
-	agent.AgentTokenClaims.Subject = "agent-1"
+	agent.Subject = "agent-1"
 
 	result := applyCredentialCaveats(agent, ScopeSetAll())
 	want := ScopeSetExplicit("proj-a")
@@ -495,7 +495,7 @@ func TestApplyCredentialCaveats_AgentDisjoint(t *testing.T) {
 			ProjectID: "proj-a",
 		},
 	}
-	agent.AgentTokenClaims.Subject = "agent-1"
+	agent.Subject = "agent-1"
 
 	result := applyCredentialCaveats(agent, ScopeSetExplicit("proj-b", "proj-c"))
 	if !result.IsNone() {
@@ -548,7 +548,7 @@ func TestApplyCredentialCaveats_AgentNoProject(t *testing.T) {
 			ProjectID: "",
 		},
 	}
-	agent.AgentTokenClaims.Subject = "agent-1"
+	agent.Subject = "agent-1"
 
 	explicit := ScopeSetExplicit("proj-a", "proj-b")
 	result := applyCredentialCaveats(agent, explicit)

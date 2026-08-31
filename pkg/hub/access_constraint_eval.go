@@ -117,8 +117,9 @@ func constraintScopeApplies(c *AccessConstraint, targetScopeType, targetScopeID 
 		}
 		return c.Scope.ID == targetScopeID
 	default:
-		// Unknown scope type: fail closed (don't apply).
-		return false
+		// Unknown scope type: fail closed — apply the constraint so that
+		// unrecognised scopes cannot silently bypass restrictions.
+		return true
 	}
 }
 

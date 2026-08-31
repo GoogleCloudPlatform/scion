@@ -27,15 +27,7 @@ import "net/http"
 // The handler functions below return 410 Gone so that clients get a clear
 // signal that the endpoints have been retired.
 
-func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "Policy API removed in CO1 cutover. Use Role Bindings.", http.StatusGone)
-}
-
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "Policy API removed in CO1 cutover. Use Role Bindings.", http.StatusGone)
-}
-
-func (s *Server) handlePolicyBindings(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Policy API removed in CO1 cutover. Use Role Bindings.", http.StatusGone)
 }
 

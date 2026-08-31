@@ -238,7 +238,9 @@ func acquireRecoveryLock(ctx context.Context, s *entadapter.CompositeStore, out 
 		return nil, fmt.Errorf("failed to acquire maintenance lock: %w", err)
 	}
 	if !acquired {
-		_ = release()
+		if release != nil {
+			_ = release()
+		}
 		return nil, fmt.Errorf("cannot acquire maintenance lock: another server instance or recovery process is running\n\nStop all server instances before running offline recovery:\n  scion server stop\n\nThen retry this command")
 	}
 	_, _ = fmt.Fprintln(out, "Maintenance lock acquired.")

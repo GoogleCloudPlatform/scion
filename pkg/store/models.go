@@ -2442,10 +2442,10 @@ type RoleBinding struct {
 	RoleDefinitionID string     `json:"roleDefinitionId"`
 	PrincipalType    string     `json:"principalType"` // "user", "agent", "group"
 	PrincipalID      string     `json:"principalId"`
-	ScopeType        string     `json:"scopeType"`  // "system", "project"
-	ScopeID          string     `json:"scopeId"`    // "" for system, project ID for project
-	NotBefore        *time.Time `json:"notBefore"`  // Binding is inactive before this time (kernel evaluates)
-	ExpiresAt        *time.Time `json:"expiresAt"`  // Binding is inactive after this time (kernel evaluates)
+	ScopeType        string     `json:"scopeType"` // "system", "project"
+	ScopeID          string     `json:"scopeId"`   // "" for system, project ID for project
+	NotBefore        *time.Time `json:"notBefore"` // Binding is inactive before this time (kernel evaluates)
+	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
 }
@@ -2738,7 +2738,7 @@ type AccessConstraint struct {
 
 // AccessConstraint subject kinds
 const (
-	ConstraintSubjectPrincipal    = "principal"
-	ConstraintSubjectGroupClosure = "group_closure"
+	ConstraintSubjectPrincipal     = "principal"
+	ConstraintSubjectGroupClosure  = "group_closure"
 	ConstraintSubjectAllPrincipals = "all_principals"
 )

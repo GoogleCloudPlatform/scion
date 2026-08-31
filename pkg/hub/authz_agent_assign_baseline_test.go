@@ -35,12 +35,6 @@ import (
 // assign. The security in that conversion comes from the GCP actAs check, not
 // from narrowing the Hub policy layer.
 
-// assignBaselineReason is the Decision.Reason emitted by the project-scoped
-// role binding grant that replaces the old assign baseline.
-// CO1: The old hard-coded baseline is gone; agents receive project-scoped
-// assign permissions via explicit role bindings.
-const assignBaselineReason = "role binding grant"
-
 // projectSA builds a project-scoped service account resource in the given
 // project. Project-scoped is what gives it a project parent, which is what the
 // baseline keys on.

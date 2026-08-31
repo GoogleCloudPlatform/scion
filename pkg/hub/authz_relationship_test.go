@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -351,19 +352,19 @@ func TestRelationshipGrant_OnlyReadAction(t *testing.T) {
 	resolver := NewRelationshipGrantResolver(nil)
 
 	// Read action: eligible (would be allowed if store was available)
-	result := resolver.CheckProgenyAccess(nil, agent,
+	result := resolver.CheckProgenyAccess(context.TODO(), agent,
 		Resource{Type: "secret", ID: "s1"}, ActionRead)
 	// Will fail because store is nil, but won't fail on the action check
 	assert.Contains(t, result.DenyReason, "store not available")
 
 	// Write action: not eligible, regardless
-	result = resolver.CheckProgenyAccess(nil, agent,
+	result = resolver.CheckProgenyAccess(context.TODO(), agent,
 		Resource{Type: "secret", ID: "s1"}, ActionUpdate)
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.DenyReason, "only read action")
 
 	// Delete action: not eligible
-	result = resolver.CheckProgenyAccess(nil, agent,
+	result = resolver.CheckProgenyAccess(context.TODO(), agent,
 		Resource{Type: "secret", ID: "s1"}, ActionDelete)
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.DenyReason, "only read action")
@@ -378,7 +379,7 @@ func TestRelationshipGrant_UnsupportedResourceType(t *testing.T) {
 
 	resolver := NewRelationshipGrantResolver(nil)
 
-	result := resolver.CheckProgenyAccess(nil, agent,
+	result := resolver.CheckProgenyAccess(context.TODO(), agent,
 		Resource{Type: "project", ID: "p1"}, ActionRead)
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.DenyReason, "not eligible for progeny grants")
@@ -523,7 +524,7 @@ func TestRelationshipGrant_CheckProgenyAccess_NilStore(t *testing.T) {
 	}
 
 	resolver := NewRelationshipGrantResolver(nil)
-	result := resolver.CheckProgenyAccess(nil, agent,
+	result := resolver.CheckProgenyAccess(context.TODO(), agent,
 		Resource{Type: "secret", ID: "s1"}, ActionRead)
 
 	assert.False(t, result.Allowed, "must fail closed when store is nil")
@@ -537,7 +538,7 @@ func TestRelationshipGrant_CheckProgenyAccess_FederatedDenied(t *testing.T) {
 	)
 
 	resolver := NewRelationshipGrantResolver(nil)
-	result := resolver.CheckProgenyAccess(nil, fedAgent,
+	result := resolver.CheckProgenyAccess(context.TODO(), fedAgent,
 		Resource{Type: "secret", ID: "s1"}, ActionRead)
 
 	assert.False(t, result.Allowed, "federated agent must be denied")

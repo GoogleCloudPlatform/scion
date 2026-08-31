@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"math/rand"
 	"testing"
 	"time"
@@ -331,6 +332,15 @@ func TestSubjectSelector_MatchesPrincipalClosure(t *testing.T) {
 				Kind: SubjectKindAllPrincipals,
 			},
 			match: true,
+		},
+		{
+			name: "principal type mismatch rejects same ID",
+			subject: SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: "group",
+				PrincipalID:   "user1",
+			},
+			match: false,
 		},
 	}
 
@@ -1176,7 +1186,7 @@ func TestConstraint_UserBlockedByConstraints(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := s.userBlockedByConstraints(nil, tc.user, tc.constraints)
+			got := s.userBlockedByConstraints(context.TODO(), tc.user, tc.constraints)
 			if got != tc.blocked {
 				t.Fatalf("userBlockedByConstraints() = %v, want %v", got, tc.blocked)
 			}
@@ -1204,7 +1214,7 @@ func TestConstraint_LockoutScenario_PrincipalTargetingSoleAdmin(t *testing.T) {
 	}
 
 	// The admin should be blocked.
-	if !s.userBlockedByConstraints(nil, admin, constraints) {
+	if !s.userBlockedByConstraints(context.TODO(), admin, constraints) {
 		t.Fatal("sole admin should be blocked by principal constraint targeting them")
 	}
 }
@@ -1229,10 +1239,10 @@ func TestConstraint_LockoutScenario_GroupClosureAllAdmins(t *testing.T) {
 	}
 
 	// Both admins should be blocked.
-	if !s.userBlockedByConstraints(nil, admin1, constraints) {
+	if !s.userBlockedByConstraints(context.TODO(), admin1, constraints) {
 		t.Fatal("admin1 should be blocked by group_closure targeting ops-team")
 	}
-	if !s.userBlockedByConstraints(nil, admin2, constraints) {
+	if !s.userBlockedByConstraints(context.TODO(), admin2, constraints) {
 		t.Fatal("admin2 should be blocked by group_closure targeting ops-team")
 	}
 }
@@ -1265,7 +1275,7 @@ func TestConstraint_LockoutScenario_CombinedPrincipalConstraints(t *testing.T) {
 	// Both admins should be blocked individually.
 	allBlocked := true
 	for _, admin := range admins {
-		if !s.userBlockedByConstraints(nil, admin, constraints) {
+		if !s.userBlockedByConstraints(context.TODO(), admin, constraints) {
 			allBlocked = false
 			break
 		}
@@ -1294,10 +1304,10 @@ func TestConstraint_LockoutSurvival_OneAdminUnaffected(t *testing.T) {
 	}
 
 	// admin1 is blocked, but admin2 survives.
-	if !s.userBlockedByConstraints(nil, admin1, constraints) {
+	if !s.userBlockedByConstraints(context.TODO(), admin1, constraints) {
 		t.Fatal("admin1 should be blocked")
 	}
-	if s.userBlockedByConstraints(nil, admin2, constraints) {
+	if s.userBlockedByConstraints(context.TODO(), admin2, constraints) {
 		t.Fatal("admin2 should NOT be blocked")
 	}
 }

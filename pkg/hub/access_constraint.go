@@ -92,6 +92,9 @@ func (s SubjectSelector) MatchesPrincipalClosure(
 ) bool {
 	switch s.Kind {
 	case SubjectKindPrincipal:
+		if s.PrincipalType != directPrincipalType {
+			return false
+		}
 		_, ok := principalClosure[s.PrincipalID]
 		return ok
 	case SubjectKindGroupClosure:

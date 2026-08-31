@@ -1218,13 +1218,6 @@ func seedRoleDefinitions(ctx context.Context, s store.Store) {
 	reconcileBuiltInRoles(ctx, s)
 }
 
-// seedDefaultPoliciesAndGroups is a backward-compatible alias for
-// seedDefaultGroupsAndBindings. It creates the hub-members group and
-// the system-scoped hub-member role binding.
-func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
-	seedDefaultGroupsAndBindings(ctx, s)
-}
-
 // =============================================================================
 // PG1 → RG1 Conversion Points: Progeny Policy to Relationship Grant
 // =============================================================================
