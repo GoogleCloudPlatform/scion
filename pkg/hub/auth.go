@@ -408,18 +408,24 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// JWT tokens are self-contained; check current user status
 				// from the store to enforce suspension between token refreshes.
 				if cfg.UserStore != nil {
-					if u, uErr := cfg.UserStore.GetUser(ctx, claims.UserID); uErr == nil {
-						if u.Status == store.UserStatusSuspended {
-							log.Warn("JWT auth rejected: user is suspended",
-								"user_id", claims.UserID, "email", claims.Email)
-							writeError(w, http.StatusForbidden, "user_suspended",
-								"access denied: user account is suspended", nil)
-							return
-						}
+					u, uErr := cfg.UserStore.GetUser(ctx, claims.UserID)
+					if uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+						log.Error("JWT auth: user store lookup failed",
+							"user_id", claims.UserID, "error", uErr)
+						writeError(w, http.StatusServiceUnavailable, "store_error",
+							"unable to verify user status", nil)
+						return
 					}
-					// If GetUser fails (store error or user deleted), let the
-					// request continue — downstream handlers will fail closed
-					// when the identity has no matching store record.
+					if uErr == nil && u.Status == store.UserStatusSuspended {
+						log.Warn("JWT auth rejected: user is suspended",
+							"user_id", claims.UserID, "email", claims.Email)
+						writeError(w, http.StatusForbidden, "user_suspended",
+							"access denied: user account is suspended", nil)
+						return
+					}
+					// ErrNotFound (deleted user) falls through — downstream
+					// handlers will fail closed when the identity has no
+					// matching store record.
 				}
 				user := NewAuthenticatedUser(
 					claims.UserID,
