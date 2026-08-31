@@ -809,6 +809,45 @@ func TestListAccessConstraintsFiltered_StableCursorOrdering(t *testing.T) {
 	assert.Equal(t, "stable-2", items2[1].Name)
 }
 
+func TestListAccessConstraintsFiltered_CursorWithCommaInName(t *testing.T) {
+	s, _ := newTestACStore(t)
+	ctx := context.Background()
+
+	// Create constraints with commas in names to verify cursor encoding
+	// handles the delimiter correctly (R1 regression test).
+	names := []string{"alpha", "ops,staging", "ops,staging,v2", "zulu"}
+	for _, name := range names {
+		c := newBaseConstraint(name)
+		_, err := s.CreateAccessConstraint(ctx, c)
+		require.NoError(t, err)
+	}
+
+	// Page through by name, size 2.
+	items, nextToken, total, err := s.ListAccessConstraintsFiltered(ctx, store.AccessConstraintListOptions{
+		PageSize:  2,
+		SortBy:    "name",
+		SortOrder: "asc",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4, total)
+	require.Len(t, items, 2)
+	assert.Equal(t, "alpha", items[0].Name)
+	assert.Equal(t, "ops,staging", items[1].Name)
+
+	// Second page — cursor was encoded from "ops,staging" which contains a comma.
+	items, nextToken, _, err = s.ListAccessConstraintsFiltered(ctx, store.AccessConstraintListOptions{
+		PageSize:  2,
+		PageToken: nextToken,
+		SortBy:    "name",
+		SortOrder: "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	assert.Equal(t, "ops,staging,v2", items[0].Name)
+	assert.Equal(t, "zulu", items[1].Name)
+	assert.Empty(t, nextToken, "no more pages")
+}
+
 func TestListAccessConstraintsFiltered_SortOrder(t *testing.T) {
 	s, _ := newTestACStore(t)
 	ctx := context.Background()

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -1200,7 +1201,7 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
 	normalized := make(map[string]struct{}, len(closure))
 	for key := range closure {
-		if idx := indexOf(key, ':'); idx >= 0 {
+		if idx := strings.IndexByte(key, ':'); idx >= 0 {
 			keyType := key[:idx]
 			keyID := key[idx+1:]
 			normType := NormalizePrincipalType(keyType)
@@ -1210,17 +1211,6 @@ func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
 		}
 	}
 	return normalized
-}
-
-// indexOf returns the index of the first occurrence of sep in s, or -1.
-// Avoids importing strings for a single use.
-func indexOf(s string, sep byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == sep {
-			return i
-		}
-	}
-	return -1
 }
 
 // =============================================================================
@@ -1521,7 +1511,8 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 
 	// Validate converted subject and scope. Invalid stored records are
 	// marked as degraded for B7's ResolutionHealth, not dropped — this
-	// preserves fail-open semantics while surfacing data quality issues.
+	// preserves record inclusion (does not silently drop) while surfacing
+	// data quality issues via the Degraded flag.
 	if err := hc.Subject.Validate(); err != nil {
 		slog.Warn("degraded access constraint: invalid stored subject",
 			"constraint_id", sc.ID, "constraint_name", sc.Name, "error", err)

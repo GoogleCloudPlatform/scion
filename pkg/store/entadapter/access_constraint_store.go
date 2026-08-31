@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -679,31 +680,46 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	if err != nil {
 		return "", uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
 	}
-	parts := strings.SplitN(string(raw), ",", 2)
-	if len(parts) != 2 {
+	s := string(raw)
+	// Split at the last comma — UUIDs never contain commas, so the sort
+	// value (which may contain commas, e.g. in constraint names) is
+	// everything before the last comma.
+	lastComma := strings.LastIndex(s, ",")
+	if lastComma < 0 {
 		return "", uuid.UUID{}, fmt.Errorf("expected 'value,id' format")
 	}
-	id, err := uuid.Parse(parts[1])
+	id, err := uuid.Parse(s[lastComma+1:])
 	if err != nil {
 		return "", uuid.UUID{}, fmt.Errorf("parse id: %w", err)
 	}
-	return parts[0], id, nil
+	return s[:lastComma], id, nil
 }
 
 // ---------------------------------------------------------------------------
 // Time field comparison helpers for keyset pagination
 // ---------------------------------------------------------------------------
 
+// mustParseCursorTime parses a time string from a server-generated cursor.
+// Cursors are always encoded with RFC3339Nano, so parse errors indicate a
+// corrupted cursor. Returns time.Time{} and logs a warning on failure rather
+// than silently discarding the error.
+func mustParseCursorTime(val string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, val)
+	if err != nil {
+		slog.Warn("malformed cursor time value, defaulting to zero time",
+			"value", val, "error", err)
+	}
+	return t
+}
+
 func constraintFieldGT(field string, val string) predicate.AccessConstraint {
 	switch field {
 	case accessconstraint.FieldName:
 		return accessconstraint.NameGT(val)
 	case accessconstraint.FieldUpdated:
-		t, _ := time.Parse(time.RFC3339Nano, val)
-		return accessconstraint.UpdatedGT(t)
+		return accessconstraint.UpdatedGT(mustParseCursorTime(val))
 	default: // created
-		t, _ := time.Parse(time.RFC3339Nano, val)
-		return accessconstraint.CreatedGT(t)
+		return accessconstraint.CreatedGT(mustParseCursorTime(val))
 	}
 }
 
@@ -712,11 +728,9 @@ func constraintFieldLT(field string, val string) predicate.AccessConstraint {
 	case accessconstraint.FieldName:
 		return accessconstraint.NameLT(val)
 	case accessconstraint.FieldUpdated:
-		t, _ := time.Parse(time.RFC3339Nano, val)
-		return accessconstraint.UpdatedLT(t)
+		return accessconstraint.UpdatedLT(mustParseCursorTime(val))
 	default: // created
-		t, _ := time.Parse(time.RFC3339Nano, val)
-		return accessconstraint.CreatedLT(t)
+		return accessconstraint.CreatedLT(mustParseCursorTime(val))
 	}
 }
 
@@ -725,10 +739,8 @@ func constraintFieldEQ(field string, val string) predicate.AccessConstraint {
 	case accessconstraint.FieldName:
 		return accessconstraint.NameEQ(val)
 	case accessconstraint.FieldUpdated:
-		t, _ := time.Parse(time.RFC3339Nano, val)
-		return accessconstraint.UpdatedEQ(t)
+		return accessconstraint.UpdatedEQ(mustParseCursorTime(val))
 	default: // created
-		t, _ := time.Parse(time.RFC3339Nano, val)
-		return accessconstraint.CreatedEQ(t)
+		return accessconstraint.CreatedEQ(mustParseCursorTime(val))
 	}
 }
