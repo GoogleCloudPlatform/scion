@@ -687,8 +687,18 @@ func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic
 		isGeneral = 1
 	}
 
+	// DEF-89: when no ConversationID is provided and the conversations table
+	// exists, generate one so the existing dual-write branch creates the
+	// conversation atomically. The external_ref derivation (empty string)
+	// matches backfillTopicConversations.
+	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
+	// called BEFORE BeginTx (same pattern as EnsureGeneralTopic).
+	if topic.ConversationID == "" && s.hasConversationsTable() {
+		topic.ConversationID = uuid.New().String()
+	}
+
 	if topic.ConversationID == "" {
-		// Legacy path: no conversation linkage.
+		// Legacy path: no conversation linkage (conversations table absent).
 		const query = `
 INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
