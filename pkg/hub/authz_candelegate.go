@@ -264,6 +264,19 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 
 	// Verify the actor holds every inherited permission at each scope.
 	for sk, perms := range permsByScope {
+		// R-3 fix: for scoped UAT actors, reject any project-scoped binding
+		// whose project doesn't match the credential's scoped project. A
+		// project-scoped UAT must not delegate group authority in a different
+		// project.
+		if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
+			if sk.scopeType == store.RoleScopeProject && sk.scopeID != scoped.ScopedProjectID() {
+				return Decision{
+					Allowed: false,
+					Reason:  "scoped credential cannot delegate group authority in a different project",
+				}
+			}
+		}
+
 		permList := make([]string, 0, len(perms))
 		for p := range perms {
 			permList = append(permList, p)

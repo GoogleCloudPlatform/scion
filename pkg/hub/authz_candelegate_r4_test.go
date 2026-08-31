@@ -214,3 +214,82 @@ func TestCanDelegate_FullCredentials_SystemGroup_Allowed(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"full-session super-admin should delegate system-scoped group membership")
 }
+
+// --- R-3: Cross-project UAT group delegation gap ---
+
+// TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied verifies that
+// a project-scoped UAT cannot delegate group membership when the group carries
+// role bindings for a DIFFERENT project.
+//
+// R-3 fix: previously, the group-membership GrantDescriptor had no ScopeType,
+// so enforceUATDelegation no-oped, and intersectCredentialCaveats filtered by
+// permission ID but not by project. A UAT scoped to project A could delegate
+// a group carrying project-B-scoped bindings.
+func TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied(t *testing.T) {
+	authz, s := setupCanDelegateTest(t)
+	ctx := context.Background()
+
+	projectA := tid("r3-proj-a")
+	projectB := tid("r3-proj-b")
+	ownerID := tid("r3-owner")
+
+	createDelegateTestProject(t, s, projectA, "r3-proj-a", ownerID)
+	createDelegateTestProject(t, s, projectB, "r3-proj-b", ownerID)
+	createTestUserWithProjectRole(t, s, ownerID, "r3-owner@test.com", projectA, store.ProjectRoleOwner)
+	// Also give owner permissions in project B.
+	rdB, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rdB.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      ownerID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectB,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create a group with a role binding scoped to project B.
+	groupID := tid("r3-group-cross")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "r3-group-cross", Name: "R3 Cross Group",
+	}))
+
+	customRD, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "r3-test-role",
+		Description: "Minimal role for R3 test",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"agent.read"},
+	})
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: customRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectB, // binding is for project B
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Full-session owner can delegate (positive control).
+	owner := NewAuthenticatedUser(ownerID, "r3-owner@test.com", "Owner", "member", "api")
+	decision := authz.CanDelegate(ctx, owner, GrantDescriptor{
+		Type:    GrantTypeGroupMembership,
+		GroupID: groupID,
+	})
+	assert.True(t, decision.Allowed,
+		"full-session owner should delegate cross-project group membership")
+
+	// UAT scoped to project A must NOT delegate group authority for project B.
+	scopedOwner := NewScopedUserIdentity(owner, projectA, []string{"agent:read"})
+	decision = authz.CanDelegate(ctx, scopedOwner, GrantDescriptor{
+		Type:    GrantTypeGroupMembership,
+		GroupID: groupID,
+	})
+	assert.False(t, decision.Allowed,
+		"R-3: project-A-scoped UAT must NOT delegate group authority in project B")
+	assert.Contains(t, decision.Reason, "different project",
+		"denial reason should mention cross-project")
+}
