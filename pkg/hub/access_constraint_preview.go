@@ -80,6 +80,9 @@ type PreviewService struct {
 
 	// stopCleanup signals the nonce cleanup goroutine to shut down.
 	stopCleanup chan struct{}
+
+	// closeOnce ensures Close() is idempotent.
+	closeOnce sync.Once
 }
 
 // NewPreviewService creates a new PreviewService.
@@ -617,8 +620,13 @@ func (ps *PreviewService) resolveAllPrincipals(
 		// Also resolve project agents.
 		agents, err := ps.store.ListAgents(ctx, store.AgentFilter{ProjectID: scope.ID}, store.ListOptions{Limit: syncPreviewThreshold + 1})
 		if err != nil {
-			ps.logger.Warn("failed to list project agents for all_principals", "project", scope.ID, "error", err)
-		} else if agents != nil {
+			// Agent resolution failure degrades completeness — same as user failures.
+			return result, &IncompletenessReason{
+				Code:    IncompletenessCodeMembershipFailed,
+				Message: fmt.Sprintf("failed to list project agents: %v", err),
+			}
+		}
+		if agents != nil {
 			for _, a := range agents.Items {
 				p := resolvedPrincipal{
 					principalType: "agent",
@@ -663,8 +671,13 @@ func (ps *PreviewService) resolveAllPrincipals(
 		// System scope: also list all agents.
 		agents, err := ps.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: syncPreviewThreshold + 1})
 		if err != nil {
-			ps.logger.Warn("failed to list agents for all_principals", "error", err)
-		} else if agents != nil {
+			// Agent resolution failure degrades completeness — same as user failures.
+			return result, &IncompletenessReason{
+				Code:    IncompletenessCodeMembershipFailed,
+				Message: fmt.Sprintf("failed to list agents: %v", err),
+			}
+		}
+		if agents != nil {
 			for _, a := range agents.Items {
 				p := resolvedPrincipal{
 					principalType: "agent",
@@ -1764,9 +1777,20 @@ func (ps *PreviewService) ListAffectedPrincipals(
 		return nil, fmt.Errorf("preview %s not found or expired", previewID)
 	}
 	job, ok := jobVal.(*PreviewJob)
-	if !ok || job.Result == nil {
+	if !ok {
 		return nil, fmt.Errorf("preview %s not yet completed", previewID)
 	}
+
+	// Hold the mutex while reading job state to avoid data races with
+	// the async goroutine that writes Result and allImpacted.
+	job.mu.Lock()
+	if job.Result == nil {
+		job.mu.Unlock()
+		return nil, fmt.Errorf("preview %s not yet completed", previewID)
+	}
+	allImpacted := job.allImpacted
+	completeness := job.Result.Completeness
+	job.mu.Unlock()
 
 	// Parse page token as offset.
 	offset := 0
@@ -1778,10 +1802,10 @@ func (ps *PreviewService) ListAffectedPrincipals(
 
 	// Paginate over the full impacted principals set, not just the first page.
 	page := ps.buildAffectedPage(
-		job.allImpacted,
+		allImpacted,
 		offset,
 		pageSize,
-		&job.Result.Completeness,
+		&completeness,
 	)
 	return &page, nil
 }
@@ -1862,9 +1886,17 @@ func (ps *PreviewService) GetPreviewJob(ctx context.Context, jobID string) (*Pre
 	job.mu.Lock()
 	defer job.mu.Unlock()
 	// Return a snapshot to avoid races on the caller side.
-	snapshot := *job
-	snapshot.cancel = nil // don't expose cancel func
-	return &snapshot, nil
+	// Copy fields individually — never copy sync.Mutex.
+	snapshot := &PreviewJob{
+		JobID:       job.JobID,
+		Status:      job.Status,
+		Operation:   job.Operation,
+		Progress:    job.Progress,
+		Result:      job.Result,
+		Error:       job.Error,
+		allImpacted: job.allImpacted,
+	}
+	return snapshot, nil
 }
 
 // CancelPreviewJob cancels an in-progress async preview job.
@@ -2180,10 +2212,13 @@ func (ps *PreviewService) cleanupNonces() {
 }
 
 // Close shuts down the PreviewService, stopping the nonce cleanup goroutine.
+// Safe to call multiple times.
 func (ps *PreviewService) Close() {
-	if ps.stopCleanup != nil {
-		close(ps.stopCleanup)
-	}
+	ps.closeOnce.Do(func() {
+		if ps.stopCleanup != nil {
+			close(ps.stopCleanup)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
