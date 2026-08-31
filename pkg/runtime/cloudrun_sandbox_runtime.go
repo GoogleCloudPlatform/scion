@@ -83,6 +83,17 @@ const sandboxWorkspace = "/workspace"
 // output; when it fails the file holds the error output that explains why.
 const entrypointLogFile = ".scion-entrypoint.log"
 
+// sandboxUID and sandboxGID are the UID/GID passed to the sandbox via
+// SCION_HOST_UID / SCION_HOST_GID. They correspond to the `scion` user
+// created by the omni-image Dockerfile (useradd -u 1000 scion).
+//
+// On Cloud Run the launcher runs as root (UID 0). Passing 0 would make
+// sciontool init keep the sandbox process as root, which Claude Code
+// ≥ 2.1.246 rejects. Hardcoding 1000 ensures the sandbox always drops
+// privileges to the scion user regardless of the launcher's own UID.
+const sandboxUID = 1000
+const sandboxGID = 1000
+
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
 func SandboxLauncherAvailable() bool {
@@ -304,10 +315,20 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		workspace: filepath.Join(rootDir, "agents", slug, "workspace"),
 	}
 
-	// Create all directories.
+	// Create all directories and chown them to the sandbox user.
+	// The launcher runs as root on Cloud Run, so directories default to
+	// root:root. The sandbox process drops to sandboxUID:sandboxGID via
+	// sciontool init, and needs these directories writable from the start
+	// (they are bind-mounted into the sandbox). Chowning here also
+	// naturally resolves /workspace writability: previously the workspace
+	// was root-owned and the sandbox ran as root; now both are scion-owned.
 	for _, d := range []string{p.agentHome, p.workspace} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return p, fmt.Errorf("mkdir %s: %w", d, err)
+		}
+		if err := os.Chown(d, sandboxUID, sandboxGID); err != nil {
+			runtimeLog.Warn("failed to chown directory to sandbox user",
+				"dir", d, "uid", sandboxUID, "gid", sandboxGID, "error", err)
 		}
 	}
 
@@ -534,9 +555,19 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	}
 
 	// Host UID/GID for container user synchronisation.
-	uid, gid := os.Getuid(), os.Getgid()
-	env["SCION_HOST_UID"] = strconv.Itoa(uid)
-	env["SCION_HOST_GID"] = strconv.Itoa(gid)
+	//
+	// On Cloud Run the launcher (and therefore os.Getuid()) runs as root
+	// (UID 0). Passing UID 0 to the sandbox causes sciontool init's
+	// setupHostUser to keep the process running as root, which makes
+	// Claude Code ≥ 2.1.246 refuse to start ("--dangerously-skip-permissions
+	// cannot be used with root/sudo privileges for security reasons").
+	//
+	// The omni-image creates a `scion` user at UID 1000 (see
+	// image-build/scion-base/Dockerfile). Pass that UID/GID so that
+	// sciontool init drops privileges to the scion user inside the
+	// sandbox, regardless of the launcher's own UID.
+	env["SCION_HOST_UID"] = strconv.Itoa(sandboxUID)
+	env["SCION_HOST_GID"] = strconv.Itoa(sandboxGID)
 
 	// Set HOME, USER and LOGNAME explicitly for the sandbox.
 	// supervisor.go:113 only sets HOME when (UID > 0 || Rootless). On
