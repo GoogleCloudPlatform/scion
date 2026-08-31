@@ -434,9 +434,6 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_conversation
-    ON webchat_topic (conversation_id) WHERE conversation_id IS NOT NULL;
-
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
     conversation_key TEXT NOT NULL,
