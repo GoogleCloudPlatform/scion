@@ -1041,6 +1041,45 @@ func TestPrepareScionLayout_CreatesDirectories(t *testing.T) {
 	}
 }
 
+// TestPrepareScionLayout_CreatesInWorkspaceSharedDirs verifies that
+// prepareScionLayout creates .scion-volumes/<name> subdirectories under
+// the workspace for shared dirs with InWorkspace=true, so that the bind
+// mount destination exists when the sandbox starts.
+func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad", InWorkspace: true},
+			{Name: "ref-data"},
+		},
+	}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// InWorkspace shared dir should have a directory under workspace.
+	iwPath := filepath.Join(paths.workspace, ".scion-volumes", "scratchpad")
+	if _, err := os.Stat(iwPath); os.IsNotExist(err) {
+		t.Errorf("in-workspace shared dir not created: %s", iwPath)
+	}
+
+	// Non-InWorkspace shared dir should NOT have a directory under workspace.
+	noIWPath := filepath.Join(paths.workspace, ".scion-volumes", "ref-data")
+	if _, err := os.Stat(noIWPath); !os.IsNotExist(err) {
+		t.Errorf("non-InWorkspace shared dir should not be created under workspace: %s", noIWPath)
+	}
+
+	// Both should still have host-side dirs under /scion/shared/.
+	for _, name := range []string{"scratchpad", "ref-data"} {
+		sdPath := filepath.Join(rootDir, "shared", name)
+		if _, err := os.Stat(sdPath); os.IsNotExist(err) {
+			t.Errorf("shared dir not created: %s", sdPath)
+		}
+	}
+}
+
 func TestPrepareScionLayout_PathStructure(t *testing.T) {
 	rootDir := t.TempDir()
 	paths, err := prepareScionLayout(rootDir, "my-agent", RunConfig{})
