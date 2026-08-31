@@ -197,6 +197,68 @@ func TestMetadataServer_NumericProjectID(t *testing.T) {
 	}
 }
 
+func TestMetadataServer_InstanceDirectoryListing(t *testing.T) {
+	port := freePort(t)
+	srv := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "test-project",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	for _, path := range []string{
+		"/computeMetadata/v1/instance",
+		"/computeMetadata/v1/instance/",
+	} {
+		resp, body := metadataGet(t, port, path)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d", path, resp.StatusCode)
+		}
+		if body != "service-accounts/\n" {
+			t.Fatalf("GET %s: expected %q, got %q", path, "service-accounts/\n", body)
+		}
+	}
+}
+
+func TestMetadataServer_ProjectDirectoryListing(t *testing.T) {
+	port := freePort(t)
+	srv := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "test-project",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	for _, path := range []string{
+		"/computeMetadata/v1/project",
+		"/computeMetadata/v1/project/",
+	} {
+		resp, body := metadataGet(t, port, path)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d", path, resp.StatusCode)
+		}
+		if body != "project-id\nnumeric-project-id\n" {
+			t.Fatalf("GET %s: expected %q, got %q", path, "project-id\nnumeric-project-id\n", body)
+		}
+	}
+}
+
 func TestMetadataServer_BlockMode(t *testing.T) {
 	port := freePort(t)
 	srv := New(Config{
