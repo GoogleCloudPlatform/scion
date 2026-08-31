@@ -67,7 +67,7 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private name = '';
   @state() private projectId = '';
   @state() private templateId = '';
-  @state() private harness = 'gemini-cli';
+  @state() private harness = 'antigravity';
   @state() private customHarness = '';
   @state() private brokerId = '';
   @state() private profile = '';
@@ -574,7 +574,7 @@ export class ScionPageAgentCreate extends LitElement {
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || 'gemini-cli';
+    const harnessDefault = settings?.defaultHarnessConfig || 'antigravity';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
