@@ -307,6 +307,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// SECURITY-GATE: CheckAccess — verify project.create permission.
+	// The resource is hub-scoped because the project does not exist yet.
+	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+		return
+	}
+
 	var req CreateProjectRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -1314,6 +1320,13 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
+		return
+	}
+
+	// SECURITY-GATE: CheckAccess — verify project.create permission.
+	// Register may find an existing project or create a new one; either way
+	// the caller must be allowed to provision projects at hub scope.
+	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
 		return
 	}
 
