@@ -114,16 +114,8 @@ func setupMessagePrivacyTest(t *testing.T) (
 		ProjectID: project.ID, OwnerID: alice.ID, Created: time.Now(), Updated: time.Now(),
 	}))
 
-	// --- give bob read-only access on agents ---
-	readPolicy := &store.Policy{
-		ID: tid("policy-msg-bob-read"), Name: "Bob Agent Read",
-		ScopeType: "hub", ResourceType: "agent",
-		Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, readPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: readPolicy.ID, PrincipalType: "user", PrincipalID: bob.ID,
-	}))
+	// --- give bob read-only access on agents via project membership (CO1: role bindings) ---
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleMember)
 
 	// --- messages ---
 	now := time.Now()

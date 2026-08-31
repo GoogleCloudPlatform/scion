@@ -1406,18 +1406,21 @@ func TestAddUserInjectedSkill_AllowProgenyCreatesPolicy(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
 	require.NotEmpty(t, entry.ID)
 
-	// Verify the progeny policy was created.
+	// CO1: ensureSkillProgenyPolicy is a no-op — progeny access is handled by
+	// the RelationshipGrantResolver. Verify no legacy policy is created.
 	policyName := "progeny-skill-access:" + entry.ID
 	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "progeny policy must be created for AllowProgeny=true skill")
+	assert.Equal(t, 0, policies.TotalCount,
+		"CO1: progeny policy must NOT be created — RelationshipGrantResolver handles progeny access")
 }
 
 // TestRemoveUserInjectedSkill_AllowProgenyDeletesPolicy verifies that removing
-// a user-scoped skill injection with AllowProgeny=true cleans up the progeny policy.
+// a user-scoped skill injection with AllowProgeny=true works cleanly.
+// CO1: progeny policies are no longer created (RelationshipGrantResolver
+// handles progeny access), so this test verifies the delete flow itself.
 func TestRemoveUserInjectedSkill_AllowProgenyDeletesPolicy(t *testing.T) {
-	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
-	ctx := context.Background()
+	srv, _, _, alice, _ := setupInjectedSkillsTest(t)
 
 	// Add a skill with AllowProgeny=true.
 	body := api.SkillInjectionEntry{
@@ -1432,25 +1435,17 @@ func TestRemoveUserInjectedSkill_AllowProgenyDeletesPolicy(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
 	entryID := entry.ID
 
-	// Verify policy exists.
-	policyName := "progeny-skill-access:" + entryID
-	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	require.Equal(t, 1, policies.TotalCount, "policy must exist before delete")
-
 	// Delete the skill injection.
 	rec = doRequestAsUser(t, srv, alice, http.MethodDelete,
 		"/api/v1/users/me/injected-skills/"+entryID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-
-	// Verify the progeny policy was cleaned up.
-	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount, "progeny policy must be deleted when skill is removed")
 }
 
 // TestSetUserInjectedSkills_BulkReplaceCleansPolicies verifies that a bulk
-// PUT on user-scope injected skills cleans up old progeny policies (R-2 fix).
+// PUT on user-scope injected skills replaces entries correctly.
+// CO1: progeny policies are no longer created (RelationshipGrantResolver
+// handles progeny access). This test verifies the bulk replace flow and
+// confirms no orphaned policies are left behind.
 func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
 	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
 	ctx := context.Background()
@@ -1464,16 +1459,6 @@ func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
 		"/api/v1/users/me/injected-skills", body)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	var entry api.SkillInjectionEntry
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
-	oldID := entry.ID
-	oldPolicyName := "progeny-skill-access:" + oldID
-
-	// Verify old policy exists.
-	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	require.Equal(t, 1, policies.TotalCount, "old policy must exist before bulk replace")
-
 	// Bulk replace with a new list (new skill with AllowProgeny=true).
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
@@ -1484,19 +1469,16 @@ func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
 		"/api/v1/users/me/injected-skills", newList)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// Old policy must be cleaned up (not orphaned).
-	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount,
-		"old progeny policy must be cleaned up after bulk replace (R-2 fix)")
-
-	// New entry should have its own policy.
+	// Verify the new entry replaced the old one.
 	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
 	require.NoError(t, err)
-	require.Len(t, sis, 1)
+	require.Len(t, sis, 1, "bulk replace should result in exactly one entry")
+	assert.Equal(t, "skill://scion/new-progeny-skill@2.0", sis[0].SkillURI)
+
+	// CO1: no progeny policies should exist — they are no longer created.
 	newPolicyName := "progeny-skill-access:" + sis[0].ID
-	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: newPolicyName}, store.ListOptions{Limit: 1})
+	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: newPolicyName}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount,
-		"new entry with AllowProgeny=true must have its own progeny policy")
+	assert.Equal(t, 0, policies.TotalCount,
+		"CO1: no progeny policy should exist — RelationshipGrantResolver handles progeny access")
 }
