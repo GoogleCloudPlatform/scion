@@ -1,0 +1,34 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraints",
+    "status": 409,
+    "designRef": "constraint-ui-ux-design.md §9.7, §7.3, §7.9; plan §WP B3",
+    "notes": "The commit was attempted against a preview whose impact analysis was truncated or degraded. Design §9.1: 'A commit may not proceed from an incomplete impact analysis.' The matching preview payload is preview-async-result.json, which carries commitBlocked.code = PREVIEW_INCOMPLETE and an empty _capabilities.actions — a correct client never reaches this error, but the server must still enforce it."
+  },
+  "error": {
+    "code": "PREVIEW_INCOMPLETE",
+    "message": "This boundary cannot be committed from an incomplete impact analysis.",
+    "retryable": true,
+    "correlationId": "req-a0f31b47",
+    "requestId": "req-a0f31b47",
+    "details": {
+      "previewId": "apv-3b90",
+      "completeness": {
+        "complete": false,
+        "truncated": false,
+        "degraded": true,
+        "reasons": [
+          {
+            "code": "MEMBERSHIP_RESOLUTION_FAILED",
+            "message": "Effective membership for 2 nested groups could not be resolved.",
+            "details": {
+              "groupIds": ["grp-legacy-ldap", "grp-vendor-2025"],
+              "unresolvedPrincipalEstimate": 61
+            }
+          }
+        ]
+      },
+      "remedy": "Resolve the unreachable group references, then preview again. Counts from the incomplete preview are lower bounds and must not be treated as final."
+    }
+  }
+}

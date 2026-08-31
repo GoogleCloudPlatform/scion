@@ -1,0 +1,26 @@
+{
+  "$fixture": {
+    "endpoint": "PUT /api/v1/admin/access-constraints/ac-42",
+    "requestHeaders": { "If-Match": "\"7\"" },
+    "status": 412,
+    "designRef": "constraint-ui-ux-design.md §9.7, §9.5; plan §WP B2",
+    "notes": "412 Precondition Failed, per If-Match semantics — deliberately NOT 409. The boundary RECORD moved; contrast STALE_AUTHORIZATION_PREVIEW, where the record is unchanged but the surrounding authorization state moved. Requires the monotonic `revision` column B2 must add; no such column exists today (base inventory §2.1, §4.3 item 4). The existing store has ErrVersionConflict → 409 version_conflict (errors.go), which is the closest current analogue and is NOT wire-compatible."
+  },
+  "error": {
+    "code": "REVISION_CONFLICT",
+    "message": "This boundary was changed by someone else while you were editing.",
+    "retryable": true,
+    "correlationId": "req-90ac7712",
+    "requestId": "req-90ac7712",
+    "details": {
+      "constraintId": "ac-42",
+      "expectedRevision": "7",
+      "currentRevision": "9",
+      "lastChangedAt": "2026-08-31T14:30:12Z",
+      "lastChangedBy": { "type": "user", "id": "usr-lin", "displayName": "Lin Alvarez" },
+      "conflictingFields": ["maximumPermissions", "appliesWhen.expiresAt"],
+      "lastAuditEventId": "aev-b44e",
+      "remedy": "Reload the boundary, re-apply your edit on top of the current version, and preview again. Your draft has not been discarded."
+    }
+  }
+}

@@ -173,9 +173,7 @@ export type ConstraintSubjectDisplay =
  * Where a boundary applies. A system boundary applies everywhere; a project
  * boundary applies only within its project.
  */
-export type ConstraintScope =
-  | { type: 'system' }
-  | { type: 'project'; projectId: string };
+export type ConstraintScope = { type: 'system' } | { type: 'project'; projectId: string };
 
 export interface ConstraintScopeDisplay {
   type: 'system' | 'project';
@@ -392,11 +390,7 @@ export interface IntersectingBoundary {
   /** `null` when the reader may not see boundaries in that scope. */
   name: string | null;
   scope: ConstraintScope;
-  relationship:
-    | 'narrows'
-    | 'overlaps'
-    | 'limits_relaxation'
-    | 'blocks_relaxation';
+  relationship: 'narrows' | 'overlaps' | 'limits_relaxation' | 'blocks_relaxation';
   overlappingPermissionCount: number;
   netEffectNote: string;
   redacted?: RedactionNotice;
@@ -433,11 +427,10 @@ export interface AccessBoundarySummary {
 }
 
 /** Full record for the detail view. */
-export interface AccessBoundaryDetail
-  extends Omit<
-    AccessBoundarySummary,
-    'maximumPermissionCount' | 'affectedPrincipalCount' | 'affectedPrincipalCountExact'
-  > {
+export interface AccessBoundaryDetail extends Omit<
+  AccessBoundarySummary,
+  'maximumPermissionCount' | 'affectedPrincipalCount' | 'affectedPrincipalCountExact'
+> {
   maximumPermissions: PermissionId[];
   permissionRegistry: PermissionRegistryContext;
   effect: BoundaryEffectSummary;
@@ -702,9 +695,14 @@ export type AccessBoundaryErrorCode =
 /**
  * Error payload. `code`, `message`, `details`, `requestId` match the existing
  * `APIError` shape. `correlationId` and `retryable` are additive per design §9.7.
+ *
+ * The `code` field is typed as `string` rather than the narrower
+ * `AccessBoundaryErrorCode` union because the server may introduce new codes
+ * before the client is updated. Known codes are enumerated by
+ * {@link AccessBoundaryErrorCode} and pinned in {@link ACCESS_BOUNDARY_ERROR_CODES}.
  */
 export interface StructuredAPIError {
-  code: AccessBoundaryErrorCode | string;
+  code: string;
   message: string;
   retryable: boolean;
   correlationId: string;
@@ -775,13 +773,13 @@ export interface AccessBoundaryAuditPage {
 /* -------------------------------------------------------------------------- */
 
 export function isProjectScope(
-  scope: ConstraintScope,
+  scope: ConstraintScope
 ): scope is { type: 'project'; projectId: string } {
   return scope.type === 'project';
 }
 
 export function isPrincipalSubject(
-  subject: ConstraintSubject,
+  subject: ConstraintSubject
 ): subject is { kind: 'principal'; principal: { type: PrincipalType; id: string } } {
   return subject.kind === 'principal';
 }
@@ -794,7 +792,7 @@ export function countsAreAuthoritative(c: PreviewCompleteness): boolean {
 /** The only sanctioned way to decide whether a control is available. */
 export function canAccessBoundary(
   capabilities: AccessBoundaryCapabilities | undefined,
-  action: AccessBoundaryCapabilityAction,
+  action: AccessBoundaryCapabilityAction
 ): boolean {
   return capabilities?.actions?.includes(action) ?? false;
 }
@@ -886,7 +884,14 @@ export function isConstraintScope(value: unknown): value is ConstraintScope {
   }
 }
 
-/** Runtime shape guard for AccessBoundarySummary. */
+/**
+ * Runtime shape guard for AccessBoundarySummary.
+ *
+ * Depth note: `risk` (array) and `health.state` (enum) are not deeply
+ * validated — only `_capabilities` presence is checked. This is acceptable
+ * for the current use case (list-item validation with a warning-only policy).
+ * Fixture tests provide deeper structural coverage.
+ */
 export function isAccessBoundarySummary(value: unknown): value is AccessBoundarySummary {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -916,9 +921,7 @@ export function isStructuredAPIError(value: unknown): value is StructuredAPIErro
 }
 
 /** Runtime shape guard for StructuredAPIErrorResponse envelope. */
-export function isStructuredAPIErrorResponse(
-  value: unknown,
-): value is StructuredAPIErrorResponse {
+export function isStructuredAPIErrorResponse(value: unknown): value is StructuredAPIErrorResponse {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
   return isStructuredAPIError(obj.error);

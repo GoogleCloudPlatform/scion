@@ -70,10 +70,7 @@ import {
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const FIXTURE_DIR = resolve(
-  __dirname,
-  '../../../../scion-volumes/scratchpad/projects/constraint-uiux/fixtures',
-);
+const FIXTURE_DIR = resolve(__dirname, '__fixtures__/access-boundaries');
 
 function loadFixture<T>(name: string): T {
   const raw = readFileSync(resolve(FIXTURE_DIR, name), 'utf-8');
@@ -204,7 +201,7 @@ describe('enum exhaustiveness (acceptance gate)', () => {
 
     it('every error code has a corresponding fixture file', () => {
       const index = loadFixture<{ codes: Array<{ code: string; fixture: string }> }>(
-        'errors-index.json',
+        'errors-index.json'
       );
       const indexedCodes = new Set(index.codes.map((c) => c.code));
       for (const code of ACCESS_BOUNDARY_ERROR_CODES) {
@@ -214,7 +211,7 @@ describe('enum exhaustiveness (acceptance gate)', () => {
 
     it('every error fixture parses as StructuredAPIErrorResponse', () => {
       const index = loadFixture<{ codes: Array<{ code: string; fixture: string }> }>(
-        'errors-index.json',
+        'errors-index.json'
       );
       for (const entry of index.codes) {
         const fixture = loadFixture<unknown>(entry.fixture);
@@ -256,9 +253,15 @@ describe('enum exhaustiveness (acceptance gate)', () => {
 describe('runtime shape guards', () => {
   describe('isConstraintSubject', () => {
     it('accepts principal subject', () => {
-      expect(isConstraintSubject({ kind: 'principal', principal: { type: 'user', id: 'u1' } })).toBe(true);
-      expect(isConstraintSubject({ kind: 'principal', principal: { type: 'agent', id: 'a1' } })).toBe(true);
-      expect(isConstraintSubject({ kind: 'principal', principal: { type: 'group', id: 'g1' } })).toBe(true);
+      expect(
+        isConstraintSubject({ kind: 'principal', principal: { type: 'user', id: 'u1' } })
+      ).toBe(true);
+      expect(
+        isConstraintSubject({ kind: 'principal', principal: { type: 'agent', id: 'a1' } })
+      ).toBe(true);
+      expect(
+        isConstraintSubject({ kind: 'principal', principal: { type: 'group', id: 'g1' } })
+      ).toBe(true);
     });
 
     it('accepts group_closure subject', () => {
@@ -316,7 +319,7 @@ describe('runtime shape guards', () => {
   describe('isStructuredAPIError', () => {
     it('validates error fixture payloads', () => {
       const lockout = loadFixture<StructuredAPIErrorResponse>(
-        'errors-constraint-admin-lockout.json',
+        'errors-constraint-admin-lockout.json'
       );
       expect(isStructuredAPIError(lockout.error)).toBe(true);
     });
@@ -414,9 +417,9 @@ describe('fixture shape validation', () => {
       expect(typeof data.generatedAt).toBe('string');
       expect(typeof data.expiresAt).toBe('string');
       expect(data.operation).toBe('create');
-      expect(
-        (MUTATION_CLASSIFICATIONS as readonly string[]).includes(data.classification),
-      ).toBe(true);
+      expect((MUTATION_CLASSIFICATIONS as readonly string[]).includes(data.classification)).toBe(
+        true
+      );
       expect(data.completeness).toBeDefined();
       expect(typeof data.completeness.complete).toBe('boolean');
       expect(typeof data.completeness.truncated).toBe('boolean');
@@ -450,9 +453,9 @@ describe('fixture shape validation', () => {
       for (const state of data.temporalStates) {
         expect(typeof state.from).toBe('string');
         expect(typeof state.label).toBe('string');
-        expect(
-          (MUTATION_CLASSIFICATIONS as readonly string[]).includes(state.classification),
-        ).toBe(true);
+        expect((MUTATION_CLASSIFICATIONS as readonly string[]).includes(state.classification)).toBe(
+          true
+        );
         expect(typeof state.affectedPrincipalCount).toBe('number');
         expect(typeof state.removedPermissionCount).toBe('number');
       }
@@ -486,7 +489,7 @@ describe('fixture shape validation', () => {
       expect(typeof data.acceptedAt).toBe('string');
       expect(typeof data.pollUrl).toBe('string');
       expect(data.retryAfterSeconds === null || typeof data.retryAfterSeconds === 'number').toBe(
-        true,
+        true
       );
       expect(data._capabilities).toBeDefined();
     });
@@ -502,7 +505,7 @@ describe('fixture shape validation', () => {
       expect(data.committed).toBeDefined();
       expect(typeof data.committed.previewId).toBe('string');
       expect(
-        (MUTATION_CLASSIFICATIONS as readonly string[]).includes(data.committed.classification),
+        (MUTATION_CLASSIFICATIONS as readonly string[]).includes(data.committed.classification)
       ).toBe(true);
       expect(typeof data.committed.affectedPrincipalCount).toBe('number');
       expect(typeof data.committed.matchedPreview).toBe('boolean');
@@ -551,7 +554,7 @@ describe('fixture shape validation', () => {
       for (const event of rejected) {
         expect(typeof event.rejectionCode).toBe('string');
         expect(
-          (ACCESS_BOUNDARY_ERROR_CODES as readonly string[]).includes(event.rejectionCode!),
+          (ACCESS_BOUNDARY_ERROR_CODES as readonly string[]).includes(event.rejectionCode!)
         ).toBe(true);
       }
     });
@@ -645,7 +648,7 @@ describe('narrowing helpers', () => {
           truncated: false,
           degraded: false,
           reasons: [],
-        }),
+        })
       ).toBe(false);
       expect(
         countsAreAuthoritative({
@@ -653,7 +656,7 @@ describe('narrowing helpers', () => {
           truncated: true,
           degraded: false,
           reasons: [],
-        }),
+        })
       ).toBe(false);
       expect(
         countsAreAuthoritative({
@@ -661,7 +664,7 @@ describe('narrowing helpers', () => {
           truncated: false,
           degraded: true,
           reasons: [],
-        }),
+        })
       ).toBe(false);
     });
   });
@@ -683,15 +686,15 @@ describe('narrowing helpers', () => {
 
   describe('subjectSelectionOf', () => {
     it('maps principal subjects to exact_* selections', () => {
-      expect(
-        subjectSelectionOf({ kind: 'principal', principal: { type: 'user', id: 'u' } }),
-      ).toBe('exact_user');
-      expect(
-        subjectSelectionOf({ kind: 'principal', principal: { type: 'agent', id: 'a' } }),
-      ).toBe('exact_agent');
-      expect(
-        subjectSelectionOf({ kind: 'principal', principal: { type: 'group', id: 'g' } }),
-      ).toBe('exact_group');
+      expect(subjectSelectionOf({ kind: 'principal', principal: { type: 'user', id: 'u' } })).toBe(
+        'exact_user'
+      );
+      expect(subjectSelectionOf({ kind: 'principal', principal: { type: 'agent', id: 'a' } })).toBe(
+        'exact_agent'
+      );
+      expect(subjectSelectionOf({ kind: 'principal', principal: { type: 'group', id: 'g' } })).toBe(
+        'exact_group'
+      );
     });
 
     it('maps group_closure', () => {
@@ -727,9 +730,9 @@ describe('cross-fixture consistency', () => {
     const data = loadFixture<AccessBoundaryPreview>('preview-create-response.json');
     // The preview classification should be consistent with temporal states
     for (const state of data.temporalStates) {
-      expect(
-        (MUTATION_CLASSIFICATIONS as readonly string[]).includes(state.classification),
-      ).toBe(true);
+      expect((MUTATION_CLASSIFICATIONS as readonly string[]).includes(state.classification)).toBe(
+        true
+      );
     }
   });
 
@@ -741,9 +744,7 @@ describe('cross-fixture consistency', () => {
     }
     // And the reverse: every indexed code is in our exported set
     for (const entry of index.codes) {
-      expect(
-        (ACCESS_BOUNDARY_ERROR_CODES as readonly string[]).includes(entry.code),
-      ).toBe(true);
+      expect((ACCESS_BOUNDARY_ERROR_CODES as readonly string[]).includes(entry.code)).toBe(true);
     }
   });
 

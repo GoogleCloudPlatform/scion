@@ -1,0 +1,114 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraint-previews",
+    "status": 201,
+    "designRef": "constraint-ui-ux-design.md §9.4 (representative response reproduced verbatim in structure), §7.1",
+    "notes": "Pure tightening. previewToken is opaque and single-use, bound to actor + operation + draftHash + baseRevision + registry revision + state revision vector, ~5 min expiry (design §9.4). draftHash is server-computed; the client must never recompute it."
+  },
+  "previewId": "apv-8d2",
+  "previewToken": "eyJhbGciOiJFZERTQSIsInR5cCI6ImFwdiJ9.opaque-single-use-signed-token.c3ln",
+  "generatedAt": "2026-08-31T14:27:10Z",
+  "expiresAt": "2026-08-31T14:32:10Z",
+  "operation": "create",
+  "constraintId": null,
+  "baseRevision": null,
+  "draftHash": "sha256:5f2c9a1e7b04d3886ac1e0d5f39b2c74e8a610bb4d27fe93c05a1d8e6b7f2043",
+  "classification": "tighten",
+  "completeness": {
+    "complete": true,
+    "truncated": false,
+    "degraded": false,
+    "reasons": []
+  },
+  "lockout": {
+    "safe": true,
+    "remainingActiveDirectAdmins": 3,
+    "actorRetainsMutationAuthority": true,
+    "checkedPermissionIds": ["access_constraint.admin"]
+  },
+  "impact": {
+    "affectedPrincipalCount": 126,
+    "losingPrincipalCount": 118,
+    "regainingPrincipalCount": 0,
+    "noEffectPrincipalCount": 8,
+    "permissionDiffs": [
+      { "permissionId": "agent.delete", "losingCount": 42, "regainingCount": 0 },
+      { "permissionId": "agent.create", "losingCount": 96, "regainingCount": 0 },
+      { "permissionId": "agent.update", "losingCount": 96, "regainingCount": 0 },
+      { "permissionId": "agent.message.send", "losingCount": 112, "regainingCount": 0 },
+      { "permissionId": "project.update", "losingCount": 118, "regainingCount": 0 },
+      { "permissionId": "skill.register", "losingCount": 61, "regainingCount": 0 },
+      { "permissionId": "role_binding.create", "losingCount": 12, "regainingCount": 0 },
+      { "permissionId": "scheduled_event.create", "losingCount": 33, "regainingCount": 0 }
+    ],
+    "permissionDiffsTruncated": false,
+    "current": { "effectivePermissionCount": 2314 },
+    "proposed": { "effectivePermissionCount": 2201 },
+    "futureMostRestrictive": null
+  },
+  "temporalStates": [
+    {
+      "from": "2026-08-31T14:27:10Z",
+      "until": null,
+      "label": "active",
+      "classification": "tighten",
+      "affectedPrincipalCount": 126,
+      "removedPermissionCount": 113
+    }
+  ],
+  "principalsPage": {
+    "items": [
+      {
+        "principal": { "type": "user", "id": "usr-danvers", "displayName": "Ada Danvers" },
+        "status": "active",
+        "changeKind": "loses",
+        "membershipPaths": [
+          {
+            "hops": [
+              { "type": "user", "id": "usr-danvers", "displayName": "Ada Danvers" },
+              { "type": "group", "id": "grp-vendor-frontend", "displayName": "Vendor Frontend" },
+              { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
+            ],
+            "direct": false,
+            "truncated": false
+          }
+        ],
+        "currentPermissionCount": 24,
+        "proposedPermissionCount": 11,
+        "removedPermissions": ["agent.create", "agent.delete", "agent.update", "project.update"],
+        "regainedPermissions": [],
+        "removedPermissionsTruncated": true,
+        "removedPermissionCount": 13,
+        "grantSources": [
+          { "kind": "role_binding", "id": "rb-88a1", "roleName": "project-member", "scope": { "type": "project", "projectId": "proj-atlas" } }
+        ],
+        "_capabilities": { "actions": ["read"] }
+      }
+    ],
+    "nextPageToken": "eyJvIjoxLCJwIjoiYXB2LThkMiJ9",
+    "totalCount": 126,
+    "totalCountExact": true
+  },
+  "intersectingBoundaries": [
+    {
+      "id": "ac-04",
+      "name": "Org-wide destructive ceiling",
+      "scope": { "type": "system" },
+      "relationship": "narrows",
+      "overlappingPermissionCount": 9,
+      "netEffectNote": "agent.delete is already excluded system-wide; this draft adds no further reduction for it.",
+      "_capabilities": { "actions": ["read"] }
+    }
+  ],
+  "warnings": [
+    {
+      "code": "LARGE_BLAST_RADIUS",
+      "severity": "warning",
+      "message": "118 principals lose at least one permission.",
+      "details": { "losingPrincipalCount": 118, "threshold": 50 }
+    }
+  ],
+  "_capabilities": {
+    "actions": ["commit"]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$fixture": {
+    "endpoint": "PUT /api/v1/admin/access-constraints/ac-42",
+    "status": 403,
+    "designRef": "constraint-ui-ux-design.md §9.7, §7.2; plan §WP B4, B5",
+    "notes": "The actor held access_constraint.admin when the preview was generated but no longer holds it at commit time — their own authority changed underneath them, typically because another boundary or a role-binding change landed first. The UI must not present this as a validation failure on the draft; the draft was fine, the actor changed."
+  },
+  "error": {
+    "code": "MUTATION_PERMISSION_LOST",
+    "message": "You no longer have permission to change access boundaries.",
+    "retryable": false,
+    "correlationId": "req-de3390b5",
+    "requestId": "req-de3390b5",
+    "details": {
+      "requiredPermissionId": "access_constraint.admin",
+      "scope": { "type": "project", "projectId": "proj-atlas" },
+      "heldAtPreview": true,
+      "heldNow": false,
+      "previewId": "apv-a41",
+      "cause": {
+        "kind": "access_constraint",
+        "constraintId": "ac-88",
+        "constraintName": "Contractor admin freeze",
+        "note": "A boundary committed at 14:30:12Z now excludes access_constraint.admin for your principal."
+      },
+      "remedy": "Your draft was not applied. Ask a security administrator to review boundary ac-88, or have them commit this change."
+    }
+  }
+}

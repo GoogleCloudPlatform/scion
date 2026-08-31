@@ -44,7 +44,6 @@ import type {
   BoundaryRevision,
   PageToken,
   StructuredAPIError,
-  AccessBoundaryErrorCode,
 } from '../shared/access-boundaries.js';
 import {
   isConstraintSubject,
@@ -69,7 +68,17 @@ const PREVIEW_JOB_PATH = '/api/v1/admin/access-constraint-preview-jobs';
  * contract so callers can inspect `code` for context-aware recovery.
  */
 export class AccessBoundaryAPIError extends Error {
-  readonly code: AccessBoundaryErrorCode | string;
+  /**
+   * Error code from the B7 structured error contract.
+   *
+   * Known codes are defined by `AccessBoundaryErrorCode` in the shared
+   * contract module; the type is widened to `string` because the server may
+   * introduce new codes before the client is updated. Use
+   * {@link isRevisionConflict}, {@link isLockoutError}, or direct comparison
+   * against the exported `ACCESS_BOUNDARY_ERROR_CODES` array for type-safe
+   * matching.
+   */
+  readonly code: string;
   readonly httpStatus: number;
   readonly retryable: boolean;
   readonly correlationId: string;
@@ -89,29 +98,52 @@ export class AccessBoundaryAPIError extends Error {
 }
 
 /**
+ * Shape of a legacy (pre-B7) error response body. Used to safely access
+ * fields in the fallback path of {@link parseErrorResponse} without
+ * triggering `@typescript-eslint/no-unsafe-*` rules on every property access.
+ */
+interface LegacyErrorBody {
+  error?:
+    | {
+        code?: string;
+        message?: string;
+        details?: Record<string, unknown>;
+      }
+    | string;
+  message?: string;
+}
+
+/**
  * Parse an error response into an AccessBoundaryAPIError. Falls back to a
  * generic error if the response doesn't match the B7 structured error contract.
  */
 async function parseErrorResponse(res: Response): Promise<AccessBoundaryAPIError> {
   try {
-    const body = await res.json();
+    // The response body is untyped JSON — it may be a B7 structured error,
+    // a legacy error shape, or something entirely unexpected. The guard
+    // `isStructuredAPIErrorResponse` handles the happy path; the fallback
+    // path intentionally accesses loosely-typed fields, consistent with how
+    // api.ts:extractApiError handles the same pattern.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const body: LegacyErrorBody = await res.json();
     if (isStructuredAPIErrorResponse(body)) {
       return new AccessBoundaryAPIError(res.status, body.error);
     }
     // Fall back to legacy error shape
+    const errorObj = typeof body.error === 'object' ? body.error : null;
     const msg =
-      (typeof body.error === 'object' && body.error?.message) ||
+      errorObj?.message ||
       body.message ||
-      (typeof body.error === 'string' && body.error) ||
+      (typeof body.error === 'string' ? body.error : null) ||
       res.statusText;
     const fallback: StructuredAPIError = {
-      code: (typeof body.error === 'object' && body.error?.code) || '',
+      code: errorObj?.code || '',
       message: msg,
       retryable: false,
       correlationId: '',
     };
-    if (typeof body.error === 'object' && body.error?.details) {
-      fallback.details = body.error.details;
+    if (errorObj?.details) {
+      fallback.details = errorObj.details;
     }
     return new AccessBoundaryAPIError(res.status, fallback);
   } catch {
@@ -132,6 +164,10 @@ async function parseErrorResponse(res: Response): Promise<AccessBoundaryAPIError
  * Tracks the latest request sequence number per endpoint key, so stale
  * responses (from slower earlier requests) are discarded when a newer
  * request has already completed.
+ *
+ * SSR safety: this module lives under `web/src/client/` and imports from
+ * `./api.js` (the browser fetch layer). It is never imported server-side.
+ * Module-level mutable state is safe here.
  */
 const sequenceCounters = new Map<string, number>();
 
@@ -186,9 +222,7 @@ function buildQueryString(filters: object): string {
  * Logs warnings for malformed items rather than throwing, so partial
  * pages are still usable.
  */
-function validateListItems<T extends { subject?: unknown; scope?: unknown }>(
-  items: T[],
-): T[] {
+function validateListItems<T extends { subject?: unknown; scope?: unknown }>(items: T[]): T[] {
   for (const item of items) {
     if (item.subject !== undefined && !isConstraintSubject(item.subject)) {
       console.warn('[access-boundaries-api] Malformed subject in response item:', item.subject);
@@ -221,7 +255,7 @@ function signalInit(signal: AbortSignal | null | undefined): AbortSignal | null 
  */
 export async function list(
   filters: AccessBoundaryListFilters = {},
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryListResponse> {
   const seqKey = 'list';
   const seq = nextSequence(seqKey);
@@ -249,7 +283,7 @@ export async function list(
  */
 export async function get(
   constraintId: string,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryDetail> {
   const seqKey = `get:${constraintId}`;
   const seq = nextSequence(seqKey);
@@ -283,7 +317,7 @@ export async function get(
  */
 export async function preview(
   request: AccessBoundaryPreviewRequest,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<
   | { kind: 'preview'; preview: AccessBoundaryPreview }
   | { kind: 'job'; job: AccessBoundaryPreviewJob }
@@ -318,12 +352,11 @@ export async function preview(
  */
 export async function pollPreviewJob(
   jobId: string,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryPreviewJob> {
-  const res = await apiFetch(
-    `${PREVIEW_JOB_PATH}/${encodeURIComponent(jobId)}`,
-    { signal: signalInit(options.signal) },
-  );
+  const res = await apiFetch(`${PREVIEW_JOB_PATH}/${encodeURIComponent(jobId)}`, {
+    signal: signalInit(options.signal),
+  });
 
   if (!res.ok) {
     throw await parseErrorResponse(res);
@@ -347,14 +380,9 @@ export async function pollPreviewJobUntilDone(
     maxIntervalMs?: number;
     /** Called on each poll with the current job state. */
     onProgress?: (job: AccessBoundaryPreviewJob) => void;
-  } = {},
+  } = {}
 ): Promise<AccessBoundaryPreviewJob> {
-  const {
-    initialIntervalMs = 2000,
-    maxIntervalMs = 10000,
-    onProgress,
-    signal,
-  } = options;
+  const { initialIntervalMs = 2000, maxIntervalMs = 10000, onProgress, signal } = options;
   let interval = initialIntervalMs;
 
   // eslint-disable-next-line no-constant-condition
@@ -374,6 +402,13 @@ export async function pollPreviewJobUntilDone(
       interval = job.retryAfterSeconds * 1000;
     }
 
+    // Check for abort before entering the delay — if the signal was aborted
+    // between poll resolution and here, the addEventListener below would
+    // register on an already-dispatched event and never fire.
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, interval);
       if (signal) {
@@ -383,7 +418,7 @@ export async function pollPreviewJobUntilDone(
             clearTimeout(timer);
             reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
           },
-          { once: true },
+          { once: true }
         );
       }
     });
@@ -398,7 +433,7 @@ export async function pollPreviewJobUntilDone(
  */
 export async function commitCreate(
   request: AccessBoundaryCommitRequest,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryCommitResponse> {
   const idempotencyKey = generateIdempotencyKey();
 
@@ -427,23 +462,20 @@ export async function commitUpdate(
   constraintId: string,
   revision: BoundaryRevision,
   request: AccessBoundaryCommitRequest,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryCommitResponse> {
   const idempotencyKey = generateIdempotencyKey();
 
-  const res = await apiFetch(
-    `${BASE_PATH}/${encodeURIComponent(constraintId)}`,
-    {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'If-Match': `"${revision}"`,
-        'Idempotency-Key': idempotencyKey,
-      },
-      body: JSON.stringify(request),
-      signal: signalInit(options.signal),
+  const res = await apiFetch(`${BASE_PATH}/${encodeURIComponent(constraintId)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'If-Match': `"${revision}"`,
+      'Idempotency-Key': idempotencyKey,
     },
-  );
+    body: JSON.stringify(request),
+    signal: signalInit(options.signal),
+  });
 
   if (!res.ok) {
     throw await parseErrorResponse(res);
@@ -459,23 +491,20 @@ export async function commitDelete(
   constraintId: string,
   revision: BoundaryRevision,
   request: Pick<AccessBoundaryCommitRequest, 'previewToken' | 'acknowledgements'>,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryCommitResponse> {
   const idempotencyKey = generateIdempotencyKey();
 
-  const res = await apiFetch(
-    `${BASE_PATH}/${encodeURIComponent(constraintId)}:delete`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'If-Match': `"${revision}"`,
-        'Idempotency-Key': idempotencyKey,
-      },
-      body: JSON.stringify(request),
-      signal: signalInit(options.signal),
+  const res = await apiFetch(`${BASE_PATH}/${encodeURIComponent(constraintId)}:delete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'If-Match': `"${revision}"`,
+      'Idempotency-Key': idempotencyKey,
     },
-  );
+    body: JSON.stringify(request),
+    signal: signalInit(options.signal),
+  });
 
   if (!res.ok) {
     throw await parseErrorResponse(res);
@@ -490,7 +519,7 @@ export async function commitDelete(
 export async function listAffected(
   constraintId: string,
   params: { pageToken?: PageToken; pageSize?: number } = {},
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AffectedPrincipalsPage> {
   const seqKey = `affected:${constraintId}`;
   const seq = nextSequence(seqKey);
@@ -498,7 +527,7 @@ export async function listAffected(
   const qs = buildQueryString(params);
   const res = await apiFetch(
     `${BASE_PATH}/${encodeURIComponent(constraintId)}/affected-principals${qs}`,
-    { signal: signalInit(options.signal) },
+    { signal: signalInit(options.signal) }
   );
 
   if (isStale(seqKey, seq)) {
@@ -518,16 +547,15 @@ export async function listAffected(
 export async function listAudit(
   constraintId: string,
   params: { pageToken?: PageToken; pageSize?: number } = {},
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<AccessBoundaryAuditPage> {
   const seqKey = `audit:${constraintId}`;
   const seq = nextSequence(seqKey);
 
   const qs = buildQueryString(params);
-  const res = await apiFetch(
-    `${BASE_PATH}/${encodeURIComponent(constraintId)}/audit${qs}`,
-    { signal: signalInit(options.signal) },
-  );
+  const res = await apiFetch(`${BASE_PATH}/${encodeURIComponent(constraintId)}/audit${qs}`, {
+    signal: signalInit(options.signal),
+  });
 
   if (isStale(seqKey, seq)) {
     throw new StaleResponseError(seqKey);
@@ -550,18 +578,24 @@ export async function listAudit(
  * and determine whether the mutation applied.
  *
  * This is the ONLY safe recovery path — never retry a commit blindly.
+ *
+ * @returns `revisionChanged` — `true` when the boundary's revision differs
+ *   from `expectedRevision`. Note: this does NOT guarantee that *this*
+ *   mutation was applied — a concurrent mutation by a different user would
+ *   also change the revision. Callers should inspect `current` for
+ *   definitive reconciliation.
  */
 export async function refetchAfterUnknownOutcome(
   constraintId: string,
   expectedRevision: BoundaryRevision,
-  options: RequestOptions = {},
+  options: RequestOptions = {}
 ): Promise<{
-  applied: boolean;
+  revisionChanged: boolean;
   current: AccessBoundaryDetail;
 }> {
   const detail = await get(constraintId, options);
   return {
-    applied: detail.revision !== expectedRevision,
+    revisionChanged: detail.revision !== expectedRevision,
     current: detail,
   };
 }

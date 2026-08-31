@@ -1,0 +1,23 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraint-previews",
+    "status": 422,
+    "designRef": "constraint-ui-ux-design.md §9.7, §9.1; plan §WP B2",
+    "notes": "The scope reference does not resolve. Distinct from SCOPE_MISMATCH, which is about a scope that exists but is incompatible with the subject or the actor's authority."
+  },
+  "error": {
+    "code": "SCOPE_NOT_FOUND",
+    "message": "The selected scope does not exist.",
+    "retryable": false,
+    "correlationId": "req-51b8e330",
+    "requestId": "req-51b8e330",
+    "details": {
+      "field": "draft.scope.projectId",
+      "scopeType": "project",
+      "referenceType": "project",
+      "referenceId": "proj-atlas-archived",
+      "reason": "project_not_found",
+      "remedy": "Select an existing project, or scope this boundary to the entire hub."
+    }
+  }
+}

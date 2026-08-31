@@ -1,0 +1,27 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraint-previews",
+    "status": 422,
+    "designRef": "constraint-ui-ux-design.md §9.7, §5.2; plan §WP B2",
+    "notes": "The scope exists but is incoherent with the rest of the draft or with the actor's authority. Today ConstraintScopeRef.Validate (access_constraint.go:125-137) performs no cross-field check at all and silently tolerates a non-empty ID on system scope (base inventory §3.3)."
+  },
+  "error": {
+    "code": "SCOPE_MISMATCH",
+    "message": "This subject cannot be constrained at the selected scope.",
+    "retryable": false,
+    "correlationId": "req-6620fa8c",
+    "requestId": "req-6620fa8c",
+    "details": {
+      "field": "draft.scope",
+      "scope": { "type": "project", "projectId": "proj-atlas" },
+      "subject": { "kind": "principal", "principal": { "type": "agent", "id": "agt-borealis-1" } },
+      "reason": "subject_not_present_in_scope",
+      "explanation": "agt-borealis-1 has no role binding or membership in Atlas, so a project-scoped boundary there would never apply to it.",
+      "remedy": "Scope this boundary to the entire hub, or select a subject that holds authority in Atlas.",
+      "alternativeScopes": [
+        { "type": "project", "projectId": "proj-borealis", "label": "Borealis" },
+        { "type": "system", "label": "Entire hub" }
+      ]
+    }
+  }
+}

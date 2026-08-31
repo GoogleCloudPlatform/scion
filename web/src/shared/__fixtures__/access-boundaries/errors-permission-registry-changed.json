@@ -1,0 +1,24 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraints",
+    "status": 409,
+    "designRef": "constraint-ui-ux-design.md §9.7, §3.4, §15.9; plan §WP B2, B3",
+    "notes": "The permission registry moved between preview and commit, so the ceiling the operator reviewed is not the ceiling that would be applied — newly registered permissions fall OUTSIDE a boundary until explicitly added (design §3.4, mirroring the comment at pkg/hub/access_constraint.go:203-205). BLOCKED TODAY: no registry revision exists (base inventory gap G1); pkg/hub/permissions.Permission has no version field. B2 must supply one before this code can be emitted."
+  },
+  "error": {
+    "code": "PERMISSION_REGISTRY_CHANGED",
+    "message": "The permission registry changed after this preview.",
+    "retryable": true,
+    "correlationId": "req-8fd012ee",
+    "requestId": "req-8fd012ee",
+    "details": {
+      "previewId": "apv-8d2",
+      "registryRevisionAtPreview": "reg-2026-08-19-a",
+      "registryRevisionNow": "reg-2026-08-31-b",
+      "addedPermissionIds": ["agent.snapshot.delete", "hub.federation.update"],
+      "removedPermissionIds": [],
+      "impactNote": "2 permissions were registered after this preview. They are outside this boundary and are therefore denied to every affected principal unless you add them.",
+      "remedy": "Preview again and decide explicitly whether the new permissions belong inside this boundary."
+    }
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "$fixture": {
+    "endpoint": "GET /api/v1/admin/access-constraints/ac-42",
+    "status": 200,
+    "designRef": "constraint-ui-ux-design.md §9.3, §6.4",
+    "notes": "Actor holds access_constraint.admin + hub.audit.read, so nothing is redacted. Compare redacted-cross-principal-response.json. Current API instead returns the flat store record plus an inline `preview` object built at GET time (handlers_access_constraints.go:171) — see base inventory §4.3 items 8, 12, 13."
+  },
+  "id": "ac-42",
+  "name": "Contractor deploy ceiling",
+  "purpose": "Contractors may inspect Atlas but never deploy or delete.",
+  "revision": "7",
+  "subject": {
+    "kind": "group_closure",
+    "groupId": "grp-contractors"
+  },
+  "subjectDisplay": {
+    "kind": "group_closure",
+    "label": "Everyone in Contractors",
+    "groupName": "Contractors",
+    "resolved": true,
+    "memberCount": 126,
+    "directMemberCount": 18,
+    "nestedGroupCount": 4
+  },
+  "scope": {
+    "type": "project",
+    "projectId": "proj-atlas"
+  },
+  "scopeDisplay": {
+    "type": "project",
+    "label": "Atlas",
+    "projectName": "Atlas",
+    "resolved": true
+  },
+  "status": "active",
+  "risk": ["lockout_sensitive"],
+  "health": {
+    "state": "healthy",
+    "unresolvedReferences": []
+  },
+  "maximumPermissions": [
+    "agent.read",
+    "agent.list",
+    "agent.logs.read",
+    "project.read",
+    "project.list",
+    "skill.read",
+    "skill.list",
+    "role.read",
+    "role_binding.read",
+    "group.read",
+    "user.read",
+    "hub.health.read",
+    "quota.read",
+    "scheduled_event.read"
+  ],
+  "permissionRegistry": {
+    "revision": "reg-2026-08-19-a",
+    "totalPermissionCount": 119,
+    "excludedPermissionCount": 105,
+    "newSincePermissionIds": ["agent.snapshot.read", "hub.federation.read"],
+    "newSinceRevision": "reg-2026-07-02-c"
+  },
+  "appliesWhen": {
+    "notBefore": null,
+    "expiresAt": null
+  },
+  "effect": {
+    "affectedPrincipalCount": 126,
+    "affectedPrincipalCountExact": true,
+    "principalsLosingAuthorityCount": 118,
+    "intersectingBoundaryCount": 2,
+    "computedAt": "2026-08-31T14:20:03Z",
+    "completeness": {
+      "complete": true,
+      "truncated": false,
+      "degraded": false,
+      "reasons": []
+    }
+  },
+  "intersectingBoundaries": [
+    {
+      "id": "ac-04",
+      "name": "Org-wide destructive ceiling",
+      "scope": { "type": "system" },
+      "relationship": "narrows",
+      "overlappingPermissionCount": 9,
+      "netEffectNote": "This system boundary already excludes agent.delete; ac-42 adds no further reduction for that permission.",
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "id": "ac-19",
+      "name": "Atlas read-only auditors",
+      "scope": { "type": "project", "projectId": "proj-atlas" },
+      "relationship": "overlaps",
+      "overlappingPermissionCount": 11,
+      "netEffectNote": "6 principals are in both subject sets; their effective ceiling is the intersection of both boundaries.",
+      "_capabilities": { "actions": ["read"] }
+    }
+  ],
+  "recovery": {
+    "disabled": false,
+    "disabledAt": null,
+    "disabledBy": null,
+    "disabledReason": null
+  },
+  "links": {
+    "affectedPrincipals": "/api/v1/admin/access-constraints/ac-42/affected-principals",
+    "audit": "/api/v1/admin/access-constraints/ac-42/audit",
+    "preview": "/api/v1/admin/access-constraint-previews"
+  },
+  "createdBy": {
+    "type": "user",
+    "id": "usr-lin",
+    "displayName": "Lin Alvarez"
+  },
+  "createdAt": "2026-06-02T18:14:02Z",
+  "updatedBy": {
+    "type": "user",
+    "id": "usr-mori",
+    "displayName": "Sam Mori"
+  },
+  "updatedAt": "2026-08-28T11:03:47Z",
+  "lastAuditEventId": "aev-91c4",
+  "_capabilities": {
+    "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+  }
+}

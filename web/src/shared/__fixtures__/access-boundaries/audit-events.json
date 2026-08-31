@@ -1,0 +1,145 @@
+{
+  "$fixture": {
+    "endpoint": "GET /api/v1/admin/access-constraints/ac-42/audit?pageSize=50&pageToken=",
+    "status": 200,
+    "designRef": "constraint-ui-ux-design.md §9.3, §11",
+    "notes": "Requires hub.audit.read for the actor/target detail; without it the events are returned with actor and principal detail redacted (see redacted-cross-principal-response.json). NO SUCH ENDPOINT EXISTS TODAY: constraint CRUD writes only slog.Info lines (base inventory §3.6), store.MutationAuditRecord has no JSON tags, and ListMutationAudits has zero non-test callers. B6 must add both the emission and this read path."
+  },
+  "constraintId": "ac-42",
+  "items": [
+    {
+      "id": "aev-91c4",
+      "occurredAt": "2026-08-28T11:03:47Z",
+      "eventType": "boundary.updated",
+      "classification": "mixed",
+      "actor": {
+        "principal": { "type": "user", "id": "usr-mori", "displayName": "Sam Mori" },
+        "credentialType": "session",
+        "credentialId": "cred-4a71"
+      },
+      "target": {
+        "type": "access_constraint",
+        "id": "ac-42",
+        "name": "Contractor deploy ceiling"
+      },
+      "revisionBefore": "6",
+      "revisionAfter": "7",
+      "previewId": "apv-77b",
+      "correlationId": "req-3c0e91aa",
+      "changeSummary": {
+        "fieldsChanged": ["maximumPermissions", "purpose"],
+        "permissionsAdded": ["quota.read"],
+        "permissionsRemoved": ["agent.message.send", "skill.register"],
+        "affectedPrincipalCount": 126,
+        "losingPrincipalCount": 112,
+        "regainingPrincipalCount": 4
+      },
+      "beforeSummary": "14 permissions; group_closure grp-contractors; scope project proj-atlas",
+      "afterSummary": "13 permissions; group_closure grp-contractors; scope project proj-atlas",
+      "outcome": "committed",
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "id": "aev-6b02",
+      "occurredAt": "2026-08-28T10:58:12Z",
+      "eventType": "boundary.commit_rejected",
+      "classification": "mixed",
+      "actor": {
+        "principal": { "type": "user", "id": "usr-mori", "displayName": "Sam Mori" },
+        "credentialType": "session",
+        "credentialId": "cred-4a71"
+      },
+      "target": {
+        "type": "access_constraint",
+        "id": "ac-42",
+        "name": "Contractor deploy ceiling"
+      },
+      "revisionBefore": "6",
+      "revisionAfter": "6",
+      "previewId": "apv-5d1",
+      "correlationId": "req-3c0e9188",
+      "changeSummary": null,
+      "beforeSummary": "14 permissions; group_closure grp-contractors; scope project proj-atlas",
+      "afterSummary": null,
+      "outcome": "rejected",
+      "rejectionCode": "STALE_AUTHORIZATION_PREVIEW",
+      "rejectionDetails": { "changedKinds": ["group_membership"] },
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "id": "aev-2288",
+      "occurredAt": "2026-07-14T09:12:33Z",
+      "eventType": "boundary.recovery_disabled",
+      "classification": "relax",
+      "actor": {
+        "principal": { "type": "user", "id": "usr-root", "displayName": "offline recovery operator" },
+        "credentialType": "offline_recovery_cli",
+        "credentialId": null
+      },
+      "target": {
+        "type": "access_constraint",
+        "id": "ac-42",
+        "name": "Contractor deploy ceiling"
+      },
+      "revisionBefore": "5",
+      "revisionAfter": "6",
+      "previewId": null,
+      "correlationId": "recover-7f21",
+      "changeSummary": {
+        "fieldsChanged": ["disabled"],
+        "permissionsAdded": [],
+        "permissionsRemoved": [],
+        "affectedPrincipalCount": 126,
+        "losingPrincipalCount": 0,
+        "regainingPrincipalCount": 126
+      },
+      "beforeSummary": "enabled",
+      "afterSummary": "disabled by offline recovery",
+      "outcome": "committed",
+      "reason": "Lockout recovery: all constraint admins were excluded.",
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "id": "aev-0041",
+      "occurredAt": "2026-06-02T18:14:02Z",
+      "eventType": "boundary.created",
+      "classification": "tighten",
+      "actor": {
+        "principal": { "type": "user", "id": "usr-lin", "displayName": "Lin Alvarez" },
+        "credentialType": "session",
+        "credentialId": "cred-1102"
+      },
+      "target": {
+        "type": "access_constraint",
+        "id": "ac-42",
+        "name": "Contractor deploy ceiling"
+      },
+      "revisionBefore": null,
+      "revisionAfter": "1",
+      "previewId": "apv-001",
+      "correlationId": "req-11ff20a0",
+      "changeSummary": {
+        "fieldsChanged": ["*"],
+        "permissionsAdded": [],
+        "permissionsRemoved": [],
+        "affectedPrincipalCount": 104,
+        "losingPrincipalCount": 98,
+        "regainingPrincipalCount": 0
+      },
+      "beforeSummary": null,
+      "afterSummary": "14 permissions; group_closure grp-contractors; scope project proj-atlas",
+      "outcome": "committed",
+      "_capabilities": { "actions": ["read"] }
+    }
+  ],
+  "nextPageToken": null,
+  "totalCount": 4,
+  "totalCountExact": true,
+  "retention": {
+    "windowDays": null,
+    "note": "Retention duration is an open sponsor question (design §13.1). The UI must not imply a fixed window until it is answered."
+  },
+  "_capabilities": {
+    "actions": ["read"]
+  }
+}
