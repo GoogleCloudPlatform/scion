@@ -163,6 +163,11 @@ type Decision struct {
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// Provenance contains the full decision provenance when Explain=true.
+	// For non-explain requests, this is populated with minimal data
+	// (matched grant and deny reason).
+	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
@@ -288,8 +293,16 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	for _, p := range principals {
 		key := p.Type + ":" + p.ID
 		closure[key] = struct{}{}
+		// Default: single-element path (overridden below for groups).
 		membershipPaths[key] = []string{p.ID}
 	}
+
+	// Build real membership path chains for group principals.
+	// The direct principal has a single-element path (itself).
+	// Groups have chains: [requesting principal, ..., group].
+	directKey := principals[0].Type + ":" + principals[0].ID
+	membershipPaths[directKey] = []string{principals[0].ID}
+	a.buildMembershipPathChains(ctx, principals[0], principals, membershipPaths)
 
 	// ── Step 3: Load active role bindings (batched) ───────────────────
 	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
@@ -471,6 +484,148 @@ func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Ide
 	return principals, nil
 }
 
+// buildMembershipPathChains builds real membership path chains for group
+// principals. For each group in the principal closure, it computes the chain
+// from the requesting principal through intermediate groups to the target
+// group. This replaces the single-element stub paths.
+//
+// The resulting paths are stored in membershipPaths using typed composite keys.
+func (a *AuthzService) buildMembershipPathChains(
+	ctx context.Context,
+	directPrincipal store.PrincipalRef,
+	principals []store.PrincipalRef,
+	membershipPaths map[string][]string,
+) {
+	// Collect all group IDs in the closure.
+	groupIDs := make(map[string]bool)
+	for _, p := range principals {
+		if p.Type == "group" {
+			groupIDs[p.ID] = true
+		}
+	}
+	if len(groupIDs) == 0 {
+		return
+	}
+
+	// Build a child→parent adjacency from the group hierarchy.
+	// For each group, get its parent groups and build the reverse mapping.
+	childToParents := make(map[string][]string)
+	for gid := range groupIDs {
+		parents, err := a.store.GetParentGroups(ctx, gid)
+		if err != nil {
+			// Best-effort: on error, keep the single-element path.
+			continue
+		}
+		for _, parentID := range parents {
+			if groupIDs[parentID] {
+				childToParents[gid] = append(childToParents[gid], parentID)
+			}
+		}
+	}
+
+	// Identify the principal's direct groups (groups that directly contain
+	// the principal, not via other groups).
+	directGroups := make(map[string]bool)
+	switch directPrincipal.Type {
+	case "user", "dev", "federated_user":
+		members, err := a.store.GetUserGroups(ctx, directPrincipal.ID)
+		if err == nil {
+			for _, m := range members {
+				if groupIDs[m.GroupID] {
+					directGroups[m.GroupID] = true
+				}
+			}
+		}
+	case "agent", "federated_agent":
+		// For agents, direct groups come from GetEffectiveGroupsForAgent.
+		// We cannot distinguish direct vs transitive from the flat list,
+		// so we use GetGroupMembership to check direct membership.
+		for gid := range groupIDs {
+			_, err := a.store.GetGroupMembership(ctx, gid, "agent", directPrincipal.ID)
+			if err == nil {
+				directGroups[gid] = true
+			}
+		}
+	}
+
+	// For each group, build a path from the direct principal through
+	// intermediate groups. Uses BFS to find shortest path.
+	principalKey := directPrincipal.Type + ":" + directPrincipal.ID
+	for gid := range groupIDs {
+		key := "group:" + gid
+		if directGroups[gid] {
+			// Directly a member: path is [principal, group].
+			membershipPaths[key] = []string{principalKey, key}
+			continue
+		}
+
+		// BFS from direct groups to find a path to gid.
+		path := bfsGroupPath(directGroups, gid, childToParents)
+		if len(path) > 0 {
+			// Prepend the principal.
+			fullPath := make([]string, 0, len(path)+1)
+			fullPath = append(fullPath, principalKey)
+			for _, p := range path {
+				fullPath = append(fullPath, "group:"+p)
+			}
+			membershipPaths[key] = fullPath
+		}
+		// Otherwise keep the single-element fallback from the closure builder.
+	}
+}
+
+// bfsGroupPath finds a path from any direct group to the target group using BFS
+// over the child→parent adjacency. Returns the path as group IDs (without the
+// principal), or nil if no path is found.
+func bfsGroupPath(directGroups map[string]bool, target string, childToParents map[string][]string) []string {
+	if directGroups[target] {
+		return []string{target}
+	}
+
+	// Reverse the child→parent map to parent→child for BFS from target.
+	parentToChildren := make(map[string][]string)
+	for child, parents := range childToParents {
+		for _, parent := range parents {
+			parentToChildren[parent] = append(parentToChildren[parent], child)
+		}
+	}
+
+	// BFS from the target backwards through the hierarchy to find a direct group.
+	type queueItem struct {
+		id   string
+		path []string
+	}
+	visited := map[string]bool{target: true}
+	queue := []queueItem{{id: target, path: []string{target}}}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, child := range parentToChildren[current.id] {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			newPath := make([]string, len(current.path)+1)
+			copy(newPath, current.path)
+			newPath[len(current.path)] = child
+
+			if directGroups[child] {
+				// Found a path. Reverse it to go from direct group to target.
+				reversed := make([]string, len(newPath))
+				for i, j := 0, len(newPath)-1; i < len(newPath); i, j = i+1, j-1 {
+					reversed[i] = newPath[j]
+				}
+				return reversed
+			}
+			queue = append(queue, queueItem{id: child, path: newPath})
+		}
+	}
+
+	return nil
+}
+
 // =============================================================================
 // Kernel result → Decision conversion
 // =============================================================================
@@ -509,7 +664,131 @@ func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 			d.Reason = "default deny"
 		}
 	}
+
+	// Populate DecisionProvenance from the kernel provenance.
+	d.Provenance = buildDecisionProvenance(kd.Provenance)
+
 	return d
+}
+
+// buildDecisionProvenance converts KernelProvenance to the external
+// DecisionProvenance type.
+func buildDecisionProvenance(kp KernelProvenance) *DecisionProvenance {
+	dp := &DecisionProvenance{
+		Permission:           kp.Permission,
+		EffectivePermissions: kp.EffectivePermissions,
+		DenyReasons:          kp.DenyReasons,
+	}
+
+	// Map granting (active) bindings.
+	for _, gb := range kp.GrantingBindings {
+		dp.Grants = append(dp.Grants, grantProvenanceToDetail(gb))
+	}
+
+	// Map rejected (inactive) bindings.
+	for _, rb := range kp.RejectedCandidates {
+		detail := grantProvenanceToDetail(rb)
+		if len(rb.RejectReasons) > 0 {
+			detail.InactiveReason = rb.RejectReasons[0]
+		}
+		dp.InactiveGrants = append(dp.InactiveGrants, detail)
+	}
+
+	// Map restrictions with boundary metadata.
+	for _, rr := range kp.Restrictions {
+		rp := RestrictionProvenance{
+			Kind:          rr.Kind,
+			Description:   rr.Description,
+			Applied:       rr.Applied,
+			Detail:        rr.Detail,
+			BoundaryName:  rr.BoundaryName,
+			BoundaryID:    rr.BoundaryID,
+			BoundaryScope: formatBoundaryScope(rr.BoundaryScopeType, rr.BoundaryScopeID),
+		}
+		// Separate credential/status restrictions from boundary restrictions.
+		if rr.Kind == "credential_scope" || rr.Kind == "delegation_ceiling" || rr.Kind == "suspension" {
+			dp.StatusRestrictions = append(dp.StatusRestrictions, rp)
+		} else {
+			dp.Restrictions = append(dp.Restrictions, rp)
+		}
+	}
+
+	// Collect unique membership paths from all evaluated bindings.
+	seenPaths := make(map[string]bool)
+	collectPath := func(gp GrantProvenance) {
+		if len(gp.MembershipPath) == 0 {
+			return
+		}
+		targetKey := gp.PrincipalType + ":" + gp.PrincipalID
+		if seenPaths[targetKey] {
+			return
+		}
+		seenPaths[targetKey] = true
+
+		kind := "direct"
+		if gp.PrincipalType == "group" {
+			if len(gp.MembershipPath) > 2 {
+				kind = "group_closure"
+			} else {
+				kind = "group_membership"
+			}
+		}
+		dp.MembershipPaths = append(dp.MembershipPaths, MembershipPathDetail{
+			TargetID: targetKey,
+			Path:     gp.MembershipPath,
+			Kind:     kind,
+		})
+	}
+	for _, gb := range kp.GrantingBindings {
+		collectPath(gb)
+	}
+	for _, rb := range kp.RejectedCandidates {
+		collectPath(rb)
+	}
+
+	// Ensure non-nil slices for JSON serialization.
+	if dp.Grants == nil {
+		dp.Grants = []GrantDetail{}
+	}
+	if dp.InactiveGrants == nil {
+		dp.InactiveGrants = []GrantDetail{}
+	}
+	if dp.Restrictions == nil {
+		dp.Restrictions = []RestrictionProvenance{}
+	}
+	if dp.MembershipPaths == nil {
+		dp.MembershipPaths = []MembershipPathDetail{}
+	}
+
+	return dp
+}
+
+// grantProvenanceToDetail converts a kernel GrantProvenance to a GrantDetail.
+func grantProvenanceToDetail(gp GrantProvenance) GrantDetail {
+	return GrantDetail{
+		BindingID:         gp.BindingID,
+		RoleID:            gp.RoleID,
+		RoleName:          gp.RoleName,
+		ScopeType:         gp.ScopeType,
+		ScopeID:           gp.ScopeID,
+		PrincipalType:     gp.PrincipalType,
+		PrincipalID:       gp.PrincipalID,
+		ContainsRequested: gp.ContainsRequested,
+		MembershipPath:    gp.MembershipPath,
+		Permissions:        gp.Permissions,
+		RejectReasons:     gp.RejectReasons,
+	}
+}
+
+// formatBoundaryScope formats scope type and ID into a human-readable string.
+func formatBoundaryScope(scopeType, scopeID string) string {
+	if scopeType == "" {
+		return ""
+	}
+	if scopeID == "" {
+		return scopeType
+	}
+	return scopeType + ":" + scopeID
 }
 
 // =============================================================================
@@ -796,7 +1075,29 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		scopeType, scopeID,
 	)
 
-	return ConstraintsToRestrictions(applicable, time.Now())
+	restrictions := ConstraintsToRestrictions(applicable, time.Now())
+
+	// Enrich restrictions with boundary metadata. ConstraintsToRestrictions
+	// builds the Description with constraint name/ID but does not populate the
+	// structured boundary fields added for provenance explain. We match each
+	// restriction back to its source constraint by position (1:1 correspondence
+	// with the applicable list, skipping nil/inactive which ConstraintsToRestrictions
+	// also skips).
+	ri := 0
+	for _, c := range applicable {
+		if c == nil || !c.IsActive(time.Now()) {
+			continue
+		}
+		if ri < len(restrictions) {
+			restrictions[ri].BoundaryName = c.Name
+			restrictions[ri].BoundaryID = c.ID
+			restrictions[ri].BoundaryScopeType = c.Scope.Type
+			restrictions[ri].BoundaryScopeID = c.Scope.ID
+		}
+		ri++
+	}
+
+	return restrictions
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
