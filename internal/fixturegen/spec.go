@@ -156,10 +156,10 @@ func Spec() []TableFixture {
 				"id": "ac100000-0000-0000-0000-000000000001", "name": "fixture-max-perms",
 				"subject_kind": "principal", "subject_principal_type": "user",
 				"subject_principal_id": userID,
-				"scope_type": "system", "scope_id": "",
+				"scope_type":           "system", "scope_id": "",
 				"maximum_permissions": `["agent.read","agent.list"]`,
-				"disabled": false,
-				"created": baseTime, "updated": baseTime,
+				"disabled":            false,
+				"created":             baseTime, "updated": baseTime,
 			},
 		}},
 		{Table: "access_policies", Rows: []row{
