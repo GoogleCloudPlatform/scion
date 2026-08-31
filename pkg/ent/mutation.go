@@ -163,7 +163,11 @@ type AccessConstraintMutation struct {
 	not_before                *time.Time
 	expires_at                *time.Time
 	disabled                  *bool
+	revision                  *int64
+	addrevision               *int64
+	purpose                   *string
 	created_by                *string
+	updated_by                *string
 	created                   *time.Time
 	updated                   *time.Time
 	clearedFields             map[string]struct{}
@@ -752,6 +756,98 @@ func (m *AccessConstraintMutation) ResetDisabled() {
 	m.disabled = nil
 }
 
+// SetRevision sets the "revision" field.
+func (m *AccessConstraintMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *AccessConstraintMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *AccessConstraintMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *AccessConstraintMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *AccessConstraintMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetPurpose sets the "purpose" field.
+func (m *AccessConstraintMutation) SetPurpose(s string) {
+	m.purpose = &s
+}
+
+// Purpose returns the value of the "purpose" field in the mutation.
+func (m *AccessConstraintMutation) Purpose() (r string, exists bool) {
+	v := m.purpose
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPurpose returns the old "purpose" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldPurpose(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPurpose is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPurpose requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPurpose: %w", err)
+	}
+	return oldValue.Purpose, nil
+}
+
+// ResetPurpose resets all changes to the "purpose" field.
+func (m *AccessConstraintMutation) ResetPurpose() {
+	m.purpose = nil
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (m *AccessConstraintMutation) SetCreatedBy(s string) {
 	m.created_by = &s
@@ -799,6 +895,55 @@ func (m *AccessConstraintMutation) CreatedByCleared() bool {
 func (m *AccessConstraintMutation) ResetCreatedBy() {
 	m.created_by = nil
 	delete(m.clearedFields, accessconstraint.FieldCreatedBy)
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *AccessConstraintMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *AccessConstraintMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the AccessConstraint entity.
+// If the AccessConstraint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintMutation) OldUpdatedBy(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (m *AccessConstraintMutation) ClearUpdatedBy() {
+	m.updated_by = nil
+	m.clearedFields[accessconstraint.FieldUpdatedBy] = struct{}{}
+}
+
+// UpdatedByCleared returns if the "updated_by" field was cleared in this mutation.
+func (m *AccessConstraintMutation) UpdatedByCleared() bool {
+	_, ok := m.clearedFields[accessconstraint.FieldUpdatedBy]
+	return ok
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *AccessConstraintMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+	delete(m.clearedFields, accessconstraint.FieldUpdatedBy)
 }
 
 // SetCreated sets the "created" field.
@@ -907,7 +1052,7 @@ func (m *AccessConstraintMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccessConstraintMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 17)
 	if m.name != nil {
 		fields = append(fields, accessconstraint.FieldName)
 	}
@@ -941,8 +1086,17 @@ func (m *AccessConstraintMutation) Fields() []string {
 	if m.disabled != nil {
 		fields = append(fields, accessconstraint.FieldDisabled)
 	}
+	if m.revision != nil {
+		fields = append(fields, accessconstraint.FieldRevision)
+	}
+	if m.purpose != nil {
+		fields = append(fields, accessconstraint.FieldPurpose)
+	}
 	if m.created_by != nil {
 		fields = append(fields, accessconstraint.FieldCreatedBy)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, accessconstraint.FieldUpdatedBy)
 	}
 	if m.created != nil {
 		fields = append(fields, accessconstraint.FieldCreated)
@@ -980,8 +1134,14 @@ func (m *AccessConstraintMutation) Field(name string) (ent.Value, bool) {
 		return m.ExpiresAt()
 	case accessconstraint.FieldDisabled:
 		return m.Disabled()
+	case accessconstraint.FieldRevision:
+		return m.Revision()
+	case accessconstraint.FieldPurpose:
+		return m.Purpose()
 	case accessconstraint.FieldCreatedBy:
 		return m.CreatedBy()
+	case accessconstraint.FieldUpdatedBy:
+		return m.UpdatedBy()
 	case accessconstraint.FieldCreated:
 		return m.Created()
 	case accessconstraint.FieldUpdated:
@@ -1017,8 +1177,14 @@ func (m *AccessConstraintMutation) OldField(ctx context.Context, name string) (e
 		return m.OldExpiresAt(ctx)
 	case accessconstraint.FieldDisabled:
 		return m.OldDisabled(ctx)
+	case accessconstraint.FieldRevision:
+		return m.OldRevision(ctx)
+	case accessconstraint.FieldPurpose:
+		return m.OldPurpose(ctx)
 	case accessconstraint.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
+	case accessconstraint.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
 	case accessconstraint.FieldCreated:
 		return m.OldCreated(ctx)
 	case accessconstraint.FieldUpdated:
@@ -1109,12 +1275,33 @@ func (m *AccessConstraintMutation) SetField(name string, value ent.Value) error 
 		}
 		m.SetDisabled(v)
 		return nil
+	case accessconstraint.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case accessconstraint.FieldPurpose:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPurpose(v)
+		return nil
 	case accessconstraint.FieldCreatedBy:
 		v, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCreatedBy(v)
+		return nil
+	case accessconstraint.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
 		return nil
 	case accessconstraint.FieldCreated:
 		v, ok := value.(time.Time)
@@ -1137,13 +1324,21 @@ func (m *AccessConstraintMutation) SetField(name string, value ent.Value) error 
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *AccessConstraintMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, accessconstraint.FieldRevision)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *AccessConstraintMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case accessconstraint.FieldRevision:
+		return m.AddedRevision()
+	}
 	return nil, false
 }
 
@@ -1152,6 +1347,13 @@ func (m *AccessConstraintMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *AccessConstraintMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case accessconstraint.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AccessConstraint numeric field %s", name)
 }
@@ -1177,6 +1379,9 @@ func (m *AccessConstraintMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(accessconstraint.FieldCreatedBy) {
 		fields = append(fields, accessconstraint.FieldCreatedBy)
+	}
+	if m.FieldCleared(accessconstraint.FieldUpdatedBy) {
+		fields = append(fields, accessconstraint.FieldUpdatedBy)
 	}
 	return fields
 }
@@ -1209,6 +1414,9 @@ func (m *AccessConstraintMutation) ClearField(name string) error {
 		return nil
 	case accessconstraint.FieldCreatedBy:
 		m.ClearCreatedBy()
+		return nil
+	case accessconstraint.FieldUpdatedBy:
+		m.ClearUpdatedBy()
 		return nil
 	}
 	return fmt.Errorf("unknown AccessConstraint nullable field %s", name)
@@ -1251,8 +1459,17 @@ func (m *AccessConstraintMutation) ResetField(name string) error {
 	case accessconstraint.FieldDisabled:
 		m.ResetDisabled()
 		return nil
+	case accessconstraint.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case accessconstraint.FieldPurpose:
+		m.ResetPurpose()
+		return nil
 	case accessconstraint.FieldCreatedBy:
 		m.ResetCreatedBy()
+		return nil
+	case accessconstraint.FieldUpdatedBy:
+		m.ResetUpdatedBy()
 		return nil
 	case accessconstraint.FieldCreated:
 		m.ResetCreated()

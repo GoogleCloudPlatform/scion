@@ -81,9 +81,24 @@ func (AccessConstraint) Fields() []ent.Field {
 			Default(false).
 			Comment("True when deactivated by offline recovery"),
 
+		// Revision tracking — monotonic counter incremented on every update.
+		field.Int64("revision").
+			Default(1).
+			Comment("Monotonic revision counter, incremented on every update"),
+
+		// Purpose — required human-readable description of why this constraint exists.
+		field.String("purpose").
+			NotEmpty().
+			Default("system constraint").
+			Comment("Human-readable description of why this constraint exists"),
+
 		// Audit fields.
 		field.String("created_by").
 			Optional(),
+		field.String("updated_by").
+			Optional().
+			Nillable().
+			Comment("Principal who last modified this constraint"),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

@@ -146,6 +146,34 @@ func (_c *AccessConstraintCreate) SetNillableDisabled(v *bool) *AccessConstraint
 	return _c
 }
 
+// SetRevision sets the "revision" field.
+func (_c *AccessConstraintCreate) SetRevision(v int64) *AccessConstraintCreate {
+	_c.mutation.SetRevision(v)
+	return _c
+}
+
+// SetNillableRevision sets the "revision" field if the given value is not nil.
+func (_c *AccessConstraintCreate) SetNillableRevision(v *int64) *AccessConstraintCreate {
+	if v != nil {
+		_c.SetRevision(*v)
+	}
+	return _c
+}
+
+// SetPurpose sets the "purpose" field.
+func (_c *AccessConstraintCreate) SetPurpose(v string) *AccessConstraintCreate {
+	_c.mutation.SetPurpose(v)
+	return _c
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_c *AccessConstraintCreate) SetNillablePurpose(v *string) *AccessConstraintCreate {
+	if v != nil {
+		_c.SetPurpose(*v)
+	}
+	return _c
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_c *AccessConstraintCreate) SetCreatedBy(v string) *AccessConstraintCreate {
 	_c.mutation.SetCreatedBy(v)
@@ -156,6 +184,20 @@ func (_c *AccessConstraintCreate) SetCreatedBy(v string) *AccessConstraintCreate
 func (_c *AccessConstraintCreate) SetNillableCreatedBy(v *string) *AccessConstraintCreate {
 	if v != nil {
 		_c.SetCreatedBy(*v)
+	}
+	return _c
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (_c *AccessConstraintCreate) SetUpdatedBy(v string) *AccessConstraintCreate {
+	_c.mutation.SetUpdatedBy(v)
+	return _c
+}
+
+// SetNillableUpdatedBy sets the "updated_by" field if the given value is not nil.
+func (_c *AccessConstraintCreate) SetNillableUpdatedBy(v *string) *AccessConstraintCreate {
+	if v != nil {
+		_c.SetUpdatedBy(*v)
 	}
 	return _c
 }
@@ -245,6 +287,14 @@ func (_c *AccessConstraintCreate) defaults() {
 		v := accessconstraint.DefaultDisabled
 		_c.mutation.SetDisabled(v)
 	}
+	if _, ok := _c.mutation.Revision(); !ok {
+		v := accessconstraint.DefaultRevision
+		_c.mutation.SetRevision(v)
+	}
+	if _, ok := _c.mutation.Purpose(); !ok {
+		v := accessconstraint.DefaultPurpose
+		_c.mutation.SetPurpose(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := accessconstraint.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -293,6 +343,17 @@ func (_c *AccessConstraintCreate) check() error {
 	}
 	if _, ok := _c.mutation.Disabled(); !ok {
 		return &ValidationError{Name: "disabled", err: errors.New(`ent: missing required field "AccessConstraint.disabled"`)}
+	}
+	if _, ok := _c.mutation.Revision(); !ok {
+		return &ValidationError{Name: "revision", err: errors.New(`ent: missing required field "AccessConstraint.revision"`)}
+	}
+	if _, ok := _c.mutation.Purpose(); !ok {
+		return &ValidationError{Name: "purpose", err: errors.New(`ent: missing required field "AccessConstraint.purpose"`)}
+	}
+	if v, ok := _c.mutation.Purpose(); ok {
+		if err := accessconstraint.PurposeValidator(v); err != nil {
+			return &ValidationError{Name: "purpose", err: fmt.Errorf(`ent: validator failed for field "AccessConstraint.purpose": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "AccessConstraint.created"`)}
@@ -380,9 +441,21 @@ func (_c *AccessConstraintCreate) createSpec() (*AccessConstraint, *sqlgraph.Cre
 		_spec.SetField(accessconstraint.FieldDisabled, field.TypeBool, value)
 		_node.Disabled = value
 	}
+	if value, ok := _c.mutation.Revision(); ok {
+		_spec.SetField(accessconstraint.FieldRevision, field.TypeInt64, value)
+		_node.Revision = value
+	}
+	if value, ok := _c.mutation.Purpose(); ok {
+		_spec.SetField(accessconstraint.FieldPurpose, field.TypeString, value)
+		_node.Purpose = value
+	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(accessconstraint.FieldCreatedBy, field.TypeString, value)
 		_node.CreatedBy = value
+	}
+	if value, ok := _c.mutation.UpdatedBy(); ok {
+		_spec.SetField(accessconstraint.FieldUpdatedBy, field.TypeString, value)
+		_node.UpdatedBy = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(accessconstraint.FieldCreated, field.TypeTime, value)
@@ -606,6 +679,36 @@ func (u *AccessConstraintUpsert) UpdateDisabled() *AccessConstraintUpsert {
 	return u
 }
 
+// SetRevision sets the "revision" field.
+func (u *AccessConstraintUpsert) SetRevision(v int64) *AccessConstraintUpsert {
+	u.Set(accessconstraint.FieldRevision, v)
+	return u
+}
+
+// UpdateRevision sets the "revision" field to the value that was provided on create.
+func (u *AccessConstraintUpsert) UpdateRevision() *AccessConstraintUpsert {
+	u.SetExcluded(accessconstraint.FieldRevision)
+	return u
+}
+
+// AddRevision adds v to the "revision" field.
+func (u *AccessConstraintUpsert) AddRevision(v int64) *AccessConstraintUpsert {
+	u.Add(accessconstraint.FieldRevision, v)
+	return u
+}
+
+// SetPurpose sets the "purpose" field.
+func (u *AccessConstraintUpsert) SetPurpose(v string) *AccessConstraintUpsert {
+	u.Set(accessconstraint.FieldPurpose, v)
+	return u
+}
+
+// UpdatePurpose sets the "purpose" field to the value that was provided on create.
+func (u *AccessConstraintUpsert) UpdatePurpose() *AccessConstraintUpsert {
+	u.SetExcluded(accessconstraint.FieldPurpose)
+	return u
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (u *AccessConstraintUpsert) SetCreatedBy(v string) *AccessConstraintUpsert {
 	u.Set(accessconstraint.FieldCreatedBy, v)
@@ -621,6 +724,24 @@ func (u *AccessConstraintUpsert) UpdateCreatedBy() *AccessConstraintUpsert {
 // ClearCreatedBy clears the value of the "created_by" field.
 func (u *AccessConstraintUpsert) ClearCreatedBy() *AccessConstraintUpsert {
 	u.SetNull(accessconstraint.FieldCreatedBy)
+	return u
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *AccessConstraintUpsert) SetUpdatedBy(v string) *AccessConstraintUpsert {
+	u.Set(accessconstraint.FieldUpdatedBy, v)
+	return u
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *AccessConstraintUpsert) UpdateUpdatedBy() *AccessConstraintUpsert {
+	u.SetExcluded(accessconstraint.FieldUpdatedBy)
+	return u
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *AccessConstraintUpsert) ClearUpdatedBy() *AccessConstraintUpsert {
+	u.SetNull(accessconstraint.FieldUpdatedBy)
 	return u
 }
 
@@ -876,6 +997,41 @@ func (u *AccessConstraintUpsertOne) UpdateDisabled() *AccessConstraintUpsertOne 
 	})
 }
 
+// SetRevision sets the "revision" field.
+func (u *AccessConstraintUpsertOne) SetRevision(v int64) *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.SetRevision(v)
+	})
+}
+
+// AddRevision adds v to the "revision" field.
+func (u *AccessConstraintUpsertOne) AddRevision(v int64) *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.AddRevision(v)
+	})
+}
+
+// UpdateRevision sets the "revision" field to the value that was provided on create.
+func (u *AccessConstraintUpsertOne) UpdateRevision() *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.UpdateRevision()
+	})
+}
+
+// SetPurpose sets the "purpose" field.
+func (u *AccessConstraintUpsertOne) SetPurpose(v string) *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.SetPurpose(v)
+	})
+}
+
+// UpdatePurpose sets the "purpose" field to the value that was provided on create.
+func (u *AccessConstraintUpsertOne) UpdatePurpose() *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.UpdatePurpose()
+	})
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (u *AccessConstraintUpsertOne) SetCreatedBy(v string) *AccessConstraintUpsertOne {
 	return u.Update(func(s *AccessConstraintUpsert) {
@@ -894,6 +1050,27 @@ func (u *AccessConstraintUpsertOne) UpdateCreatedBy() *AccessConstraintUpsertOne
 func (u *AccessConstraintUpsertOne) ClearCreatedBy() *AccessConstraintUpsertOne {
 	return u.Update(func(s *AccessConstraintUpsert) {
 		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *AccessConstraintUpsertOne) SetUpdatedBy(v string) *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.SetUpdatedBy(v)
+	})
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *AccessConstraintUpsertOne) UpdateUpdatedBy() *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.UpdateUpdatedBy()
+	})
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *AccessConstraintUpsertOne) ClearUpdatedBy() *AccessConstraintUpsertOne {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.ClearUpdatedBy()
 	})
 }
 
@@ -1318,6 +1495,41 @@ func (u *AccessConstraintUpsertBulk) UpdateDisabled() *AccessConstraintUpsertBul
 	})
 }
 
+// SetRevision sets the "revision" field.
+func (u *AccessConstraintUpsertBulk) SetRevision(v int64) *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.SetRevision(v)
+	})
+}
+
+// AddRevision adds v to the "revision" field.
+func (u *AccessConstraintUpsertBulk) AddRevision(v int64) *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.AddRevision(v)
+	})
+}
+
+// UpdateRevision sets the "revision" field to the value that was provided on create.
+func (u *AccessConstraintUpsertBulk) UpdateRevision() *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.UpdateRevision()
+	})
+}
+
+// SetPurpose sets the "purpose" field.
+func (u *AccessConstraintUpsertBulk) SetPurpose(v string) *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.SetPurpose(v)
+	})
+}
+
+// UpdatePurpose sets the "purpose" field to the value that was provided on create.
+func (u *AccessConstraintUpsertBulk) UpdatePurpose() *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.UpdatePurpose()
+	})
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (u *AccessConstraintUpsertBulk) SetCreatedBy(v string) *AccessConstraintUpsertBulk {
 	return u.Update(func(s *AccessConstraintUpsert) {
@@ -1336,6 +1548,27 @@ func (u *AccessConstraintUpsertBulk) UpdateCreatedBy() *AccessConstraintUpsertBu
 func (u *AccessConstraintUpsertBulk) ClearCreatedBy() *AccessConstraintUpsertBulk {
 	return u.Update(func(s *AccessConstraintUpsert) {
 		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *AccessConstraintUpsertBulk) SetUpdatedBy(v string) *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.SetUpdatedBy(v)
+	})
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *AccessConstraintUpsertBulk) UpdateUpdatedBy() *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.UpdateUpdatedBy()
+	})
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *AccessConstraintUpsertBulk) ClearUpdatedBy() *AccessConstraintUpsertBulk {
+	return u.Update(func(s *AccessConstraintUpsert) {
+		s.ClearUpdatedBy()
 	})
 }
 

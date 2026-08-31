@@ -41,8 +41,14 @@ type AccessConstraint struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	// True when deactivated by offline recovery
 	Disabled bool `json:"disabled,omitempty"`
+	// Monotonic revision counter, incremented on every update
+	Revision int64 `json:"revision,omitempty"`
+	// Human-readable description of why this constraint exists
+	Purpose string `json:"purpose,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Principal who last modified this constraint
+	UpdatedBy *string `json:"updated_by,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -59,7 +65,9 @@ func (*AccessConstraint) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case accessconstraint.FieldDisabled:
 			values[i] = new(sql.NullBool)
-		case accessconstraint.FieldName, accessconstraint.FieldSubjectKind, accessconstraint.FieldSubjectPrincipalType, accessconstraint.FieldSubjectPrincipalID, accessconstraint.FieldSubjectGroupID, accessconstraint.FieldScopeType, accessconstraint.FieldScopeID, accessconstraint.FieldCreatedBy:
+		case accessconstraint.FieldRevision:
+			values[i] = new(sql.NullInt64)
+		case accessconstraint.FieldName, accessconstraint.FieldSubjectKind, accessconstraint.FieldSubjectPrincipalType, accessconstraint.FieldSubjectPrincipalID, accessconstraint.FieldSubjectGroupID, accessconstraint.FieldScopeType, accessconstraint.FieldScopeID, accessconstraint.FieldPurpose, accessconstraint.FieldCreatedBy, accessconstraint.FieldUpdatedBy:
 			values[i] = new(sql.NullString)
 		case accessconstraint.FieldNotBefore, accessconstraint.FieldExpiresAt, accessconstraint.FieldCreated, accessconstraint.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -159,11 +167,30 @@ func (_m *AccessConstraint) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Disabled = value.Bool
 			}
+		case accessconstraint.FieldRevision:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field revision", values[i])
+			} else if value.Valid {
+				_m.Revision = value.Int64
+			}
+		case accessconstraint.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = value.String
+			}
 		case accessconstraint.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field created_by", values[i])
 			} else if value.Valid {
 				_m.CreatedBy = value.String
+			}
+		case accessconstraint.FieldUpdatedBy:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field updated_by", values[i])
+			} else if value.Valid {
+				_m.UpdatedBy = new(string)
+				*_m.UpdatedBy = value.String
 			}
 		case accessconstraint.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -256,8 +283,19 @@ func (_m *AccessConstraint) String() string {
 	builder.WriteString("disabled=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Disabled))
 	builder.WriteString(", ")
+	builder.WriteString("revision=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Revision))
+	builder.WriteString(", ")
+	builder.WriteString("purpose=")
+	builder.WriteString(_m.Purpose)
+	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)
+	builder.WriteString(", ")
+	if v := _m.UpdatedBy; v != nil {
+		builder.WriteString("updated_by=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
