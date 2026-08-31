@@ -1309,6 +1309,7 @@ func TestResolveListScopes_AccessConstraintExcludesListPermission(t *testing.T) 
 		SubjectKind:        store.ConstraintSubjectAllPrincipals,
 		ScopeType:          store.RoleScopeSystem,
 		MaximumPermissions: []string{"agent.read"}, // project.list NOT included
+		Purpose:            "C-2 regression test: exclude project.list",
 		CreatedBy:          "test",
 	})
 	require.NoError(t, err)

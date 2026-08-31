@@ -1234,6 +1234,7 @@ func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
 		SubjectKind:        store.ConstraintSubjectAllPrincipals,
 		ScopeType:          store.RoleScopeSystem,
 		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "R-2 test: constraint intersection",
 	})
 	require.NoError(t, err)
 
@@ -1295,6 +1296,7 @@ func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T)
 		SubjectPrincipalID:   &groupIDStr,
 		ScopeType:            store.RoleScopeSystem,
 		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "B1 test: group-targeted principal constraint",
 	})
 	require.NoError(t, err)
 
@@ -1343,6 +1345,7 @@ func TestGetEffectivePermissions_ProjectScopeConstraint(t *testing.T) {
 		ScopeType:          store.RoleScopeProject,
 		ScopeID:            projID,
 		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "B1 test: project-scoped constraint",
 	})
 	require.NoError(t, err)
 
