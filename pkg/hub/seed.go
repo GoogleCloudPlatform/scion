@@ -184,9 +184,7 @@ func hubMemberPermissionIDs() []string {
 		// GCP service account catalog (read-only)
 		"gcp_service_account.read",
 		"gcp_service_account.list",
-		// Policy catalog (read-only — will be removed at Policy cutover)
-		"policy.read",
-		"policy.list",
+		// OBS-5: policy.read and policy.list removed — Policy API returns 410 Gone.
 		// Skill catalog (read-only)
 		"skill.read",
 		"skill.list",
@@ -222,8 +220,7 @@ func hubViewerPermissionIDs() []string {
 		"broker.list",
 		"gcp_service_account.read",
 		"gcp_service_account.list",
-		"policy.read",
-		"policy.list",
+		// OBS-5: policy.read and policy.list removed — Policy API returns 410 Gone.
 		"skill.read",
 		"skill.list",
 		"quota.read",
@@ -498,25 +495,8 @@ func ensureProjectScheduledEventPolicy(_ context.Context, _ store.Store, _ *stor
 // with versioned revision tracking.
 func backfillHubAdminRolePermissions(_ context.Context, _ store.Store) {}
 
-// seedPolicyTombstoneKey returns the hub-setting key used to record that a
-// seeded policy was intentionally deleted by an operator.
-func seedPolicyTombstoneKey(policyName string) string {
-	return fmt.Sprintf("seed.policy.deleted.%s", policyName)
-}
-
-// hasSeedPolicyTombstone returns true if a tombstone hub setting exists for the
-// given seeded policy name, indicating it was intentionally deleted.
-// It returns an error for transient store failures so the caller can fail-closed.
-func hasSeedPolicyTombstone(ctx context.Context, s store.Store, policyName string) (bool, error) {
-	_, err := s.GetHubSetting(ctx, seedPolicyTombstoneKey(policyName))
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	return false, err
-}
+// seedPolicyTombstoneKey and hasSeedPolicyTombstone removed in CO1 review
+// Round 1 (OBS-4): zero callers after policy seeding functions became no-ops.
 
 // seedPolicy is a no-op after CO1 cutover. All authorization is handled
 // by RoleBindings and the AK1 kernel — no new Policies are seeded.

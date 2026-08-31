@@ -92,7 +92,7 @@ func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzReque
 		Reason:         decision.Reason,
 		MatchedPolicy:  decision.MatchedPolicy,
 		MatchedGrant:   decision.MatchedGrant,
-		PolicyID:       decision.PolicyID,
+		PolicyID:       decision.BindingID,
 		Sampled:        sampled,
 	}
 
@@ -285,7 +285,7 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		Reason:        decision.Reason,
 		MatchedPolicy: decision.MatchedPolicy,
 		MatchedGrant:  decision.MatchedGrant,
-		PolicyID:      decision.PolicyID,
+		PolicyID:      decision.BindingID,
 		Trace:         decision.ExplainTrace,
 	}
 	if resp.Trace == nil {

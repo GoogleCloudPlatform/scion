@@ -72,7 +72,7 @@ func setupPassthroughServer(t *testing.T, owner *store.User, hostSAEmail, hostPr
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// The user must exist before createProjectMembersGroupAndPolicy so that
+	// The user must exist before createProjectMembersGroup so that
 	// the FK constraint on the group owner succeeds and the user is added to
 	// the project members group.
 	require.NoError(t, s.CreateUser(ctx, owner))
@@ -88,7 +88,7 @@ func setupPassthroughServer(t *testing.T, owner *store.User, hostSAEmail, hostPr
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID:                         tid("broker-pt"),
@@ -406,7 +406,7 @@ func TestPassthrough_NonOwnerNonAdmin_Create_Denied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Broker owned by someone else, auto-provide so dispatch is allowed.
 	brokerOwnerID := tid("user-pt-broker-real-owner")

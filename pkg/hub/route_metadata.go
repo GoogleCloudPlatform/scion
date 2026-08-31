@@ -544,18 +544,17 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Policies (super-admin-only: policy permissions are not in
-	// the hub-admin role, so only super-admins pass via the step-1 bypass)
+	// Policies: CO1 cutover — all handlers return 410 Gone. Route guard
+	// relaxed from RouteHubAdmin to RouteAuthenticated so the 410 reaches
+	// the caller. OBS-5 removed policy.read/policy.list from all roles.
 	// -------------------------------------------------------------------------
 	"/api/v1/policies": {
 		Pattern: "/api/v1/policies", RouteID: "policies.list",
-		Classification: RouteHubAdmin,
-		Permission:     "policy.read", Resource: "policy", Action: "read",
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/policies/": {
 		Pattern: "/api/v1/policies/", RouteID: "policies.byId",
-		Classification: RouteHubAdmin,
-		Permission:     "policy.read", Resource: "policy", Action: "read",
+		Classification: RouteAuthenticated,
 	},
 
 	// -------------------------------------------------------------------------

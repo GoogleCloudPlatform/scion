@@ -230,7 +230,7 @@ func TestAuthz_ProjectOwnerBypass_CreatorOwnerStillWorks(t *testing.T) {
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
 	assert.True(t, decision.Allowed, "project creator (direct OwnerID) should still be allowed; reason=%q", decision.Reason)
 	// CO1: The AK1 kernel evaluates role bindings first; alice has a
-	// project-owner role binding (created by createProjectMembersGroupAndPolicy)
+	// project-owner role binding (created by createProjectMembersGroup)
 	// which includes project.update, so the role binding fires before the
 	// resource-owner relationship check.
 	assert.Equal(t, "role binding grant", decision.Reason)
@@ -362,7 +362,7 @@ func TestProjectMembersGroup_SlugSquatDoesNotGrantFutureProjectOwnership(t *test
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	got, err := s.GetGroup(ctx, squatted.ID)
 	require.NoError(t, err)
@@ -411,7 +411,7 @@ func TestProjectMembersGroup_AllowsExistingSystemGroupForSameProject(t *testing.
 	}
 	require.NoError(t, s.CreateGroup(ctx, membersGroup))
 
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	membership, err := s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, creator.ID)
 	require.NoError(t, err)

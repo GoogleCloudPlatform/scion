@@ -323,7 +323,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 				callerID = user.ID()
 			}
 			s.createProjectGroup(ctx, existing)
-			s.createProjectMembersGroupAndPolicy(ctx, existing, callerID)
+			s.createProjectMembersGroup(ctx, existing, callerID)
 			writeJSON(w, http.StatusOK, existing)
 			return
 		}
@@ -459,7 +459,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	// Create project members group and policy (best-effort).
 	// This continues to create the group for collaboration and policy bindings.
 	// The role binding above is now the canonical membership source.
-	s.createProjectMembersGroupAndPolicy(ctx, project)
+	s.createProjectMembersGroup(ctx, project)
 
 	// Ensure the #general chat topic exists for this project (best-effort).
 	s.ensureProjectGeneralTopic(ctx, project)
@@ -774,7 +774,7 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 		group.Annotations[systemProjectAgentsGroupAnnotation] == "true"
 }
 
-// createProjectMembersGroupAndPolicy creates the project's collaboration
+// createProjectMembersGroup creates the project's collaboration
 // members group and ensures project membership via RoleBindings. The group
 // exists for collaboration (chat, agent co-ownership) but carries NO
 // authorization meaning — all authorization flows through project-scoped
@@ -786,7 +786,7 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 // callerUserID, when non-empty, also receives a project-owner RoleBinding
 // (e.g. the user who linked the project). It is safe to pass the same value as
 // project.CreatedBy — duplicate bindings are handled gracefully.
-func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project *store.Project, callerUserID ...string) {
+func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.Project, callerUserID ...string) {
 	membersSlug := projectMembersGroupSlug(project.Slug)
 
 	s.projectsLogger().Debug("ensuring project members group",
@@ -1471,7 +1471,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		s.createProjectGroup(ctx, project)
 
 		// Create project members group (best-effort, for collaboration)
-		s.createProjectMembersGroupAndPolicy(ctx, project)
+		s.createProjectMembersGroup(ctx, project)
 
 		// Ensure the #general chat topic exists for this project (best-effort).
 		s.ensureProjectGeneralTopic(ctx, project)
@@ -1490,7 +1490,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		s.projectsLogger().Debug("ensuring groups for existing project during register",
 			"project_id", project.ID, "slug", project.Slug, "caller", callerID)
 		s.createProjectGroup(ctx, project)
-		s.createProjectMembersGroupAndPolicy(ctx, project, callerID)
+		s.createProjectMembersGroup(ctx, project, callerID)
 	}
 
 	// Handle broker linking - two paths:
@@ -2566,7 +2566,7 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		NotFound(w, "Project")
 		return
 	}
-	s.createProjectMembersGroupAndPolicy(ctx, project)
+	s.createProjectMembersGroup(ctx, project)
 
 	// Enrich owner display name
 	if project.OwnerID != "" {

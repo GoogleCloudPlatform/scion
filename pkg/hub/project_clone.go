@@ -260,7 +260,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// ── Step 7: Create members group (collaboration) ─────────────────────
 	// The group exists for collaboration; authorization is via RoleBindings.
-	s.createProjectMembersGroupAndPolicy(ctx, clone, callerID)
+	s.createProjectMembersGroup(ctx, clone, callerID)
 
 	// ── Step 8: Deep-copy project-scoped harness configs ─────────────────
 

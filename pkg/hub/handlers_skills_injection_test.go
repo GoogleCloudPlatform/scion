@@ -79,8 +79,8 @@ func setupInjectedSkillsTest(t *testing.T) (*Server, store.Store, *store.Project
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	// Create the project members group so authz works correctly.
-	// createProjectMembersGroupAndPolicy also adds alice (CreatedBy) as an owner.
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	// createProjectMembersGroup also adds alice (CreatedBy) as an owner.
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, project, alice, bob
 }
@@ -137,8 +137,8 @@ func TestListProjectInjectedSkills_IsolatedBetweenProjects(t *testing.T) {
 		CreatedBy: alice.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project2))
-	// createProjectMembersGroupAndPolicy also adds alice (CreatedBy) as an owner.
-	srv.createProjectMembersGroupAndPolicy(ctx, project2)
+	// createProjectMembersGroup also adds alice (CreatedBy) as an owner.
+	srv.createProjectMembersGroup(ctx, project2)
 
 	si2 := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
@@ -582,7 +582,7 @@ func TestRemoveProjectInjectedSkill_CrossProjectIDORRejected(t *testing.T) {
 		CreatedBy: alice.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, projectB))
-	srv.createProjectMembersGroupAndPolicy(ctx, projectB)
+	srv.createProjectMembersGroup(ctx, projectB)
 
 	// Add an entry to project B.
 	siB := &store.SkillInjection{

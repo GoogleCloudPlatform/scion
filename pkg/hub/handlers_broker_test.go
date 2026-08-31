@@ -94,7 +94,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// CO1: Add bob as a project member via role binding so he can create
 	// agents (project-level authz).

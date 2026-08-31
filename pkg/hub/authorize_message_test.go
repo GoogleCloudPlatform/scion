@@ -75,7 +75,7 @@ func msgAuthzSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Add member to the project members group so policies apply.
 	msgAuthzAddProjectMember(t, s, member.ID, projectID, "msg-authz-project", store.GroupMemberRoleMember)

@@ -474,7 +474,7 @@ func defaultServerHealthCheck(addr string) (running bool, err error) {
 	resp, err := client.Get("http://" + addr + "/healthz")
 	if err != nil {
 		// Connection refused / timeout → no server.
-		if isConnectionRefused(err) {
+		if isConnectionError(err) {
 			return false, nil
 		}
 		return false, err
@@ -484,8 +484,11 @@ func defaultServerHealthCheck(addr string) (running bool, err error) {
 	return true, nil
 }
 
-// isConnectionRefused returns true for "connection refused" errors.
-func isConnectionRefused(err error) bool {
+// isConnectionError returns true for network-level connection errors
+// (connection refused, timeout, DNS failure, etc.) that indicate no server
+// is listening. Renamed from isConnectionRefused (OBS-7) because it matches
+// all net.OpError, not just ECONNREFUSED.
+func isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}

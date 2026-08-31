@@ -345,7 +345,7 @@ func setupProjectScopedAdminTest(t *testing.T) (*Server, store.Store, *store.Use
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectX))
-	srv.createProjectMembersGroupAndPolicy(ctx, projectX)
+	srv.createProjectMembersGroup(ctx, projectX)
 
 	// Create project Y (unbound project)
 	projectY := &store.Project{
@@ -358,7 +358,7 @@ func setupProjectScopedAdminTest(t *testing.T) (*Server, store.Store, *store.Use
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectY))
-	srv.createProjectMembersGroupAndPolicy(ctx, projectY)
+	srv.createProjectMembersGroup(ctx, projectY)
 
 	// Create project-admin role binding for projectAdmin in project X only
 	projectAdminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
@@ -562,7 +562,7 @@ func TestScopedAdmin_HubAdminCanCreateProjectScopedBinding(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Look up project-admin role definition
 	projectAdminDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
@@ -603,7 +603,7 @@ func TestScopedAdmin_CombinedHubAndProjectRoles(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Hub-admin should still access hub-level endpoints
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/admin/roles", nil)

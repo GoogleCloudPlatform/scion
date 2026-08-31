@@ -183,7 +183,7 @@ func TestCloneTemplate_Authz_DestinationChecked(t *testing.T) {
 		Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	body := map[string]interface{}{
 		"name":    "Clone Into Project",

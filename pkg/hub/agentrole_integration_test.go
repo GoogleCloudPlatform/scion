@@ -59,7 +59,7 @@ func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, user, project
 }
@@ -513,7 +513,7 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, st.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-cap"),
@@ -583,7 +583,7 @@ func setupFullMaxProject(t *testing.T) (*Server, store.Store, *store.Project) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, project
 }
@@ -864,7 +864,7 @@ func TestCreateAgent_ProjectMaxBaseline_CapsFullToBaseline(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-base-cap"),
@@ -904,7 +904,7 @@ func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Member user requesting no specific role — should default to project max (readonly)
 	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
@@ -967,7 +967,7 @@ func setupReadScopeTest(t *testing.T) (*Server, store.Store, *store.Agent, *stor
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	agent := &store.Agent{
 		ID:        tid("agent-read-scope"),
@@ -1182,7 +1182,7 @@ func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T)
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Set the hub-level default to baseline — this should NOT override the
 	// project-level explicit "full".

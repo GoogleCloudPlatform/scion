@@ -102,7 +102,7 @@ func setupPatchPassthroughFixture(t *testing.T) *patchPassthroughFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroupAndPolicy(ctx, f.project)
+	srv.createProjectMembersGroup(ctx, f.project)
 
 	// Create a broker owned by the broker owner, with host SA (P8).
 	f.broker = &store.RuntimeBroker{
@@ -323,7 +323,7 @@ func TestPatchPassthrough_AutoProvideBrokerNonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// AutoProvide broker: any user can dispatch to it, but that does NOT
 	// grant passthrough. The broker is owned by brokerOwner.
@@ -400,7 +400,7 @@ func TestPatchPassthrough_NoBrokerValidationError(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Agent with NO runtime broker
 	agent := &store.Agent{

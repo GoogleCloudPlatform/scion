@@ -97,7 +97,7 @@ func smmSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User, *st
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Owner gets owner role binding.
 	msgAuthzAddProjectMember(t, s, owner.ID, projectID, "smm-project", store.GroupMemberRoleOwner)

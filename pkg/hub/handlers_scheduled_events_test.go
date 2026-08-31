@@ -537,7 +537,7 @@ func TestScheduledEvent_ProjectOwnerAllowed(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create the project's members group and add user as owner
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Create a project-owner role binding — isProjectOwnerOrAdmin checks role
 	// bindings, not group membership.
@@ -594,7 +594,7 @@ func TestScheduledEvent_FederatedUserAllowed(t *testing.T) {
 	// Set up project membership infrastructure and owner role binding.
 	project, err := s.GetProject(ctx, projectID)
 	require.NoError(t, err)
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, fedUserID))
 
 	t.Run("list allowed", func(t *testing.T) {

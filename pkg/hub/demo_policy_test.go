@@ -101,8 +101,8 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create project members group and policy (simulates what project creation handler does).
-	// Phase 1F: createProjectMembersGroupAndPolicy now also creates the role binding.
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	// Phase 1F: createProjectMembersGroup now also creates the role binding.
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, alice, bob, project
 }
@@ -196,7 +196,7 @@ func TestDemoPolicy_ProjectRecreation_CreatorCanCreateAgent(t *testing.T) {
 }
 
 // TestDemoPolicy_ProjectMembersGroupIdempotent tests that calling
-// createProjectMembersGroupAndPolicy twice for the same project is safe — the
+// createProjectMembersGroup twice for the same project is safe — the
 // second call should still ensure the creator is a member.
 func TestDemoPolicy_ProjectMembersGroupIdempotent(t *testing.T) {
 	// CO1: CreatePolicyRequest and policy demo handlers removed; test retained as shell.

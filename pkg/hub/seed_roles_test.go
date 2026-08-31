@@ -97,7 +97,7 @@ func TestBuiltInRoles_HubMemberContainsExpectedPermissions(t *testing.T) {
 		"harness_config.read", "harness_config.list",
 		"broker.read", "broker.list",
 		"gcp_service_account.read", "gcp_service_account.list",
-		"policy.read", "policy.list",
+		// OBS-5: policy.read and policy.list removed — Policy API returns 410 Gone.
 		"skill.read", "skill.list",
 		"quota.read",
 		"role.read",

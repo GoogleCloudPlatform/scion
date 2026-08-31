@@ -126,7 +126,7 @@ func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
 // picking a hub-wide account. The call is idempotent.
 func createAgentAsOwner(t *testing.T, f *bypassAgentsFixture, req CreateAgentRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
 	return doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", req)
 }
@@ -224,7 +224,7 @@ func TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
 		sa := hubScopedSAForAgent(t, f, true) // created by a stranger
 		admin := hubAdminUser(t, f)
 
-		f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+		f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
 		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
 			"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
 				Name: "hub-sa-agent-admin",

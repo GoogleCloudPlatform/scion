@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -57,24 +58,22 @@ func TestSeedPolicy_SeededPoliciesHaveOrigin(t *testing.T) {
 }
 
 // TestSeedPolicy_SkipsRecreationWhenTombstoneExists verifies that after CO1
-// cutover, seedPolicy is a no-op regardless of tombstone state. The tombstone
-// mechanism (hasSeedPolicyTombstone) is still functional for any code that
-// checks it directly.
+// cutover, seedPolicy is a no-op regardless of tombstone state.
+// OBS-4: seedPolicyTombstoneKey and hasSeedPolicyTombstone removed (zero callers).
 func TestSeedPolicy_SkipsRecreationWhenTombstoneExists(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
 	const policyName = "test-tombstone-policy"
 
-	// Plant a tombstone hub setting.
-	key := seedPolicyTombstoneKey(policyName)
+	// Plant a tombstone hub setting directly (functions removed in OBS-4).
+	key := fmt.Sprintf("seed.policy.deleted.%s", policyName)
 	_, err := s.UpsertHubSetting(ctx, key, json.RawMessage(`"true"`), "system", -1, "managed")
 	require.NoError(t, err)
 
-	// Verify the tombstone check still works.
-	hasTomb, err := hasSeedPolicyTombstone(ctx, s, policyName)
-	require.NoError(t, err)
-	assert.True(t, hasTomb, "tombstone should be detected")
+	// Verify tombstone exists via direct hub setting read.
+	_, err = s.GetHubSetting(ctx, key)
+	require.NoError(t, err, "tombstone hub setting should exist")
 
 	// Get the hub-members group for the seedPolicy call.
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
@@ -154,7 +153,8 @@ func TestDeletePolicy_UserCreatedPolicyNoTombstone(t *testing.T) {
 	assert.Equal(t, http.StatusGone, rec.Code)
 
 	// Verify NO tombstone was created (endpoint returned 410, no deletion occurred).
-	key := seedPolicyTombstoneKey(policy.Name)
+	// OBS-4: seedPolicyTombstoneKey removed; inline the key format.
+	key := fmt.Sprintf("seed.policy.deleted.%s", policy.Name)
 	_, err := s.GetHubSetting(ctx, key)
 	assert.ErrorIs(t, err, store.ErrNotFound,
 		"no tombstone should be created when policy DELETE returns 410")

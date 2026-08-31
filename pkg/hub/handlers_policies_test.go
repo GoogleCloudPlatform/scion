@@ -135,10 +135,11 @@ func TestPolicyEndpoints_AdminPassesThrough(t *testing.T) {
 	}
 }
 
-// TestPolicyRouteGuard_SuperAdminOnlyAccess verifies that policy routes in the
-// route metadata table enforce super-admin-only access. Policy permissions are
-// NOT in the hub-admin role, so hub-admins should be denied.
-func TestPolicyRouteGuard_SuperAdminOnlyAccess(t *testing.T) {
+// TestPolicyRouteGuard_AuthenticatedGetsGone verifies that policy routes
+// return 410 Gone for any authenticated user after CO1 cutover. OBS-5
+// removed policy.read/policy.list from all roles and the route classification
+// was relaxed to RouteAuthenticated.
+func TestPolicyRouteGuard_AuthenticatedGetsGone(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -163,34 +164,16 @@ func TestPolicyRouteGuard_SuperAdminOnlyAccess(t *testing.T) {
 		t.Fatalf("create hub-admin role binding: %v", err)
 	}
 
-	okHandler := func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	// Hub-admin should now reach the 410 Gone handler (route is RouteAuthenticated).
+	rec := doRequestAsUser(t, srv, hubAdminUser, http.MethodGet, "/api/v1/policies", nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("hub-admin accessing policy route: expected 410 Gone, got %d", rec.Code)
 	}
 
-	// Test the policy route guard: hub-admin should be denied because
-	// policy.read is not in the hub-admin role.
-	meta := routeMetadataTable["/api/v1/policies"]
-	handler := srv.routeGuard(meta, okHandler)
-
-	hubAdmin := NewAuthenticatedUser(tid("ha-pol"), "ha-pol@test.com", "Hub Admin", "member", "api")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/policies", nil)
-	req = req.WithContext(contextWithIdentity(ctx, hubAdmin))
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("hub-admin accessing policy route: expected 403, got %d", rr.Code)
-	}
-
-	// Super-admin should pass: needs a valid UUID and role binding in CO1.
+	// Super-admin also gets 410 Gone (the handler always returns Gone).
 	createTestUserWithRole(t, s, tid("sa-pol"), "sa-pol@test.com", "admin", store.SystemRoleSuperAdmin)
-	superAdmin := NewAuthenticatedUser(tid("sa-pol"), "sa-pol@test.com", "Super Admin", "admin", "api")
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/policies", nil)
-	req = req.WithContext(contextWithIdentity(ctx, superAdmin))
-	rr = httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("super-admin accessing policy route: expected 200, got %d", rr.Code)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/policies", nil)
+	if rec.Code != http.StatusGone {
+		t.Errorf("super-admin accessing policy route: expected 410 Gone, got %d", rec.Code)
 	}
 }

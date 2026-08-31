@@ -153,8 +153,8 @@ type DecisionStep struct {
 type Decision struct {
 	Allowed        bool   // Whether access is allowed
 	Reason         string // Human-readable explanation
-	PolicyID       string // ID of the matched policy (if any)
-	PolicyName     string // Name of the matched policy (if any)
+	BindingID      string // ID of the matched role binding (if any)
+	RoleName       string // Name of the matched role (if any)
 	Scope          string // Scope level that decided (hub, project, resource)
 	MatchedGrant   string // Audit-ready matched grant identifier
 	MatchedPolicy  string // Audit-ready matched policy identifier
@@ -167,10 +167,9 @@ type Decision struct {
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
-	Scope             string   `json:"scope"`
-	PoliciesEvaluated int      `json:"policiesEvaluated"`
-	Matched           bool     `json:"matched"`
-	EffectiveGroups   []string `json:"effectiveGroups,omitempty"`
+	Scope           string   `json:"scope"`
+	Matched         bool     `json:"matched"`
+	EffectiveGroups []string `json:"effectiveGroups,omitempty"`
 }
 
 // DecisionAuditEmitter is an interface for emitting decision audit records.
@@ -488,8 +487,8 @@ func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 			gb := kd.Provenance.GrantingBindings[0]
 			d.Reason = "role binding grant"
 			d.MatchedGrant = gb.RoleName
-			d.PolicyName = gb.RoleName
-			d.PolicyID = gb.BindingID
+			d.RoleName = gb.RoleName
+			d.BindingID = gb.BindingID
 			d.Scope = gb.ScopeType
 		} else {
 			d.Reason = "kernel allow"
@@ -587,7 +586,7 @@ func (a *AuthzService) checkRelationshipGrants(
 					Reason:       "relationship grant: " + string(result.RelationshipType),
 					Scope:        ScopeTypeRelationship,
 					MatchedGrant: result.Provenance.RoleName,
-					PolicyID:     result.Provenance.BindingID,
+					BindingID:    result.Provenance.BindingID,
 				}, true
 			}
 		}
@@ -869,10 +868,10 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)
 	if decision.MatchedPolicy == "" {
-		decision.MatchedPolicy = decision.PolicyID
+		decision.MatchedPolicy = decision.BindingID
 	}
 	if decision.MatchedGrant == "" {
-		decision.MatchedGrant = decision.PolicyName
+		decision.MatchedGrant = decision.RoleName
 	}
 	return decision
 }

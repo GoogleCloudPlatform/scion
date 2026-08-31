@@ -114,7 +114,7 @@ func setupHubScopedAssignTest(t *testing.T) *hubScopedAssignFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroupAndPolicy(ctx, f.project, f.owner.ID)
+	srv.createProjectMembersGroup(ctx, f.project, f.owner.ID)
 
 	// Add member to the project members group
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:hsa-project:members")
@@ -194,7 +194,7 @@ func TestHubScopedAssign_ModeOff_Denied(t *testing.T) {
 	// The owner created the SA, so they'd pass Hub policy. But mode=off must
 	// deny at the mode-coupling precondition, before policy runs.
 	sa := hubScopedSACreatedBy(t, f, f.owner.ID, true)
-	f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
@@ -216,7 +216,7 @@ func TestHubScopedAssign_ModeOff_AdminAlsoDenied(t *testing.T) {
 
 	admin := hubAdminUser(t, f)
 	sa := hubScopedSAForAgent(t, f, true)
-	f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
 
 	rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
@@ -251,7 +251,7 @@ func TestHubScopedAssign_ModeOff_ProjectScopedStillAllowed(t *testing.T) {
 		CreatedAt:          time.Now(),
 	}
 	require.NoError(t, f.store.CreateGCPServiceAccount(ctx, sa))
-	f.srv.createProjectMembersGroupAndPolicy(ctx, f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(ctx, f.proj, f.owner.ID)
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
