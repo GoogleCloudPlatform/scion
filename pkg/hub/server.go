@@ -1473,6 +1473,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
 		CredentialStore:    s,
+		UserStore:          s,
 		AuthMode:           cfg.AuthMode,
 		Debug:              cfg.Debug,
 		Logger:             srv.authLog,

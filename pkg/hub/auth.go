@@ -76,6 +76,10 @@ type AuthConfig struct {
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
+	// UserStore enables per-request user-status checks (e.g. suspension
+	// enforcement) for self-contained credentials like JWTs that do not
+	// themselves hit the database.
+	UserStore store.UserStore
 	// Debug enables verbose logging
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
@@ -360,6 +364,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				scopedUser, err := cfg.UATSvc.ValidateToken(ctx, token)
 				if err != nil {
+					if errors.Is(err, ErrUserSuspended) {
+						writeError(w, http.StatusForbidden, "user_suspended",
+							"access denied: user account is suspended", nil)
+						return
+					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
 					return
@@ -395,6 +404,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
 					return
+				}
+				// JWT tokens are self-contained; check current user status
+				// from the store to enforce suspension between token refreshes.
+				if cfg.UserStore != nil {
+					if u, uErr := cfg.UserStore.GetUser(ctx, claims.UserID); uErr == nil {
+						if u.Status == store.UserStatusSuspended {
+							log.Warn("JWT auth rejected: user is suspended",
+								"user_id", claims.UserID, "email", claims.Email)
+							writeError(w, http.StatusForbidden, "user_suspended",
+								"access denied: user account is suspended", nil)
+							return
+						}
+					}
+					// If GetUser fails (store error or user deleted), let the
+					// request continue — downstream handlers will fail closed
+					// when the identity has no matching store record.
 				}
 				user := NewAuthenticatedUser(
 					claims.UserID,

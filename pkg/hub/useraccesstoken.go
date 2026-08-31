@@ -188,6 +188,10 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, fmt.Errorf("failed to look up user: %w", err)
 	}
 
+	if user.Status == store.UserStatusSuspended {
+		return nil, ErrUserSuspended
+	}
+
 	return NewScopedUserIdentityWithCredentialID(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
 		token.ProjectID,
