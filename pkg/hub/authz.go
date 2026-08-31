@@ -1071,6 +1071,9 @@ func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bo
 
 // storeToHubAccessConstraint converts a store AccessConstraint to a hub
 // AccessConstraint. Returns nil if the store constraint is nil.
+// Runs Validate() on subject and scope and marks the constraint as degraded
+// (with a warning log) if validation fails on stored records, rather than
+// silently discarding them.
 func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 	if sc == nil {
 		return nil
@@ -1080,6 +1083,12 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 		Name:               sc.Name,
 		MaximumPermissions: sc.MaximumPermissions,
 		Disabled:           sc.Disabled,
+		Revision:           sc.Revision,
+		Purpose:            sc.Purpose,
+		UpdatedBy:          sc.UpdatedBy,
+		CreatedBy:          sc.CreatedBy,
+		CreatedAt:          sc.CreatedAt,
+		UpdatedAt:          sc.UpdatedAt,
 	}
 	// Map subject.
 	hc.Subject = SubjectSelector{
@@ -1106,6 +1115,21 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 	if sc.ExpiresAt != nil {
 		hc.Condition.ExpiresAt = *sc.ExpiresAt
 	}
+
+	// Validate converted subject and scope. Invalid stored records are
+	// marked as degraded for B7's ResolutionHealth, not dropped — this
+	// preserves fail-open semantics while surfacing data quality issues.
+	if err := hc.Subject.Validate(); err != nil {
+		slog.Warn("degraded access constraint: invalid stored subject",
+			"constraint_id", sc.ID, "constraint_name", sc.Name, "error", err)
+		hc.Degraded = true
+	}
+	if err := hc.Scope.Validate(); err != nil {
+		slog.Warn("degraded access constraint: invalid stored scope",
+			"constraint_id", sc.ID, "constraint_name", sc.Name, "error", err)
+		hc.Degraded = true
+	}
+
 	return hc
 }
 

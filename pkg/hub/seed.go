@@ -99,7 +99,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2,
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -743,6 +743,8 @@ func hubAdminPermissionIDs() []string {
 		"skill.update":   true,
 		"skill.delete":   true,
 		"skill.register": true,
+		// Access constraint read (admin does NOT get access_constraint.admin)
+		"access_constraint.read": true,
 	}
 
 	var ids []string
