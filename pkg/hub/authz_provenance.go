@@ -85,6 +85,10 @@ type ActivationResult struct {
 	// ExpiresAtSatisfied is true when the current time is before ExpiresAt
 	// (or ExpiresAt is zero).
 	ExpiresAtSatisfied bool
+
+	// FailClosedReason is set when the activation check fails closed due to
+	// missing evaluation context (e.g. zero Now with time-conditioned binding).
+	FailClosedReason string
 }
 
 // RestrictionResult records how a single restriction reduced (or did not

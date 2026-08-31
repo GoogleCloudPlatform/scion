@@ -948,6 +948,83 @@ func TestProperty_OrderIndependence_Randomized(t *testing.T) {
 	}
 }
 
+func TestEvaluate_ZeroNow_FailClosed_WithTimeConditions(t *testing.T) {
+	// R6: When Now is zero and a binding has time conditions, the binding
+	// must be rejected (fail closed) rather than producing inconsistent
+	// accept/reject based on zero-time comparisons.
+	roles := map[string]*RolePermissions{
+		"r1": makeRole("r1", "temp-role", ScopeTypeSystem, "agent.create"),
+	}
+
+	cases := []struct {
+		name      string
+		notBefore time.Time
+		expiresAt time.Time
+	}{
+		{"notBefore_only", testNow.Add(-1 * time.Hour), time.Time{}},
+		{"expiresAt_only", time.Time{}, testNow.Add(24 * time.Hour)},
+		{"both_conditions", testNow.Add(-1 * time.Hour), testNow.Add(24 * time.Hour)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bindings := []CandidateBinding{
+				makeTimedBinding("b1", "r1", "user", "user1", ScopeTypeSystem, "",
+					tc.notBefore, tc.expiresAt),
+			}
+			req := KernelRequest{
+				Permission:        "agent.create",
+				PrincipalClosure:  closureOf("user:user1"),
+				Resource:          ResourceContext{ProjectID: "proj-a"},
+				CandidateBindings: bindings,
+				RoleDefinitions:   roles,
+				Now:               time.Time{}, // zero
+			}
+			d := Evaluate(req)
+			if d.Allowed {
+				t.Fatal("zero-Now with time-conditioned binding must deny (fail closed)")
+			}
+			// Verify the reject reason mentions fail-closed.
+			if len(d.Provenance.RejectedCandidates) == 0 {
+				t.Fatal("expected rejected candidate")
+			}
+			rc := d.Provenance.RejectedCandidates[0]
+			found := false
+			for _, reason := range rc.RejectReasons {
+				if reason == "evaluation time not set; time-conditioned binding rejected (fail closed)" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected fail-closed reason, got %v", rc.RejectReasons)
+			}
+		})
+	}
+}
+
+func TestEvaluate_ZeroNow_AllowsUnconditionedBindings(t *testing.T) {
+	// A binding with no time conditions should still be evaluated normally
+	// even when Now is zero (backwards compatibility).
+	roles := map[string]*RolePermissions{
+		"r1": makeRole("r1", "perm-role", ScopeTypeSystem, "agent.create"),
+	}
+	bindings := []CandidateBinding{
+		makeBinding("b1", "r1", "user", "user1", ScopeTypeSystem, ""),
+	}
+	req := KernelRequest{
+		Permission:        "agent.create",
+		PrincipalClosure:  closureOf("user:user1"),
+		Resource:          ResourceContext{ProjectID: "proj-a"},
+		CandidateBindings: bindings,
+		RoleDefinitions:   roles,
+		Now:               time.Time{}, // zero
+	}
+	d := Evaluate(req)
+	if !d.Allowed {
+		t.Fatal("zero-Now with unconditioned binding should allow")
+	}
+}
+
 func TestEvaluate_ScopeTypeMismatch_Rejected(t *testing.T) {
 	// A binding with ScopeType "system" pointing at a project-scoped role
 	// must be rejected. Vice versa as well.

@@ -347,11 +347,15 @@ func evaluateBinding(req KernelRequest, cb *CandidateBinding) GrantProvenance {
 	activation := evaluateActivation(cb, req.Now)
 	prov.ActivationResult = activation
 	if !activation.Active {
-		if !activation.NotBeforeSatisfied {
-			prov.RejectReasons = append(prov.RejectReasons, "binding not yet active (notBefore)")
-		}
-		if !activation.ExpiresAtSatisfied {
-			prov.RejectReasons = append(prov.RejectReasons, "binding expired (expiresAt)")
+		if activation.FailClosedReason != "" {
+			prov.RejectReasons = append(prov.RejectReasons, activation.FailClosedReason)
+		} else {
+			if !activation.NotBeforeSatisfied {
+				prov.RejectReasons = append(prov.RejectReasons, "binding not yet active (notBefore)")
+			}
+			if !activation.ExpiresAtSatisfied {
+				prov.RejectReasons = append(prov.RejectReasons, "binding expired (expiresAt)")
+			}
 		}
 		return prov
 	}
@@ -379,6 +383,19 @@ func evaluateActivation(cb *CandidateBinding, now time.Time) ActivationResult {
 	result := ActivationResult{
 		NotBefore: cb.NotBefore,
 		ExpiresAt: cb.ExpiresAt,
+	}
+
+	hasTimeCondition := !cb.NotBefore.IsZero() || !cb.ExpiresAt.IsZero()
+
+	// Fail closed: if Now is zero and the binding has any time condition,
+	// reject the binding. A zero Now is a programming error — callers must
+	// supply an evaluation time when time-conditioned bindings exist.
+	if now.IsZero() && hasTimeCondition {
+		result.NotBeforeSatisfied = false
+		result.ExpiresAtSatisfied = false
+		result.Active = false
+		result.FailClosedReason = "evaluation time not set; time-conditioned binding rejected (fail closed)"
+		return result
 	}
 
 	// notBefore: satisfied if zero or now >= notBefore.
