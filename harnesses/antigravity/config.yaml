@@ -57,7 +57,7 @@ capabilities:
     system_prompt: { support: "partial", reason: "System prompt is downgraded to GEMINI.md preamble" }
     agent_instructions: { support: "yes" }
   auth:
-    api_key: { support: "yes" }
+    api_key: { support: "yes", reason: "Via GEMINI_API_KEY with modelProvider=gemini in settings.json" }
     auth_file: { support: "yes", reason: "Via AGY_TOKEN file secret at ~/.gemini/antigravity-cli/antigravity-oauth-token" }
     oauth_token: { support: "no", reason: "AGY uses file-based OAuth token, not raw token injection" }
     vertex_ai: { support: "yes", reason: "GCP mode via ADC (GOOGLE_APPLICATION_CREDENTIALS) + GOOGLE_CLOUD_PROJECT, requires AGY CLI >= 1.1.10" }
@@ -82,7 +82,7 @@ auth:
           target_suffix: "/.gemini/antigravity-cli/antigravity-oauth-token"
     api-key:
       required_env:
-        - any_of: ["GEMINI_API_KEY"]
+        - any_of: ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
     vertex-ai:
       required_env:
         - any_of: ["GOOGLE_CLOUD_PROJECT"]
@@ -98,6 +98,7 @@ auth:
   autodetect:
     env:
       GEMINI_API_KEY: api-key
+      GOOGLE_API_KEY: api-key
       AGY_TOKEN: oauth-token
       GOOGLE_CLOUD_PROJECT: vertex-ai
     files:
