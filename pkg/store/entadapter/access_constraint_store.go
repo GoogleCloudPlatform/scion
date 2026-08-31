@@ -16,6 +16,15 @@ package entadapter
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
@@ -25,12 +34,24 @@ import (
 
 // AccessConstraintStore implements store.AccessConstraintStore using Ent ORM.
 type AccessConstraintStore struct {
-	client *ent.Client
+	client      *ent.Client
+	dialectOnce sync.Once
+	dialectName string
 }
 
 // NewAccessConstraintStore creates a new Ent-backed AccessConstraintStore.
 func NewAccessConstraintStore(client *ent.Client) *AccessConstraintStore {
 	return &AccessConstraintStore{client: client}
+}
+
+// usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
+func (s *AccessConstraintStore) usesRowLocks(ctx context.Context) bool {
+	s.dialectOnce.Do(func() {
+		_, _ = s.client.AccessConstraint.Query().
+			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
+			Exist(ctx)
+	})
+	return s.dialectName == dialect.Postgres
 }
 
 // entAccessConstraintToStore converts an Ent AccessConstraint entity to a
@@ -46,6 +67,8 @@ func entAccessConstraintToStore(e *ent.AccessConstraint) *store.AccessConstraint
 		NotBefore:          e.NotBefore,
 		ExpiresAt:          e.ExpiresAt,
 		Disabled:           e.Disabled,
+		Revision:           e.Revision,
+		Purpose:            e.Purpose,
 		CreatedBy:          e.CreatedBy,
 		CreatedAt:          e.Created,
 		UpdatedAt:          e.Updated,
@@ -59,19 +82,125 @@ func entAccessConstraintToStore(e *ent.AccessConstraint) *store.AccessConstraint
 	if e.SubjectGroupID != nil {
 		result.SubjectGroupID = e.SubjectGroupID
 	}
+	if e.UpdatedBy != nil {
+		result.UpdatedBy = *e.UpdatedBy
+	}
 	return result
 }
 
-// CreateAccessConstraint creates a new access constraint.
+// validateReferences checks that referenced entities (user, agent, group,
+// project) exist in the database. Runs inside a transaction.
+func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.Tx, c *store.AccessConstraint) error {
+	switch c.SubjectKind {
+	case store.ConstraintSubjectPrincipal:
+		if c.SubjectPrincipalType == nil || c.SubjectPrincipalID == nil {
+			return fmt.Errorf("principal type and ID required for principal subject: %w", store.ErrInvalidInput)
+		}
+		principalID, err := uuid.Parse(*c.SubjectPrincipalID)
+		if err != nil {
+			return fmt.Errorf("invalid principal ID %q: %w", *c.SubjectPrincipalID, store.ErrInvalidInput)
+		}
+		switch *c.SubjectPrincipalType {
+		case store.ConstraintPrincipalTypeUser:
+			exists, err := tx.User.Query().Where(func(sel *entsql.Selector) {
+				sel.Where(entsql.EQ("id", principalID))
+			}).Exist(ctx)
+			if err != nil {
+				return fmt.Errorf("check user existence: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("user %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
+			}
+		case store.ConstraintPrincipalTypeAgent:
+			exists, err := tx.Agent.Query().Where(func(sel *entsql.Selector) {
+				sel.Where(entsql.EQ("id", principalID))
+			}).Exist(ctx)
+			if err != nil {
+				return fmt.Errorf("check agent existence: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("agent %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
+			}
+		case store.ConstraintPrincipalTypeGroup:
+			exists, err := tx.Group.Query().Where(func(sel *entsql.Selector) {
+				sel.Where(entsql.EQ("id", principalID))
+			}).Exist(ctx)
+			if err != nil {
+				return fmt.Errorf("check group existence: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("group %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
+			}
+		default:
+			return fmt.Errorf("invalid principal type %q: %w", *c.SubjectPrincipalType, store.ErrInvalidInput)
+		}
+
+	case store.ConstraintSubjectGroupClosure:
+		if c.SubjectGroupID == nil {
+			return fmt.Errorf("group ID required for group_closure subject: %w", store.ErrInvalidInput)
+		}
+		groupID, err := uuid.Parse(*c.SubjectGroupID)
+		if err != nil {
+			return fmt.Errorf("invalid group ID %q: %w", *c.SubjectGroupID, store.ErrInvalidInput)
+		}
+		exists, err := tx.Group.Query().Where(func(sel *entsql.Selector) {
+			sel.Where(entsql.EQ("id", groupID))
+		}).Exist(ctx)
+		if err != nil {
+			return fmt.Errorf("check group existence: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("group %s not found: %w", *c.SubjectGroupID, store.ErrNotFound)
+		}
+
+	case store.ConstraintSubjectAllPrincipals:
+		// No reference to validate.
+	}
+
+	// Validate project scope reference.
+	if c.ScopeType == "project" && c.ScopeID != "" {
+		projectID, err := uuid.Parse(c.ScopeID)
+		if err != nil {
+			return fmt.Errorf("invalid project ID %q: %w", c.ScopeID, store.ErrInvalidInput)
+		}
+		exists, err := tx.Project.Query().Where(func(sel *entsql.Selector) {
+			sel.Where(entsql.EQ("id", projectID))
+		}).Exist(ctx)
+		if err != nil {
+			return fmt.Errorf("check project existence: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("project %s not found: %w", c.ScopeID, store.ErrNotFound)
+		}
+	}
+
+	return nil
+}
+
+// CreateAccessConstraint creates a new access constraint with reference
+// validation inside a transaction.
 func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *store.AccessConstraint) (*store.AccessConstraint, error) {
-	builder := s.client.AccessConstraint.Create().
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Validate references inside the transaction.
+	if err := s.validateReferences(ctx, tx, c); err != nil {
+		return nil, err
+	}
+
+	builder := tx.AccessConstraint.Create().
 		SetName(c.Name).
 		SetSubjectKind(accessconstraint.SubjectKind(c.SubjectKind)).
 		SetScopeType(accessconstraint.ScopeType(c.ScopeType)).
 		SetScopeID(c.ScopeID).
 		SetMaximumPermissions(c.MaximumPermissions).
 		SetDisabled(c.Disabled).
-		SetCreatedBy(c.CreatedBy)
+		SetCreatedBy(c.CreatedBy).
+		SetRevision(1).
+		SetPurpose(c.Purpose)
 
 	if c.SubjectPrincipalType != nil {
 		builder.SetSubjectPrincipalType(*c.SubjectPrincipalType)
@@ -88,11 +217,19 @@ func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *s
 	if c.ExpiresAt != nil {
 		builder.SetExpiresAt(*c.ExpiresAt)
 	}
+	if c.UpdatedBy != "" {
+		builder.SetUpdatedBy(c.UpdatedBy)
+	}
 
 	created, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
 	return entAccessConstraintToStore(created), nil
 }
 
@@ -109,20 +246,51 @@ func (s *AccessConstraintStore) GetAccessConstraint(ctx context.Context, id stri
 	return entAccessConstraintToStore(e), nil
 }
 
-// UpdateAccessConstraint updates an existing access constraint.
-func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *store.AccessConstraint) (*store.AccessConstraint, error) {
+// UpdateAccessConstraint updates an existing access constraint with reference
+// validation and optimistic concurrency control.
+// If expectedRevision > 0, returns ErrRevisionConflict if the stored revision
+// differs. Revision is always incremented atomically.
+func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *store.AccessConstraint, expectedRevision int64) (*store.AccessConstraint, error) {
 	uid, err := parseGetID(c.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	builder := s.client.AccessConstraint.UpdateOneID(uid).
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Read existing constraint inside transaction for optimistic concurrency.
+	q := tx.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
+	if s.usesRowLocks(ctx) {
+		q = q.ForUpdate()
+	}
+	existing, err := q.Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	// Check optimistic concurrency if expectedRevision is provided.
+	if expectedRevision > 0 && existing.Revision != expectedRevision {
+		return nil, store.ErrRevisionConflict
+	}
+
+	// Validate references inside the transaction.
+	if err := s.validateReferences(ctx, tx, c); err != nil {
+		return nil, err
+	}
+
+	builder := tx.AccessConstraint.UpdateOneID(uid).
 		SetName(c.Name).
 		SetSubjectKind(accessconstraint.SubjectKind(c.SubjectKind)).
 		SetScopeType(accessconstraint.ScopeType(c.ScopeType)).
 		SetScopeID(c.ScopeID).
 		SetMaximumPermissions(c.MaximumPermissions).
-		SetDisabled(c.Disabled)
+		SetDisabled(c.Disabled).
+		SetRevision(existing.Revision + 1).
+		SetPurpose(c.Purpose)
 
 	if c.SubjectPrincipalType != nil {
 		builder.SetSubjectPrincipalType(*c.SubjectPrincipalType)
@@ -149,11 +317,21 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	} else {
 		builder.ClearExpiresAt()
 	}
+	if c.UpdatedBy != "" {
+		builder.SetUpdatedBy(c.UpdatedBy)
+	} else {
+		builder.ClearUpdatedBy()
+	}
 
 	updated, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
 	return entAccessConstraintToStore(updated), nil
 }
 
@@ -170,7 +348,8 @@ func (s *AccessConstraintStore) DeleteAccessConstraint(ctx context.Context, id s
 	return nil
 }
 
-// ListAccessConstraints returns all access constraints with pagination.
+// ListAccessConstraints returns all access constraints with offset-based
+// pagination. Kept for backward compatibility with loadAllAccessConstraints.
 func (s *AccessConstraintStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
 	if limit <= 0 {
 		limit = 100
@@ -193,6 +372,167 @@ func (s *AccessConstraintStore) ListAccessConstraints(ctx context.Context, limit
 		result[i] = entAccessConstraintToStore(e)
 	}
 	return result, nil
+}
+
+// ListAccessConstraintsFiltered returns access constraints with SQL-level
+// filtering, sorting, and cursor-based pagination.
+func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Context, opts store.AccessConstraintListOptions) ([]*store.AccessConstraint, string, int, error) {
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 1000 {
+		pageSize = 1000
+	}
+
+	// Build filter predicates.
+	var preds []predicate.AccessConstraint
+
+	if opts.SubjectKind != "" {
+		preds = append(preds, accessconstraint.SubjectKindEQ(accessconstraint.SubjectKind(opts.SubjectKind)))
+	}
+	if opts.SubjectPrincipalType != "" {
+		preds = append(preds, accessconstraint.SubjectPrincipalTypeEQ(opts.SubjectPrincipalType))
+	}
+	if opts.ScopeType != "" {
+		preds = append(preds, accessconstraint.ScopeTypeEQ(accessconstraint.ScopeType(opts.ScopeType)))
+	}
+	if opts.ScopeID != "" {
+		preds = append(preds, accessconstraint.ScopeIDEQ(opts.ScopeID))
+	}
+	if opts.NameContains != "" {
+		preds = append(preds, accessconstraint.NameContainsFold(opts.NameContains))
+	}
+
+	// Status filter (derived from disabled flag and time window).
+	now := time.Now()
+	switch opts.Status {
+	case "active":
+		// Not disabled, not_before <= now (or null), expires_at > now (or null)
+		preds = append(preds, accessconstraint.DisabledEQ(false))
+		preds = append(preds, accessconstraint.Or(
+			accessconstraint.NotBeforeIsNil(),
+			accessconstraint.NotBeforeLTE(now),
+		))
+		preds = append(preds, accessconstraint.Or(
+			accessconstraint.ExpiresAtIsNil(),
+			accessconstraint.ExpiresAtGT(now),
+		))
+	case "scheduled":
+		// Not disabled, not_before > now
+		preds = append(preds, accessconstraint.DisabledEQ(false))
+		preds = append(preds, accessconstraint.NotBeforeGT(now))
+	case "expired":
+		// Not disabled, expires_at <= now
+		preds = append(preds, accessconstraint.DisabledEQ(false))
+		preds = append(preds, accessconstraint.ExpiresAtNotNil())
+		preds = append(preds, accessconstraint.ExpiresAtLTE(now))
+	case "recovery_disabled":
+		preds = append(preds, accessconstraint.DisabledEQ(true))
+	}
+
+	// Determine sort field and order.
+	sortField := accessconstraint.FieldCreated
+	switch opts.SortBy {
+	case "name":
+		sortField = accessconstraint.FieldName
+	case "updated":
+		sortField = accessconstraint.FieldUpdated
+	case "created":
+		sortField = accessconstraint.FieldCreated
+	}
+
+	sortDesc := false
+	if strings.EqualFold(opts.SortOrder, "desc") {
+		sortDesc = true
+	}
+
+	// Count total matching records.
+	totalQuery := s.client.AccessConstraint.Query()
+	if len(preds) > 0 {
+		totalQuery = totalQuery.Where(preds...)
+	}
+	totalCount, err := totalQuery.Count(ctx)
+	if err != nil {
+		return nil, "", 0, mapError(err)
+	}
+
+	// Build paginated query.
+	query := s.client.AccessConstraint.Query()
+	if len(preds) > 0 {
+		query = query.Where(preds...)
+	}
+
+	// Apply cursor.
+	if opts.PageToken != "" {
+		cursorTime, cursorID, err := decodeConstraintCursor(opts.PageToken)
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("invalid page token: %w", err)
+		}
+		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_time, cursor_id)
+		if sortDesc {
+			query = query.Where(accessconstraint.Or(
+				accessconstraint.And(
+					constraintFieldLT(sortField, cursorTime),
+				),
+				accessconstraint.And(
+					constraintFieldEQ(sortField, cursorTime),
+					accessconstraint.IDLT(cursorID),
+				),
+			))
+		} else {
+			query = query.Where(accessconstraint.Or(
+				accessconstraint.And(
+					constraintFieldGT(sortField, cursorTime),
+				),
+				accessconstraint.And(
+					constraintFieldEQ(sortField, cursorTime),
+					accessconstraint.IDGT(cursorID),
+				),
+			))
+		}
+	}
+
+	// Apply ordering.
+	if sortDesc {
+		query = query.Order(ent.Desc(sortField), ent.Desc(accessconstraint.FieldID))
+	} else {
+		query = query.Order(ent.Asc(sortField), ent.Asc(accessconstraint.FieldID))
+	}
+
+	// Fetch one extra to detect if there's a next page.
+	entities, err := query.Limit(pageSize + 1).All(ctx)
+	if err != nil {
+		return nil, "", 0, mapError(err)
+	}
+
+	hasNextPage := len(entities) > pageSize
+	if hasNextPage {
+		entities = entities[:pageSize]
+	}
+
+	result := make([]*store.AccessConstraint, len(entities))
+	for i, e := range entities {
+		result[i] = entAccessConstraintToStore(e)
+	}
+
+	var nextPageToken string
+	if hasNextPage && len(entities) > 0 {
+		last := entities[len(entities)-1]
+		var cursorTime time.Time
+		switch sortField {
+		case accessconstraint.FieldUpdated:
+			cursorTime = last.Updated
+		case accessconstraint.FieldName:
+			// For name sorting, use created as tie-breaker timestamp.
+			cursorTime = last.Created
+		default:
+			cursorTime = last.Created
+		}
+		nextPageToken = encodeConstraintCursor(cursorTime, last.ID.String())
+	}
+
+	return result, nextPageToken, totalCount, nil
 }
 
 // CountAccessConstraints returns the total number of access constraints.
@@ -316,4 +656,70 @@ func (s *AccessConstraintStore) DisableAccessConstraint(ctx context.Context, id 
 		return mapError(err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Cursor helpers for access constraint pagination
+// ---------------------------------------------------------------------------
+
+func encodeConstraintCursor(t time.Time, id string) string {
+	raw := t.Format(time.RFC3339Nano) + "," + id
+	return base64.URLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeConstraintCursor(cursor string) (time.Time, uuid.UUID, error) {
+	raw, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+	}
+	parts := strings.SplitN(string(raw), ",", 2)
+	if len(parts) != 2 {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("expected 'timestamp,id' format")
+	}
+	ts, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse timestamp: %w", err)
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+	}
+	return ts, id, nil
+}
+
+// ---------------------------------------------------------------------------
+// Time field comparison helpers for keyset pagination
+// ---------------------------------------------------------------------------
+
+func constraintFieldGT(field string, t time.Time) predicate.AccessConstraint {
+	switch field {
+	case accessconstraint.FieldUpdated:
+		return accessconstraint.UpdatedGT(t)
+	case accessconstraint.FieldCreated:
+		return accessconstraint.CreatedGT(t)
+	default:
+		return accessconstraint.CreatedGT(t)
+	}
+}
+
+func constraintFieldLT(field string, t time.Time) predicate.AccessConstraint {
+	switch field {
+	case accessconstraint.FieldUpdated:
+		return accessconstraint.UpdatedLT(t)
+	case accessconstraint.FieldCreated:
+		return accessconstraint.CreatedLT(t)
+	default:
+		return accessconstraint.CreatedLT(t)
+	}
+}
+
+func constraintFieldEQ(field string, t time.Time) predicate.AccessConstraint {
+	switch field {
+	case accessconstraint.FieldUpdated:
+		return accessconstraint.UpdatedEQ(t)
+	case accessconstraint.FieldCreated:
+		return accessconstraint.CreatedEQ(t)
+	default:
+		return accessconstraint.CreatedEQ(t)
+	}
 }
