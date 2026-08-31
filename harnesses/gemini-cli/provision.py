@@ -131,9 +131,9 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
         return overlay
     if method == "vertex-ai":
         return {
-            "GOOGLE_CLOUD_PROJECT": "${GOOGLE_CLOUD_PROJECT}",
-            "GOOGLE_CLOUD_REGION": "${GOOGLE_CLOUD_REGION}",
-            "GOOGLE_CLOUD_LOCATION": "${GOOGLE_CLOUD_REGION}",
+            "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
+            "GOOGLE_CLOUD_REGION": os.environ.get("GOOGLE_CLOUD_REGION", ""),
+            "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_REGION", ""),
         }
     return {}
 
