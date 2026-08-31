@@ -37,7 +37,7 @@ func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		s.handlePutMessaging(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 

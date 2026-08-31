@@ -280,11 +280,13 @@ func classifyUnattributedMessage(report *AttributionReport, msg *store.Message, 
 
 	if !senderIsUUID || !recipientIsUUID {
 		report.NonUUIDPrincipal++
-		report.NonUUIDExamples = append(report.NonUUIDExamples, NonUUIDExample{
-			MessageID:   msg.ID,
-			SenderID:    senderID,
-			RecipientID: recipientID,
-		})
+		if len(report.NonUUIDExamples) < 10 {
+			report.NonUUIDExamples = append(report.NonUUIDExamples, NonUUIDExample{
+				MessageID:   msg.ID,
+				SenderID:    senderID,
+				RecipientID: recipientID,
+			})
+		}
 		return
 	}
 
@@ -365,6 +367,9 @@ func mergeAttributionReport(dst, src *AttributionReport) {
 	dst.NonUUIDPrincipal += src.NonUUIDPrincipal
 	dst.Unresolvable += src.Unresolvable
 	dst.NonUUIDExamples = append(dst.NonUUIDExamples, src.NonUUIDExamples...)
+	if len(dst.NonUUIDExamples) > 10 {
+		dst.NonUUIDExamples = dst.NonUUIDExamples[:10]
+	}
 	dst.UnresolvableExamples = append(dst.UnresolvableExamples, src.UnresolvableExamples...)
 	if len(dst.UnresolvableExamples) > 10 {
 		dst.UnresolvableExamples = dst.UnresolvableExamples[:10]

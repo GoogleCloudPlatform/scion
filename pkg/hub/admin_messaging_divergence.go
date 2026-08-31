@@ -95,7 +95,7 @@ var divergenceCaveats = divergenceBoardCaveats{
 // Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

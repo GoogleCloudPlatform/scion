@@ -156,7 +156,7 @@ func sqliteColumnExists(db *sql.DB, table, column string) bool {
 	if err != nil {
 		return false
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -200,7 +200,7 @@ func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 func TestC4Fix_SQLite_FreshDB(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init(), "Init on fresh DB must succeed")
@@ -221,7 +221,7 @@ func TestC4Fix_SQLite_FreshDB(t *testing.T) {
 func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Seed the DB with the pre-existing schema (no conversation_id column).
 	_, err = db.Exec(preExistingSQLiteSchemaSQL)
@@ -248,7 +248,7 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 func TestC4Fix_SQLite_Idempotent(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init(), "first Init must succeed")
@@ -265,7 +265,7 @@ func TestC4Fix_SQLite_Idempotent(t *testing.T) {
 func TestC4Fix_SQLite_PreExistingDB_Idempotent(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	_, err = db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
@@ -460,7 +460,7 @@ func TestC4Fix_Postgres_FreshDB(t *testing.T) {
 	dsn := requirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	pgDropWebchatTables(t, db)
 	defer pgDropWebchatTables(t, db)
@@ -480,7 +480,7 @@ func TestC4Fix_Postgres_PreExistingDB(t *testing.T) {
 	dsn := requirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	pgDropWebchatTables(t, db)
 	defer pgDropWebchatTables(t, db)
@@ -506,7 +506,7 @@ func TestC4Fix_Postgres_Idempotent(t *testing.T) {
 	dsn := requirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	pgDropWebchatTables(t, db)
 	defer pgDropWebchatTables(t, db)
@@ -520,7 +520,7 @@ func TestC4Fix_Postgres_PreExistingDB_Idempotent(t *testing.T) {
 	dsn := requirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	pgDropWebchatTables(t, db)
 	defer pgDropWebchatTables(t, db)

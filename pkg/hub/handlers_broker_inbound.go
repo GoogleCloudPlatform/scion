@@ -268,10 +268,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				req.Message.Metadata = make(map[string]string)
 			}
 			req.Message.Metadata["conversation_id"] = convResult.ConversationID
+			log.Info("Resolved conversation for broker inbound",
+				"conversation_id", convResult.ConversationID,
+				"surface", req.Surface, "external_ref", req.ExternalRef)
 		}
-		log.Info("Resolved conversation for broker inbound",
-			"conversation_id", convResult.ConversationID,
-			"surface", req.Surface, "external_ref", req.ExternalRef)
 	}
 
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery

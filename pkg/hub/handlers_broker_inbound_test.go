@@ -614,6 +614,104 @@ func TestHandleBrokerInbound_AgentSenderDenied(t *testing.T) {
 	assert.Equal(t, ErrCodeMessageDenied, errResp.Error.Code)
 }
 
+// TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff verifies that when
+// conversation resolution fails and write-deny is OFF (the default), the handler
+// completes without panicking and the message still dispatches (fail-open).
+//
+// Before the fix, convResult was nil on the error path and the trailing log.Info
+// dereferenced convResult.ConversationID, causing a nil-pointer panic.
+func TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set a webChatStore so that WithKeyTopicLookup is injected into the
+	// resolve call. The stub embeds the interface; only the topic-lookup
+	// codepath is reached, and it fails before any method is called because
+	// the external_ref is intentionally malformed ("thread:bad" has only
+	// two colon-separated parts instead of the required three).
+	srv.SetWebChatStore(&stubWebChatStore{})
+
+	// Write-deny is OFF by default (no operational settings loaded).
+	// Verify the precondition so the test breaks loudly if the default changes.
+	require.False(t, srv.writeDenyEnabled(), "precondition: write-deny must be OFF")
+
+	user := &store.User{
+		ID:          tid("user-conv-fail"),
+		Email:       "conv-fail@example.com",
+		DisplayName: "Conv Fail User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-conv-fail"),
+		Slug:      "conv-fail-proj",
+		Name:      "Conv Failure Test Project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-conv-fail"),
+		Slug:         "conv-fail-agent",
+		Name:         "Conv Fail Agent",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
+	payload := inboundMessageRequest{
+		Topic: topic,
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from fail-open path",
+			Type:      messages.TypeInstruction,
+		},
+		// Surface + ExternalRef triggers conversation resolution.
+		// "thread:bad" is intentionally malformed (2 parts, not 3) so
+		// ResolveOrCreateConversationByKey returns (nil, error).
+		Surface:     "discord",
+		ExternalRef: "thread:bad",
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+
+	// The handler must not panic. Before the fix the nil convResult
+	// dereference in the log.Info call caused a panic here.
+	require.NotPanics(t, func() {
+		srv.mux.ServeHTTP(rec, req)
+	})
+
+	// Fail-open: the message proceeds to dispatch. No dispatcher is wired
+	// in the test server, so we expect 503 Service Unavailable — proving
+	// the handler continued past the failed resolution.
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"fail-open path must reach dispatch (503 = no dispatcher in test)")
+}
+
 // TestHandleBrokerInbound_UnmappedExternalSenderDenied verifies that an
 // unmapped external-channel sender (e.g. "discord:someuser") is denied.
 func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
