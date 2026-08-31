@@ -253,14 +253,6 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         thinking_tier=thinking_tier, auth_method=method,
     )
 
-    # Set modelProvider for API key auth (after _prestage_onboarding creates
-    # settings.json). Belt-and-suspenders: _prestage_onboarding sets this on
-    # initial creation, but we re-apply here to guarantee it is present even
-    # when settings.json was created by an earlier provision run or external
-    # tooling.
-    if method == "api-key":
-        _set_model_provider(ctx.home, "gemini")
-
     _apply_mcp(ctx)
 
     ctx.info(f"method={method}")
@@ -279,24 +271,6 @@ def _read_agy_token(ctx: scion_harness.ProvisionContext) -> str:
 
 
 # ---- Native functions below: keyring, hooks, onboarding, MCP ----
-
-
-def _set_model_provider(home: str, provider: str) -> None:
-    """Set modelProvider in settings.json for API key auth."""
-    settings_path = os.path.join(
-        home, ".gemini", "antigravity-cli", "settings.json"
-    )
-    if os.path.isfile(settings_path):
-        try:
-            data = scion_harness.load_json(settings_path)
-            if isinstance(data, dict):
-                data["modelProvider"] = provider
-                scion_harness.atomic_write_json(settings_path, data)
-                return
-        except (OSError, json.JSONDecodeError):
-            pass  # Fall through; _prestage_onboarding handles initial creation.
-    # File doesn't exist yet — _prestage_onboarding creates it.
-    # modelProvider will be set there when auth_method == "api-key".
 
 
 def _generate_hooks_json(home: str) -> None:
