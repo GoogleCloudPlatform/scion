@@ -437,6 +437,13 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// Constraint-coverage gate (R5): if this group participates in any
+	// AccessConstraint, deleting it silently removes the constraint's subject.
+	// Require access_constraint.admin permission to proceed.
+	if !s.requireConstraintAdminForGroup(w, r, group.ID) {
+		return
+	}
+
 	if group.GroupType == store.GroupTypeProjectAgents {
 		BadRequest(w, "project_agents groups are system-managed and cannot be deleted via API")
 		return
@@ -844,6 +851,13 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		return
 	}
 
+	// Constraint-coverage gate (R5): if this group participates in any
+	// AccessConstraint, removing a member silently relaxes that constraint.
+	// Require access_constraint.admin permission to proceed.
+	if !s.requireConstraintAdminForGroup(w, r, group.ID) {
+		return
+	}
+
 	// Prevent removing the last owner of a group
 	if memberType == store.GroupMemberTypeUser {
 		membership, err := s.store.GetGroupMembership(ctx, group.ID, memberType, memberID)
@@ -888,4 +902,69 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		"member_id", memberID)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// isConstraintBearingGroup checks whether the given group ID appears as a
+// subject in any AccessConstraint. A group is constraint-bearing if any
+// constraint targets it via a "principal" subject with type "group" or via
+// a "group_closure" subject. Modifying membership of or deleting a
+// constraint-bearing group requires access_constraint.admin permission.
+func (s *Server) isConstraintBearingGroup(ctx context.Context, groupID string) (bool, error) {
+	constraints, err := s.store.ListAccessConstraints(ctx, 0, 0)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range constraints {
+		if c.SubjectKind == store.ConstraintSubjectPrincipal &&
+			c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == "group" &&
+			c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == groupID {
+			return true, nil
+		}
+		if c.SubjectKind == store.ConstraintSubjectGroupClosure &&
+			c.SubjectGroupID != nil && *c.SubjectGroupID == groupID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// requireConstraintAdminForGroup checks whether the group is constraint-bearing
+// and, if so, requires the caller to hold access_constraint.admin permission.
+// Returns true if the operation may proceed, false if it was denied (response
+// already written).
+func (s *Server) requireConstraintAdminForGroup(w http.ResponseWriter, r *http.Request, groupID string) bool {
+	ctx := r.Context()
+	isCB, err := s.isConstraintBearingGroup(ctx, groupID)
+	if err != nil {
+		// Fail closed: if we cannot determine constraint status, deny.
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+			"failed to check constraint status for group", nil)
+		return false
+	}
+	if !isCB {
+		return true // not constraint-bearing — no extra check needed
+	}
+
+	// Group is constraint-bearing: require access_constraint.admin.
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return false
+	}
+	if s.authzService == nil {
+		Forbidden(w)
+		return false
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   Resource{Type: "access_constraint", ID: "hub"},
+		Action:     ActionManage,
+		Permission: PermissionConstraintAdmin,
+	})
+	if !decision.Allowed {
+		writeForbidden(w, "group is referenced by an access constraint; access_constraint.admin permission required")
+		return false
+	}
+	return true
 }

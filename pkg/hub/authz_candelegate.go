@@ -216,6 +216,21 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		return Decision{Allowed: true, Reason: "group has no role bindings; no authority delegation required"}
 	}
 
+	// R4 gap (a): UAT scope bypass on group membership. If any binding on
+	// the group closure is system-scoped, a project-scoped UAT must not be
+	// allowed to delegate that authority — the GrantDescriptor for group
+	// membership has no ScopeType, so enforceUATDelegation cannot catch it.
+	if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeSystem {
+				return Decision{
+					Allowed: false,
+					Reason:  "scoped credential cannot delegate system-scoped group authority",
+				}
+			}
+		}
+	}
+
 	// Collect all permissions grouped by (scopeType, scopeID) so we can
 	// verify the actor holds each permission at the appropriate scope.
 	type scopeKey struct {
@@ -357,8 +372,9 @@ func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor I
 
 // actorHoldsAllPermissions resolves the actor's effective permissions in the
 // given scope and checks that every permission in targetPerms is held.
-// Permissions come from both role bindings AND policy grants, because a user's
-// effective authority is the union of both sources.
+// Permissions come from role bindings. Credential caveats (UAT project scope,
+// agent JWT scopes) are intersected with the resolved permissions so that
+// delegation checks enforce the same restrictions as normal CheckAccess.
 func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Identity, targetPerms []string, scopeType, scopeID string) Decision {
 	actorPerms, err := a.getEffectivePermissions(ctx, actor.Type(), actor.ID(), scopeType, scopeID)
 	if err != nil {
@@ -375,8 +391,10 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 		}
 	}
 
-	// CO1: Policy-granted permissions removed. All authority now flows
-	// through RoleBindings resolved above.
+	// R4 gap (b): Intersect resolved permissions with credential caveats.
+	// This mirrors the restrictions built in CheckAccess (steps 7a/7b) so
+	// that delegation checks honour the same credential scope boundaries.
+	actorPerms = a.intersectCredentialCaveats(actor, actorPerms)
 
 	actorPermSet := make(map[string]bool, len(actorPerms))
 	for _, p := range actorPerms {
@@ -393,6 +411,39 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 	}
 
 	return Decision{Allowed: true, Reason: "actor holds all required permissions"}
+}
+
+// intersectCredentialCaveats filters a permission set through the credential
+// restrictions carried by the actor's identity. If the actor has no credential
+// caveats (full session), the permissions are returned unchanged.
+func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string) []string {
+	var restriction *Restriction
+
+	switch v := actor.(type) {
+	case *ScopedUserIdentity:
+		if v != nil {
+			scopes := v.ScopedScopes()
+			if len(scopes) > 0 {
+				r := uatScopeRestriction(scopes)
+				restriction = &r
+			}
+		}
+	case AgentIdentity:
+		r := agentScopeRestriction(v)
+		restriction = &r
+	}
+
+	if restriction == nil || restriction.Check == nil {
+		return perms
+	}
+
+	filtered := make([]string, 0, len(perms))
+	for _, p := range perms {
+		if restriction.Check(p) {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
 }
 
 // scopesToPermissionIDs maps agent token scopes to permission IDs using
