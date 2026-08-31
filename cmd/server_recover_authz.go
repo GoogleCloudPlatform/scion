@@ -17,8 +17,11 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -37,6 +40,7 @@ var (
 	recoverConfigPath         string
 	recoverDBURL              string
 	recoverConfirmationPhrase string
+	recoverForce              bool
 )
 
 // recoverAuthzCmd is the offline authorization recovery command.
@@ -86,6 +90,7 @@ func init() {
 	recoverAuthzCmd.Flags().StringVar(&recoverConfigPath, "config", "", "Path to server configuration file")
 	recoverAuthzCmd.Flags().StringVar(&recoverDBURL, "db", "", "Database URL/path (overrides config)")
 	recoverAuthzCmd.Flags().StringVar(&recoverConfirmationPhrase, "confirm", "", `Confirmation phrase (required for --disable-all-constraints: "I understand this disables all access constraints")`)
+	recoverAuthzCmd.Flags().BoolVar(&recoverForce, "force", false, "Bypass running-server check (use only if the server is confirmed down)")
 }
 
 // DisableAllConfirmPhrase is the exact phrase required when using --disable-all-constraints.
@@ -140,6 +145,15 @@ func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
 
 	if cfg.Database.URL == "" {
 		return fmt.Errorf("no database URL configured; provide --db flag or ensure server config exists")
+	}
+
+	// Check for a running server before proceeding, unless --force is used.
+	if !recoverForce {
+		if err := checkServerNotRunning(cfg, out); err != nil {
+			return err
+		}
+	} else {
+		_, _ = fmt.Fprintln(out, "WARNING: --force flag set, skipping running-server check.")
 	}
 
 	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, cfg.Database.URL)
@@ -410,6 +424,78 @@ func recoverPromptConfirmation(out io.Writer, question string) bool {
 	}
 	response = strings.TrimSpace(strings.ToLower(response))
 	return response == "y" || response == "yes"
+}
+
+// serverHealthChecker is the function that probes whether a server is running.
+// Tests replace this to simulate a running or stopped server without binding a port.
+var serverHealthChecker = defaultServerHealthCheck
+
+// checkServerNotRunning probes the configured HTTP port to verify that no server
+// instance is responding. On SQLite (where advisory locks are no-ops), this is
+// the primary exclusion mechanism. On Postgres it supplements the advisory lock.
+func checkServerNotRunning(cfg *config.GlobalConfig, out io.Writer) error {
+	port := cfg.Hub.Port
+	if port == 0 {
+		port = 9100 // default hub port
+	}
+	host := cfg.Hub.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	_, _ = fmt.Fprintf(out, "Checking for running server at %s... ", addr)
+
+	running, err := serverHealthChecker(addr)
+	if err != nil {
+		// Network error or unexpected response — assume no server (fail open for connectivity issues).
+		_, _ = fmt.Fprintln(out, "no server detected.")
+		return nil
+	}
+	if running {
+		_, _ = fmt.Fprintln(out, "server is running!")
+		return fmt.Errorf("a server instance is running at %s\n\n"+
+			"Stop all server instances before running offline recovery:\n"+
+			"  scion server stop\n\n"+
+			"If the server is confirmed down and the port check is a false positive,\n"+
+			"use --force to bypass this check", addr)
+	}
+
+	_, _ = fmt.Fprintln(out, "no server detected.")
+	return nil
+}
+
+// defaultServerHealthCheck tries to connect to the server's HTTP port and
+// hit the health endpoint. Returns (true, nil) if the server responds.
+func defaultServerHealthCheck(addr string) (running bool, err error) {
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		// Connection refused / timeout → no server.
+		if isConnectionRefused(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer resp.Body.Close()
+	// Any HTTP response means a server is listening.
+	return true, nil
+}
+
+// isConnectionRefused returns true for "connection refused" errors.
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// Fallback: check error string for common patterns.
+	return strings.Contains(err.Error(), "connection refused") ||
+		strings.Contains(err.Error(), "dial tcp")
 }
 
 func resolveOperatorIdentity() string {
