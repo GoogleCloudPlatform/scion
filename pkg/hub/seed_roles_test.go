@@ -101,7 +101,7 @@ func TestBuiltInRoles_HubMemberContainsExpectedPermissions(t *testing.T) {
 		"skill.read", "skill.list",
 		"quota.read",
 		"role.read",
-		"role_binding.read",
+		// S1: role_binding.read removed — project members use project-scoped endpoint.
 		"hub.settings.read",
 		// project.create (replacing hub-member-create-projects policy)
 		"project.create",

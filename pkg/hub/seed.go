@@ -111,7 +111,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2,
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -120,7 +120,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubViewer,
 			Description: "Hub viewer with read-only access to directory resources",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2,
 			Permissions: hubViewerPermissionIDs(),
 		},
 
@@ -215,8 +215,11 @@ func hubMemberPermissionIDs() []string {
 		"quota.read",
 		// Role definitions (read-only)
 		"role.read",
-		// Role bindings (read-only)
-		"role_binding.read",
+		// S1 fix: role_binding.read REMOVED. Hub members no longer need
+		// system-scoped role_binding.read because the project members UI
+		// uses the project-scoped /api/v1/projects/{id}/members endpoint,
+		// which authorizes via project.read instead. Leaving role_binding.read
+		// here let any hub member enumerate all role bindings hub-wide.
 		// Hub metadata (read-only)
 		"hub.settings.read",
 		// Project creation — hub members may create projects
@@ -248,7 +251,7 @@ func hubViewerPermissionIDs() []string {
 		"skill.list",
 		"quota.read",
 		"role.read",
-		"role_binding.read",
+		// S1 fix: role_binding.read REMOVED — same rationale as hub-member.
 		"hub.settings.read",
 	}
 }

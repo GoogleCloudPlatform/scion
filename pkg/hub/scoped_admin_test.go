@@ -257,8 +257,8 @@ func TestScopedAdmin_RegularMemberAllowedReadAdminEndpoints(t *testing.T) {
 	srv, _, _, member := setupScopedAdminTest(t)
 
 	// CO1: Hub members access admin endpoints only through role bindings.
-	// The hub-member role includes role.read and role_binding.read but NOT
-	// hub.config.read or hub.health.read.
+	// The hub-member role includes role.read but NOT role_binding.read (S1 fix),
+	// hub.config.read, or hub.health.read.
 
 	t.Run("allowed_via_hub_member_role", func(t *testing.T) {
 		// Endpoints whose permissions are in the hub-member role.
@@ -267,7 +267,6 @@ func TestScopedAdmin_RegularMemberAllowedReadAdminEndpoints(t *testing.T) {
 			path string
 		}{
 			{"roles", "/api/v1/admin/roles"},
-			{"role-bindings", "/api/v1/admin/role-bindings"},
 			{"permissions", "/api/v1/admin/permissions"},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
@@ -280,10 +279,13 @@ func TestScopedAdmin_RegularMemberAllowedReadAdminEndpoints(t *testing.T) {
 
 	t.Run("denied_without_hub_admin_role", func(t *testing.T) {
 		// Endpoints whose permissions are NOT in the hub-member role.
+		// S1: role-bindings moved here — hub members can no longer enumerate
+		// all role bindings hub-wide.
 		for _, tt := range []struct {
 			name string
 			path string
 		}{
+			{"role-bindings", "/api/v1/admin/role-bindings"},
 			{"server-config", "/api/v1/admin/server-config"},
 			{"health-summary", "/api/v1/admin/health/summary"},
 		} {
@@ -429,8 +431,8 @@ func TestScopedAdmin_ProjectAdminAllowedHubReadOperations(t *testing.T) {
 	srv, _, projectAdmin, _, _ := setupProjectScopedAdminTest(t)
 
 	// CO1: Project-scoped admin is also a hub member. The hub-member role
-	// includes role.read and role_binding.read but NOT hub.config.read or
-	// hub.health.read. Only endpoints whose permissions are in the hub-member
+	// includes role.read but NOT role_binding.read (S1 fix), hub.config.read,
+	// or hub.health.read. Only endpoints whose permissions are in the hub-member
 	// role are accessible.
 
 	t.Run("allowed_via_hub_member_role", func(t *testing.T) {
@@ -439,7 +441,6 @@ func TestScopedAdmin_ProjectAdminAllowedHubReadOperations(t *testing.T) {
 			path string
 		}{
 			{"roles (action=read)", "/api/v1/admin/roles"},
-			{"role-bindings (action=read)", "/api/v1/admin/role-bindings"},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				rec := doRequestAsUser(t, srv, projectAdmin, http.MethodGet, tt.path, nil)
@@ -450,10 +451,12 @@ func TestScopedAdmin_ProjectAdminAllowedHubReadOperations(t *testing.T) {
 	})
 
 	t.Run("denied_without_hub_admin_role", func(t *testing.T) {
+		// S1: role-bindings now denied for hub members (no longer have role_binding.read)
 		for _, tt := range []struct {
 			name string
 			path string
 		}{
+			{"role-bindings (action=read)", "/api/v1/admin/role-bindings"},
 			{"server-config (action=read)", "/api/v1/admin/server-config"},
 			{"health-summary (action=read)", "/api/v1/admin/health/summary"},
 		} {
