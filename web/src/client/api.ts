@@ -32,17 +32,28 @@ export interface AccessDeniedDetail {
   reason?: string;
 }
 
+/** Options for {@link apiFetch}, extending the standard RequestInit. */
+export interface ApiFetchOptions extends RequestInit {
+  /**
+   * When true, suppress the global `scion:access-denied` toast for 403 responses.
+   * Use this when the calling component renders the error inline (e.g. dialog error div,
+   * sl-alert) to prevent duplicate notifications (RC-C fix).
+   */
+  suppressAccessDeniedToast?: boolean;
+}
+
 /**
  * Fetch wrapper that includes credentials and handles 403 responses.
  *
  * Returns the raw Response object so callers can handle the body themselves.
  * On 403, dispatches a `scion:access-denied` event on `window` with parsed
- * error details, but does NOT re-throw or alter the response.
+ * error details (unless `suppressAccessDeniedToast` is set), but does NOT
+ * re-throw or alter the response.
  */
 const API_SLOW_THRESHOLD_MS = 2000;
 let sessionExpiredRedirectPending = false;
 
-export async function apiFetch(path: string, options?: RequestInit): Promise<Response> {
+export async function apiFetch(path: string, options?: ApiFetchOptions): Promise<Response> {
   const start = performance.now();
   const response = await fetch(path, {
     ...options,
@@ -67,15 +78,23 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
     return response;
   }
 
-  if (response.status === 403) {
+  if (response.status === 403 && !options?.suppressAccessDeniedToast) {
     let detail: AccessDeniedDetail = {};
     try {
       const body = await response.clone().json();
-      detail = {
-        resource: body.resource,
-        action: body.action,
-        reason: body.reason || body.error || body.message,
-      };
+      // The backend error envelope is {error: {code, message}}, not
+      // {resource, action, reason}. Read from the actual shape so the
+      // toast can render a specific message when it fires.
+      if (typeof body.error === 'object' && body.error) {
+        detail = {
+          action: body.error.code,
+          reason: body.error.message,
+        };
+      } else {
+        detail = {
+          reason: body.message || body.error || 'Access denied',
+        };
+      }
     } catch {
       // Body wasn't JSON — use empty detail
     }

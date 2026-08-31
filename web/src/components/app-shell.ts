@@ -242,8 +242,12 @@ export class ScionApp extends LitElement {
 
   private handleAccessDenied(event: CustomEvent<AccessDeniedDetail>): void {
     const detail = event.detail || {};
-    const action = detail.action || 'perform this action on';
-    const message = `You don't have permission to ${action} this resource.`;
+    // Mark as handled to prevent duplicate toasts if chat-shell is also mounted.
+    (detail as Record<string, unknown>)._handled = true;
+    // Prefer the backend reason (now correctly extracted from the error envelope).
+    const message = detail.reason
+      ? `Access denied: ${detail.reason}`
+      : `You don't have permission to ${detail.action || 'perform this action on'} this resource.`;
 
     showToast(message, 'warning');
   }

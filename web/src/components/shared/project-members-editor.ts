@@ -539,6 +539,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
     try {
       // PM1: Use project-scoped members endpoint.
+      // suppressAccessDeniedToast: the dialog renders errors inline (RC-C fix).
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/members`,
         {
@@ -549,6 +550,7 @@ export class ScionProjectMembersEditor extends LitElement {
             principalType: this.addPrincipalType,
             principalId: this.addPrincipalId.trim(),
           }),
+          suppressAccessDeniedToast: true,
         }
       );
 
@@ -603,6 +605,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
     try {
       // PM1: Atomic role change via PATCH endpoint.
+      // suppressAccessDeniedToast: inline alert handles errors (RC-C fix).
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/members/${this.changeMember.id}`,
         {
@@ -611,6 +614,7 @@ export class ScionProjectMembersEditor extends LitElement {
           body: JSON.stringify({
             roleDefinitionId: this.changeRoleId,
           }),
+          suppressAccessDeniedToast: true,
         }
       );
 
@@ -660,9 +664,10 @@ export class ScionProjectMembersEditor extends LitElement {
 
     try {
       // PM1: Use project-scoped members endpoint.
+      // suppressAccessDeniedToast: inline alert handles errors (RC-C fix).
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/members/${member.id}`,
-        { method: 'DELETE' }
+        { method: 'DELETE', suppressAccessDeniedToast: true }
       );
       if (!res.ok) {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));

@@ -207,9 +207,16 @@ export class ScionChatShell extends LitElement {
   }
 
   private handleAccessDenied(event: CustomEvent<AccessDeniedDetail>): void {
+    // Guard against double-toast when both app-shell and chat-shell are mounted.
+    // The app-shell handler runs first (registered on a parent element); if it
+    // already handled this event, skip the duplicate toast.
     const detail = event.detail || {};
-    const action = detail.action || 'perform this action on';
-    const message = `You don't have permission to ${action} this resource.`;
+    if ((detail as Record<string, unknown>)._handled) return;
+    (detail as Record<string, unknown>)._handled = true;
+
+    const message = detail.reason
+      ? `Access denied: ${detail.reason}`
+      : `You don't have permission to ${detail.action || 'perform this action on'} this resource.`;
     showToast(message, 'warning');
   }
 
