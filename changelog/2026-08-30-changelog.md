@@ -17,7 +17,7 @@ Per-resource permission-gated admin UI ships end-to-end (3-phase: permissions en
 * **Heredoc argv security comment (#1427):** False security comment on broker Exec heredoc replaced with a WARNING acknowledging the token exposure in outer argv.
 
 ## 🧪 Tests
-* **Read-switch behaviour pinned (#1425):** 23 tests pinning behaviour at three ConversationReadSwitch call sites before Tranche G, including two confirmed open defects (DEF-59a slug resolution, DEF-64 manager DM visibility).
+* **Read-switch behavior pinned (#1425):** 23 tests pinning behavior at three ConversationReadSwitch call sites before Tranche G, including two confirmed open defects (DEF-59a slug resolution, DEF-64 manager DM visibility).
 
 ## 🔧 CI & Infrastructure
 * **Race detection split (#1422):** Nightly race detection split into two parallel jobs — all packages except pkg/hub (90m) and pkg/hub with no_sqlite (45m).
