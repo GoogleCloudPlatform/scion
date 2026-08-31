@@ -83,6 +83,29 @@ const (
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// Governance error codes — B5 transactional governance for boundary mutations
+	// and adjacent-domain operations.
+
+	// ErrCodeStaleAuthorizationPreview is returned when authorization-relevant
+	// state (role bindings, group membership, principal status, constraints)
+	// changed between preview generation and commit.
+	ErrCodeStaleAuthorizationPreview = "stale_authorization_preview"
+
+	// ErrCodeInsufficientRelaxationAuthority is returned when the actor has
+	// access_constraint.admin but lacks sufficient authority over the permissions
+	// being restored by a relaxation or mixed-classification mutation.
+	ErrCodeInsufficientRelaxationAuthority = "insufficient_constraint_relaxation_authority"
+
+	// ErrCodeMutationPermissionLost is returned when the actor lost
+	// access_constraint.admin between preview and commit.
+	ErrCodeMutationPermissionLost = "mutation_permission_lost"
+
+	// ErrCodeSecurityReviewRequired is returned by adjacent-domain operations
+	// (group membership/deletion, role binding changes, user suspension) when
+	// the operation affects a boundary-relevant entity and requires impact
+	// review before proceeding.
+	ErrCodeSecurityReviewRequired = "security_review_required"
 )
 
 // writeError writes a JSON error response.
