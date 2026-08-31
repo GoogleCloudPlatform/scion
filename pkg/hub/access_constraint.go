@@ -58,6 +58,9 @@ type SubjectSelector struct {
 }
 
 // Validate checks that the subject selector is well-formed.
+// It rejects orphaned fields: principal-specific fields must be empty when
+// kind is group_closure or all_principals, and group-specific fields must be
+// empty when kind is principal.
 func (s SubjectSelector) Validate() error {
 	switch s.Kind {
 	case SubjectKindPrincipal:
@@ -70,12 +73,32 @@ func (s SubjectSelector) Validate() error {
 		if s.PrincipalID == "" {
 			return errors.New("principalId is required for principal subject")
 		}
+		// Reject orphaned group field on principal kind.
+		if s.GroupID != "" {
+			return errors.New("groupId must be empty for principal subject")
+		}
 	case SubjectKindGroupClosure:
 		if s.GroupID == "" {
 			return errors.New("groupId is required for group_closure subject")
 		}
+		// Reject orphaned principal fields on group_closure kind.
+		if s.PrincipalID != "" {
+			return errors.New("principalId must be empty for group_closure subject")
+		}
+		if s.PrincipalType != "" {
+			return errors.New("principalType must be empty for group_closure subject")
+		}
 	case SubjectKindAllPrincipals:
-		// No additional fields required.
+		// Reject orphaned fields on all_principals kind.
+		if s.PrincipalID != "" {
+			return errors.New("principalId must be empty for all_principals subject")
+		}
+		if s.PrincipalType != "" {
+			return errors.New("principalType must be empty for all_principals subject")
+		}
+		if s.GroupID != "" {
+			return errors.New("groupId must be empty for all_principals subject")
+		}
 	default:
 		return fmt.Errorf("invalid subject kind %q: must be principal, group_closure, or all_principals", s.Kind)
 	}
@@ -125,7 +148,10 @@ type ConstraintScopeRef struct {
 func (s ConstraintScopeRef) Validate() error {
 	switch s.Type {
 	case ScopeTypeSystem:
-		// ID should be empty for system scope.
+		// ID must be empty for system scope.
+		if s.ID != "" {
+			return errors.New("scope ID must be empty for system scope")
+		}
 	case ScopeTypeProject:
 		if s.ID == "" {
 			return errors.New("project ID is required for project scope")
@@ -212,6 +238,16 @@ type AccessConstraint struct {
 	// offline recovery). It is not evaluated when disabled.
 	Disabled bool `json:"disabled,omitempty"`
 
+	// Revision is a monotonic counter incremented on every update.
+	// Used for optimistic concurrency control.
+	Revision int64 `json:"revision"`
+
+	// Purpose is a human-readable description of why this constraint exists.
+	Purpose string `json:"purpose,omitempty"`
+
+	// UpdatedBy is the principal who last modified this constraint.
+	UpdatedBy string `json:"updatedBy,omitempty"`
+
 	// CreatedBy is the user ID of the creator.
 	CreatedBy string `json:"createdBy"`
 
@@ -220,6 +256,11 @@ type AccessConstraint struct {
 
 	// UpdatedAt is the last update timestamp.
 	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+
+	// Degraded indicates the constraint record has invalid stored data.
+	// Set by the conversion layer when validation fails on a stored record.
+	// B7's ResolutionHealth uses this to report unhealthy constraints.
+	Degraded bool `json:"degraded,omitempty"`
 }
 
 // Validate checks that the constraint is well-formed.
