@@ -29,7 +29,27 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/require"
 )
+
+// ensureAdminRoleBinding grants a super-admin role binding to the given user
+// (CO1 cutover: role bindings are required for authorization).
+func ensureAdminRoleBinding(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil && err != store.ErrAlreadyExists {
+		t.Fatalf("failed to create admin role binding: %v", err)
+	}
+}
 
 // mockTemplateTarball installs a mock HTTP transport that serves a gzip tarball
 // containing a single template under templates/my-template, and returns a
@@ -79,6 +99,7 @@ func TestHandleResourcesImport_GlobalAsAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	defer mockTemplateTarball(t)()
 
@@ -172,6 +193,7 @@ func TestHandleResourcesImport_StreamsProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	defer mockTemplateTarball(t)()
 
@@ -245,6 +267,7 @@ func TestHandleResourcesImport_StreamErrorEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	// Serve an empty tarball: no resource dirs are discovered.
 	old := http.DefaultClient.Transport
@@ -323,6 +346,7 @@ func TestHandleResourcesImport_InvalidKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
 		Kind:      "not-a-kind",
@@ -414,6 +438,7 @@ func TestHandleResourcesImport_HarnessConfigGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	defer mockHarnessConfigTarball(t)()
 
@@ -457,6 +482,7 @@ func TestHandleResourcesImport_SingleHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	defer mockSingleHarnessConfigTarball(t)()
 
@@ -497,6 +523,7 @@ func TestHandleProjectImportHarnessConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	defer mockHarnessConfigTarball(t)()
 
@@ -539,6 +566,7 @@ func TestHandleResourcesImport_MissingSourceURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
 		Kind:  "template",

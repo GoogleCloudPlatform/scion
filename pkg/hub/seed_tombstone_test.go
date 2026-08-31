@@ -28,13 +28,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSeedPolicy_SeededPoliciesHaveOrigin verifies that the startup seeder sets
-// Origin="seeded" on the default policies.
-//
-// PG1 NOTE: The old per-type hub-member-read-* policies are no longer seeded
-// at startup. They were replaced by a single hub-member RoleBinding. This test
-// now verifies the seedPolicy function still works correctly when called
-// directly (it's still used by legacy backfill paths).
+// TestSeedPolicy_SeededPoliciesHaveOrigin verifies that after CO1 cutover,
+// seedPolicy is a no-op — no policies are created. All authorization is
+// handled by RoleBindings and the AK1 kernel.
 func TestSeedPolicy_SeededPoliciesHaveOrigin(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
@@ -43,7 +39,7 @@ func TestSeedPolicy_SeededPoliciesHaveOrigin(t *testing.T) {
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	require.NoError(t, err)
 
-	// Manually seed a policy to test the origin behavior
+	// seedPolicy is now a no-op after CO1 cutover.
 	seedPolicy(ctx, s, group.ID, &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         "test-seed-origin-check",
@@ -54,26 +50,37 @@ func TestSeedPolicy_SeededPoliciesHaveOrigin(t *testing.T) {
 		Effect:       "allow",
 	})
 
+	// Verify no policy was created (seedPolicy is a no-op in CO1).
 	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: "test-seed-origin-check"}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	require.Len(t, res.Items, 1, "expected seeded policy to exist")
-	assert.Equal(t, store.PolicyOriginSeeded, res.Items[0].Origin,
-		"seeded policy should have Origin=%q", store.PolicyOriginSeeded)
+	assert.Len(t, res.Items, 0, "seedPolicy should be a no-op after CO1 cutover")
 }
 
-// TestSeedPolicy_SkipsRecreationWhenTombstoneExists verifies that seedPolicy
-// does not recreate a policy when a deletion tombstone hub setting exists.
+// TestSeedPolicy_SkipsRecreationWhenTombstoneExists verifies that after CO1
+// cutover, seedPolicy is a no-op regardless of tombstone state. The tombstone
+// mechanism (hasSeedPolicyTombstone) is still functional for any code that
+// checks it directly.
 func TestSeedPolicy_SkipsRecreationWhenTombstoneExists(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
 	const policyName = "test-tombstone-policy"
 
+	// Plant a tombstone hub setting.
+	key := seedPolicyTombstoneKey(policyName)
+	_, err := s.UpsertHubSetting(ctx, key, json.RawMessage(`"true"`), "system", -1, "managed")
+	require.NoError(t, err)
+
+	// Verify the tombstone check still works.
+	hasTomb, err := hasSeedPolicyTombstone(ctx, s, policyName)
+	require.NoError(t, err)
+	assert.True(t, hasTomb, "tombstone should be detected")
+
 	// Get the hub-members group for the seedPolicy call.
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	require.NoError(t, err)
 
-	// Create a policy first.
+	// seedPolicy is a no-op after CO1 — nothing is created.
 	seedPolicy(ctx, s, group.ID, &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         policyName,
@@ -84,46 +91,22 @@ func TestSeedPolicy_SkipsRecreationWhenTombstoneExists(t *testing.T) {
 		Effect:       "allow",
 	})
 
-	// Verify it exists.
+	// Confirm no policy exists (seedPolicy is a no-op).
 	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	require.Len(t, res.Items, 1)
-
-	// Delete it.
-	require.NoError(t, s.DeletePolicy(ctx, res.Items[0].ID))
-
-	// Plant a tombstone hub setting.
-	key := seedPolicyTombstoneKey(policyName)
-	_, err = s.UpsertHubSetting(ctx, key, json.RawMessage(`"true"`), "system", -1, "managed")
-	require.NoError(t, err)
-
-	// Re-run seedPolicy — it should NOT recreate.
-	seedPolicy(ctx, s, group.ID, &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         policyName,
-		Description:  "Test policy for tombstone check",
-		ScopeType:    "hub",
-		ResourceType: "user",
-		Actions:      []string{"read", "list"},
-		Effect:       "allow",
-	})
-
-	// Confirm it was not recreated.
-	res, err = s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 0, res.TotalCount, "tombstoned policy should not be recreated")
+	assert.Equal(t, 0, res.TotalCount, "seedPolicy should be a no-op after CO1 cutover")
 }
 
-// TestDeletePolicy_SeededPolicyCreatesTombstone verifies that deleting a seeded
-// policy via the HTTP handler records a tombstone hub setting.
+// TestDeletePolicy_SeededPolicyCreatesTombstone verifies that after CO1 cutover,
+// the policy DELETE endpoint returns 410 Gone since policies are no longer
+// the authorization mechanism (replaced by RoleBindings).
 func TestDeletePolicy_SeededPolicyCreatesTombstone(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	const policyName = "test-tombstone-seeded-delete"
 
-	// Create a seeded policy directly (since PG1 no longer seeds per-type
-	// policies at startup).
+	// Create a seeded policy directly in the store.
 	policy := &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         policyName,
@@ -137,19 +120,19 @@ func TestDeletePolicy_SeededPolicyCreatesTombstone(t *testing.T) {
 	}
 	require.NoError(t, s.CreatePolicy(ctx, policy))
 
-	// Delete via HTTP handler (as admin).
+	// CO1: Policy DELETE endpoint returns 410 Gone.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+policy.ID, nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusGone, rec.Code)
 
-	// Verify tombstone was created.
-	key := seedPolicyTombstoneKey(policyName)
-	setting, err := s.GetHubSetting(ctx, key)
-	require.NoError(t, err, "tombstone hub setting should exist after deleting seeded policy")
-	assert.Equal(t, key, setting.Section)
+	// Verify the policy still exists in the store (not deleted via HTTP).
+	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.TotalCount, "policy should still exist since HTTP DELETE returns 410")
 }
 
-// TestDeletePolicy_UserCreatedPolicyNoTombstone verifies that deleting a
-// user-created policy (non-seeded) does NOT create a tombstone hub setting.
+// TestDeletePolicy_UserCreatedPolicyNoTombstone verifies that after CO1
+// cutover, the policy DELETE endpoint returns 410 Gone for user-created
+// policies as well.
 func TestDeletePolicy_UserCreatedPolicyNoTombstone(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -166,19 +149,20 @@ func TestDeletePolicy_UserCreatedPolicyNoTombstone(t *testing.T) {
 	}
 	require.NoError(t, s.CreatePolicy(ctx, policy))
 
-	// Delete via HTTP handler.
+	// CO1: Policy DELETE endpoint returns 410 Gone.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+policy.ID, nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusGone, rec.Code)
 
-	// Verify NO tombstone was created.
+	// Verify NO tombstone was created (endpoint returned 410, no deletion occurred).
 	key := seedPolicyTombstoneKey(policy.Name)
 	_, err := s.GetHubSetting(ctx, key)
 	assert.ErrorIs(t, err, store.ErrNotFound,
-		"no tombstone should be created for user-created policy deletion")
+		"no tombstone should be created when policy DELETE returns 410")
 }
 
-// TestBackfillSeededPolicyOrigin verifies that backfillSeededPolicyOrigin marks
-// existing policies with Origin="seeded" when they have empty Origin.
+// TestBackfillSeededPolicyOrigin verifies that after CO1 cutover,
+// backfillSeededPolicyOrigin is a no-op — policy origin tracking is no
+// longer needed since authorization uses RoleBindings.
 func TestBackfillSeededPolicyOrigin(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
@@ -198,15 +182,15 @@ func TestBackfillSeededPolicyOrigin(t *testing.T) {
 	}
 	require.NoError(t, s.CreatePolicy(ctx, policy))
 
-	// Run backfill with this policy name.
+	// backfillSeededPolicyOrigin is a no-op after CO1 cutover.
 	backfillSeededPolicyOrigin(ctx, s, []string{testPolicyName})
 
-	// Verify Origin was set.
+	// Verify Origin was NOT set (backfill is a no-op).
 	res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: testPolicyName}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
 	require.Len(t, res.Items, 1)
-	assert.Equal(t, store.PolicyOriginSeeded, res.Items[0].Origin,
-		"backfill should set Origin to %q", store.PolicyOriginSeeded)
+	assert.Equal(t, "", res.Items[0].Origin,
+		"backfillSeededPolicyOrigin should be a no-op after CO1 cutover")
 }
 
 // TestBackfillSeededPolicyOrigin_SkipsAlreadySet verifies that backfill does

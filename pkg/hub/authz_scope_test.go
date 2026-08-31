@@ -263,7 +263,7 @@ func TestString(t *testing.T) {
 // --- ResolveAuthorizedScopes tests ---
 
 func TestResolveAuthorizedScopes_SystemBinding(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -284,7 +284,7 @@ func TestResolveAuthorizedScopes_SystemBinding(t *testing.T) {
 }
 
 func TestResolveAuthorizedScopes_ProjectBindings(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -315,7 +315,7 @@ func TestResolveAuthorizedScopes_ProjectBindings(t *testing.T) {
 }
 
 func TestResolveAuthorizedScopes_MixedBindings(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}, "group1": {}}
+	closure := map[string]struct{}{"user:user1": {}, "group:group1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -345,7 +345,7 @@ func TestResolveAuthorizedScopes_MixedBindings(t *testing.T) {
 }
 
 func TestResolveAuthorizedScopes_NoMatchingPermission(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -367,7 +367,7 @@ func TestResolveAuthorizedScopes_NoMatchingPermission(t *testing.T) {
 }
 
 func TestResolveAuthorizedScopes_PrincipalNotInClosure(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -388,7 +388,7 @@ func TestResolveAuthorizedScopes_PrincipalNotInClosure(t *testing.T) {
 }
 
 func TestResolveAuthorizedScopes_NoBindings(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	result := ResolveAuthorizedScopes(closure, "agent.list", nil, nil, testNow)
 	if !result.IsNone() {
 		t.Fatalf("no bindings should produce None, got %v", result)
@@ -398,7 +398,7 @@ func TestResolveAuthorizedScopes_NoBindings(t *testing.T) {
 func TestResolveAuthorizedScopes_ScopeTypeMismatch_Rejected(t *testing.T) {
 	// A binding with ScopeType "system" pointing at a project-scoped role
 	// should not contribute to the scope set. Vice versa as well.
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	roles := map[string]*RolePermissions{
 		"r-project": NewRolePermissions("r-project", "project-role", ScopeTypeProject, []string{"agent.list"}),
 		"r-system":  NewRolePermissions("r-system", "system-role", ScopeTypeSystem, []string{"agent.list"}),
@@ -433,7 +433,7 @@ func TestResolveAuthorizedScopes_ScopeTypeMismatch_Rejected(t *testing.T) {
 func TestResolveAuthorizedScopes_ExpiredAndNotYetActive(t *testing.T) {
 	// R2 regression: expired and not-yet-active bindings must not contribute
 	// to the scope set.
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	roles := map[string]*RolePermissions{
 		"r1": NewRolePermissions("r1", "member", ScopeTypeProject, []string{"agent.list"}),
 	}

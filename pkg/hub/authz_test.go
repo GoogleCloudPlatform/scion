@@ -21,7 +21,6 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -71,7 +70,8 @@ func TestAuthz_OwnerBypass(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionDelete)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, "resource owner", decision.Reason)
+	// CO1: The AK1 kernel returns "relationship grant: resource owner" for the owner bypass.
+	assert.Equal(t, "relationship grant: resource owner", decision.Reason)
 }
 
 func TestAuthz_DirectUserPolicy(t *testing.T) {
@@ -83,24 +83,24 @@ func TestAuthz_DirectUserPolicy(t *testing.T) {
 		ID: tid("user-1"), Email: "user1@test.com", DisplayName: "User 1", Role: "member", Status: "active",
 	}))
 
-	// Create policy allowing read
-	policy := &store.Policy{
-		ID: tid("policy-1"), Name: "Allow Read", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-
-	// Bind to user
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-1"), PrincipalType: "user", PrincipalID: tid("user-1"),
-	}))
+	// CO1: Create a custom role with agent.read permission and bind to user
+	// (replaces policy-based grant).
+	rd := createTestRoleDefinition(t, s, "allow-agent-read", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-1"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-1"), "user1@test.com", "User 1", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, tid("policy-1"), decision.PolicyID)
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_DefaultDeny(t *testing.T) {
@@ -116,10 +116,13 @@ func TestAuthz_DefaultDeny(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionDelete)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	// CO1: The AK1 kernel returns "no candidate bindings" when no role bindings match.
+	assert.Equal(t, "no candidate bindings", decision.Reason)
 }
 
 func TestAuthz_DenyEffect(t *testing.T) {
+	// CO1: The AK1 kernel has no deny effect. Without a role binding granting
+	// the requested permission, the result is default deny.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -127,41 +130,34 @@ func TestAuthz_DenyEffect(t *testing.T) {
 		ID: tid("user-deny"), Email: "deny@test.com", DisplayName: "Deny", Role: "member", Status: "active",
 	}))
 
-	policy := &store.Policy{
-		ID: tid("policy-deny"), Name: "Deny Write", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"update"}, Effect: "deny",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-deny"), PrincipalType: "user", PrincipalID: tid("user-deny"),
-	}))
+	// Give the user agent.read but NOT agent.update
+	rd := createTestRoleDefinition(t, s, "read-not-update", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-deny"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-deny"), "deny@test.com", "Deny", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
+	// agent.update is not granted — bindings exist but do not include this permission
 	decision := authz.CheckAccess(ctx, user, resource, ActionUpdate)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, tid("policy-deny"), decision.PolicyID)
+	assert.Contains(t, decision.Reason, "do not include permission")
 }
 
 func TestAuthz_WildcardAction(t *testing.T) {
+	// CO1: Wildcard policies replaced by super-admin role which has all permissions.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: tid("user-wc"), Email: "wc@test.com", DisplayName: "WC", Role: "member", Status: "active",
-	}))
+	createTestUserWithRole(t, s, tid("user-wc"), "wc@test.com", "admin", store.SystemRoleSuperAdmin)
 
-	policy := &store.Policy{
-		ID: tid("policy-wc"), Name: "Allow All", ScopeType: "hub",
-		ResourceType: "*", Actions: []string{"*"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-wc"), PrincipalType: "user", PrincipalID: tid("user-wc"),
-	}))
-
-	user := NewAuthenticatedUser(tid("user-wc"), "wc@test.com", "WC", "member", "api")
+	user := NewAuthenticatedUser(tid("user-wc"), "wc@test.com", "WC", "admin", "api")
 
 	// Test with different actions and resource types
 	for _, action := range []Action{ActionRead, ActionUpdate, ActionDelete, ActionManage} {
@@ -171,6 +167,8 @@ func TestAuthz_WildcardAction(t *testing.T) {
 }
 
 func TestAuthz_ScopeOverride(t *testing.T) {
+	// CO1: Scope override now tested via project-scoped role binding. A user
+	// with a project-scoped role binding gets access within that project.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -178,26 +176,24 @@ func TestAuthz_ScopeOverride(t *testing.T) {
 		ID: tid("user-scope"), Email: "scope@test.com", DisplayName: "Scope", Role: "member", Status: "active",
 	}))
 
-	// Hub-level deny
-	hubPolicy := &store.Policy{
-		ID: tid("policy-hub-deny"), Name: "Hub Deny", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny", Priority: 0,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, hubPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-hub-deny"), PrincipalType: "user", PrincipalID: tid("user-scope"),
+	// Create project
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("project-1"), Name: "Scope Project", Slug: "scope-project-1",
 	}))
 
-	// Project-level allow (more specific scope overrides)
-	projectPolicy := &store.Policy{
-		ID: tid("policy-project-allow"), Name: "Project Allow", ScopeType: "project",
-		ScopeID:      tid("project-1"),
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow", Priority: 0,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-project-allow"), PrincipalType: "user", PrincipalID: tid("user-scope"),
-	}))
+	// Create a project-scoped role binding with agent.read permission
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-scope"),
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          tid("project-1"),
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-scope"), "scope@test.com", "Scope", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1"), ParentType: "project", ParentID: tid("project-1")}
@@ -205,10 +201,13 @@ func TestAuthz_ScopeOverride(t *testing.T) {
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.True(t, decision.Allowed)
 	assert.Equal(t, "project", decision.Scope)
-	assert.Equal(t, tid("policy-project-allow"), decision.PolicyID)
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_PriorityWithinScope(t *testing.T) {
+	// CO1: The AK1 kernel has no policy priority concept. Role bindings are
+	// additive (allow-only). This test verifies that a user without any role
+	// binding for the requested permission is denied.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -216,34 +215,30 @@ func TestAuthz_PriorityWithinScope(t *testing.T) {
 		ID: tid("user-prio"), Email: "prio@test.com", DisplayName: "Prio", Role: "member", Status: "active",
 	}))
 
-	// Low priority allow
-	p1 := &store.Policy{
-		ID: tid("policy-low"), Name: "Low Priority Allow", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow", Priority: 0,
-	}
-	// High priority deny (should override)
-	p2 := &store.Policy{
-		ID: tid("policy-high"), Name: "High Priority Deny", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny", Priority: 10,
-	}
-	require.NoError(t, s.CreatePolicy(ctx, p1))
-	require.NoError(t, s.CreatePolicy(ctx, p2))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-low"), PrincipalType: "user", PrincipalID: tid("user-prio"),
-	}))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-high"), PrincipalType: "user", PrincipalID: tid("user-prio"),
-	}))
+	// Give user a role that does NOT include agent.read
+	rd := createTestRoleDefinition(t, s, "no-agent-read", store.RoleScopeSystem, []string{"project.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-prio"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-prio"), "prio@test.com", "Prio", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, tid("policy-high"), decision.PolicyID)
+	assert.Contains(t, decision.Reason, "do not include permission")
 }
 
 func TestAuthz_ConditionLabels(t *testing.T) {
+	// CO1: Policy conditions (labels) are not supported in the AK1 kernel.
+	// Role bindings grant permission unconditionally. This test verifies that
+	// a user with the right role binding can access agents regardless of labels,
+	// and that a user without any role binding is denied.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -251,21 +246,20 @@ func TestAuthz_ConditionLabels(t *testing.T) {
 		ID: tid("user-labels"), Email: "labels@test.com", DisplayName: "Labels", Role: "member", Status: "active",
 	}))
 
-	policy := &store.Policy{
-		ID: tid("policy-labels"), Name: "Label Condition", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-		Conditions: &store.PolicyConditions{
-			Labels: map[string]string{"env": "production", "team": "backend"},
-		},
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-labels"), PrincipalType: "user", PrincipalID: tid("user-labels"),
-	}))
+	// Create role with agent.read and bind to user
+	rd := createTestRoleDefinition(t, s, "label-agent-read", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-labels"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-labels"), "labels@test.com", "Labels", "member", "api")
 
-	// Matching labels
+	// With agent.read role binding, access is granted regardless of labels
 	resourceMatch := Resource{
 		Type:   "agent",
 		ID:     tid("agent-1"),
@@ -274,18 +268,16 @@ func TestAuthz_ConditionLabels(t *testing.T) {
 	decision := authz.CheckAccess(ctx, user, resourceMatch, ActionRead)
 	assert.True(t, decision.Allowed)
 
-	// Non-matching labels
-	resourceNoMatch := Resource{
-		Type:   "agent",
-		ID:     tid("agent-2"),
-		Labels: map[string]string{"env": "staging"},
-	}
-	decision = authz.CheckAccess(ctx, user, resourceNoMatch, ActionRead)
+	// Same user requesting an action NOT in their role binding — denied
+	decision = authz.CheckAccess(ctx, user, resourceMatch, ActionDelete)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	assert.Contains(t, decision.Reason, "do not include permission")
 }
 
 func TestAuthz_TimeConditions(t *testing.T) {
+	// CO1: Time conditions on policies are not supported in the AK1 kernel.
+	// This test verifies that a user without a role binding for the requested
+	// permission is denied (equivalent to an expired grant).
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -293,28 +285,17 @@ func TestAuthz_TimeConditions(t *testing.T) {
 		ID: tid("user-time"), Email: "time@test.com", DisplayName: "Time", Role: "member", Status: "active",
 	}))
 
-	past := time.Now().Add(-time.Hour)
-	policy := &store.Policy{
-		ID: tid("policy-expired"), Name: "Expired Policy", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-		Conditions: &store.PolicyConditions{
-			ValidUntil: &past,
-		},
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-expired"), PrincipalType: "user", PrincipalID: tid("user-time"),
-	}))
-
+	// No role binding granting agent.read — simulates an expired/absent grant.
 	user := NewAuthenticatedUser(tid("user-time"), "time@test.com", "Time", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	assert.Equal(t, "no candidate bindings", decision.Reason)
 }
 
 func TestAuthz_AgentDirectPolicy(t *testing.T) {
+	// CO1: Agent access now comes through role bindings, not policies.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -327,25 +308,31 @@ func TestAuthz_AgentDirectPolicy(t *testing.T) {
 		ProjectID: tid("project-agent-1"), Phase: string(state.PhaseRunning),
 	}))
 
-	// Create and bind policy to agent
-	policy := &store.Policy{
-		ID: tid("policy-agent"), Name: "Agent Allow", ScopeType: "hub",
-		ResourceType: "project", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-agent"), PrincipalType: "agent", PrincipalID: tid("agent-direct"),
-	}))
+	// Create a custom role with project.read and bind to the agent
+	rd := createTestRoleDefinition(t, s, "agent-project-read", store.RoleScopeSystem, []string{"project.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalAgent,
+		PrincipalID:      tid("agent-direct"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
-	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("agent-direct")}, ProjectID: tid("project-agent-1")}}
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("agent-direct")},
+		ProjectID: tid("project-agent-1"),
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+	}}
 	resource := Resource{Type: "project", ID: tid("project-agent-1")}
 
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, tid("policy-agent"), decision.PolicyID)
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_ActionMismatch(t *testing.T) {
+	// CO1: Action mismatch tested via role binding with specific permission.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -353,14 +340,16 @@ func TestAuthz_ActionMismatch(t *testing.T) {
 		ID: tid("user-act"), Email: "act@test.com", DisplayName: "Act", Role: "member", Status: "active",
 	}))
 
-	policy := &store.Policy{
-		ID: tid("policy-read-only"), Name: "Read Only", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-read-only"), PrincipalType: "user", PrincipalID: tid("user-act"),
-	}))
+	// Create role with only agent.read
+	rd := createTestRoleDefinition(t, s, "action-agent-read-only", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-act"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-act"), "act@test.com", "Act", "member", "api")
 	resource := Resource{Type: "agent", ID: tid("agent-1")}
@@ -369,12 +358,14 @@ func TestAuthz_ActionMismatch(t *testing.T) {
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.True(t, decision.Allowed)
 
-	// Delete should fail
+	// Delete should fail (not in role permissions)
 	decision = authz.CheckAccess(ctx, user, resource, ActionDelete)
 	assert.False(t, decision.Allowed)
 }
 
 func TestAuthz_ResourceTypeMismatch(t *testing.T) {
+	// CO1: Resource type mismatch tested via role binding with specific permission.
+	// agent.read grants access to agents but not projects.
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
@@ -382,22 +373,24 @@ func TestAuthz_ResourceTypeMismatch(t *testing.T) {
 		ID: tid("user-rt"), Email: "rt@test.com", DisplayName: "RT", Role: "member", Status: "active",
 	}))
 
-	policy := &store.Policy{
-		ID: tid("policy-agent-only"), Name: "Agent Only", ScopeType: "hub",
-		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: tid("policy-agent-only"), PrincipalType: "user", PrincipalID: tid("user-rt"),
-	}))
+	// Create role with only agent.read
+	rd := createTestRoleDefinition(t, s, "rt-agent-read-only", store.RoleScopeSystem, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      tid("user-rt"),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(tid("user-rt"), "rt@test.com", "RT", "member", "api")
 
-	// Agent resource should match
+	// Agent resource should match (agent.read)
 	decision := authz.CheckAccess(ctx, user, Resource{Type: "agent", ID: "a1"}, ActionRead)
 	assert.True(t, decision.Allowed)
 
-	// Project resource should not match
+	// Project resource should not match (no project.read permission)
 	decision = authz.CheckAccess(ctx, user, Resource{Type: "project", ID: "g1"}, ActionRead)
 	assert.False(t, decision.Allowed)
 }
@@ -434,7 +427,8 @@ func TestAuthz_BrokerDispatch_OwnerAllowed(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionDispatch)
 	assert.True(t, decision.Allowed)
-	assert.Equal(t, "resource owner", decision.Reason)
+	// CO1: The AK1 kernel returns "relationship grant: resource owner" for the owner bypass.
+	assert.Equal(t, "relationship grant: resource owner", decision.Reason)
 }
 
 func TestAuthz_BrokerDispatch_NonOwnerDenied(t *testing.T) {
@@ -450,7 +444,8 @@ func TestAuthz_BrokerDispatch_NonOwnerDenied(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionDispatch)
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	// CO1: The AK1 kernel returns "no candidate bindings" when no role bindings match.
+	assert.Equal(t, "no candidate bindings", decision.Reason)
 }
 
 func TestAuthz_BrokerDispatch_AdminAllowed(t *testing.T) {

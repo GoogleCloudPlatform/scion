@@ -45,8 +45,9 @@ func scheduledEventPermissionIDs() []string {
 	}
 }
 
-// TestBackfillHubAdminRolePermissions verifies that missing permissions are
-// added to the hub-admin role definition.
+// TestBackfillHubAdminRolePermissions verifies that backfillHubAdminRolePermissions
+// is a no-op after CO1 cutover: stripped permissions remain absent and
+// non-scheduled_event permissions are untouched.
 func TestBackfillHubAdminRolePermissions(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
@@ -85,22 +86,24 @@ func TestBackfillHubAdminRolePermissions(t *testing.T) {
 			"fixture precondition: %s should have been removed", id)
 	}
 
-	// Run the backfill.
+	// CO1: backfillHubAdminRolePermissions is now a no-op after cutover.
+	// Call it to verify it does not restore the stripped permissions.
 	backfillHubAdminRolePermissions(ctx, s)
 
-	// Verify all 5 scheduled_event.* permissions are now present.
+	// Verify all 5 scheduled_event.* permissions are still absent (no-op after CO1 cutover).
 	rd, err = s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 
 	for _, id := range scheduledEventPermissionIDs() {
-		assert.Contains(t, rd.Permissions, id,
-			"backfill should have added %s", id)
+		assert.NotContains(t, rd.Permissions, id,
+			"backfill is a no-op after CO1 cutover, %s should remain absent", id)
 	}
 
 	// Verify the stripped (non-scheduled_event) permissions are still present.
+	// The no-op backfill must not disturb existing permissions.
 	for _, p := range stripped {
 		assert.Contains(t, rd.Permissions, p,
-			"backfill must be additive-only — existing permission %s should be preserved", p)
+			"no-op backfill must not remove existing permission %s", p)
 	}
 }
 

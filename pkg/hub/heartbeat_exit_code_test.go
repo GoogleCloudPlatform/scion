@@ -34,6 +34,7 @@ func setupHeartbeatExitCodeTest(t *testing.T) (srv *Server, s store.Store, broke
 	t.Helper()
 
 	srv, s = testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{

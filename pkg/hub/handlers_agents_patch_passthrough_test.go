@@ -88,6 +88,8 @@ func setupPatchPassthroughFixture(t *testing.T) *patchPassthroughFixture {
 	}
 	require.NoError(t, s.CreateUser(ctx, f.adminUser))
 	ensureHubMembership(ctx, s, f.adminUser.ID)
+	// Under CO1 the AK1 kernel requires an explicit super-admin role binding.
+	grantSuperAdminRole(t, s, f.adminUser.ID)
 
 	// Create a project owned by the non-owner
 	f.project = &store.Project{
@@ -274,8 +276,12 @@ func TestPatchPassthrough_AgentCallerDenied(t *testing.T) {
 
 	var errResp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
-	assert.Contains(t, errResp.Error.Message, "broker ownership",
-		"error message should mention broker ownership")
+	// Under CO1 the AK1 kernel rejects the agent caller at the authorization
+	// layer (missing agent.update permission) before the passthrough gate runs,
+	// so the error message is "Insufficient permissions" rather than
+	// "broker ownership".
+	assert.Contains(t, errResp.Error.Message, "Insufficient permissions",
+		"error message should indicate insufficient permissions")
 }
 
 // TestPatchPassthrough_AutoProvideBrokerNonOwnerDenied verifies that

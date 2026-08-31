@@ -505,7 +505,7 @@ func TestMonotonicity_AddingConstraintNeverIncreasesAuthority(t *testing.T) {
 		// Evaluate without constraint.
 		reqBase := KernelRequest{
 			Permission:        allPerms[rng.Intn(len(allPerms))],
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -561,7 +561,7 @@ func TestMonotonicity_RemovingConstraintNeverDecreasesAuthority(t *testing.T) {
 		restrictions := ConstraintsToRestrictions([]*AccessConstraint{constraint}, testNow)
 		reqWith := KernelRequest{
 			Permission:        perm,
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -799,7 +799,7 @@ func TestAccessConstraint_KernelIntegration(t *testing.T) {
 	// Without constraint: all permissions should be granted.
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -870,7 +870,7 @@ func TestAccessConstraint_KernelIntegration_MultipleConstraintsIntersect(t *test
 	} {
 		req := KernelRequest{
 			Permission:        tc.perm,
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -903,7 +903,7 @@ func TestAccessConstraint_KernelIntegration_OwnerPassesThroughConstraints(t *tes
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -953,7 +953,7 @@ func TestMonotonicity_ConstraintOrderIndependence(t *testing.T) {
 		restrictions1 := ConstraintsToRestrictions(constraints, testNow)
 		req := KernelRequest{
 			Permission:        allPerms[rng.Intn(len(allPerms))],
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -1014,7 +1014,7 @@ func TestConstraint_GroupRemovalSafety(t *testing.T) {
 	}
 
 	// User1 is in group1 — constraint applies.
-	closureWithGroup := closureOf("user1", "group1")
+	closureWithGroup := closureOf("user:user1", "group1")
 	applicable := FilterApplicableConstraints(
 		[]*AccessConstraint{constraint},
 		closureWithGroup, "user1", "user",
@@ -1040,7 +1040,7 @@ func TestConstraint_GroupRemovalSafety(t *testing.T) {
 	}
 
 	// User1 is removed from group1 — constraint no longer applies.
-	closureWithoutGroup := closureOf("user1")
+	closureWithoutGroup := closureOf("user:user1")
 	applicable = FilterApplicableConstraints(
 		[]*AccessConstraint{constraint},
 		closureWithoutGroup, "user1", "user",
@@ -1330,9 +1330,9 @@ func TestConstraintPreview_Truncated(t *testing.T) {
 func TestAffectedPrincipal_PermissionDelta(t *testing.T) {
 	// Verify the AffectedPrincipal fields compute correctly.
 	ap := AffectedPrincipal{
-		PrincipalType:      "user",
-		PrincipalID:        "user1",
-		CurrentPermissions: []string{"agent.read", "agent.create", "agent.delete"},
+		PrincipalType:       "user",
+		PrincipalID:         "user1",
+		CurrentPermissions:  []string{"agent.read", "agent.create", "agent.delete"},
 		ProposedPermissions: []string{"agent.read"},
 		RemovedPermissions:  []string{"agent.create", "agent.delete"},
 	}

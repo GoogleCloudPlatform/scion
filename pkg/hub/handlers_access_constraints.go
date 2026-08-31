@@ -33,20 +33,20 @@ import (
 
 // createAccessConstraintRequest is the payload for POST /api/v1/admin/access-constraints.
 type createAccessConstraintRequest struct {
-	Name               string                 `json:"name"`
+	Name               string                  `json:"name"`
 	Subject            subjectSelectorRequest  `json:"subject"`
 	Scope              constraintScopeRequest  `json:"scope"`
-	MaximumPermissions []string               `json:"maximumPermissions"`
+	MaximumPermissions []string                `json:"maximumPermissions"`
 	Condition          *constraintConditionReq `json:"condition,omitempty"`
 }
 
 // updateAccessConstraintRequest is the payload for PATCH /api/v1/admin/access-constraints/:id.
 type updateAccessConstraintRequest struct {
 	Name               *string                 `json:"name,omitempty"`
-	Subject            *subjectSelectorRequest  `json:"subject,omitempty"`
-	Scope              *constraintScopeRequest  `json:"scope,omitempty"`
+	Subject            *subjectSelectorRequest `json:"subject,omitempty"`
+	Scope              *constraintScopeRequest `json:"scope,omitempty"`
 	MaximumPermissions []string                `json:"maximumPermissions,omitempty"`
-	Condition          *constraintConditionReq  `json:"condition,omitempty"`
+	Condition          *constraintConditionReq `json:"condition,omitempty"`
 }
 
 type subjectSelectorRequest struct {

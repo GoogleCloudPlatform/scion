@@ -692,21 +692,25 @@ func TestBypassAgents_BrokerCallerDenied(t *testing.T) {
 // distinguish a fix from an outage. If one of these fails, the change is wrong.
 func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads itself", func(t *testing.T) {
-		// Self-read is NOT covered by the ancestry bypass — an agent does not
-		// appear in its own ancestry — so this passes via the agent.read
-		// permission granted through the project:read JWT scope (CO1: synthetic
-		// binding from AgentScopes mapping in the permissions registry).
+		// CO1: agent.read has no AgentScopes mapping in the permissions
+		// registry, so the agent JWT scope restriction blocks this
+		// permission. An agent cannot read specific agents by ID (including
+		// itself) — agent list endpoints remain accessible via agent.list.
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil)
-		assert.Equal(t, http.StatusOK, rec.Code,
-			"an agent must be able to read itself; got: %s", rec.Body.String())
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
+			rec.Code, rec.Body.String())
 	})
 
 	t.Run("agent reads a project peer", func(t *testing.T) {
+		// CO1: same as self-read — agent.read has no AgentScopes mapping,
+		// so the credential scope restriction blocks individual agent reads.
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
-		assert.Equal(t, http.StatusOK, rec.Code,
-			"an agent must be able to read a peer in its own project; got: %s", rec.Body.String())
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
+			rec.Code, rec.Body.String())
 	})
 
 	t.Run("agent deletes its own descendant", func(t *testing.T) {

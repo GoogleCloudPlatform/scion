@@ -458,6 +458,7 @@ func TestProjectSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 func setupBrokerSecretTest(t *testing.T) (*Server, string) {
 	t.Helper()
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
@@ -505,6 +506,7 @@ func TestBrokerSecretByKey_InvalidBase64_DefaultEncoding_Returns400(t *testing.T
 
 func TestBrokerSecretByKey_RawEncoding_StoresLiteralValue(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()

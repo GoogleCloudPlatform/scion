@@ -632,16 +632,14 @@ func TestRegression_AdminBypassStillWorks(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create an admin user
+	// Create an admin user with super-admin role binding (CO1: role bindings required)
+	createTestUserWithRole(t, s, tid("admin-bypass-regression"), "admin-bypass@test.com", "admin", store.SystemRoleSuperAdmin)
 	admin := &store.User{
 		ID:          tid("admin-bypass-regression"),
 		Email:       "admin-bypass@test.com",
-		DisplayName: "Admin Bypass",
+		DisplayName: "admin-bypass@test.com",
 		Role:        store.UserRoleAdmin,
-		Status:      "active",
-		Created:     time.Now(),
 	}
-	require.NoError(t, s.CreateUser(ctx, admin))
 
 	// Create a project
 	project := &store.Project{

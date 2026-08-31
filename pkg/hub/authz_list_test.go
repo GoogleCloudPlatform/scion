@@ -113,7 +113,7 @@ func TestCollectRoleDefinitionIDs_Empty(t *testing.T) {
 // TestScopeAwareList_SystemAdmin verifies that a user with a system-scoped role
 // containing the list permission gets ScopeSetAll.
 func TestScopeAwareList_SystemAdmin(t *testing.T) {
-	closure := map[string]struct{}{"admin1": {}}
+	closure := map[string]struct{}{"user:admin1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -142,7 +142,7 @@ func TestScopeAwareList_SystemAdmin(t *testing.T) {
 // TestScopeAwareList_OrdinaryMember verifies that a user with only project-scoped
 // bindings sees only their bound projects.
 func TestScopeAwareList_OrdinaryMember(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -174,7 +174,7 @@ func TestScopeAwareList_OrdinaryMember(t *testing.T) {
 // TestScopeAwareList_MixedDirectAndGroupScopes verifies that a user with a
 // direct binding on project A and a group binding on project B sees both.
 func TestScopeAwareList_MixedDirectAndGroupScopes(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}, "group-team": {}}
+	closure := map[string]struct{}{"user:user1": {}, "group:group-team": {}}
 	bindings := []CandidateBinding{
 		// Direct user binding on project A.
 		{
@@ -209,7 +209,7 @@ func TestScopeAwareList_MixedDirectAndGroupScopes(t *testing.T) {
 
 // TestScopeAwareList_NoBindings verifies that a user with no bindings gets None.
 func TestScopeAwareList_NoBindings(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	scopes := ResolveAuthorizedScopes(closure, "project.list", nil, nil, testNow)
 	if !scopes.IsNone() {
 		t.Fatalf("no bindings should produce None, got %v", scopes)
@@ -220,7 +220,7 @@ func TestScopeAwareList_NoBindings(t *testing.T) {
 // do not contribute to the scope set.
 func TestScopeAwareList_ExpiredBindingExcluded(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b-expired",
@@ -259,7 +259,7 @@ func TestScopeAwareList_ExpiredBindingExcluded(t *testing.T) {
 func TestScopeAwareList_RoleWithoutListPermission(t *testing.T) {
 	// A user whose role does NOT include project.list should get None even
 	// though they have project-scoped bindings.
-	closure := map[string]struct{}{"user1": {}}
+	closure := map[string]struct{}{"user:user1": {}}
 	bindings := []CandidateBinding{
 		{
 			BindingID:        "b1",
@@ -285,10 +285,10 @@ func TestScopeAwareList_RoleWithoutListPermission(t *testing.T) {
 // different groups correctly union.
 func TestScopeAwareList_MultipleGroupsUnion(t *testing.T) {
 	closure := map[string]struct{}{
-		"user1":   {},
-		"group-a": {},
-		"group-b": {},
-		"group-c": {},
+		"user:user1":    {},
+		"group:group-a": {},
+		"group:group-b": {},
+		"group:group-c": {},
 	}
 	bindings := []CandidateBinding{
 		{
@@ -331,7 +331,7 @@ func TestScopeAwareList_MultipleGroupsUnion(t *testing.T) {
 // TestScopeAwareList_SystemBindingShortCircuits verifies that a system-scoped
 // binding produces All immediately, even if project bindings are also present.
 func TestScopeAwareList_SystemBindingShortCircuits(t *testing.T) {
-	closure := map[string]struct{}{"user1": {}, "hub-admins": {}}
+	closure := map[string]struct{}{"user:user1": {}, "group:hub-admins": {}}
 	bindings := []CandidateBinding{
 		// Project binding.
 		{

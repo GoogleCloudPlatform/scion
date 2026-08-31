@@ -55,6 +55,22 @@ func TestIntegrationsHooksPermissionConversion(t *testing.T) {
 		}
 	}
 
+	// Grant super-admin role binding for the admin user (CO1 cutover: role bindings required)
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get super-admin role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("create super-admin role binding: %v", err)
+	}
+
 	// Grant hub-admin role binding.
 	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	if err != nil {

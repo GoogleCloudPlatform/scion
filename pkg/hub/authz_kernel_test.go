@@ -64,7 +64,7 @@ func membershipPaths(paths map[string][]string) map[string][]string {
 func TestEvaluate_DefaultDeny_NoBindings(t *testing.T) {
 	req := KernelRequest{
 		Permission:       "agent.create",
-		PrincipalClosure: closureOf("user1"),
+		PrincipalClosure: closureOf("user:user1"),
 		Resource:         ResourceContext{ProjectID: "proj-a"},
 		Now:              testNow,
 	}
@@ -80,7 +80,7 @@ func TestEvaluate_DefaultDeny_NoBindings(t *testing.T) {
 func TestEvaluate_DefaultDeny_EmptyPermission(t *testing.T) {
 	req := KernelRequest{
 		Permission:       "",
-		PrincipalClosure: closureOf("user1"),
+		PrincipalClosure: closureOf("user:user1"),
 		Now:              testNow,
 	}
 	d := Evaluate(req)
@@ -110,7 +110,7 @@ func TestEvaluate_SimpleAllow(t *testing.T) {
 	}
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -143,7 +143,7 @@ func TestEvaluate_OrderIndependence(t *testing.T) {
 	// Evaluate with original order.
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -185,7 +185,7 @@ func TestEvaluate_AdditiveGrants(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.read",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -220,7 +220,7 @@ func TestEvaluate_SubtractiveRestrictions(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -282,7 +282,7 @@ func TestEvaluate_ExpirationBoundaries(t *testing.T) {
 			}
 			req := KernelRequest{
 				Permission:        "agent.create",
-				PrincipalClosure:  closureOf("user1"),
+				PrincipalClosure:  closureOf("user:user1"),
 				Resource:          ResourceContext{ProjectID: "proj-a"},
 				CandidateBindings: bindings,
 				RoleDefinitions:   roles,
@@ -307,7 +307,7 @@ func TestEvaluate_ScopeIsolation(t *testing.T) {
 	// Request for proj-a: should allow.
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -339,7 +339,7 @@ func TestEvaluate_SystemScopeContainment(t *testing.T) {
 	for _, proj := range projects {
 		req := KernelRequest{
 			Permission:        "agent.create",
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: proj},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -366,7 +366,7 @@ func TestEvaluate_MultipleRolesUnion(t *testing.T) {
 	for _, perm := range []string{"agent.read", "agent.create"} {
 		req := KernelRequest{
 			Permission:        perm,
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -381,7 +381,7 @@ func TestEvaluate_MultipleRolesUnion(t *testing.T) {
 	// agent.delete should still be denied.
 	req := KernelRequest{
 		Permission:        "agent.delete",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -404,7 +404,7 @@ func TestEvaluate_GroupMembership(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1", "group1"),
+		PrincipalClosure:  closureOf("user:user1", "group:group1"),
 		MembershipPaths:   membershipPaths(map[string][]string{"group1": {"user1", "group1"}}),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
@@ -438,7 +438,7 @@ func TestEvaluate_NestedGroups(t *testing.T) {
 	// User is in child-group, which is in parent-group.
 	req := KernelRequest{
 		Permission:       "agent.create",
-		PrincipalClosure: closureOf("user1", "child-group", "parent-group"),
+		PrincipalClosure: closureOf("user:user1", "group:child-group", "group:parent-group"),
 		MembershipPaths: membershipPaths(map[string][]string{
 			"child-group":  {"user1", "child-group"},
 			"parent-group": {"user1", "child-group", "parent-group"},
@@ -480,7 +480,7 @@ func TestEvaluate_FalseActivationOnlyAffectsOwnGrant(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -504,7 +504,7 @@ func TestEvaluate_OwnerAdminPassesThoughRestrictions(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -533,7 +533,7 @@ func TestEvaluate_UnknownRoleDefinition(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   map[string]*RolePermissions{}, // empty
@@ -555,7 +555,7 @@ func TestEvaluate_UnknownScopeType(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -578,7 +578,7 @@ func TestEvaluate_EmptyResourceProjectID(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "hub.settings.read",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{}, // no project
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -601,7 +601,7 @@ func TestEvaluate_MultipleRestrictions(t *testing.T) {
 	// Two restrictions that both allow agent.create.
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -646,7 +646,7 @@ func TestEvaluate_SuspensionRestriction(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -679,7 +679,7 @@ func TestEvaluate_Provenance_FullTrace(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:       "agent.read",
-		PrincipalClosure: closureOf("user1", "group1"),
+		PrincipalClosure: closureOf("user:user1", "group:group1"),
 		MembershipPaths: membershipPaths(map[string][]string{
 			"user1":  {"user1"},
 			"group1": {"user1", "group1"},
@@ -725,7 +725,7 @@ func TestEvaluate_Provenance_RejectedReasons(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.read",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -790,7 +790,7 @@ func TestProperty_AdditiveGrants(t *testing.T) {
 
 		reqBase := KernelRequest{
 			Permission:        "p2",
-			PrincipalClosure:  closureOf("user1"),
+			PrincipalClosure:  closureOf("user:user1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: base,
 			RoleDefinitions:   roles,
@@ -870,7 +870,7 @@ func TestProperty_SubtractiveRestrictions(t *testing.T) {
 		for _, perm := range allPerms {
 			reqBase := KernelRequest{
 				Permission:        perm,
-				PrincipalClosure:  closureOf("user1"),
+				PrincipalClosure:  closureOf("user:user1"),
 				Resource:          ResourceContext{ProjectID: "proj-a"},
 				CandidateBindings: bindings,
 				RoleDefinitions:   roles,
@@ -919,7 +919,7 @@ func TestProperty_OrderIndependence_Randomized(t *testing.T) {
 
 		reqOrig := KernelRequest{
 			Permission:        "p2",
-			PrincipalClosure:  closureOf("user1", "group1"),
+			PrincipalClosure:  closureOf("user:user1", "group:group1"),
 			Resource:          ResourceContext{ProjectID: "proj-a"},
 			CandidateBindings: bindings,
 			RoleDefinitions:   roles,
@@ -976,7 +976,7 @@ func TestEvaluate_ScopeTypeMismatch_Rejected(t *testing.T) {
 			}
 			req := KernelRequest{
 				Permission:        "agent.create",
-				PrincipalClosure:  closureOf("user1"),
+				PrincipalClosure:  closureOf("user:user1"),
 				Resource:          ResourceContext{ProjectID: "proj-a"},
 				CandidateBindings: bindings,
 				RoleDefinitions:   roles,
@@ -1014,7 +1014,7 @@ func TestEvaluate_NilRestrictionCheckDeniesEverything(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -1051,7 +1051,7 @@ func TestEvaluate_EffectivePermissions_FullyRestricted(t *testing.T) {
 	// Credential caveat that allows only agent.read.
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -1098,7 +1098,7 @@ func TestEvaluate_CredentialCaveatIsRestriction(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,
@@ -1138,7 +1138,7 @@ func TestEvaluate_RestrictionProvenanceRecorded(t *testing.T) {
 
 	req := KernelRequest{
 		Permission:        "agent.create",
-		PrincipalClosure:  closureOf("user1"),
+		PrincipalClosure:  closureOf("user:user1"),
 		Resource:          ResourceContext{ProjectID: "proj-a"},
 		CandidateBindings: bindings,
 		RoleDefinitions:   roles,

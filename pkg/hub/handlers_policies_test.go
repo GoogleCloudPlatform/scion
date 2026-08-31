@@ -27,9 +27,7 @@ import (
 )
 
 // newPolicyTestServer creates a test server with authzService initialized so
-// that Decide-based permission checks work. Callers get a super-admin user
-// (role "admin") who passes through the step-1 bypass in Decide, and a
-// regular member who does not.
+// that Decide-based permission checks work.
 func newPolicyTestServer(t *testing.T) *Server {
 	t.Helper()
 	srv, s := testServer(t)
@@ -37,190 +35,103 @@ func newPolicyTestServer(t *testing.T) *Server {
 	return srv
 }
 
-// TestPolicyEndpoints_RequireAdmin verifies that policy endpoints enforce
-// permission-based checks. Policy permissions are NOT in the hub-admin role,
-// so only super-admins can access them. Non-admin authenticated users must
-// receive 403 and unauthenticated callers must receive 401.
+// TestPolicyEndpoints_RequireAdmin verifies that the policy API is removed in
+// CO1: all callers (admin, non-admin, unauthenticated) receive 410 Gone.
 func TestPolicyEndpoints_RequireAdmin(t *testing.T) {
 	srv := newPolicyTestServer(t)
-	admin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "cli")
-	member := NewAuthenticatedUser("user-1", "user@test.com", "User", "member", "cli")
-
-	type testCase struct {
-		name       string
-		method     string
-		path       string
-		body       string
-		handler    func(http.ResponseWriter, *http.Request)
-		wantAdmin  int // expected status for admin (2xx or 4xx for missing body/resource)
-		wantMember int // expected status for non-admin
-		wantAnon   int // expected status for unauthenticated
-	}
+	admin := NewAuthenticatedUser(tid("pol-admin"), "admin@test.com", "Admin", "admin", "cli")
+	member := NewAuthenticatedUser(tid("pol-member"), "user@test.com", "User", "member", "cli")
 
 	policyBody := `{"name":"test-pol","scopeType":"hub","actions":["read"],"effect":"allow"}`
 
-	tests := []testCase{
-		{
-			name:    "POST /api/v1/policies (createPolicy)",
-			method:  http.MethodPost,
-			path:    "/api/v1/policies",
-			body:    policyBody,
-			handler: srv.handlePolicies,
-			// Admin gets 201 (created) — the request is valid
-			wantAdmin:  http.StatusCreated,
-			wantMember: http.StatusForbidden,
-			wantAnon:   http.StatusUnauthorized,
-		},
-	}
-
-	for _, tc := range tests {
+	// CO1: handlePolicies returns 410 Gone for every caller/method.
+	for _, tc := range []struct {
+		name string
+		user *AuthenticatedUser // nil = unauthenticated
+	}{
+		{"non-admin member", member},
+		{"unauthenticated", nil},
+		{"admin", admin},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Test non-admin member → 403
-			var bodyReader *strings.Reader
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			} else {
-				bodyReader = strings.NewReader("")
-			}
-			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/policies", strings.NewReader(policyBody))
 			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(contextWithIdentity(req.Context(), member))
+			if tc.user != nil {
+				req = req.WithContext(contextWithIdentity(req.Context(), tc.user))
+			}
 			rr := httptest.NewRecorder()
-			tc.handler(rr, req)
-			if rr.Code != tc.wantMember {
-				t.Errorf("non-admin: expected %d, got %d: %s", tc.wantMember, rr.Code, rr.Body.String())
-			}
-
-			// Test unauthenticated → 401
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			} else {
-				bodyReader = strings.NewReader("")
-			}
-			req = httptest.NewRequest(tc.method, tc.path, bodyReader)
-			req.Header.Set("Content-Type", "application/json")
-			// No identity in context
-			rr = httptest.NewRecorder()
-			tc.handler(rr, req)
-			if rr.Code != tc.wantAnon {
-				t.Errorf("unauthenticated: expected %d, got %d: %s", tc.wantAnon, rr.Code, rr.Body.String())
-			}
-
-			// Test admin → passes through (gets expected status, not 401/403)
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			} else {
-				bodyReader = strings.NewReader("")
-			}
-			req = httptest.NewRequest(tc.method, tc.path, bodyReader)
-			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(contextWithIdentity(req.Context(), admin))
-			rr = httptest.NewRecorder()
-			tc.handler(rr, req)
-			if rr.Code != tc.wantAdmin {
-				t.Errorf("admin: expected %d, got %d: %s", tc.wantAdmin, rr.Code, rr.Body.String())
+			srv.handlePolicies(rr, req)
+			if rr.Code != http.StatusGone {
+				t.Errorf("expected 410, got %d: %s", rr.Code, rr.Body.String())
 			}
 		})
 	}
 }
 
 // TestPolicyRouteEndpoints_RequireAdmin verifies that policy routes dispatched
-// through handlePolicyRoutes enforce permission checks for write operations.
-// Read operations (GET) are protected by the route guard, not the handler.
+// through handlePolicyRoutes return 410 Gone in CO1 for all callers.
 func TestPolicyRouteEndpoints_RequireAdmin(t *testing.T) {
 	srv := newPolicyTestServer(t)
-	member := NewAuthenticatedUser("user-1", "user@test.com", "User", "member", "cli")
+	member := NewAuthenticatedUser(tid("pol-route-member"), "user@test.com", "User", "member", "cli")
 
-	type testCase struct {
+	// CO1: handlePolicyRoutes returns 410 Gone for every method/caller.
+	for _, tc := range []struct {
 		name   string
 		method string
 		path   string
 		body   string
-	}
-
-	// Write operations have inline Decide checks and should return 403
-	writeTests := []testCase{
-		{
-			name:   "PATCH /api/v1/policies/{id} (updatePolicy)",
-			method: http.MethodPatch,
-			path:   "/api/v1/policies/nonexistent-id",
-			body:   `{"name":"updated"}`,
-		},
-		{
-			name:   "DELETE /api/v1/policies/{id} (deletePolicy)",
-			method: http.MethodDelete,
-			path:   "/api/v1/policies/nonexistent-id",
-		},
-		{
-			name:   "DELETE /api/v1/policies/{id}/bindings/user/user-1 (removePolicyBinding)",
-			method: http.MethodDelete,
-			path:   "/api/v1/policies/nonexistent-id/bindings/user/user-1",
-		},
-	}
-
-	for _, tc := range writeTests {
+	}{
+		{"PATCH policy", http.MethodPatch, "/api/v1/policies/nonexistent-id", `{"name":"updated"}`},
+		{"DELETE policy", http.MethodDelete, "/api/v1/policies/nonexistent-id", ""},
+		{"DELETE binding", http.MethodDelete, "/api/v1/policies/nonexistent-id/bindings/user/user-1", ""},
+	} {
 		t.Run(tc.name+" non-admin", func(t *testing.T) {
-			var bodyReader *strings.Reader
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			} else {
-				bodyReader = strings.NewReader("")
-			}
-			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			req = req.WithContext(contextWithIdentity(req.Context(), member))
 			rr := httptest.NewRecorder()
 			srv.handlePolicyRoutes(rr, req)
-			if rr.Code != http.StatusForbidden {
-				t.Errorf("non-admin: expected 403, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusGone {
+				t.Errorf("non-admin: expected 410, got %d: %s", rr.Code, rr.Body.String())
 			}
 		})
 
 		t.Run(tc.name+" unauthenticated", func(t *testing.T) {
-			var bodyReader *strings.Reader
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			} else {
-				bodyReader = strings.NewReader("")
-			}
-			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
-			// No identity in context
 			rr := httptest.NewRecorder()
 			srv.handlePolicyRoutes(rr, req)
-			if rr.Code != http.StatusUnauthorized {
-				t.Errorf("unauthenticated: expected 401, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusGone {
+				t.Errorf("unauthenticated: expected 410, got %d: %s", rr.Code, rr.Body.String())
 			}
 		})
 	}
 }
 
-// TestPolicyEndpoints_AdminPassesThrough verifies that admin callers can
-// successfully reach the underlying handler logic (not blocked by the gate).
+// TestPolicyEndpoints_AdminPassesThrough verifies that even admin callers
+// receive 410 Gone in CO1 — the policy API is fully removed.
 func TestPolicyEndpoints_AdminPassesThrough(t *testing.T) {
 	srv := newPolicyTestServer(t)
-	admin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("pol-admin-pt"), "admin@test.com", "Admin", "admin", "cli")
 
-	// Create a policy as admin — should succeed
+	// POST (create) as admin -> 410
 	body := `{"name":"admin-test-pol","scopeType":"hub","actions":["read"],"effect":"allow"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/policies", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handlePolicies(rr, req)
-
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("admin create: expected 201, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusGone {
+		t.Fatalf("admin create: expected 410, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// List policies as admin — should succeed
+	// GET (list) as admin -> 410
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/policies", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr = httptest.NewRecorder()
 	srv.handlePolicies(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("admin list: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusGone {
+		t.Fatalf("admin list: expected 410, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -230,7 +141,6 @@ func TestPolicyEndpoints_AdminPassesThrough(t *testing.T) {
 func TestPolicyRouteGuard_SuperAdminOnlyAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	seedRoleDefinitions(ctx, s)
 
 	// Create a hub-admin user (member role with hub-admin role binding)
 	hubAdminUser := &store.User{
@@ -272,8 +182,9 @@ func TestPolicyRouteGuard_SuperAdminOnlyAccess(t *testing.T) {
 		t.Errorf("hub-admin accessing policy route: expected 403, got %d", rr.Code)
 	}
 
-	// Super-admin should pass
-	superAdmin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "api")
+	// Super-admin should pass: needs a valid UUID and role binding in CO1.
+	createTestUserWithRole(t, s, tid("sa-pol"), "sa-pol@test.com", "admin", store.SystemRoleSuperAdmin)
+	superAdmin := NewAuthenticatedUser(tid("sa-pol"), "sa-pol@test.com", "Super Admin", "admin", "api")
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/policies", nil)
 	req = req.WithContext(contextWithIdentity(ctx, superAdmin))
 	rr = httptest.NewRecorder()

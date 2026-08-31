@@ -28,6 +28,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ensureSuperAdminBinding creates a super-admin system role binding for an
+// existing user. Idempotent: silently ignores duplicate-binding errors.
+// CO1: the AK1 kernel requires role bindings for authorization decisions;
+// User.Role="admin" alone is no longer sufficient.
+func ensureSuperAdminBinding(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "super-admin role definition must exist after seeding")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil && err != store.ErrAlreadyExists {
+		t.Fatalf("failed to create super-admin role binding: %v", err)
+	}
+}
+
 // =============================================================================
 // PM1: Project Membership as RoleBinding View
 //
@@ -110,6 +132,8 @@ func TestPM1_LastOwnerProtection_CannotDeleteLastOwner(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, owner))
 	ensureHubMembership(ctx, s, owner.ID)
+	// CO1: Admin users need a super-admin role binding to pass authz checks.
+	ensureSuperAdminBinding(t, s, owner.ID)
 
 	// Create project.
 	project := &store.Project{
@@ -156,6 +180,9 @@ func TestPM1_LastOwnerProtection_CanDeleteNonLastOwner(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner2))
 	ensureHubMembership(ctx, s, owner1.ID)
 	ensureHubMembership(ctx, s, owner2.ID)
+	// CO1: Admin users need super-admin role bindings to pass authz checks.
+	ensureSuperAdminBinding(t, s, owner1.ID)
+	ensureSuperAdminBinding(t, s, owner2.ID)
 
 	// Create project with two owners.
 	project := &store.Project{

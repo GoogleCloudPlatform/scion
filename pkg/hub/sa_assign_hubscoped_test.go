@@ -92,6 +92,18 @@ func setupHubScopedAssignTest(t *testing.T) *hubScopedAssignFixture {
 		ensureHubMembership(ctx, s, u.ID)
 	}
 
+	// Grant super-admin role binding for admin user (CO1 cutover: role bindings required)
+	saRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: saRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
 	f.project = &store.Project{
 		ID:        tid("hsa-project"),
 		Name:      "HSA Project",
@@ -167,7 +179,7 @@ func TestHubScopedAssign_CurrentHubMember_PolicyAllows(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"a current hub member must be allowed to assign a hub-scoped SA at the Hub policy layer; reason=%q",
 		decision.Reason)
-	assert.Equal(t, "hub member hub-scoped assign baseline", decision.Reason)
+	assert.Equal(t, "relationship grant: hub member hub-scoped assign", decision.Reason)
 }
 
 // =============================================================================
@@ -332,7 +344,8 @@ func TestHubScopedAssign_Admin_ModeEnforce_Allowed(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"admin must be allowed to assign hub-scoped SA when mode=enforce; reason=%q",
 		decision.Reason)
-	assert.Equal(t, "admin bypass", decision.Reason)
+	// CO1 cutover: role bindings grant access instead of admin bypass
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 // =============================================================================

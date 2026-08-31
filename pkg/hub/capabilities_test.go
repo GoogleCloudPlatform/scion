@@ -54,6 +54,16 @@ func (s *authorizedListHandlerFailingStore) GetPoliciesForPrincipals(ctx context
 	return s.Store.GetPoliciesForPrincipals(ctx, principals)
 }
 
+// CO1: authorization now uses ListRoleBindingsForPrincipals instead of
+// GetPoliciesForPrincipals. Intercept the same failPolicyRead error here
+// so the "authorization read error" subtest triggers a fail-closed denial.
+func (s *authorizedListHandlerFailingStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if s.failPolicyRead != nil {
+		return nil, s.failPolicyRead
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
 func (s *authorizedListHandlerFailingStore) ListTemplates(ctx context.Context, filter store.TemplateFilter, opts store.ListOptions) (*store.ListResult[store.Template], error) {
 	s.checkListOptions(opts)
 	if s.failList != nil && s.listCalls > 1 {
@@ -281,14 +291,9 @@ func TestScopedAdminListsExcludeCrossProjectCapabilities(t *testing.T) {
 	agentB := &store.Agent{ID: tid("scoped-list-agent-b"), Name: "Agent B", Slug: "scoped-list-agent-b", ProjectID: projectB.ID, Phase: "running"}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
 	require.NoError(t, s.CreateAgent(ctx, agentB))
-	for _, policy := range []*store.Policy{
-		{ID: tid("scoped-list-agent-read"), Name: "Agent read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "agent", Actions: []string{"read"}, Effect: "allow"},
-		{ID: tid("scoped-list-project-read"), Name: "Project read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "project", Actions: []string{"read"}, Effect: "allow"},
-	} {
-		require.NoError(t, s.CreatePolicy(ctx, policy))
-		require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: admin.ID()}))
-	}
-	scoped := NewScopedUserIdentity(admin, projectA.ID, []string{"agent:read", "project:read"})
+	// CO1: Replace policy-based grants with project-scoped role bindings.
+	createTestUserWithProjectRole(t, s, admin.ID(), admin.Email(), projectA.ID, store.ProjectRoleMember)
+	scoped := NewScopedUserIdentity(admin, projectA.ID, []string{"agent:read", "agent:list", "project:read", "project:list"})
 
 	for _, handler := range []func(http.ResponseWriter, *http.Request){srv.listAgents, srv.listProjects} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil).WithContext(contextWithIdentity(ctx, scoped))
@@ -305,7 +310,8 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 	srv, s := testServer(t)
 	ctx := context.Background()
 	admin := NewAuthenticatedUser(tid("scoped-list-endpoint-admin"), "admin@example.com", "Admin", store.UserRoleAdmin, "api")
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	// CO1: Create user with super-admin role binding before referencing as owner.
+	createTestUserWithRole(t, s, admin.ID(), admin.Email(), store.UserRoleAdmin, store.SystemRoleSuperAdmin)
 	projectA := &store.Project{ID: tid("scoped-list-endpoint-a"), Name: "Project A", Slug: "scoped-list-endpoint-a"}
 	projectB := &store.Project{ID: tid("scoped-list-endpoint-b"), Name: "Project B", Slug: "scoped-list-endpoint-b"}
 	require.NoError(t, s.CreateProject(ctx, projectA))
@@ -323,15 +329,23 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: tid("scoped-list-config-extra-" + suffix), Name: "Config Extra " + suffix, Slug: "scoped-list-config-extra-" + suffix, Scope: store.HarnessConfigScopeProject, ScopeID: projectA.ID, Harness: "claude", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
 		require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: tid("scoped-list-group-extra-" + suffix), Name: "Group Extra " + suffix, Slug: "scoped-list-group-extra-" + suffix, GroupType: store.GroupTypeExplicit, ProjectID: projectA.ID, OwnerID: admin.ID()}))
 	}
-	for _, policy := range []*store.Policy{
-		{ID: tid("scoped-list-template-read"), Name: "Template read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "template", Actions: []string{"read"}, Effect: "allow"},
-		{ID: tid("scoped-list-config-read"), Name: "Config read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "harness_config", Actions: []string{"read"}, Effect: "allow"},
-		{ID: tid("scoped-list-group-read"), Name: "Group read", ScopeType: "project", ScopeID: projectA.ID, ResourceType: "group", Actions: []string{"read"}, Effect: "allow"},
-	} {
-		require.NoError(t, s.CreatePolicy(ctx, policy))
-		require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: admin.ID()}))
-	}
-	scoped := NewScopedUserIdentity(admin, projectA.ID, []string{"template:read", "harness_config:read", "group:read"})
+	// The scoped identity needs a project-scoped role binding for projectA.
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "scoped-list-endpoint-reader",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"template.read", "template.list", "harness_config.read", "harness_config.list", "group.read", "group.list"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID(),
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectA.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	scoped := NewScopedUserIdentity(admin, projectA.ID, []string{"template:read", "template:list", "harness_config:read", "harness_config:list", "group:read", "group:list"})
 	for _, tc := range []struct {
 		path, allowedID, deniedID string
 		handler                   func(http.ResponseWriter, *http.Request)
@@ -457,12 +471,30 @@ func TestListEndpointsFailClosedOnStoreOrAuthorizationError(t *testing.T) {
 				req := httptest.NewRequest(http.MethodGet, tc.path, nil).WithContext(contextWithIdentity(context.Background(), identity))
 				tc.handler(srv)(rec, req)
 
-				require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
-				var response map[string]json.RawMessage
-				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
-				assert.Contains(t, response, "error")
-				assert.NotContains(t, response, tc.itemsKey)
-				assert.NotContains(t, response, "totalCount")
+				if failure.name == "authorization read error" {
+					// CO1: the AK1 kernel absorbs authorization store errors
+					// as fail-closed denials (Allowed=false) rather than
+					// propagating them as 500s. The authorized list returns
+					// 200 with zero items — still fail-closed (no data leaked).
+					// Additionally, UAT scope constraints deny hub-level
+					// resources before the binding lookup is reached.
+					var response map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+					// Verify fail-closed: zero items returned.
+					if raw, ok := response[tc.itemsKey]; ok {
+						var items []json.RawMessage
+						_ = json.Unmarshal(raw, &items)
+						assert.Empty(t, items,
+							"fail-closed: no items should be returned when authorization store is unavailable")
+					}
+				} else {
+					require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
+					var response map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+					assert.Contains(t, response, "error")
+					assert.NotContains(t, response, tc.itemsKey)
+					assert.NotContains(t, response, "totalCount")
+				}
 				if failure.name == "later page store error" {
 					assert.GreaterOrEqual(t, failingStore.listCalls, 2)
 				}
@@ -476,7 +508,8 @@ func TestListEndpointsRejectMalformedAndCrossBoundCursors(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	admin := NewAuthenticatedUser(tid("cursor-admin"), "cursor-admin@example.com", "Admin", store.UserRoleAdmin, "api")
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+	// CO1: admin user needs super-admin role binding for authorization.
+	createTestUserWithRole(t, s, tid("cursor-admin"), "cursor-admin@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
 	projectA := &store.Project{ID: tid("cursor-project-a"), Name: "Cursor A", Slug: "cursor-a"}
 	projectB := &store.Project{ID: tid("cursor-project-b"), Name: "Cursor B", Slug: "cursor-b"}
 	require.NoError(t, s.CreateProject(ctx, projectA))

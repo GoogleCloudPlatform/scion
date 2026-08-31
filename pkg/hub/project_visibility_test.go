@@ -127,8 +127,12 @@ func TestListProjects_NonMemberDoesNotSeeProject(t *testing.T) {
 }
 
 // TestProjectVisibility_HubMembersGroupMakesProjectPublic verifies the "everyone"
-// visibility pattern: adding the hub-members group to a project's members group
-// makes the project visible to all hub members via transitive group expansion.
+// visibility pattern: granting the hub-members group a project-member role binding
+// makes the project visible to all hub members.
+//
+// CO1: Under the AK1 kernel, group nesting into the project members group is for
+// collaboration only. Authorization requires a role binding for the hub-members
+// group on the project.
 func TestProjectVisibility_HubMembersGroupMakesProjectPublic(t *testing.T) {
 	srv, s, _, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
@@ -137,34 +141,39 @@ func TestProjectVisibility_HubMembersGroupMakesProjectPublic(t *testing.T) {
 	rec := doRequestAsUser(t, srv, bob, http.MethodGet,
 		"/api/v1/projects/"+project.ID, nil)
 	require.Equal(t, http.StatusNotFound, rec.Code,
-		"before adding hub-members group, non-member should get 404")
+		"before granting hub-members group access, non-member should get 404")
 
-	// Add the hub-members group to the project's members group (nested group).
-	// This is the "make project public" operation.
+	// CO1: Create a project-member role binding for the hub-members group.
+	// This is the "make project public" operation under the AK1 kernel.
 	hubMembersGroup, err := s.GetGroupBySlug(ctx, "hub-members")
 	require.NoError(t, err, "hub-members group should exist")
 
-	projectMembersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-	require.NoError(t, err, "project members group should exist")
+	pmRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
 
-	err = s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    projectMembersGroup.ID,
-		MemberType: store.GroupMemberTypeGroup,
-		MemberID:   hubMembersGroup.ID,
-		Role:       store.GroupMemberRoleMember,
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: pmRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      hubMembersGroup.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
 	})
-	require.NoError(t, err, "adding hub-members group to project members should succeed")
+	require.NoError(t, err, "creating hub-members group role binding should succeed")
 
-	// Now bob (hub member) should be able to see the project through transitive membership.
+	// Now bob (hub member) should be able to see the project through group role binding.
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet,
 		"/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusOK, rec.Code,
-		"after adding hub-members group, any hub member should see the project; got: %s", rec.Body.String())
+		"after granting hub-members group access, any hub member should see the project; got: %s", rec.Body.String())
 }
 
 // TestProjectVisibility_HubMembersGroupMakesProjectVisibleInList verifies that
-// after adding hub-members to the project members group, the project appears in
-// the list response for all hub members.
+// after granting the hub-members group a project-member role binding, the project
+// appears in the list response for all hub members.
+//
+// CO1: Under the AK1 kernel, group nesting is for collaboration only.
+// Authorization requires a role binding for the hub-members group on the project.
 func TestProjectVisibility_HubMembersGroupMakesProjectVisibleInList(t *testing.T) {
 	srv, s, _, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
@@ -179,17 +188,22 @@ func TestProjectVisibility_HubMembersGroupMakesProjectVisibleInList(t *testing.T
 			"non-member should not see project in list before making public")
 	}
 
-	// Make the project public by adding hub-members to project members.
+	// CO1: Create a project-member role binding for the hub-members group.
 	hubMembersGroup, err := s.GetGroupBySlug(ctx, "hub-members")
 	require.NoError(t, err)
-	projectMembersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+
+	pmRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    projectMembersGroup.ID,
-		MemberType: store.GroupMemberTypeGroup,
-		MemberID:   hubMembersGroup.ID,
-		Role:       store.GroupMemberRoleMember,
-	}))
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: pmRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      hubMembersGroup.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	// Now bob should see the project in list.
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/projects", nil)
@@ -230,88 +244,65 @@ func TestGetProject_CheckAccess_NonMemberReadDenied(t *testing.T) {
 		"non-member should be denied read on project; reason=%q", decision.Reason)
 }
 
-// TestNarrowHubMemberReadAll_DeletesWildcardPolicy verifies that the
-// narrowHubMemberReadAll function deletes a wildcard hub-member-read-all policy
-// and that per-type policies are seeded for directory resources only.
+// TestNarrowHubMemberReadAll_DeletesWildcardPolicy verifies that after CO1
+// cutover, no per-type hub-member-read-* policies are seeded — all
+// authorization is handled by RoleBindings. The narrowHubMemberReadAll
+// function is now a no-op, and seedPolicy no longer creates policies.
 func TestNarrowHubMemberReadAll_DeletesWildcardPolicy(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	// After testServer/seedDefaultPoliciesAndGroups, the wildcard policy should
-	// be gone and per-type policies should exist.
+	// After CO1 cutover, no wildcard policy should exist.
 	wildcardPolicies, err := s.ListPolicies(ctx, store.PolicyFilter{
 		Name:      "hub-member-read-all",
 		ScopeType: "hub",
 	}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, wildcardPolicies.Items,
-		"wildcard hub-member-read-all should be deleted after narrowing")
+		"wildcard hub-member-read-all should not exist after CO1 cutover")
 
-	// Per-type policies for globally readable resources should exist.
+	// After CO1 cutover, per-type policies are also not seeded — authorization
+	// is handled by role bindings on the hub-members group instead.
 	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding", "hub"} {
 		policies, err := s.ListPolicies(ctx, store.PolicyFilter{
 			Name:      "hub-member-read-" + rt,
 			ScopeType: "hub",
 		}, store.ListOptions{Limit: 1})
 		require.NoError(t, err)
-		require.NotEmpty(t, policies.Items,
-			"hub-member-read-%s policy should be seeded", rt)
-		assert.Equal(t, rt, policies.Items[0].ResourceType,
-			"policy resource type should be %s", rt)
-		assert.Equal(t, []string{"read", "list"}, policies.Items[0].Actions)
+		assert.Empty(t, policies.Items,
+			"hub-member-read-%s policy should not exist after CO1 cutover (authorization via role bindings)", rt)
 	}
 
-	// No per-type policy should exist for project or agent
-	// (those are now gated per-project by membership policies).
-	for _, rt := range []string{"project", "agent"} {
-		policies, err := s.ListPolicies(ctx, store.PolicyFilter{
-			Name:      "hub-member-read-" + rt,
-			ScopeType: "hub",
-		}, store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Empty(t, policies.Items,
-			"hub-member-read-%s should NOT exist as a hub-scoped policy", rt)
-	}
+	// Verify hub-members group exists with a role binding instead.
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	assert.NotEmpty(t, group.ID, "hub-members group should exist")
 }
 
-// TestEnsureProjectMemberReadPolicy_CreatesReadPolicies verifies that
-// ensureProjectMemberReadPolicy creates read+list policies for project and agent
-// resource types bound to the project's members group.
+// TestEnsureProjectMemberReadPolicy_CreatesReadPolicies verifies that after
+// CO1 cutover, ensureProjectMemberReadPolicy is a no-op — no per-project
+// read policies are created. Project access is handled by project-scoped
+// role bindings (project-member, project-admin, project-owner).
 func TestEnsureProjectMemberReadPolicy_CreatesReadPolicies(t *testing.T) {
 	_, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
+	// After CO1 cutover, per-project member-read policies are not created.
 	for _, rt := range []string{"project", "agent"} {
 		policyName := "project:" + project.Slug + ":member-read-" + rt
 		policies, err := s.ListPolicies(ctx, store.PolicyFilter{
 			Name: policyName,
 		}, store.ListOptions{Limit: 1})
 		require.NoError(t, err)
-		require.NotEmpty(t, policies.Items,
-			"member-read-%s policy should exist for project %s", rt, project.Slug)
-
-		policy := policies.Items[0]
-		assert.Equal(t, "project", policy.ScopeType)
-		assert.Equal(t, project.ID, policy.ScopeID)
-		assert.Equal(t, rt, policy.ResourceType)
-		assert.Equal(t, []string{"read", "list"}, policy.Actions)
-		assert.Equal(t, "allow", policy.Effect)
-
-		// Verify binding to members group
-		membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-		require.NoError(t, err)
-		bindings, err := s.GetPolicyBindings(ctx, policy.ID)
-		require.NoError(t, err)
-		found := false
-		for _, b := range bindings {
-			if b.PrincipalType == "group" && b.PrincipalID == membersGroup.ID {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found,
-			"member-read-%s policy should be bound to members group", rt)
+		assert.Empty(t, policies.Items,
+			"member-read-%s policy should not exist after CO1 cutover (authorization via role bindings)", rt)
 	}
+
+	// Instead, verify the project members group exists (role bindings handle access).
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	require.NoError(t, err)
+	assert.NotEmpty(t, membersGroup.ID,
+		"project members group should exist for role-binding-based access")
 }
 
 // TestProjectVisibility_NewProjectCreatorCanRead verifies that when a project is

@@ -91,6 +91,7 @@ func hubScopedSACreatedBy(t *testing.T, f *bypassAgentsFixture, creator string, 
 // of the same one.
 func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
 	t.Helper()
+	ctx := context.Background()
 	u := &store.User{
 		ID:          tid("hub-admin"),
 		Email:       "hub-admin@example.com",
@@ -99,7 +100,18 @@ func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
 		Status:      "active",
 		Created:     time.Now(),
 	}
-	require.NoError(t, f.store.CreateUser(context.Background(), u))
+	require.NoError(t, f.store.CreateUser(ctx, u))
+	// CO1: Admin access requires a role binding; the role field alone is not enough.
+	rd, err := f.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      u.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
 	return u
 }
 

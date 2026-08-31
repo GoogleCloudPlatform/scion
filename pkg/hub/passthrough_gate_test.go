@@ -342,6 +342,20 @@ func TestPassthrough_AdminWithActAs_Create_Allowed(t *testing.T) {
 
 	// Create admin who is NOT the broker owner.
 	admin := addExtraUser(t, s, tid("user-pt-admin-1"), "admin1@test.com", store.UserRoleAdmin)
+	// CO1: Admin access requires a role binding; the role field alone is not enough.
+	{
+		ctx := context.Background()
+		rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      admin.ID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemReconcileCreatedBy,
+		})
+		require.NoError(t, err)
+	}
 
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
 	enforceSAAssign(srv, checker)
