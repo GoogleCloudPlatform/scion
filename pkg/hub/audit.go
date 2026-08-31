@@ -368,7 +368,7 @@ func (l *LogAuditLogger) LogInviteAuditEvent(ctx context.Context, event *InviteA
 
 // LogGCPTokenEvent logs a GCP token generation event to the standard logger.
 func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEvent) error {
-	level := slog.LevelInfo
+	level := slog.LevelDebug
 	if !event.Success {
 		level = slog.LevelWarn
 	}
