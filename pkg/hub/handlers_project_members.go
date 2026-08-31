@@ -75,6 +75,15 @@ var validProjectRoles = map[string]bool{
 	store.ProjectRoleMember: true,
 }
 
+// directUserOnlyProjectRoles are project roles that can only be assigned to
+// direct user principals, not groups or agents. This mirrors the frontend's
+// PROJECT_DIRECT_USER_ONLY_ROLES constraint and prevents 500 errors from
+// the store's ErrDirectUserOnly guard.
+var directUserOnlyProjectRoles = map[string]bool{
+	store.ProjectRoleOwner: true,
+	store.ProjectRoleAdmin: true,
+}
+
 // ---------------------------------------------------------------------------
 // Route handler: /api/v1/projects/{id}/members[/{bindingID}]
 // ---------------------------------------------------------------------------
