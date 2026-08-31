@@ -279,12 +279,31 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// Track resolution errors for explain provenance.
+	var resolutionErrors []string
+
 	// ── Step 2: Resolve principal closure ─────────────────────────────
 	principals, err := a.authorizationPrincipals(ctx, principal.Identity)
 	if err != nil {
 		a.logger.Warn("failed to resolve authorization principals",
 			"principal_id", principal.ID, "error", err)
-		return decorateDecision(Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}, principal, credential)
+		errMsg := "principal resolution error: " + err.Error()
+		if request.Explain {
+			resolutionErrors = append(resolutionErrors, errMsg)
+		}
+		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission: permissionID,
+				Errors:     resolutionErrors,
+				DenyReasons: []string{"principal resolution error (fail-closed)"},
+				Grants:     []GrantDetail{},
+				InactiveGrants: []GrantDetail{},
+				Restrictions:   []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, principal, credential)
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -297,19 +316,37 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		membershipPaths[key] = []string{p.ID}
 	}
 
-	// Build real membership path chains for group principals.
-	// The direct principal has a single-element path (itself).
-	// Groups have chains: [requesting principal, ..., group].
+	// Build real membership path chains for group principals when
+	// Explain=true. For non-explain requests, single-element paths are
+	// sufficient (performance optimization).
 	directKey := principals[0].Type + ":" + principals[0].ID
 	membershipPaths[directKey] = []string{principals[0].ID}
-	a.buildMembershipPathChains(ctx, principals[0], principals, membershipPaths)
+	if request.Explain {
+		a.buildMembershipPathChains(ctx, principals[0], principals, membershipPaths)
+	}
 
 	// ── Step 3: Load active role bindings (batched) ───────────────────
 	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 	if err != nil {
 		a.logger.Warn("failed to load role bindings",
 			"principal_id", principal.ID, "error", err)
-		return decorateDecision(Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}, principal, credential)
+		errMsg := "binding resolution error: " + err.Error()
+		if request.Explain {
+			resolutionErrors = append(resolutionErrors, errMsg)
+		}
+		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				Errors:          resolutionErrors,
+				DenyReasons:     []string{"binding resolution error (fail-closed)"},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, principal, credential)
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -318,7 +355,23 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	if err != nil {
 		a.logger.Warn("failed to load role definitions",
 			"principal_id", principal.ID, "error", err)
-		return decorateDecision(Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}, principal, credential)
+		errMsg := "role resolution error: " + err.Error()
+		if request.Explain {
+			resolutionErrors = append(resolutionErrors, errMsg)
+		}
+		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				Errors:          resolutionErrors,
+				DenyReasons:     []string{"role resolution error (fail-closed)"},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, principal, credential)
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -418,6 +471,26 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+			}
+		}
+	}
+
+	// ── Step 11: Finalize provenance ─────────────────────────────────
+	// When Explain=true, include resolution errors and full provenance.
+	// When Explain=false, strip provenance to minimal data for performance.
+	if decision.Provenance != nil {
+		if request.Explain {
+			decision.Provenance.Errors = append(decision.Provenance.Errors, resolutionErrors...)
+		} else {
+			// Non-explain: keep only the minimal provenance (matched grant,
+			// deny reason) to avoid serializing large structures.
+			decision.Provenance = &DecisionProvenance{
+				Permission:      decision.Provenance.Permission,
+				Grants:          decision.Provenance.Grants,
+				DenyReasons:     decision.Provenance.DenyReasons,
+				Restrictions:    []RestrictionProvenance{},
+				InactiveGrants:  []GrantDetail{},
+				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
 	}

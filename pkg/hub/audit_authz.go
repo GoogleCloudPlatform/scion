@@ -184,18 +184,19 @@ type explainRequest struct {
 
 // explainResponse is the JSON response for the explain endpoint.
 type explainResponse struct {
-	Allowed       bool           `json:"allowed"`
-	Reason        string         `json:"reason"`
-	MatchedPolicy string         `json:"matchedPolicy,omitempty"`
-	MatchedGrant  string         `json:"matchedGrant,omitempty"`
-	PolicyID      string         `json:"policyId,omitempty"`
-	Trace         []DecisionStep `json:"trace"`
+	Allowed       bool                `json:"allowed"`
+	Reason        string              `json:"reason"`
+	MatchedPolicy string              `json:"matchedPolicy,omitempty"`
+	MatchedGrant  string              `json:"matchedGrant,omitempty"`
+	PolicyID      string              `json:"policyId,omitempty"`
+	Trace         []DecisionStep      `json:"trace"`
+	Provenance    *DecisionProvenance `json:"provenance,omitempty"`
 }
 
 // handleAuthzExplain handles POST /api/v1/authz/explain.
 func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "Method not allowed", nil)
 		return
 	}
 
@@ -208,17 +209,19 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 
 	var req explainRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 
 	if req.Resource.Type == "" || req.Action == "" {
-		http.Error(w, "resource.type and action are required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "resource.type and action are required", nil)
 		return
 	}
 
 	// Determine the principal for the explain request.
 	explainIdentity := identity
+	isCrossPrincipal := req.PrincipalID != "" && req.PrincipalID != identity.ID()
+
 	// Explaining for a different principal reveals authorization internals and
 	// is restricted to users with hub.audit.read (super-admin only). The Decide
 	// check evaluates via the AK1 kernel, so the super-admin role binding
@@ -236,23 +239,23 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-admin cannot explain for a different principal.
-	if req.PrincipalID != "" && req.PrincipalID != identity.ID() {
+	if isCrossPrincipal {
 		if !isSuperAdmin {
-			http.Error(w, "Forbidden: cannot explain for another principal", http.StatusForbidden)
+			writeForbidden(w, "cannot explain for another principal without hub.audit.read")
 			return
 		}
 		// Super-admin: resolve the target principal.
 		if req.PrincipalKind == "agent" || req.PrincipalKind == string(PrincipalKindAgent) {
 			agent, err := s.store.GetAgent(ctx, req.PrincipalID)
 			if err != nil {
-				http.Error(w, "Principal not found", http.StatusNotFound)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Principal not found", nil)
 				return
 			}
 			explainIdentity = newAgentIdentityFromStore(agent)
 		} else {
 			user, err := s.store.GetUser(ctx, req.PrincipalID)
 			if err != nil {
-				http.Error(w, "Principal not found", http.StatusNotFound)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Principal not found", nil)
 				return
 			}
 			explainIdentity = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "api")
@@ -280,6 +283,14 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 
 	decision := s.authzService.Decide(ctx, authzReq)
 
+	// Apply field-level redaction for cross-principal explain.
+	// When the requesting user is explaining another principal's access,
+	// redact sensitive fields but preserve causal structure.
+	provenance := decision.Provenance
+	if isCrossPrincipal && provenance != nil {
+		provenance = redactCrossPrincipalProvenance(provenance)
+	}
+
 	resp := explainResponse{
 		Allowed:       decision.Allowed,
 		Reason:        decision.Reason,
@@ -287,12 +298,108 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		MatchedGrant:  decision.MatchedGrant,
 		PolicyID:      decision.BindingID,
 		Trace:         decision.ExplainTrace,
+		Provenance:    provenance,
 	}
 	if resp.Trace == nil {
 		resp.Trace = []DecisionStep{}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// redactCrossPrincipalProvenance redacts sensitive fields from provenance
+// for cross-principal explain requests. It preserves causal structure
+// (the reader learns THAT something is hidden and WHY) but removes
+// sensitive names and display names.
+func redactCrossPrincipalProvenance(dp *DecisionProvenance) *DecisionProvenance {
+	if dp == nil {
+		return nil
+	}
+
+	redacted := &DecisionProvenance{
+		Permission:           dp.Permission,
+		EffectivePermissions: dp.EffectivePermissions,
+		DenyReasons:          dp.DenyReasons,
+		Errors:               dp.Errors,
+	}
+
+	// Redact grant details: preserve binding/role IDs, redact principal names.
+	for _, g := range dp.Grants {
+		redacted.Grants = append(redacted.Grants, redactGrantDetail(g))
+	}
+	for _, g := range dp.InactiveGrants {
+		redacted.InactiveGrants = append(redacted.InactiveGrants, redactGrantDetail(g))
+	}
+
+	// Copy restrictions: boundary IDs are stable identifiers the reader
+	// can follow, but names may be sensitive.
+	for _, r := range dp.Restrictions {
+		rr := r
+		rr.BoundaryName = "[redacted]"
+		redacted.Restrictions = append(redacted.Restrictions, rr)
+	}
+
+	// Copy status restrictions.
+	redacted.StatusRestrictions = dp.StatusRestrictions
+
+	// Redact membership paths: preserve structure (path length) and typed
+	// target IDs but redact group names within paths.
+	for _, mp := range dp.MembershipPaths {
+		rmp := MembershipPathDetail{
+			TargetID: mp.TargetID,
+			Kind:     mp.Kind,
+		}
+		for _, p := range mp.Path {
+			rmp.Path = append(rmp.Path, redactPathElement(p))
+		}
+		redacted.MembershipPaths = append(redacted.MembershipPaths, rmp)
+	}
+
+	// Ensure non-nil slices.
+	if redacted.Grants == nil {
+		redacted.Grants = []GrantDetail{}
+	}
+	if redacted.InactiveGrants == nil {
+		redacted.InactiveGrants = []GrantDetail{}
+	}
+	if redacted.Restrictions == nil {
+		redacted.Restrictions = []RestrictionProvenance{}
+	}
+	if redacted.MembershipPaths == nil {
+		redacted.MembershipPaths = []MembershipPathDetail{}
+	}
+
+	return redacted
+}
+
+// redactGrantDetail redacts sensitive fields from a GrantDetail while
+// preserving the causal structure (binding IDs, role IDs, scope info).
+func redactGrantDetail(g GrantDetail) GrantDetail {
+	return GrantDetail{
+		BindingID:         g.BindingID,
+		RoleID:            g.RoleID,
+		RoleName:          g.RoleName, // Role names are not sensitive (they are system-defined).
+		ScopeType:         g.ScopeType,
+		ScopeID:           g.ScopeID,
+		PrincipalType:     g.PrincipalType,
+		PrincipalID:       "[redacted]",
+		ContainsRequested: g.ContainsRequested,
+		MembershipPath:    nil, // Redact path details in cross-principal.
+		Permissions:       g.Permissions,
+		InactiveReason:    g.InactiveReason,
+		RejectReasons:     g.RejectReasons,
+	}
+}
+
+// redactPathElement redacts the ID part of a typed path element (e.g.,
+// "group:engineers" → "group:[redacted]") while preserving the type prefix.
+func redactPathElement(element string) string {
+	for _, prefix := range []string{"user:", "agent:", "group:", "dev:", "federated_user:", "federated_agent:"} {
+		if len(element) > len(prefix) && element[:len(prefix)] == prefix {
+			return prefix + "[redacted]"
+		}
+	}
+	return "[redacted]"
 }
 
 // explainAgentIdentity is a minimal AgentIdentity for the explain endpoint.
