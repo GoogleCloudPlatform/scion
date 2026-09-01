@@ -128,16 +128,66 @@ func TestRS2_TransitiveGroupAccess(t *testing.T) {
 	})
 
 	t.Run("group_removal_revokes_transitive_access", func(t *testing.T) {
+		// Mint cursors for both endpoints before revocation
+		recProjCursor := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/projects?limit=1", nil)
+		require.Equal(t, http.StatusOK, recProjCursor.Code)
+		var projPage ListProjectsResponse
+		require.NoError(t, json.NewDecoder(recProjCursor.Body).Decode(&projPage))
+		projCursor := projPage.NextCursor // may be empty if only 1 project
+
+		recAgentCursor := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents?limit=1", nil)
+		require.Equal(t, http.StatusOK, recAgentCursor.Code)
+		var agentPage ListAgentsResponse
+		require.NoError(t, json.NewDecoder(recAgentCursor.Body).Decode(&agentPage))
+
 		// Remove user from group A → breaks transitive chain
 		require.NoError(t, s.RemoveGroupMember(ctx, groupA.ID, store.GroupMemberTypeUser, user.ID))
 
+		// Project list: revoked
 		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/projects", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
-		var resp ListProjectsResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		projectIDs := extractProjectIDs(resp.Projects)
+		var projResp ListProjectsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&projResp))
+		projectIDs := extractProjectIDs(projResp.Projects)
 		assert.NotContains(t, projectIDs, transitiveProj.ID,
-			"user must lose transitively-granted access after group removal")
+			"user must lose transitively-granted project access after group removal")
+		assert.Equal(t, 0, projResp.TotalCount,
+			"project totalCount must be zero after losing all grants")
+
+		// Agent list: revoked (same scope resolution path)
+		recAg := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents", nil)
+		require.Equal(t, http.StatusOK, recAg.Code)
+		var agentResp ListAgentsResponse
+		require.NoError(t, json.NewDecoder(recAg.Body).Decode(&agentResp))
+		agentIDs := extractAgentIDs(agentResp.Agents)
+		assert.NotContains(t, agentIDs, transitiveAgent.ID,
+			"user must lose transitively-granted agent access after group removal")
+		assert.Equal(t, 0, agentResp.TotalCount,
+			"agent totalCount must be zero after losing all grants")
+
+		// Prior project cursor replay: rejected or empty (None scope → 200 empty)
+		if projCursor != "" {
+			recCursorReplay := doRequestAsUser(t, srv, user, http.MethodGet,
+				"/api/v1/projects?limit=1&cursor="+projCursor, nil)
+			if recCursorReplay.Code == http.StatusOK {
+				var emptyResp ListProjectsResponse
+				require.NoError(t, json.NewDecoder(recCursorReplay.Body).Decode(&emptyResp))
+				assert.Equal(t, 0, emptyResp.TotalCount,
+					"project cursor replay after revocation must return zero results")
+			} else {
+				assert.Equal(t, http.StatusBadRequest, recCursorReplay.Code,
+					"project cursor must be rejected after transitive group revocation")
+			}
+		}
+
+		// Prior agent cursor: cannot return data
+		// After revocation, scope is None → handler returns 200 empty without cursor check
+		recAgCursorReplay := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents", nil)
+		require.Equal(t, http.StatusOK, recAgCursorReplay.Code)
+		var agCursorResp ListAgentsResponse
+		require.NoError(t, json.NewDecoder(recAgCursorReplay.Body).Decode(&agCursorResp))
+		assert.Equal(t, 0, agCursorResp.TotalCount,
+			"agent list after transitive revocation must return zero results")
 	})
 }
 
@@ -451,15 +501,26 @@ func TestRS2_SuspensionCursorReplay(t *testing.T) {
 
 	// Replay through real auth middleware (doRequestAsUser generates a JWT
 	// and goes through the full HTTP handler stack including auth middleware).
-	// Suspended user should be denied before reaching the cursor check.
+	// Suspended user is denied at the middleware layer with a deterministic 403
+	// and error code "user_suspended" (see auth.go UnifiedAuthMiddleware).
 	rec = doRequestAsUser(t, srv, user, http.MethodGet,
 		"/api/v1/projects?limit=2&cursor="+page1.NextCursor, nil)
-	assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden,
-		"suspended user must be denied at auth middleware, got %d", rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"suspended user must receive exactly 403 from auth middleware")
 
-	// Also verify no list data in response body
-	assert.NotContains(t, rec.Body.String(), "projects",
-		"suspended user response must not contain list data")
+	// Verify the exact error code in the JSON response
+	var errResp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp),
+		"suspended user response must be valid JSON")
+	assert.Equal(t, "user_suspended", errResp.Error.Code,
+		"suspended user must receive 'user_suspended' error code")
+	assert.Contains(t, errResp.Error.Message, "suspended",
+		"suspended user error message must mention suspension")
 }
 
 // ==========================================================================
@@ -537,6 +598,60 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+
+	t.Run("uat_to_uat_same_scope_different_credential_id", func(t *testing.T) {
+		// Create 3 agents in projA so both UATs can paginate the agent endpoint
+		for i := 0; i < 3; i++ {
+			ag := &store.Agent{
+				ID: tid(fmt.Sprintf("r2-ccs-ag%d", i)), Slug: fmt.Sprintf("r2-ccs-ag%d", i),
+				Name: fmt.Sprintf("ccs-agent-%d", i), ProjectID: projA.ID,
+				OwnerID: user.ID, Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateAgent(ctx, ag))
+		}
+
+		// Mint two UATs for the same user, same project, same scope.
+		// Each CreateToken call generates a distinct credential record with a unique ID.
+		uatA1 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:manage"})
+		uatA2 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:manage"})
+
+		// Both UATs see projA's agents
+		recA1 := doRequestWithUAT(t, srv, uatA1, http.MethodGet, "/api/v1/agents", nil)
+		require.Equal(t, http.StatusOK, recA1.Code)
+		var respA1 ListAgentsResponse
+		require.NoError(t, json.NewDecoder(recA1.Body).Decode(&respA1))
+		require.GreaterOrEqual(t, respA1.TotalCount, 3,
+			"UAT A1 must see at least 3 agents in projA")
+
+		recA2 := doRequestWithUAT(t, srv, uatA2, http.MethodGet, "/api/v1/agents", nil)
+		require.Equal(t, http.StatusOK, recA2.Code)
+		var respA2 ListAgentsResponse
+		require.NoError(t, json.NewDecoder(recA2.Body).Decode(&respA2))
+		require.GreaterOrEqual(t, respA2.TotalCount, 3,
+			"UAT A2 must see at least 3 agents in projA")
+
+		// Mint cursor with UAT A1 (limit=1 → cursor produced)
+		recCursor := doRequestWithUAT(t, srv, uatA1, http.MethodGet,
+			"/api/v1/agents?limit=1", nil)
+		require.Equal(t, http.StatusOK, recCursor.Code)
+		var page1 ListAgentsResponse
+		require.NoError(t, json.NewDecoder(recCursor.Body).Decode(&page1))
+		require.NotEmpty(t, page1.NextCursor,
+			"UAT A1 must produce a cursor when limit=1 and 3+ agents exist")
+
+		// Prove UAT A1 can replay its own cursor
+		recReplay := doRequestWithUAT(t, srv, uatA1, http.MethodGet,
+			"/api/v1/agents?limit=1&cursor="+page1.NextCursor, nil)
+		require.Equal(t, http.StatusOK, recReplay.Code,
+			"UAT A1 must successfully replay its own cursor")
+
+		// Replay with UAT A2 (same user, same scope, different credential ID) → 400
+		recCross := doRequestWithUAT(t, srv, uatA2, http.MethodGet,
+			"/api/v1/agents?limit=1&cursor="+page1.NextCursor, nil)
+		assert.Equal(t, http.StatusBadRequest, recCross.Code,
+			"cursor from UAT A1 must be rejected when replayed with UAT A2 "+
+				"(same user+scope, different credential ID)")
+	})
 
 	t.Run("same_scope_different_credential_rejected", func(t *testing.T) {
 		// Mint with session JWT (full scope)
@@ -764,10 +879,12 @@ func TestRS2_ProductionAgentJWT(t *testing.T) {
 // R2-8: Transferred/stale ownership exercise
 // ==========================================================================
 
-// TestRS2_TransferredOwnership verifies that Mine/Shared classification uses
-// active RoleBindings, not the legacy Project.OwnerID field. A project with
-// OwnerID=UserA but an owner RoleBinding for UserB classifies as Mine for
-// UserB and NOT Mine for UserA (when UserA has no owner RoleBinding).
+// TestRS2_TransferredOwnership uses the production transfer endpoint
+// POST /api/v1/projects/{id}/transfer-ownership to atomically transfer
+// ownership from UserA to UserB. It verifies Mine/Shared classification
+// before and after the transfer for both project and agent endpoints,
+// proving that classification follows active RoleBindings (not legacy
+// Project.OwnerID which remains stale after transfer). Also tests mine=true.
 func TestRS2_TransferredOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -785,24 +902,23 @@ func TestRS2_TransferredOwnership(t *testing.T) {
 	ensureHubMembership(ctx, s, userA.ID)
 	ensureHubMembership(ctx, s, userB.ID)
 
-	// Create a project with OwnerID = userA (legacy metadata)
+	// Create a project with OwnerID = userA and an owner RoleBinding for userA.
+	// This is the pre-transfer state: userA is the legitimate owner.
 	proj := &store.Project{
 		ID: tid("r2-txo-p"), Name: "Transferred Proj", Slug: "r2-txo-proj",
 		OwnerID: userA.ID, CreatedBy: userA.ID,
 		Created: time.Now().Add(-2 * time.Hour), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, proj))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, proj.ID, userA.ID))
 
-	// Give userB the owner RoleBinding (simulating ownership transfer)
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, proj.ID, userB.ID))
-
-	// Give userA a member binding (they can still see the project, but not as owner)
+	// Give userB a member binding so they can see the project (needed as transfer target)
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: memberRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userA.ID,
+		PrincipalID:      userB.ID,
 		ScopeType:        store.RoleScopeProject,
 		ScopeID:          proj.ID,
 		CreatedBy:        "test",
@@ -817,59 +933,107 @@ func TestRS2_TransferredOwnership(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, ag))
 
-	t.Run("mine_follows_binding_not_ownerid_projects", func(t *testing.T) {
-		// UserB (new owner via RoleBinding) — Mine should include project
+	// ---- BEFORE TRANSFER: verify baseline Mine/Shared ----
+
+	t.Run("before_transfer_userA_mine_includes_project", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, userA, http.MethodGet, "/api/v1/projects?scope=mine", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp ListProjectsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Contains(t, extractProjectIDs(resp.Projects), proj.ID,
+			"before transfer: Mine for userA (owner) must include project")
+	})
+
+	t.Run("before_transfer_userB_mine_excludes_project", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, userB, http.MethodGet, "/api/v1/projects?scope=mine", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp ListProjectsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.NotContains(t, extractProjectIDs(resp.Projects), proj.ID,
+			"before transfer: Mine for userB (member) must NOT include project")
+	})
+
+	// ---- EXECUTE TRANSFER via production endpoint ----
+
+	t.Run("transfer_via_production_endpoint", func(t *testing.T) {
+		// POST /api/v1/projects/{id}/transfer-ownership
+		transferBody := map[string]string{"newOwnerId": userB.ID}
+		rec := doRequestAsUser(t, srv, userA, http.MethodPost,
+			"/api/v1/projects/"+proj.ID+"/transfer-ownership", transferBody)
+		require.Equal(t, http.StatusOK, rec.Code,
+			"transfer-ownership must succeed; body: %s", rec.Body.String())
+	})
+
+	// ---- AFTER TRANSFER: verify Mine/Shared classification follows RoleBindings ----
+
+	// Verify Project.OwnerID is STILL userA (stale metadata; transfer only changes RoleBindings)
+	updatedProj, err := s.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+	assert.Equal(t, userA.ID, updatedProj.OwnerID,
+		"after transfer: Project.OwnerID must remain stale (userA)")
+
+	t.Run("after_transfer_userB_mine_includes_project", func(t *testing.T) {
+		// UserB (new owner via transfer) — Mine must include project
 		rec := doRequestAsUser(t, srv, userB, http.MethodGet, "/api/v1/projects?scope=mine", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp ListProjectsResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		projectIDs := extractProjectIDs(resp.Projects)
 		assert.Contains(t, projectIDs, proj.ID,
-			"Mine for userB (new owner via RoleBinding) must include project")
+			"after transfer: Mine for userB (new owner via RoleBinding) must include project")
+		assert.Equal(t, 1, resp.TotalCount,
+			"after transfer: userB Mine must have exactly 1 project")
 	})
 
-	t.Run("mine_excludes_stale_ownerid_projects", func(t *testing.T) {
-		// UserA (legacy OwnerID but no owner RoleBinding) — Mine should NOT include project
+	t.Run("after_transfer_userA_mine_excludes_project", func(t *testing.T) {
+		// UserA (downgraded to member by transfer, legacy OwnerID still set) — Mine must NOT include
 		rec := doRequestAsUser(t, srv, userA, http.MethodGet, "/api/v1/projects?scope=mine", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp ListProjectsResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		projectIDs := extractProjectIDs(resp.Projects)
 		assert.NotContains(t, projectIDs, proj.ID,
-			"Mine for userA (stale OwnerID, no owner RoleBinding) must NOT include project")
+			"after transfer: Mine for userA (stale OwnerID, now member) must NOT include project")
 	})
 
-	t.Run("shared_correct_after_transfer_projects", func(t *testing.T) {
-		// UserA should see project in Shared (member, not owner)
+	t.Run("after_transfer_mine_true_alias", func(t *testing.T) {
+		// Verify mine=true works as alias of scope=mine after transfer
+		rec := doRequestAsUser(t, srv, userB, http.MethodGet, "/api/v1/projects?mine=true", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp ListProjectsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Contains(t, extractProjectIDs(resp.Projects), proj.ID,
+			"mine=true must work as alias of scope=mine after transfer")
+	})
+
+	t.Run("after_transfer_shared_correct_projects", func(t *testing.T) {
+		// UserA should see project in Shared (member after transfer)
 		rec := doRequestAsUser(t, srv, userA, http.MethodGet, "/api/v1/projects?scope=shared", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp ListProjectsResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		projectIDs := extractProjectIDs(resp.Projects)
-		assert.Contains(t, projectIDs, proj.ID,
-			"Shared for userA must include project (has member binding)")
+		assert.Contains(t, extractProjectIDs(resp.Projects), proj.ID,
+			"after transfer: Shared for userA must include project (has member binding)")
 	})
 
-	t.Run("mine_follows_binding_not_ownerid_agents", func(t *testing.T) {
-		// UserB — agent Mine should include agents in owned project
+	t.Run("after_transfer_mine_agents_userB", func(t *testing.T) {
+		// UserB (new owner) — agent Mine should include agents in owned project
 		rec := doRequestAsUser(t, srv, userB, http.MethodGet, "/api/v1/agents?scope=mine", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp ListAgentsResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		agentIDs := extractAgentIDs(resp.Agents)
-		assert.Contains(t, agentIDs, ag.ID,
-			"Mine agents for userB (new owner) must include agent in owned project")
+		assert.Contains(t, extractAgentIDs(resp.Agents), ag.ID,
+			"after transfer: Mine agents for userB (new owner) must include agent")
 	})
 
-	t.Run("shared_correct_after_transfer_agents", func(t *testing.T) {
-		// UserA — agent Shared should include agents in the project (has member binding)
+	t.Run("after_transfer_shared_agents_userA", func(t *testing.T) {
+		// UserA (member) — agent Shared should include agents in the project
 		rec := doRequestAsUser(t, srv, userA, http.MethodGet, "/api/v1/agents?scope=shared", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp ListAgentsResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		agentIDs := extractAgentIDs(resp.Agents)
-		assert.Contains(t, agentIDs, ag.ID,
-			"Shared agents for userA must include agent (has member binding)")
+		assert.Contains(t, extractAgentIDs(resp.Agents), ag.ID,
+			"after transfer: Shared agents for userA must include agent (has member binding)")
 	})
 }
 
@@ -895,30 +1059,59 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Create authorized project A
+	// Create a RuntimeBroker for filter testing
+	brokerID := tid("r2-fcm-br")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "test-broker", Slug: "r2-fcm-br",
+		Status: "online", ConnectionState: "connected",
+	}))
+
+	// Create authorized project A (with a broker)
 	projA := &store.Project{
 		ID: tid("r2-fcm-pa"), Name: "FilterProjA", Slug: "r2-fcm-a",
 		OwnerID: user.ID, CreatedBy: user.ID,
-		Created: time.Now().Add(-3 * time.Hour), Updated: time.Now(),
+		DefaultRuntimeBrokerID: brokerID,
+		Created:                time.Now().Add(-3 * time.Hour), Updated: time.Now(),
 	}
-	// Create authorized project B (with a broker and template=false)
+	// Create authorized project B (template project)
 	projB := &store.Project{
 		ID: tid("r2-fcm-pb"), Name: "FilterProjB", Slug: "r2-fcm-b",
 		OwnerID: user.ID, CreatedBy: user.ID,
+		Labels:  map[string]string{"scion.io/template": "true"},
 		Created: time.Now().Add(-2 * time.Hour), Updated: time.Now(),
 	}
-	// Create unauthorized project C
+	// Create unauthorized project C (same name as A, with same broker)
 	projC := &store.Project{
 		ID: tid("r2-fcm-pc"), Name: "FilterProjA", Slug: "r2-fcm-c",
-		OwnerID: tid("r2-fcm-oth"), CreatedBy: tid("r2-fcm-oth"),
-		Created: time.Now().Add(-1 * time.Hour), Updated: time.Now(),
+		OwnerID:                tid("r2-fcm-oth"), CreatedBy: tid("r2-fcm-oth"),
+		DefaultRuntimeBrokerID: brokerID,
+		Created:                time.Now().Add(-1 * time.Hour), Updated: time.Now(),
+	}
+	// Create authorized project D (additional for pagination test)
+	projD := &store.Project{
+		ID: tid("r2-fcm-pd"), Name: "FilterProjD", Slug: "r2-fcm-d",
+		OwnerID: user.ID, CreatedBy: user.ID,
+		DefaultRuntimeBrokerID: brokerID,
+		Created:                time.Now().Add(-4 * time.Hour), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projA))
 	require.NoError(t, s.CreateProject(ctx, projB))
 	require.NoError(t, s.CreateProject(ctx, projC))
+	require.NoError(t, s.CreateProject(ctx, projD))
 
-	// Authorize A and B
-	for _, pid := range []string{projA.ID, projB.ID} {
+	// Register the broker as a provider (contributor) for projects A, C, D.
+	// The brokerId filter matches against the project_contributor table.
+	for _, pid := range []string{projA.ID, projC.ID, projD.ID} {
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID:  pid,
+			BrokerID:   brokerID,
+			BrokerName: "test-broker",
+			Status:     "online",
+		}))
+	}
+
+	// Authorize A, B, and D
+	for _, pid := range []string{projA.ID, projB.ID, projD.ID} {
 		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: memberRD.ID,
 			PrincipalType:    store.RoleBindingPrincipalUser,
@@ -930,31 +1123,47 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Create agents with various properties
+	// Create agents with various properties including labels and broker IDs
 	agentRunning := &store.Agent{
 		ID: tid("r2-fcm-ar"), Slug: "r2-fcm-ar", Name: "running-agent",
 		ProjectID: projA.ID, OwnerID: user.ID, Phase: "running",
-		Created: time.Now(), Updated: time.Now(),
+		Labels:          map[string]string{"env": "prod", "tier": "frontend"},
+		RuntimeBrokerID: brokerID,
+		Created:         time.Now(), Updated: time.Now(),
 	}
 	agentStopped := &store.Agent{
 		ID: tid("r2-fcm-as"), Slug: "r2-fcm-as", Name: "stopped-agent",
 		ProjectID: projA.ID, OwnerID: user.ID, Phase: "stopped",
+		Labels:  map[string]string{"env": "prod", "tier": "backend"},
 		Created: time.Now(), Updated: time.Now(),
 	}
 	agentBProj := &store.Agent{
 		ID: tid("r2-fcm-ab"), Slug: "r2-fcm-ab", Name: "projb-agent",
 		ProjectID: projB.ID, OwnerID: user.ID, Phase: "running",
-		Created: time.Now(), Updated: time.Now(),
+		Labels:          map[string]string{"env": "staging"},
+		RuntimeBrokerID: brokerID,
+		Created:         time.Now(), Updated: time.Now(),
 	}
-	// Agent in unauthorized project
+	// Additional agent in projD for cursor termination
+	agentDProj := &store.Agent{
+		ID: tid("r2-fcm-ad"), Slug: "r2-fcm-ad", Name: "projd-agent",
+		ProjectID: projD.ID, OwnerID: user.ID, Phase: "running",
+		Labels:          map[string]string{"env": "prod", "tier": "frontend"},
+		RuntimeBrokerID: brokerID,
+		Created:         time.Now(), Updated: time.Now(),
+	}
+	// Agent in unauthorized project (same labels and broker as authorized agents)
 	agentUnauth := &store.Agent{
 		ID: tid("r2-fcm-au"), Slug: "r2-fcm-au", Name: "unauth-agent",
-		ProjectID: projC.ID, OwnerID: tid("r2-fcm-oth"), Phase: "running",
-		Created: time.Now(), Updated: time.Now(),
+		ProjectID:       projC.ID, OwnerID: tid("r2-fcm-oth"), Phase: "running",
+		Labels:          map[string]string{"env": "prod", "tier": "frontend"},
+		RuntimeBrokerID: brokerID,
+		Created:         time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentRunning))
 	require.NoError(t, s.CreateAgent(ctx, agentStopped))
 	require.NoError(t, s.CreateAgent(ctx, agentBProj))
+	require.NoError(t, s.CreateAgent(ctx, agentDProj))
 	require.NoError(t, s.CreateAgent(ctx, agentUnauth))
 
 	// Table-driven project filter tests
@@ -983,6 +1192,27 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 			name:       "slug_filter_unauthorized_empty",
 			query:      "slug=r2-fcm-c",
 			wantTotal:  0,
+			notWantIDs: []string{projC.ID},
+		},
+		{
+			name:       "brokerId_filter_intersects_auth",
+			query:      "brokerId=" + brokerID,
+			wantTotal:  2, // projA + projD (authorized, have broker); projC has same broker but unauthorized
+			wantIDs:    []string{projA.ID, projD.ID},
+			notWantIDs: []string{projC.ID},
+		},
+		{
+			name:       "isTemplate_true_intersects_auth",
+			query:      "isTemplate=true",
+			wantTotal:  1, // only projB is a template
+			wantIDs:    []string{projB.ID},
+			notWantIDs: []string{projA.ID, projC.ID},
+		},
+		{
+			name:       "isTemplate_false_intersects_auth",
+			query:      "isTemplate=false",
+			wantTotal:  2, // projA + projD (authorized, non-template); projC unauthorized
+			wantIDs:    []string{projA.ID, projD.ID},
 			notWantIDs: []string{projC.ID},
 		},
 	}
@@ -1030,8 +1260,8 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 		{
 			name:       "phase_filter_intersects_auth",
 			query:      "phase=running",
-			wantTotal:  2, // running in projA + running in projB
-			wantIDs:    []string{agentRunning.ID, agentBProj.ID},
+			wantTotal:  3, // running in projA + running in projB + running in projD
+			wantIDs:    []string{agentRunning.ID, agentBProj.ID, agentDProj.ID},
 			notWantIDs: []string{agentStopped.ID, agentUnauth.ID},
 		},
 		{
@@ -1044,7 +1274,28 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 		{
 			name:       "includeDeleted_false_no_leak",
 			query:      "includeDeleted=false",
-			wantTotal:  3, // all agents in authorized projects
+			wantTotal:  4, // all agents in authorized projects (A, B, D)
+			notWantIDs: []string{agentUnauth.ID},
+		},
+		{
+			name:       "label_filter_intersects_auth",
+			query:      "label=env%3Dprod",
+			wantTotal:  3, // running(A), stopped(A), projd-agent(D) — all have env=prod; unauth has same label but unauthorized
+			wantIDs:    []string{agentRunning.ID, agentStopped.ID, agentDProj.ID},
+			notWantIDs: []string{agentUnauth.ID},
+		},
+		{
+			name:       "label_multi_key_filter_intersects_auth",
+			query:      "label=env%3Dprod&label=tier%3Dfrontend",
+			wantTotal:  2, // running(A) + projd-agent(D) have both env=prod AND tier=frontend
+			wantIDs:    []string{agentRunning.ID, agentDProj.ID},
+			notWantIDs: []string{agentStopped.ID, agentUnauth.ID},
+		},
+		{
+			name:       "runtimeBrokerId_filter_intersects_auth",
+			query:      "runtimeBrokerId=" + brokerID,
+			wantTotal:  3, // running(A), projb-agent(B), projd-agent(D) have the broker; unauth has same broker but unauthorized
+			wantIDs:    []string{agentRunning.ID, agentBProj.ID, agentDProj.ID},
 			notWantIDs: []string{agentUnauth.ID},
 		},
 	}
@@ -1067,4 +1318,64 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 			}
 		})
 	}
+
+	// Paginated filtered project case: brokerId filter + limit=1 → walk pages
+	t.Run("project/brokerId_paginated", func(t *testing.T) {
+		var allIDs []string
+		cursor := ""
+		for page := 0; page < 10; page++ {
+			url := "/api/v1/projects?brokerId=" + brokerID + "&limit=1"
+			if cursor != "" {
+				url += "&cursor=" + cursor
+			}
+			rec := doRequestAsUser(t, srv, user, http.MethodGet, url, nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			var resp ListProjectsResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			assert.Equal(t, 2, resp.TotalCount,
+				"paginated brokerId filter must report stable totalCount=2")
+			for _, p := range resp.Projects {
+				allIDs = append(allIDs, p.Project.ID)
+			}
+			if resp.NextCursor == "" {
+				break
+			}
+			cursor = resp.NextCursor
+		}
+		assert.Len(t, allIDs, 2, "paginated walk must return exactly 2 projects")
+		assert.Contains(t, allIDs, projA.ID)
+		assert.Contains(t, allIDs, projD.ID)
+		assert.NotContains(t, allIDs, projC.ID,
+			"unauthorized project with same broker must not appear in paginated results")
+	})
+
+	// Agent cursor termination: label filter with multiple authorized matches, limit=1
+	t.Run("agent/label_cursor_termination", func(t *testing.T) {
+		var allIDs []string
+		cursor := ""
+		for page := 0; page < 10; page++ {
+			url := "/api/v1/agents?label=env%3Dprod&label=tier%3Dfrontend&limit=1"
+			if cursor != "" {
+				url += "&cursor=" + cursor
+			}
+			rec := doRequestAsUser(t, srv, user, http.MethodGet, url, nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			var resp ListAgentsResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			assert.Equal(t, 2, resp.TotalCount,
+				"label-filtered agent list must report stable totalCount=2")
+			for _, a := range resp.Agents {
+				allIDs = append(allIDs, a.Agent.ID)
+			}
+			if resp.NextCursor == "" {
+				break
+			}
+			cursor = resp.NextCursor
+		}
+		assert.Len(t, allIDs, 2, "cursor walk must terminate with exactly 2 agents")
+		assert.Contains(t, allIDs, agentRunning.ID)
+		assert.Contains(t, allIDs, agentDProj.ID)
+		assert.NotContains(t, allIDs, agentUnauth.ID,
+			"unauthorized agent with matching labels must not appear")
+	})
 }
