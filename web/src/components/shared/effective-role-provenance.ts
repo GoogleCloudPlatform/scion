@@ -145,6 +145,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   @state() private deniedPermissions: DeniedPermission[] = [];
   @state() private explainRedacted?: RedactionNotice;
   @state() private showLayers = false;
+  /** Whether explain layers have been successfully loaded at least once. */
+  @state() private _explainLoaded = false;
 
   static override styles = css`
     :host {
@@ -579,6 +581,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       if (data.redacted !== undefined) {
         this.explainRedacted = data.redacted;
       }
+
+      this._explainLoaded = true;
     } catch (err) {
       console.error('Failed to load access explain:', err);
       this.explainError = err instanceof Error ? err.message : 'Failed to load access layers';
@@ -732,12 +736,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
   private handleLayersToggle(): void {
     this.showLayers = !this.showLayers;
-    if (
-      this.showLayers &&
-      !this.explainLoading &&
-      this.potentialCount === 0 &&
-      !this.explainError
-    ) {
+    if (this.showLayers && !this.explainLoading && !this._explainLoaded && !this.explainError) {
       void this.loadExplainLayers();
     }
   }
