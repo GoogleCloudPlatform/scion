@@ -1349,7 +1349,7 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 			assert.Equal(t, 2, resp.TotalCount,
 				"paginated brokerId filter must report stable totalCount=2")
 			for _, p := range resp.Projects {
-				allIDs = append(allIDs, p.Project.ID)
+				allIDs = append(allIDs, p.ID)
 			}
 			if resp.NextCursor == "" {
 				break
@@ -1379,7 +1379,7 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 			assert.Equal(t, 2, resp.TotalCount,
 				"label-filtered agent list must report stable totalCount=2")
 			for _, a := range resp.Agents {
-				allIDs = append(allIDs, a.Agent.ID)
+				allIDs = append(allIDs, a.ID)
 			}
 			if resp.NextCursor == "" {
 				break

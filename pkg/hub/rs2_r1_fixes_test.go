@@ -101,7 +101,7 @@ func TestRS2_ProjectListMultiPageInterleaved(t *testing.T) {
 		assert.LessOrEqual(t, len(resp.Projects), 2, "page %d: at most limit items", pageCount)
 
 		for _, p := range resp.Projects {
-			allSeenIDs = append(allSeenIDs, p.Project.ID)
+			allSeenIDs = append(allSeenIDs, p.ID)
 		}
 
 		cursor = resp.NextCursor
@@ -194,7 +194,7 @@ func TestRS2_AgentListMultiPageInterleaved(t *testing.T) {
 		assert.Equal(t, 4, resp.TotalCount, "page %d: totalCount stable at 4", pageCount)
 
 		for _, a := range resp.Agents {
-			allSeenIDs = append(allSeenIDs, a.Agent.ID)
+			allSeenIDs = append(allSeenIDs, a.ID)
 		}
 
 		cursor = resp.NextCursor
@@ -258,7 +258,7 @@ func TestRS2_ProjectListInterleavedWithCallerFilter(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, 1, resp.TotalCount, "name filter + auth should find exactly 1")
 	require.Len(t, resp.Projects, 1)
-	assert.Equal(t, "special-project", resp.Projects[0].Project.Name)
+	assert.Equal(t, "special-project", resp.Projects[0].Name)
 }
 
 // ==========================================================================
@@ -1722,7 +1722,7 @@ func TestRS2_EnrichmentOnlyFromAuthorized(t *testing.T) {
 		// Only authorized project appears
 		assert.Equal(t, 1, resp.TotalCount)
 		require.Len(t, resp.Projects, 1)
-		assert.Equal(t, authProj.ID, resp.Projects[0].Project.ID)
+		assert.Equal(t, authProj.ID, resp.Projects[0].ID)
 
 		// Unauthorized project name must not appear anywhere
 		assert.NotContains(t, rec.Body.String(), unauthProj.Name,
@@ -1739,10 +1739,10 @@ func TestRS2_EnrichmentOnlyFromAuthorized(t *testing.T) {
 		// Only authorized agent appears
 		assert.Equal(t, 1, resp.TotalCount)
 		require.Len(t, resp.Agents, 1)
-		assert.Equal(t, authAgent.ID, resp.Agents[0].Agent.ID)
+		assert.Equal(t, authAgent.ID, resp.Agents[0].ID)
 
 		// Enrichment: agent's project name is filled (from authorized result)
-		assert.Equal(t, authProj.Name, resp.Agents[0].Agent.Project,
+		assert.Equal(t, authProj.Name, resp.Agents[0].Project,
 			"enrichment must run for authorized agents")
 
 		// Unauthorized agent data must not appear

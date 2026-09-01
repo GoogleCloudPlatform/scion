@@ -118,7 +118,7 @@ func TestRS2_ProjectListScopePushed(t *testing.T) {
 		assert.Equal(t, 2, resp.TotalCount, "totalCount must reflect only authorized projects")
 		projectIDs := make([]string, len(resp.Projects))
 		for i, p := range resp.Projects {
-			projectIDs[i] = p.Project.ID
+			projectIDs[i] = p.ID
 		}
 		assert.Contains(t, projectIDs, projA.ID)
 		assert.Contains(t, projectIDs, projB.ID)
@@ -422,7 +422,7 @@ func TestRS2_AgentListScopePushed(t *testing.T) {
 
 		assert.Equal(t, 1, resp.TotalCount)
 		require.Len(t, resp.Agents, 1)
-		assert.Equal(t, visibleAgent.ID, resp.Agents[0].Agent.ID)
+		assert.Equal(t, visibleAgent.ID, resp.Agents[0].ID)
 	})
 
 	t.Run("project_filter_intersects_with_auth", func(t *testing.T) {
@@ -818,7 +818,7 @@ func exprToString(expr ast.Expr) string {
 func extractProjectIDs(projects []ProjectWithCapabilities) []string {
 	ids := make([]string, len(projects))
 	for i, p := range projects {
-		ids[i] = p.Project.ID
+		ids[i] = p.ID
 	}
 	return ids
 }
@@ -826,7 +826,7 @@ func extractProjectIDs(projects []ProjectWithCapabilities) []string {
 func extractAgentIDs(agents []AgentWithCapabilities) []string {
 	ids := make([]string, len(agents))
 	for i, a := range agents {
-		ids[i] = a.Agent.ID
+		ids[i] = a.ID
 	}
 	return ids
 }

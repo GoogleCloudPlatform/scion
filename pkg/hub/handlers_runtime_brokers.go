@@ -657,62 +657,6 @@ func (s *Server) resolveUserRBProjectIDs(ctx context.Context, userID string) []s
 	return projectIDs
 }
 
-// resolveUserEffectiveProjectIDs returns project IDs where the user has active
-// effective RoleBinding access: direct user bindings plus transitive group
-// bindings, filtered by NotBefore/ExpiresAt lifecycle. This is the C0
-// definition of "effective access" for Shared computation.
-//
-// C0-CONTAINMENT: G1 — Shared must use active effective RoleBinding access.
-// Future/expired bindings are excluded. Group-derived access is included.
-// Contract decision to relax: Phase 1 Shared semantics.
-func (s *Server) resolveUserEffectiveProjectIDs(ctx context.Context, userID string) []string {
-	// Build the set of principals: the user directly, plus all their groups.
-	principals := []store.PrincipalRef{
-		{Type: store.RoleBindingPrincipalUser, ID: userID},
-	}
-	groupIDs, err := s.store.GetEffectiveGroups(ctx, userID)
-	if err == nil {
-		for _, gid := range groupIDs {
-			principals = append(principals, store.PrincipalRef{
-				Type: store.RoleBindingPrincipalGroup, ID: gid,
-			})
-		}
-	}
-
-	// Query all bindings for these principals, scoped to projects.
-	scopeTypes := []string{store.RoleScopeProject}
-	bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, nil)
-	if err != nil || len(bindings) == 0 {
-		return nil
-	}
-
-	now := time.Now()
-	projectIDSet := make(map[string]struct{})
-	for _, rb := range bindings {
-		if rb.ScopeID == "" {
-			continue
-		}
-		// Activation lifecycle: binding must be currently active.
-		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-			continue
-		}
-		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
-			continue
-		}
-		projectIDSet[rb.ScopeID] = struct{}{}
-	}
-
-	if len(projectIDSet) == 0 {
-		return nil
-	}
-
-	projectIDs := make([]string, 0, len(projectIDSet))
-	for id := range projectIDSet {
-		projectIDs = append(projectIDs, id)
-	}
-	return projectIDs
-}
-
 // resolveUserOwnerProjectIDs returns project IDs where the user has an active,
 // direct project-owner RoleBinding. This is the C0-containment definition of
 // "mine": only projects the user directly owns.
