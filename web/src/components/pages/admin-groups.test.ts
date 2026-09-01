@@ -651,3 +651,70 @@ describe('Tab switching', () => {
     });
   });
 });
+
+/* ========================================================================== */
+/* G6: Accessibility assertions                                                */
+/* ========================================================================== */
+
+describe('Accessibility (G6 sweep)', () => {
+  const { readFileSync } = require('fs');
+  const { resolve } = require('path');
+  const LIST_SOURCE = readFileSync(resolve(__dirname, './admin-groups.ts'), 'utf-8');
+  const FORM_SOURCE = readFileSync(
+    resolve(__dirname, '../shared/group-form-dialog.ts'),
+    'utf-8'
+  );
+
+  it('groups table has role="table" and aria-label', () => {
+    expect(LIST_SOURCE).toContain('role="table"');
+    expect(LIST_SOURCE).toContain('aria-label="Groups"');
+  });
+
+  it('groups table has a visually-hidden caption', () => {
+    expect(LIST_SOURCE).toContain('<caption class="sr-only">');
+  });
+
+  it('groups table headers have scope="col"', () => {
+    expect(LIST_SOURCE).toContain('scope="col"');
+  });
+
+  it('result count region uses aria-live="polite"', () => {
+    expect(LIST_SOURCE).toContain('aria-live="polite"');
+    expect(LIST_SOURCE).toContain('role="status"');
+  });
+
+  it('decorative group icons have aria-hidden', () => {
+    expect(LIST_SOURCE).toMatch(/group-icon[^"]*"[^>]*aria-hidden="true"/);
+  });
+
+  it('error states use role="alert"', () => {
+    expect(LIST_SOURCE).toMatch(/error-state[^"]*"[^>]*role="alert"/);
+  });
+
+  it('form dialog banner error uses role="alert"', () => {
+    expect(FORM_SOURCE).toContain('role="alert"');
+  });
+
+  it('form dialog has focusFirstError for validation failures', () => {
+    expect(FORM_SOURCE).toContain('focusFirstError');
+    expect(FORM_SOURCE).toContain('[data-error="true"]');
+  });
+
+  it('decorative prefix icons are aria-hidden in list page', () => {
+    // All sl-icon elements with slot="prefix" should be aria-hidden
+    const prefixIcons = LIST_SOURCE.match(/<sl-icon[^>]*slot="prefix"[^>]*>/g) ?? [];
+    expect(prefixIcons.length).toBeGreaterThan(0);
+    for (const icon of prefixIcons) {
+      expect(icon).toContain('aria-hidden="true"');
+    }
+  });
+
+  it('form dialog suppresses close while submitting', () => {
+    expect(FORM_SOURCE).toContain('this.submitting');
+    expect(FORM_SOURCE).toContain('e.preventDefault()');
+  });
+
+  it('create button has an id for focus return', () => {
+    expect(LIST_SOURCE).toContain('id="create-group-btn"');
+  });
+});

@@ -133,6 +133,19 @@ export class ScionGroupMemberEditor extends LitElement {
       display: block;
     }
 
+    /* Screen-reader-only utility */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     /* Section layout (compact mode) */
     .section {
       background: var(--scion-surface, #ffffff);
@@ -474,6 +487,11 @@ export class ScionGroupMemberEditor extends LitElement {
 
   private closeAddDialog(): void {
     this.addDialogOpen = false;
+    // Return focus to the Add Member button
+    requestAnimationFrame(() => {
+      const addBtn = this.shadowRoot?.querySelector<HTMLElement>('.list-header sl-button, .section-header sl-button');
+      addBtn?.focus();
+    });
   }
 
   private clearAddErrors(): void {
@@ -715,14 +733,14 @@ export class ScionGroupMemberEditor extends LitElement {
         ${this.canAdd
           ? html`
               <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
-                <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                <sl-icon slot="prefix" name="person-plus" aria-hidden="true"></sl-icon>
                 Add Member
               </sl-button>
             `
           : nothing}
       </div>
 
-      ${this.error ? html`<div class="error-state">${this.error}</div>` : nothing}
+      ${this.error ? html`<div class="error-state" role="alert">${this.error}</div>` : nothing}
       ${this.loading
         ? html`<div class="loading-state"><sl-spinner></sl-spinner> Loading members...</div>`
         : this.members.length === 0
@@ -746,14 +764,14 @@ export class ScionGroupMemberEditor extends LitElement {
           ${this.canAdd
             ? html`
                 <sl-button size="small" variant="default" @click=${this.openAddDialog}>
-                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                  <sl-icon slot="prefix" name="person-plus" aria-hidden="true"></sl-icon>
                   Add Member
                 </sl-button>
               `
             : nothing}
         </div>
 
-        ${this.error ? html`<div class="error-state">${this.error}</div>` : nothing}
+        ${this.error ? html`<div class="error-state" role="alert">${this.error}</div>` : nothing}
         ${this.loading
           ? html`<div class="loading-state"><sl-spinner></sl-spinner> Loading members...</div>`
           : this.members.length === 0
@@ -767,13 +785,16 @@ export class ScionGroupMemberEditor extends LitElement {
   private renderMembersTable() {
     return html`
       <div class="table-container">
-        <table>
+        <table role="table" aria-label="Group members">
+          <caption class="sr-only">
+            List of group members showing name, role, and date added.
+          </caption>
           <thead>
             <tr>
-              <th>Member</th>
-              <th>Role</th>
-              <th class="hide-mobile">Added</th>
-              ${this.canRemove ? html`<th class="actions-cell"></th>` : nothing}
+              <th scope="col">Member</th>
+              <th scope="col">Role</th>
+              <th scope="col" class="hide-mobile">Added</th>
+              ${this.canRemove ? html`<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>` : nothing}
             </tr>
           </thead>
           <tbody>
@@ -794,7 +815,7 @@ export class ScionGroupMemberEditor extends LitElement {
       <tr>
         <td>
           <div class="member-identity">
-            <div class="member-icon ${member.memberType}">
+            <div class="member-icon ${member.memberType}" aria-hidden="true">
               <sl-icon name="${this.getMemberIcon(member.memberType)}"></sl-icon>
             </div>
             <div class="member-info">
@@ -844,13 +865,13 @@ export class ScionGroupMemberEditor extends LitElement {
   private renderEmptyMembers() {
     return html`
       <div class="empty-state">
-        <sl-icon name="people"></sl-icon>
+        <sl-icon name="people" aria-hidden="true"></sl-icon>
         <h3>No Members</h3>
         <p>This group doesn't have any members yet.</p>
         ${this.canAdd
           ? html`
               <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
-                <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                <sl-icon slot="prefix" name="person-plus" aria-hidden="true"></sl-icon>
                 Add Member
               </sl-button>
             `
@@ -892,15 +913,15 @@ export class ScionGroupMemberEditor extends LitElement {
             }}
           >
             <sl-option value="user">
-              <sl-icon slot="prefix" name="person"></sl-icon>
+              <sl-icon slot="prefix" name="person" aria-hidden="true"></sl-icon>
               User
             </sl-option>
             <sl-option value="group">
-              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              <sl-icon slot="prefix" name="diagram-3" aria-hidden="true"></sl-icon>
               Group
             </sl-option>
             <sl-option value="agent">
-              <sl-icon slot="prefix" name="cpu"></sl-icon>
+              <sl-icon slot="prefix" name="cpu" aria-hidden="true"></sl-icon>
               Agent
             </sl-option>
           </sl-select>

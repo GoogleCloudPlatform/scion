@@ -185,7 +185,7 @@ describe('Capability split matrix (readOnly × capabilities)', () => {
     // The add button should be gated by this.canAdd, not !this.readOnly
     expect(SOURCE).toContain('this.canAdd');
     // Verify add button appears in a canAdd conditional
-    expect(SOURCE).toMatch(/this\.canAdd[\s\S]{0,200}Add Member/);
+    expect(SOURCE).toMatch(/this\.canAdd[\s\S]{0,300}Add Member/);
   });
 
   it('template gates remove button on canRemove (not bare readOnly)', () => {
@@ -579,5 +579,70 @@ describe('API adapter migration', () => {
   it('catches GroupsApiError in handleAddMember', () => {
     expect(SOURCE).toContain('instanceof GroupsApiError');
     expect(SOURCE).toContain('surfaceAddError');
+  });
+});
+
+/* ====================================================================== */
+/* G6: Accessibility assertions                                            */
+/* ====================================================================== */
+
+describe('Accessibility (G6 sweep)', () => {
+  const templates = extractTemplateContent(SOURCE);
+
+  it('members table has role="table" and aria-label', () => {
+    expect(templates).toContain('role="table"');
+    expect(templates).toContain('aria-label="Group members"');
+  });
+
+  it('members table has a visually-hidden caption', () => {
+    expect(templates).toContain('<caption class="sr-only">');
+  });
+
+  it('table headers have scope="col"', () => {
+    // All th elements (not thead) should have scope="col"
+    const thMatches = SOURCE.match(/<th\b[^>]*>/g) ?? [];
+    const thOnly = thMatches.filter((t: string) => !t.startsWith('<thead'));
+    expect(thOnly.length).toBeGreaterThan(0);
+    for (const th of thOnly) {
+      expect(th).toContain('scope="col"');
+    }
+  });
+
+  it('member count uses aria-live="polite"', () => {
+    expect(templates).toContain('aria-live="polite"');
+  });
+
+  it('decorative member icons have aria-hidden on parent', () => {
+    expect(templates).toMatch(/member-icon[^"]*"[^>]*aria-hidden="true"/);
+  });
+
+  it('error states use role="alert"', () => {
+    expect(templates).toMatch(/error-state[^"]*"[^>]*role="alert"/);
+  });
+
+  it('add-dialog error uses role="alert"', () => {
+    expect(templates).toMatch(/dialog-error[^"]*"[^>]*role="alert"/);
+  });
+
+  it('decorative prefix icons are aria-hidden', () => {
+    // All sl-icon elements with slot="prefix" should be aria-hidden
+    const prefixIcons = templates.match(/<sl-icon[^>]*slot="prefix"[^>]*>/g) ?? [];
+    expect(prefixIcons.length).toBeGreaterThan(0);
+    for (const icon of prefixIcons) {
+      expect(icon).toContain('aria-hidden="true"');
+    }
+  });
+
+  it('remove buttons have accessible label', () => {
+    expect(templates).toContain('label="Remove member"');
+  });
+
+  it('sr-only utility class is defined in styles', () => {
+    expect(SOURCE).toContain('.sr-only');
+    expect(SOURCE).toContain('clip: rect(0, 0, 0, 0)');
+  });
+
+  it('actions column header has sr-only text', () => {
+    expect(SOURCE).toMatch(/actions-cell[^"]*"[^>]*>.*sr-only.*Actions/s);
   });
 });

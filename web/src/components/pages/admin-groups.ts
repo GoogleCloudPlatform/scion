@@ -856,6 +856,15 @@ export class ScionPageAdminGroups extends LitElement {
 
   private onGroupFormCancel(): void {
     this.showCreateDialog = false;
+    this.returnFocusToCreateBtn();
+  }
+
+  /** Return focus to the create button after the dialog closes. */
+  private returnFocusToCreateBtn(): void {
+    requestAnimationFrame(() => {
+      const btn = this.shadowRoot?.querySelector<HTMLElement>('#create-group-btn');
+      btn?.focus();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -877,8 +886,13 @@ export class ScionPageAdminGroups extends LitElement {
         <div class="header-actions">
           ${this.canCreate
             ? html`
-                <sl-button variant="primary" size="small" @click=${() => this.openCreateDialog()}>
-                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                <sl-button
+                  id="create-group-btn"
+                  variant="primary"
+                  size="small"
+                  @click=${() => this.openCreateDialog()}
+                >
+                  <sl-icon slot="prefix" name="plus-lg" aria-hidden="true"></sl-icon>
                   Create group
                 </sl-button>
               `
@@ -954,12 +968,12 @@ export class ScionPageAdminGroups extends LitElement {
     if (this.myGroupsError) {
       return html`
         <div class="error-state" role="alert">
-          <sl-icon name="exclamation-triangle"></sl-icon>
+          <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
           <h2>Failed to Load Your Groups</h2>
           <p>There was a problem loading your group memberships.</p>
           <div class="error-details">${this.myGroupsError}</div>
           <sl-button variant="primary" @click=${() => this.loadMyGroups()}>
-            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+            <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
             Retry
           </sl-button>
         </div>
@@ -969,7 +983,7 @@ export class ScionPageAdminGroups extends LitElement {
     if (this.myGroups.length === 0) {
       return html`
         <div class="empty-state">
-          <sl-icon name="diagram-3"></sl-icon>
+          <sl-icon name="diagram-3" aria-hidden="true"></sl-icon>
           <h2>No Group Memberships</h2>
           <p>You are not a member of any groups yet.</p>
         </div>
@@ -1004,7 +1018,7 @@ export class ScionPageAdminGroups extends LitElement {
             void this.loadData();
           }}
         >
-          <sl-icon name="search" slot="prefix"></sl-icon>
+          <sl-icon name="search" slot="prefix" aria-hidden="true"></sl-icon>
         </sl-input>
 
         <sl-select
@@ -1033,7 +1047,7 @@ export class ScionPageAdminGroups extends LitElement {
                   >${this.activeFilterCount} filter${this.activeFilterCount !== 1 ? 's' : ''}</span
                 >
                 <sl-button variant="text" size="small" @click=${() => this.clearFilters()}>
-                  <sl-icon slot="prefix" name="x-lg"></sl-icon>
+                  <sl-icon slot="prefix" name="x-lg" aria-hidden="true"></sl-icon>
                   Clear filters
                 </sl-button>
               `
@@ -1078,12 +1092,12 @@ export class ScionPageAdminGroups extends LitElement {
   private renderError() {
     return html`
       <div class="error-state" role="alert">
-        <sl-icon name="exclamation-triangle"></sl-icon>
+        <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
         <h2>Failed to Load Groups</h2>
         <p>There was a problem connecting to the API.</p>
         <div class="error-details">${this.error}</div>
         <sl-button variant="primary" @click=${() => this.loadData()}>
-          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
           Retry
         </sl-button>
       </div>
@@ -1093,7 +1107,7 @@ export class ScionPageAdminGroups extends LitElement {
   private renderPermissionDenied() {
     return html`
       <div class="permission-denied-state" role="alert">
-        <sl-icon name="shield-lock"></sl-icon>
+        <sl-icon name="shield-lock" aria-hidden="true"></sl-icon>
         <h2>Permission Denied</h2>
         <p>
           You do not have the required permission to view groups. Contact your administrator to
@@ -1111,11 +1125,11 @@ export class ScionPageAdminGroups extends LitElement {
     if (this.hasActiveFilters) {
       return html`
         <div class="empty-state">
-          <sl-icon name="funnel"></sl-icon>
+          <sl-icon name="funnel" aria-hidden="true"></sl-icon>
           <h2>No Groups Match These Filters</h2>
           <p>Try adjusting your search or filter criteria.</p>
           <sl-button variant="primary" size="small" @click=${() => this.clearFilters()}>
-            <sl-icon slot="prefix" name="x-lg"></sl-icon>
+            <sl-icon slot="prefix" name="x-lg" aria-hidden="true"></sl-icon>
             Clear filters
           </sl-button>
         </div>
@@ -1124,7 +1138,7 @@ export class ScionPageAdminGroups extends LitElement {
 
     return html`
       <div class="empty-state">
-        <sl-icon name="diagram-3"></sl-icon>
+        <sl-icon name="diagram-3" aria-hidden="true"></sl-icon>
         <h2>No Groups</h2>
         <p>
           Groups organize users, agents, and other groups. They can be granted roles and used in
@@ -1133,7 +1147,7 @@ export class ScionPageAdminGroups extends LitElement {
         ${this.canCreate
           ? html`
               <sl-button variant="primary" @click=${() => this.openCreateDialog()}>
-                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                <sl-icon slot="prefix" name="plus-lg" aria-hidden="true"></sl-icon>
                 Create your first group
               </sl-button>
             `
@@ -1250,7 +1264,7 @@ export class ScionPageAdminGroups extends LitElement {
           ?disabled=${!this.hasPreviousPage}
           @click=${() => this.goPreviousPage()}
         >
-          <sl-icon name="chevron-left"></sl-icon>
+          <sl-icon name="chevron-left" aria-hidden="true"></sl-icon>
           Previous
         </sl-button>
         <span class="pagination-info"> Showing ${start}–${end} · ${this.totalCount} total </span>
@@ -1261,7 +1275,7 @@ export class ScionPageAdminGroups extends LitElement {
           @click=${() => this.goNextPage()}
         >
           Next
-          <sl-icon name="chevron-right"></sl-icon>
+          <sl-icon name="chevron-right" aria-hidden="true"></sl-icon>
         </sl-button>
       </div>
     `;

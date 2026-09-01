@@ -212,7 +212,7 @@ export class ScionGroupDeleteDialog extends LitElement {
         }}
       >
         ${this.phase === 'error' && this.errorMessage
-          ? html`<div class="error-banner">${this.errorMessage}</div>`
+          ? html`<div class="error-banner" role="alert">${this.errorMessage}</div>`
           : nothing}
 
         <div class="impact-copy">

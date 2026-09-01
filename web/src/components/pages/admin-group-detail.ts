@@ -473,14 +473,14 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
     return html`
       <a href="/admin/groups" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
+        <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
         Back to Groups
       </a>
 
       <div class="header">
         <div class="header-info">
           <div class="header-title">
-            <div class="group-icon ${this.group.groupType}">
+            <div class="group-icon ${this.group.groupType}" aria-hidden="true">
               <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
             </div>
             <h1>${this.group.name}</h1>
@@ -497,11 +497,12 @@ export class ScionPageAdminGroupDetail extends LitElement {
                 ${canEdit
                   ? html`
                       <sl-button
+                        id="edit-group-btn"
                         variant="default"
                         size="small"
                         @click=${() => this.handleEditClick()}
                       >
-                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        <sl-icon slot="prefix" name="pencil" aria-hidden="true"></sl-icon>
                         Edit
                       </sl-button>
                     `
@@ -510,14 +511,15 @@ export class ScionPageAdminGroupDetail extends LitElement {
                   ? html`
                       <sl-dropdown>
                         <sl-button slot="trigger" variant="default" size="small" caret>
-                          <sl-icon name="three-dots-vertical"></sl-icon>
+                          <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
                         </sl-button>
                         <sl-menu>
                           <sl-menu-item
+                            id="delete-group-item"
                             @click=${() => this.handleDeleteClick()}
                             style="color: var(--sl-color-danger-600, #dc2626);"
                           >
-                            <sl-icon slot="prefix" name="trash"></sl-icon>
+                            <sl-icon slot="prefix" name="trash" aria-hidden="true"></sl-icon>
                             Delete group
                           </sl-menu-item>
                         </sl-menu>
@@ -532,7 +534,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
       ${isProjectAgents
         ? html`
             <sl-alert variant="neutral" open class="system-managed-alert">
-              <sl-icon slot="icon" name="info-circle"></sl-icon>
+              <sl-icon slot="icon" name="info-circle" aria-hidden="true"></sl-icon>
               This group is system-managed. Its membership mirrors the agents of project
               ${this.group.projectId ?? 'unknown'} and cannot be edited.
             </sl-alert>
@@ -597,14 +599,17 @@ export class ScionPageAdminGroupDetail extends LitElement {
       ></scion-group-member-editor>
 
       <scion-group-form-dialog
+        mode="edit"
         .group=${this.group}
         @group-updated=${(e: CustomEvent<GroupUpdatedDetail>) => this.handleGroupUpdated(e)}
+        @group-form-cancel=${() => this.returnFocusTo('#edit-group-btn')}
       ></scion-group-form-dialog>
 
       <scion-group-delete-dialog
         .group=${this.group}
         .memberCount=${this.memberCount}
         @group-deleted=${(e: CustomEvent<GroupDeletedDetail>) => this.handleGroupDeleted(e)}
+        @sl-after-hide=${() => this.returnFocusTo('#delete-group-item')}
       ></scion-group-delete-dialog>
     `;
   }
@@ -621,10 +626,19 @@ export class ScionPageAdminGroupDetail extends LitElement {
     this.group = e.detail.group;
     dispatchPageTitle(this, this.group.name || this.groupId, 'Groups');
     void this.resolveOwnerName();
+    this.returnFocusTo('#edit-group-btn');
   }
 
   private handleGroupDeleted(_e: CustomEvent<GroupDeletedDetail>): void {
     navigateTo('/admin/groups');
+  }
+
+  /** Return focus to the element that invoked a dialog. */
+  private returnFocusTo(selector: string): void {
+    requestAnimationFrame(() => {
+      const el = this.shadowRoot?.querySelector<HTMLElement>(selector);
+      el?.focus();
+    });
   }
 
   private renderLoading() {
@@ -639,17 +653,17 @@ export class ScionPageAdminGroupDetail extends LitElement {
   private renderError() {
     return html`
       <a href="/admin/groups" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
+        <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
         Back to Groups
       </a>
 
-      <div class="error-state">
-        <sl-icon name="exclamation-triangle"></sl-icon>
+      <div class="error-state" role="alert">
+        <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
         <h2>Failed to Load Group</h2>
         <p>There was a problem loading this group.</p>
         <div class="error-details">${this.error || 'Group not found'}</div>
         <sl-button variant="primary" @click=${() => this.loadGroup()}>
-          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
           Retry
         </sl-button>
       </div>
