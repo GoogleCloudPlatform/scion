@@ -111,6 +111,11 @@ export class ScionProjectMembersEditor extends LitElement {
   // Remove state
   @state() private removingMemberId: string | null = null;
 
+  // C0-CONTAINMENT: advisory read-only flag derived from server-returned
+  // membership _capabilities. Only project owners get manage_members; admins
+  // see read-only controls. Server enforcement is mandatory regardless.
+  @state() private serverReadOnly = false;
+
   // Action feedback
   @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
     null;
@@ -451,12 +456,21 @@ export class ScionProjectMembersEditor extends LitElement {
 
       const data = (await membersRes.json()) as {
         items?: ProjectMemberBinding[];
+        _capabilities?: { actions?: string[] };
       };
       // Server returns enriched items with roleName and source.
       this.members = (data.items || []).map((b) => ({
         ...b,
         source: b.source || 'direct',
       }));
+
+      // C0-CONTAINMENT: server-driven advisory read-only for non-owners.
+      // If the server returns _capabilities without manage_members, hide
+      // mutation controls. When _capabilities is absent (older server or
+      // non-user identity), fall through to the parent-supplied readOnly.
+      if (data._capabilities) {
+        this.serverReadOnly = !(data._capabilities.actions || []).includes('manage_members');
+      }
 
       // Load project roles for the role picker.
       if (rolesRes.ok) {
@@ -479,6 +493,12 @@ export class ScionProjectMembersEditor extends LitElement {
   // ---------------------------------------------------------------------------
 
   // getPrincipalIcon is imported from ./role-binding-utils.js
+
+  /** Effective read-only: true when the parent says read-only OR the server
+   *  advisory indicates the current user cannot manage members. */
+  private get effectiveReadOnly(): boolean {
+    return this.readOnly || this.serverReadOnly;
+  }
 
   /** Returns true if a role name represents project ownership. */
   private isOwnerRole(roleName: string): boolean {
@@ -711,7 +731,7 @@ export class ScionProjectMembersEditor extends LitElement {
             ? html`<p>${this.sectionDescription}</p>`
             : nothing}
         </div>
-        ${!this.readOnly
+        ${!this.effectiveReadOnly
           ? html`
               <sl-button
                 variant="primary"
@@ -743,7 +763,7 @@ export class ScionProjectMembersEditor extends LitElement {
               ? html`<p>${this.sectionDescription}</p>`
               : nothing}
           </div>
-          ${!this.readOnly
+          ${!this.effectiveReadOnly
             ? html`
                 <sl-button
                   size="small"
@@ -812,7 +832,7 @@ export class ScionProjectMembersEditor extends LitElement {
           <sl-icon name="people"></sl-icon>
           <h3>No Members</h3>
           <p>Add members to grant access to this project.</p>
-          ${!this.readOnly
+          ${!this.effectiveReadOnly
             ? html`
                 <sl-button
                   variant="primary"
@@ -840,7 +860,7 @@ export class ScionProjectMembersEditor extends LitElement {
               <th>Member</th>
               <th>Role</th>
               <th class="hide-mobile">Source</th>
-              ${!this.readOnly
+              ${!this.effectiveReadOnly
                 ? html`<th class="actions-cell">Actions</th>`
                 : nothing}
             </tr>
@@ -888,7 +908,7 @@ export class ScionProjectMembersEditor extends LitElement {
               : html`<sl-icon name="person-check"></sl-icon> Direct`}
           </span>
         </td>
-        ${!this.readOnly
+        ${!this.effectiveReadOnly
           ? html`
               <td class="actions-cell">
                 ${!isGroupDerived

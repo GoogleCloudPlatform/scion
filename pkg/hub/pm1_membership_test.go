@@ -411,3 +411,98 @@ func TestMergeProjectIDs_EmptyInputs(t *testing.T) {
 	merged := mergeProjectIDs([]string{}, []string{})
 	assert.Nil(t, merged, "merging empty slices should return nil")
 }
+
+// ===========================================================================
+// C0: resolveUserOwnerProjectIDs — Mine must select owner-only bindings
+// ===========================================================================
+
+func TestC0_ResolveUserOwnerProjectIDs_OnlyOwnerBindings(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("c0-mine-user"), Email: "c0-mine@test.com",
+		DisplayName: "C0 Mine User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Create three projects.
+	ownedProject := &store.Project{
+		ID: tid("c0-owned"), Name: "Owned Project", Slug: "c0-owned",
+		OwnerID: user.ID, CreatedBy: user.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	adminProject := &store.Project{
+		ID: tid("c0-admin-proj"), Name: "Admin Project", Slug: "c0-admin-proj",
+		OwnerID: tid("c0-other-o"), CreatedBy: tid("c0-other-o"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	memberProject := &store.Project{
+		ID: tid("c0-member-proj"), Name: "Member Project", Slug: "c0-member-proj",
+		OwnerID: tid("c0-other-o"), CreatedBy: tid("c0-other-o"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, ownedProject))
+	require.NoError(t, s.CreateProject(ctx, adminProject))
+	require.NoError(t, s.CreateProject(ctx, memberProject))
+
+	// Give user project-owner on the first.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, ownedProject.ID, user.ID))
+
+	// Give user project-admin on the second.
+	adminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          adminProject.ID,
+		CreatedBy:        user.ID,
+	})
+	require.NoError(t, err)
+
+	// Give user project-member on the third.
+	memberRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          memberProject.ID,
+		CreatedBy:        user.ID,
+	})
+	require.NoError(t, err)
+
+	// C0 exit gate: Mine must return ONLY the owned project.
+	ownerIDs := srv.resolveUserOwnerProjectIDs(ctx, user.ID)
+	assert.Len(t, ownerIDs, 1,
+		"C0: resolveUserOwnerProjectIDs must return only project-owner bindings")
+	assert.Contains(t, ownerIDs, ownedProject.ID)
+	assert.NotContains(t, ownerIDs, adminProject.ID,
+		"C0: project-admin binding must NOT classify a project as Mine")
+	assert.NotContains(t, ownerIDs, memberProject.ID,
+		"C0: project-member binding must NOT classify a project as Mine")
+
+	// All bindings should still appear in the general resolver.
+	allIDs := srv.resolveUserRBProjectIDs(ctx, user.ID)
+	assert.Len(t, allIDs, 3, "resolveUserRBProjectIDs should return all 3 projects")
+}
+
+func TestC0_SubtractProjectIDs(t *testing.T) {
+	all := []string{"a", "b", "c", "d"}
+	exclude := []string{"b", "d"}
+	result := subtractProjectIDs(all, exclude)
+	assert.Len(t, result, 2)
+	assert.Contains(t, result, "a")
+	assert.Contains(t, result, "c")
+
+	// Empty exclude returns all.
+	result2 := subtractProjectIDs(all, nil)
+	assert.Equal(t, all, result2)
+
+	// Subtracting everything returns nil.
+	result3 := subtractProjectIDs(all, all)
+	assert.Nil(t, result3)
+}

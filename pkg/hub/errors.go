@@ -136,6 +136,26 @@ const (
 	// ErrCodeRecoveryDisabledImmutable is returned when a mutation targets a
 	// recovery-disabled constraint, which cannot be modified via HTTP.
 	ErrCodeRecoveryDisabledImmutable = "recovery_disabled_immutable"
+
+	// C0-CONTAINMENT: Stable membership governance denial codes.
+	// These replace raw evaluator/permission details in 403 responses for
+	// project membership operations. Internal provenance is retained in
+	// structured logs.
+	//
+	// Contract decision to relax: Phase 1 stable denial code vocabulary.
+
+	// ErrCodeRoleAssignmentForbidden indicates the actor lacks the authority
+	// to manage project membership (e.g., not a project owner).
+	ErrCodeRoleAssignmentForbidden = "role_assignment_forbidden"
+
+	// ErrCodeTargetRoleProtected indicates the actor cannot assign or modify
+	// the target role due to governance restrictions (e.g., an admin trying
+	// to mint an owner binding).
+	ErrCodeTargetRoleProtected = "target_role_protected"
+
+	// ErrCodeLastOwner indicates an operation was rejected because it would
+	// remove the last direct-user project-owner binding.
+	ErrCodeLastOwner = "LAST_OWNER"
 )
 
 // writeError writes a JSON error response.

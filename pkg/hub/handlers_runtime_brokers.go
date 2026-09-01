@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -603,6 +604,30 @@ func mergeProjectIDs(sources ...[]string) []string {
 	return merged
 }
 
+// subtractProjectIDs returns IDs from all that are NOT in exclude.
+//
+// C0-CONTAINMENT: F-PLAN-01 — used to compute Shared = all-membership minus
+// owner-only set. Contract decision to relax: Phase 1 Mine/Shared semantics.
+func subtractProjectIDs(all, exclude []string) []string {
+	if len(exclude) == 0 {
+		return all
+	}
+	excludeSet := make(map[string]struct{}, len(exclude))
+	for _, id := range exclude {
+		excludeSet[id] = struct{}{}
+	}
+	result := make([]string, 0, len(all))
+	for _, id := range all {
+		if _, excluded := excludeSet[id]; !excluded {
+			result = append(result, id)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // resolveUserRBProjectIDs returns project IDs from the user's project-scoped
 // RoleBindings. This complements resolveUserProjectIDs (which uses legacy
 // group memberships) by including projects where the user was granted access
@@ -619,6 +644,55 @@ func (s *Server) resolveUserRBProjectIDs(ctx context.Context, userID string) []s
 		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID != "" {
 			projectIDSet[rb.ScopeID] = struct{}{}
 		}
+	}
+
+	if len(projectIDSet) == 0 {
+		return nil
+	}
+
+	projectIDs := make([]string, 0, len(projectIDSet))
+	for id := range projectIDSet {
+		projectIDs = append(projectIDs, id)
+	}
+	return projectIDs
+}
+
+// resolveUserOwnerProjectIDs returns project IDs where the user has an active,
+// direct project-owner RoleBinding. This is the C0-containment definition of
+// "mine": only projects the user directly owns.
+//
+// C0-CONTAINMENT: F-QA-01 — Mine must select only active direct project-owner
+// bindings, not all project-scoped bindings. The contract decision to relax
+// this restriction is Phase 1 Mine/Shared semantics.
+func (s *Server) resolveUserOwnerProjectIDs(ctx context.Context, userID string) []string {
+	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil || len(bindings) == 0 {
+		return nil
+	}
+
+	// Resolve the project-owner role definition ID once per request.
+	ownerRoleDef, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	if err != nil || ownerRoleDef == nil {
+		return nil
+	}
+
+	now := time.Now()
+	projectIDSet := make(map[string]struct{})
+	for _, rb := range bindings {
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" {
+			continue
+		}
+		if rb.RoleDefinitionID != ownerRoleDef.ID {
+			continue
+		}
+		// Check activation lifecycle: binding must be currently active.
+		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
+			continue
+		}
+		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
+			continue
+		}
+		projectIDSet[rb.ScopeID] = struct{}{}
 	}
 
 	if len(projectIDSet) == 0 {

@@ -369,16 +369,22 @@ func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity
 }
 
 // canDelegateProjectMembership checks whether the actor can add members to
-// a project. The actor must be a project owner or admin.
+// a project.
+//
+// C0-CONTAINMENT: F-QA-02, F-PLAN-02, F-PLAN-03 — temporarily requires
+// an active direct project-owner binding. Project admins cannot manage
+// membership until the Phase 1 governance matrix is approved. Contract
+// decision to relax: Phase 1 must define which actor roles can manage
+// which target roles.
 func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	if grant.ProjectID == "" {
 		return Decision{Allowed: false, Reason: "project membership requires a project ID"}
 	}
 	userID := actor.ID()
-	if a.isProjectOwnerOrAdmin(ctx, userID, grant.ProjectID) {
-		return Decision{Allowed: true, Reason: "project owner/admin can manage membership"}
+	if a.isProjectOwner(ctx, userID, grant.ProjectID) {
+		return Decision{Allowed: true, Reason: "project owner can manage membership"}
 	}
-	return Decision{Allowed: false, Reason: "actor is not a project owner or admin"}
+	return Decision{Allowed: false, Reason: "only project owners can manage project membership"}
 }
 
 // actorHoldsAllPermissions resolves the actor's effective permissions in the

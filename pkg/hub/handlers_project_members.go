@@ -41,8 +41,9 @@ type projectMemberInfo struct {
 
 // listProjectMembersResponse wraps the paginated result for project members.
 type listProjectMembersResponse struct {
-	Items      []projectMemberInfo `json:"items"`
-	TotalCount int                 `json:"totalCount"`
+	Items        []projectMemberInfo `json:"items"`
+	TotalCount   int                 `json:"totalCount"`
+	Capabilities *Capabilities       `json:"_capabilities,omitempty"`
 }
 
 // addProjectMemberRequest is the payload for POST /api/v1/projects/{id}/members.
@@ -184,9 +185,25 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		items = append(items, info)
 	}
 
+	// C0-CONTAINMENT: Compute advisory membership-management capabilities.
+	// Only project owners can manage membership; admins see read-only.
+	// This lets the UI hide mutation controls for non-owners without waiting
+	// for a 403 round-trip. Server enforcement remains mandatory.
+	//
+	// Contract decision to relax: align with Phase 1 CanDelegate relaxation.
+	var memberCaps *Capabilities
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		if user, ok := identity.(UserIdentity); ok {
+			if s.authzService.isProjectOwner(ctx, user.ID(), projectID) {
+				memberCaps = &Capabilities{Actions: []string{"manage_members"}}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, listProjectMembersResponse{
-		Items:      items,
-		TotalCount: totalCount,
+		Items:        items,
+		TotalCount:   totalCount,
+		Capabilities: memberCaps,
 	})
 }
 
@@ -317,20 +334,26 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		return
 	}
 
-	// CanDelegate: project membership check — actor must be project owner/admin.
+	// CanDelegate: project membership check — actor must be project owner.
+	//
+	// C0-CONTAINMENT: F-QA-02 — only project owners can manage membership.
+	// Contract decision to relax: Phase 1 governance matrix.
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(ctx, user, GrantDescriptor{
 			Type:      GrantTypeProjectMembership,
 			ProjectID: projectID,
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "cannot add project member: "+decision.Reason)
+			slog.Info("project member add denied: membership gate",
+				"project_id", projectID, "actor", user.Email(),
+				"reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeRoleAssignmentForbidden,
+				"You do not have permission to manage members in this project", nil)
 			return
 		}
 
 		// CanDelegate: role binding escalation check — actor must hold all
-		// permissions in the target role to prevent a project-admin from
-		// minting a project-owner.
+		// permissions in the target role to prevent escalation.
 		decision = s.authzService.CanDelegate(ctx, user, GrantDescriptor{
 			Type:             GrantTypeRoleBinding,
 			RoleDefinitionID: req.RoleDefinitionID,
@@ -338,7 +361,11 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 			ScopeID:          projectID,
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "cannot assign role: "+decision.Reason)
+			slog.Info("project member add denied: role escalation",
+				"project_id", projectID, "actor", user.Email(),
+				"target_role", roleDef.Name, "reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeTargetRoleProtected,
+				"You cannot assign the requested role in this project", nil)
 			return
 		}
 	}
@@ -484,7 +511,7 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			if ownerCount <= 1 {
-				writeError(w, http.StatusConflict, "LAST_OWNER",
+				writeError(w, http.StatusConflict, ErrCodeLastOwner,
 					"Cannot change role of the last project owner — every project must retain at least one direct user owner", nil)
 				return
 			}
@@ -492,13 +519,20 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 	}
 
 	// CanDelegate checks.
+	//
+	// C0-CONTAINMENT: F-QA-02 — only project owners can manage membership.
+	// Contract decision to relax: Phase 1 governance matrix.
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(ctx, user, GrantDescriptor{
 			Type:      GrantTypeProjectMembership,
 			ProjectID: projectID,
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "cannot modify project member: "+decision.Reason)
+			slog.Info("project member role change denied: membership gate",
+				"project_id", projectID, "actor", user.Email(),
+				"reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeRoleAssignmentForbidden,
+				"You do not have permission to manage members in this project", nil)
 			return
 		}
 
@@ -509,7 +543,11 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 			ScopeID:          projectID,
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "cannot assign role: "+decision.Reason)
+			slog.Info("project member role change denied: role escalation",
+				"project_id", projectID, "actor", user.Email(),
+				"target_role", newRoleDef.Name, "reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeTargetRoleProtected,
+				"You cannot assign the requested role in this project", nil)
 			return
 		}
 	}
@@ -623,7 +661,7 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 				return
 			}
 			if ownerCount <= 1 {
-				writeError(w, http.StatusConflict, "LAST_OWNER",
+				writeError(w, http.StatusConflict, ErrCodeLastOwner,
 					"Cannot remove the last project owner — every project must retain at least one direct user owner", nil)
 				return
 			}
@@ -631,13 +669,20 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 	}
 
 	// CanDelegate check.
+	//
+	// C0-CONTAINMENT: F-QA-02 — only project owners can manage membership.
+	// Contract decision to relax: Phase 1 governance matrix.
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(ctx, user, GrantDescriptor{
 			Type:      GrantTypeProjectMembership,
 			ProjectID: projectID,
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "cannot remove project member: "+decision.Reason)
+			slog.Info("project member removal denied: membership gate",
+				"project_id", projectID, "actor", user.Email(),
+				"reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeRoleAssignmentForbidden,
+				"You do not have permission to manage members in this project", nil)
 			return
 		}
 	}

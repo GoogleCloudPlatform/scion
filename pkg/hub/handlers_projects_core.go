@@ -159,52 +159,54 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope=mine: projects the current user owns or is a member of
-	// scope=shared: projects where the user is a member/admin but not the owner
-	// mine=true (legacy): projects the user owns or is a member of
+	// scope=mine: projects where the user has an active direct project-owner
+	//   RoleBinding. Legacy Project.OwnerID is included for backward compat.
+	// scope=shared: projects where the user has effective access (group
+	//   membership or any RoleBinding) but is NOT in the "mine" set.
+	// mine=true (legacy alias): same as scope=mine.
 	//
-	// All scopes merge two membership sources:
-	//   1. Legacy group memberships (resolveUserProjectIDs)
-	//   2. Project-scoped RoleBindings (resolveUserRBProjectIDs)
+	// C0-CONTAINMENT: F-QA-01, F-PLAN-01 — Mine selects only active direct
+	// project-owner bindings. Shared excludes the owner set rather than relying
+	// on legacy OwnerID. Contract decision to relax: Phase 1 Mine/Shared
+	// semantics.
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			// Legacy ownership (Project.OwnerID) combined with
-			// RoleBinding-based and group-based membership.
+			// Legacy ownership (Project.OwnerID).
 			filter.OwnerID = userIdent.ID()
-			memberIDs := mergeProjectIDs(
-				s.resolveUserProjectIDs(ctx, userIdent.ID()),
-				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
-			)
-			if len(memberIDs) > 0 {
-				filter.MemberOrOwnerIDs = memberIDs
+			// RoleBinding-based: only project-owner bindings.
+			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+			if len(ownerIDs) > 0 {
+				filter.MemberOrOwnerIDs = ownerIDs
 			}
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			memberIDs := mergeProjectIDs(
+			// All effective access (legacy groups + all RoleBindings).
+			allMemberIDs := mergeProjectIDs(
 				s.resolveUserProjectIDs(ctx, userIdent.ID()),
 				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
 			)
-			if len(memberIDs) > 0 {
-				filter.MemberProjectIDs = memberIDs
+			// Owner set (active direct project-owner bindings).
+			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+			// Shared = all membership minus the owner set.
+			sharedIDs := subtractProjectIDs(allMemberIDs, ownerIDs)
+			if len(sharedIDs) > 0 {
+				filter.MemberProjectIDs = sharedIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
-				// User has no memberships — return empty result
+				// User has no shared memberships — return empty result.
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
 		}
 	default:
-		// Legacy mine=true support
+		// Legacy mine=true support — same semantics as scope=mine.
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				memberIDs := mergeProjectIDs(
-					s.resolveUserProjectIDs(ctx, userIdent.ID()),
-					s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
-				)
-				if len(memberIDs) > 0 {
-					filter.MemberOrOwnerIDs = memberIDs
+				ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+				if len(ownerIDs) > 0 {
+					filter.MemberOrOwnerIDs = ownerIDs
 				}
 			}
 		}

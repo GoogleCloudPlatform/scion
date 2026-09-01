@@ -259,31 +259,34 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.Labels = parsed
 	}
 
-	// scope=mine: agents the current user created
-	// scope=shared: agents in projects the user is a member of, but not created by them
-	// mine=true (legacy): agents the user created or in projects they own/are a member of
+	// scope=mine: agents in projects the user directly owns (active
+	//   project-owner RoleBinding) or agents the user created.
+	// scope=shared: agents in projects where the user has effective access
+	//   but is NOT in the "mine" owner set.
+	// mine=true (legacy alias): same as scope=mine.
 	//
-	// All scopes merge legacy group memberships and RoleBinding-based membership.
+	// C0-CONTAINMENT: F-QA-01 — Mine selects only active direct project-owner
+	// bindings. Shared excludes the owner set. Contract decision to relax:
+	// Phase 1 Mine/Shared semantics.
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			filter.OwnerID = userIdent.ID()
-			memberIDs := mergeProjectIDs(
-				s.resolveUserProjectIDs(ctx, userIdent.ID()),
-				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
-			)
-			if len(memberIDs) > 0 {
-				filter.MemberOrOwnerProjectIDs = memberIDs
+			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+			if len(ownerIDs) > 0 {
+				filter.MemberOrOwnerProjectIDs = ownerIDs
 			}
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			memberIDs := mergeProjectIDs(
+			allMemberIDs := mergeProjectIDs(
 				s.resolveUserProjectIDs(ctx, userIdent.ID()),
 				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
 			)
-			if len(memberIDs) > 0 {
-				filter.MemberProjectIDs = memberIDs
+			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+			sharedIDs := subtractProjectIDs(allMemberIDs, ownerIDs)
+			if len(sharedIDs) > 0 {
+				filter.MemberProjectIDs = sharedIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
@@ -293,12 +296,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				memberIDs := mergeProjectIDs(
-					s.resolveUserProjectIDs(ctx, userIdent.ID()),
-					s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
-				)
-				if len(memberIDs) > 0 {
-					filter.MemberOrOwnerProjectIDs = memberIDs
+				ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+				if len(ownerIDs) > 0 {
+					filter.MemberOrOwnerProjectIDs = ownerIDs
 				}
 			}
 		}

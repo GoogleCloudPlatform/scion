@@ -644,7 +644,7 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 				return
 			}
 			if ownerCount <= 1 {
-				writeError(w, http.StatusConflict, "LAST_OWNER",
+				writeError(w, http.StatusConflict, ErrCodeLastOwner,
 					"Cannot remove the last project owner — every project must retain at least one direct user owner", nil)
 				return
 			}

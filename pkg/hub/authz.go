@@ -1529,6 +1529,55 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 
 // isProjectOwnerOrAdmin reports whether the user has project-owner or
 // project-admin role in the given project. Uses the batched query path.
+// isProjectOwner checks whether the user is a direct project-owner.
+//
+// C0-CONTAINMENT: F-QA-02 — this function restricts to owner-only. The
+// pre-existing isProjectOwnerOrAdmin allowed admins to manage membership,
+// which the C0 exit gate disallows. Contract decision to relax: Phase 1
+// governance matrix.
+func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID string) bool {
+	if userID == "" || projectID == "" {
+		return false
+	}
+
+	// 1. Direct user membership.
+	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
+	if err == nil && membership != nil {
+		if membership.Role == store.ProjectRoleOwner {
+			return true
+		}
+	}
+
+	// 2. Group-expanded: check if any of the user's groups have an owner
+	//    role binding on this project.
+	groupIDs, err := a.store.GetEffectiveGroups(ctx, userID)
+	if err != nil || len(groupIDs) == 0 {
+		return false
+	}
+
+	var principals []store.PrincipalRef
+	for _, gid := range groupIDs {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+	}
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return false
+	}
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			continue
+		}
+		if rd.Name == store.ProjectRoleOwner {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
 	if userID == "" || projectID == "" {
 		return false
