@@ -41,6 +41,7 @@ import type { PermissionId } from '../../shared/access-boundaries.js';
 
 export interface PermissionChangeDetail {
   retainedPermissions: PermissionId[];
+  totalCount: number;
 }
 
 /** A single permission as fetched from the registry. */
@@ -407,6 +408,7 @@ export class ScionMaximumPermissionSelector extends LitElement {
       new CustomEvent<PermissionChangeDetail>('permission-change', {
         detail: {
           retainedPermissions: [...this.retainedPermissions],
+          totalCount: this.registryPermissions.length,
         },
         bubbles: true,
         composed: true,

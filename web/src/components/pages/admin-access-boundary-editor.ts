@@ -384,6 +384,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
 
   private handlePermissionChange(e: CustomEvent<PermissionChangeDetail>): void {
     this.draftRetainedPermissions = e.detail.retainedPermissions;
+    this.draftTotalPermissionCount = e.detail.totalCount;
     this.markDirty();
   }
 

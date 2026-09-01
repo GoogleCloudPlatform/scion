@@ -218,7 +218,7 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
 
     switch (d.subjectSelection) {
       case 'exact_user':
-        return `User: ${d.subjectDisplayLabel || d.subject.kind === 'principal' ? (d.subject as { kind: 'principal'; principal: { id: string } }).principal.id : ''}`;
+        return `User: ${d.subjectDisplayLabel || (d.subject.kind === 'principal' ? (d.subject as { kind: 'principal'; principal: { id: string } }).principal.id : '')}`;
       case 'exact_agent':
         return `Agent: ${d.subjectDisplayLabel || (d.subject.kind === 'principal' ? (d.subject as { kind: 'principal'; principal: { id: string } }).principal.id : '')}`;
       case 'exact_group':

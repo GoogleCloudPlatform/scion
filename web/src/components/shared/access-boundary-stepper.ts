@@ -216,7 +216,6 @@ export class ScionAccessBoundaryStepper extends LitElement {
                     done: isComplete,
                     clickable,
                   })}
-                  role="listitem"
                   aria-current=${isCurrent ? 'step' : 'false'}
                   aria-label="${step.label}${isComplete ? ' (completed)' : ''}${isCurrent
                     ? ' (current)'
