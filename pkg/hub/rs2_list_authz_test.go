@@ -284,10 +284,10 @@ func TestRS2_ProjectListCursorBinding(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		p := &store.Project{
 			ID: tid("rs2-plc-p" + string(rune('a'+i))), Name: "Proj " + string(rune('A'+i)),
-			Slug:      "rs2-plc-" + string(rune('a'+i)),
-			OwnerID:   userA.ID, CreatedBy: userA.ID,
-			Created:   time.Now().Add(time.Duration(-5+i) * time.Hour),
-			Updated:   time.Now(),
+			Slug:    "rs2-plc-" + string(rune('a'+i)),
+			OwnerID: userA.ID, CreatedBy: userA.ID,
+			Created: time.Now().Add(time.Duration(-5+i) * time.Hour),
+			Updated: time.Now(),
 		}
 		require.NoError(t, s.CreateProject(ctx, p))
 		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
