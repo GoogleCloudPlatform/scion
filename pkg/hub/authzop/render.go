@@ -46,7 +46,7 @@ func RenderMarkdown(specs []OperationSpec) string {
 
 func renderSpec(b *strings.Builder, s *OperationSpec) {
 	b.WriteString(fmt.Sprintf("## %s\n\n", s.ID))
-	b.WriteString(fmt.Sprintf("**Domain:** %s  \n", s.Domain))
+	b.WriteString(fmt.Sprintf("**Domain:** %s\n\n", s.Domain))
 	b.WriteString(fmt.Sprintf("**Description:** %s\n\n", s.Description))
 
 	// Entry points.
@@ -88,7 +88,7 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 
 	// Base permission and resolver.
 	if s.BasePermission != "" {
-		b.WriteString(fmt.Sprintf("**Base Permission:** `%s`  \n", s.BasePermission))
+		b.WriteString(fmt.Sprintf("**Base Permission:** `%s`\n\n", s.BasePermission))
 	}
 	if s.ResourceResolver != "" {
 		b.WriteString(fmt.Sprintf("**Resource Resolver:** %s\n\n", s.ResourceResolver))

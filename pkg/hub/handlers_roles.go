@@ -555,8 +555,32 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
+	// R4 brief item 2: project-scoped role-binding create MUST route through
+	// ProjectMembershipService for typed governance, delegation, lock,
+	// last-owner protection, transactional audit, and D4 enforcement.
+	// System-scoped operations remain generic.
+	if req.ScopeType == store.RoleScopeProject && s.membershipService != nil {
+		mReq := MembershipRequest{
+			Op:            MembershipOpAdd,
+			ProjectID:     req.ScopeID,
+			Actor:         user,
+			PrincipalType: req.PrincipalType,
+			PrincipalID:   req.PrincipalID,
+			RoleDefID:     req.RoleDefinitionID,
+			NotBefore:     req.NotBefore,
+			ExpiresAt:     req.ExpiresAt,
+		}
+		result, denial := s.membershipService.AddMember(r.Context(), mReq)
+		if denial != nil && !denial.Allowed {
+			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, nil)
+			return
+		}
+		writeJSON(w, http.StatusCreated, result.Binding)
+		return
+	}
+
 	// CanDelegate check: security invariant — the actor must hold all
-	// permissions granted by the target role.
+	// permissions granted by the target role (system-scoped only at this point).
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
 			Type:             GrantTypeRoleBinding,
@@ -620,35 +644,26 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// PM1: last-owner protection — cannot delete the last direct-user
-	// project-owner binding. Every project must retain at least one.
-	//
-	// Known limitation (O2): The count-then-delete sequence is not
-	// transactional, so two concurrent deletions of different owner bindings
-	// could both pass the check and leave the project with zero owners.
-	// Risk is low (requires simultaneous admin operations on the same
-	// project) and is mitigated by the offline recovery command (RC1)
-	// which can detect and repair orphaned projects. This matches the
-	// AC1 TOCTOU pattern accepted elsewhere in the authorization layer.
-	if binding.ScopeType == store.RoleScopeProject && binding.PrincipalType == store.RoleBindingPrincipalUser {
-		roleDef, rdErr := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-		if rdErr != nil {
-			slog.Error("last-owner check: failed to look up project-owner role definition", "error", rdErr)
-			writeErrorFromErr(w, rdErr, "")
+	// R4 brief item 2: project-scoped role-binding delete MUST route
+	// through ProjectMembershipService for serialization lock,
+	// last-owner protection, typed governance, transactional audit,
+	// and stable denial mapping. System-scoped operations remain generic.
+	if binding.ScopeType == store.RoleScopeProject && s.membershipService != nil {
+		mReq := MembershipRequest{
+			Op:        MembershipOpRemove,
+			ProjectID: binding.ScopeID,
+			Actor:     user,
+			BindingID: id,
+		}
+		_, denial := s.membershipService.RemoveMember(ctx, mReq)
+		if denial != nil && !denial.Allowed {
+			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, nil)
 			return
 		}
-		if binding.RoleDefinitionID == roleDef.ID {
-			ownerCount, countErr := s.countDirectOwnerBindings(ctx, binding.ScopeID)
-			if countErr != nil {
-				writeErrorFromErr(w, countErr, "")
-				return
-			}
-			if ownerCount <= 1 {
-				writeError(w, http.StatusConflict, ErrCodeLastOwner,
-					"Cannot remove the last project owner — every project must retain at least one direct user owner", nil)
-				return
-			}
-		}
+		slog.Info("role binding deleted (via membership service)",
+			"binding_id", id, "actor", user.Email())
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {

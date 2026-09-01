@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -230,6 +231,106 @@ func (svc *ProjectMembershipService) isActorDirectOwner(ctx context.Context, use
 }
 
 // ---------------------------------------------------------------------------
+// R4 O-1: tx-aware authority re-evaluation helpers
+//
+// These variants read the actor's effective role and direct-owner status from
+// the provided (transactional) store *after* the project lock has been
+// acquired. This closes the TOCTOU window between pre-lock governance checks
+// and the locked decision point: a concurrent demotion that commits between
+// the pre-lock check and lock acquisition is visible to these helpers.
+// ---------------------------------------------------------------------------
+
+// projectEffectiveRoleFromStore is like projectEffectiveRole but reads from the
+// provided store (which should be the transactional store inside a locked tx).
+func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.Context, s store.Store, userID, projectID string) string {
+	now := svc.nowFunc()
+
+	directBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return ""
+	}
+
+	rdCache := make(map[string]*store.RoleDefinition)
+	getRoleDef := func(rdID string) *store.RoleDefinition {
+		if rd, ok := rdCache[rdID]; ok {
+			return rd
+		}
+		rd, err := s.GetRoleDefinition(ctx, rdID)
+		if err != nil {
+			return nil
+		}
+		rdCache[rdID] = rd
+		return rd
+	}
+
+	bestRole := ""
+	for _, rb := range directBindings {
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+			continue
+		}
+		if !isBindingActive(rb, now) {
+			continue
+		}
+		rd := getRoleDef(rb.RoleDefinitionID)
+		if rd == nil {
+			continue
+		}
+		bestRole = higherProjectRole(bestRole, rd.Name)
+	}
+
+	// Group-derived bindings (read from tx store).
+	groupIDs, err := s.GetEffectiveGroups(ctx, userID)
+	if err == nil && len(groupIDs) > 0 {
+		var principals []store.PrincipalRef
+		for _, gid := range groupIDs {
+			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
+		}
+		groupBindings, err := s.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err == nil {
+			for _, rb := range groupBindings {
+				if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+					continue
+				}
+				if !isBindingActive(rb, now) {
+					continue
+				}
+				rd := getRoleDef(rb.RoleDefinitionID)
+				if rd == nil {
+					continue
+				}
+				if rd.Name == store.ProjectRoleOwner {
+					continue
+				}
+				bestRole = higherProjectRole(bestRole, rd.Name)
+			}
+		}
+	}
+
+	return bestRole
+}
+
+// isActorDirectOwnerFromStore checks whether the actor has an active direct
+// project-owner binding using the provided (transactional) store.
+func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Context, s store.Store, userID, projectID string) bool {
+	now := svc.nowFunc()
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return false
+	}
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	if err != nil {
+		return false
+	}
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID &&
+			b.RoleDefinitionID == ownerRD.ID && isBindingActive(b, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Governance check — the CT1 D5 typed governance matrix
 // ---------------------------------------------------------------------------
 
@@ -394,23 +495,35 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
-	// Pre-compute actor's effective role and direct-owner status before the
-	// transaction. These read-only checks against the actor's own bindings
-	// cannot be done inside the SQLite write-locked transaction without
-	// deadlocking — and the actor's role is not being mutated by this tx.
-	actorRole := svc.projectEffectiveRole(ctx, req.Actor.ID(), req.ProjectID)
-	actorIsDirectOwner := svc.isActorDirectOwner(ctx, req.Actor.ID(), req.ProjectID)
-
 	// R3-1 + O-1: acquire project lock and check existing bindings inside the
 	// same transaction. The lock serializes concurrent membership mutations
 	// for this project (FOR UPDATE on PostgreSQL; no-op on SQLite). The D4
 	// existing-binding check inside the locked tx prevents two concurrent
 	// AddMember requests from both seeing zero bindings and both creating.
+	//
+	// R4 O-1: the actor's effective role and direct-owner status are
+	// re-evaluated from the transactional store AFTER acquiring the lock.
+	// This closes the TOCTOU window where a concurrent demotion could change
+	// the actor's authority between the pre-lock governance check and the
+	// locked decision point.
 	var result *MembershipResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
+		}
+
+		// R4 O-1: re-evaluate actor authority under lock.
+		actorRole := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		actorIsDirectOwner := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if actorRole == "" {
+			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+		}
+		if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
+		}
+		if requiresDirectOwner(roleDef.Name) && !actorIsDirectOwner {
+			return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 		}
 
 		// One-binding invariant (D4): re-check under lock.
@@ -435,8 +548,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 				return nil
 			}
 			// Governance check for the old role (since we're replacing it).
-			// Use pre-computed actor role to avoid svc.store reads inside the
-			// SQLite write-locked transaction.
+			// actorRole already re-evaluated under lock above.
 			if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
 				reason := fmt.Sprintf("actor role %q cannot %s target role %q", actorRole, req.Op, oldRoleDef.Name)
 				if isProtectedRole(oldRoleDef.Name) {
@@ -513,6 +625,9 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
+		}
+		if govDenial := isGovernanceError(txErr); govDenial != nil {
+			return nil, govDenial
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "failed to create binding: " + txErr.Error(), HTTPStatus: 500}
 	}
@@ -602,11 +717,49 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	// binding, enforce last-owner guard, and write audit record.
 	// R3-1: acquire project lock to prevent write-skew under PostgreSQL.
 	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU.
+	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
+		}
+
+		// R4 O-1: re-evaluate actor authority under lock.
+		actorRole := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		actorIsDirectOwner := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if actorRole == "" {
+			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+		}
+
+		// Re-fetch the target binding under lock to detect concurrent removal.
+		existing, err = tx.GetRoleBinding(ctx, req.BindingID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				return fmt.Errorf("governance:%d:%s", 404, "binding not found (re-fetched under lock)")
+			}
+			return fmt.Errorf("re-fetch binding: %w", err)
+		}
+		// Re-resolve old role under lock.
+		oldRoleDef, err = tx.GetRoleDefinition(ctx, existing.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("resolve old role under lock: %w", err)
+		}
+
+		// Re-validate governance under lock with fresh actor role.
+		if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
+			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, oldRoleDef.Name))
+		}
+		if oldRoleDef.Name != newRoleDef.Name {
+			if !svc.isOperationPermitted(actorRole, req.Op, newRoleDef.Name) {
+				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
+			}
+		}
+		if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
+			return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+		}
+		if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(newRoleDef.Name) && !actorIsDirectOwner {
+			return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 		}
 
 		// Last-owner guard (inside tx for serialization).
@@ -623,7 +776,6 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
 			return fmt.Errorf("delete old binding: %w", err)
 		}
-		var err error
 		created, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: req.NewRoleDefID,
 			PrincipalType:    existing.PrincipalType,
@@ -654,6 +806,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	if txErr != nil {
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
+		}
+		if govDenial := isGovernanceError(txErr); govDenial != nil {
+			return nil, govDenial
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
@@ -701,10 +856,42 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	// Delete the binding, enforce last-owner guard, and write audit inside a
 	// transaction. R3-1: acquire project lock to prevent write-skew.
 	// R2-R1: the last-owner check MUST be inside the transaction.
+	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
+		}
+
+		// R4 O-1: re-evaluate actor authority under lock.
+		actorRole := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if actorRole == "" {
+			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+		}
+
+		// Re-fetch the target binding under lock.
+		binding, err = tx.GetRoleBinding(ctx, req.BindingID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				return fmt.Errorf("governance:%d:%s", 404, "binding not found (re-fetched under lock)")
+			}
+			return fmt.Errorf("re-fetch binding: %w", err)
+		}
+		// Re-resolve role under lock.
+		roleDef, err = tx.GetRoleDefinition(ctx, binding.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("resolve role under lock: %w", err)
+		}
+
+		// Re-validate governance under lock.
+		if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
+		}
+		if requiresDirectOwner(roleDef.Name) {
+			actorIsDirectOwner := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+			if !actorIsDirectOwner {
+				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+			}
 		}
 
 		// Last-owner guard (inside tx for serialization).
@@ -730,6 +917,9 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	if txErr != nil {
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
+		}
+		if govDenial := isGovernanceError(txErr); govDenial != nil {
+			return nil, govDenial
 		}
 		if txErr == store.ErrNotFound {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "binding not found", HTTPStatus: 404}
@@ -795,11 +985,17 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 
 	// All transfer mutations, post-state invariant, and audit happen in one
 	// transaction. If anything fails, the entire transfer is rolled back.
+	// R4 O-1: re-verify actor is still a direct owner after acquiring the lock.
 	var newOwnerBinding, oldActorBinding *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// R3-1: acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
+		}
+
+		// R4 O-1: re-verify actor is still a direct owner under lock.
+		if !svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID) {
+			return fmt.Errorf("governance:%d:%s", 403, "actor is no longer a direct project owner (re-evaluated under lock)")
 		}
 
 		// Step 1: Give the new owner a project-owner binding (or replace existing).
@@ -868,6 +1064,9 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		})
 	})
 	if txErr != nil {
+		if govDenial := isGovernanceError(txErr); govDenial != nil {
+			return nil, govDenial
+		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "ownership transfer failed: " + txErr.Error(), HTTPStatus: 500}
 	}
 
@@ -1162,6 +1361,38 @@ func (e *lastOwnerError) Error() string {
 func isLastOwnerError(err error) bool {
 	_, ok := err.(*lastOwnerError)
 	return ok
+}
+
+// isGovernanceError checks whether a transaction error is a governance denial
+// produced by the in-tx re-evaluation helpers. Returns a MembershipDecision
+// if so.
+func isGovernanceError(err error) *MembershipDecision {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "governance:") {
+		return nil
+	}
+	// Format: "governance:STATUS:REASON"
+	parts := strings.SplitN(msg, ":", 3)
+	if len(parts) < 3 {
+		return nil
+	}
+	status := 403
+	if _, scanErr := fmt.Sscanf(parts[1], "%d", &status); scanErr != nil {
+		status = 403
+	}
+	code := ErrCodeRoleAssignmentForbidden
+	if status == 404 {
+		code = "not_found"
+	}
+	return &MembershipDecision{
+		Allowed:    false,
+		DenialCode: code,
+		Reason:     parts[2],
+		HTTPStatus: status,
+	}
 }
 
 // lastOwnerDenial converts a lastOwnerError into a MembershipDecision.

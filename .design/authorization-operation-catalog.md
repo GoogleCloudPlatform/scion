@@ -101,7 +101,8 @@
 
 ## project.membership.add
 
-**Domain:** project.membership  
+**Domain:** project.membership
+
 **Description:** Add a member to a project with a specified role
 
 ### Entry Points
@@ -114,7 +115,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.manage`  
+**Base Permission:** `project.manage`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `grant-authority`
@@ -153,7 +155,8 @@
 
 ## project.membership.update
 
-**Domain:** project.membership  
+**Domain:** project.membership
+
 **Description:** Change a project member's role
 
 ### Entry Points
@@ -166,7 +169,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.manage`  
+**Base Permission:** `project.manage`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `change-authority`
@@ -208,7 +212,8 @@
 
 ## project.membership.remove
 
-**Domain:** project.membership  
+**Domain:** project.membership
+
 **Description:** Remove a member from a project
 
 ### Entry Points
@@ -221,7 +226,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.manage`  
+**Base Permission:** `project.manage`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `revoke-authority`
@@ -256,7 +262,8 @@
 
 ## project.membership.list
 
-**Domain:** project.membership  
+**Domain:** project.membership
+
 **Description:** List project members and their roles
 
 ### Entry Points
@@ -269,7 +276,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.read`  
+**Base Permission:** `project.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `list-scoped`
@@ -284,7 +292,8 @@
 
 ## project.membership.transfer
 
-**Domain:** project.membership  
+**Domain:** project.membership
+
 **Description:** Atomically transfer project ownership from the actor to another user
 
 ### Entry Points
@@ -297,7 +306,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.manage`  
+**Base Permission:** `project.manage`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `change-authority`
@@ -340,7 +350,8 @@
 
 ## role.definition.create
 
-**Domain:** role  
+**Domain:** role
+
 **Description:** Create a custom role definition
 
 ### Entry Points
@@ -353,7 +364,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role.create`  
+**Base Permission:** `role.create`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `create-resource`
@@ -379,7 +391,8 @@
 
 ## role.definition.update
 
-**Domain:** role  
+**Domain:** role
+
 **Description:** Update a custom role definition
 
 ### Entry Points
@@ -392,7 +405,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role.update`  
+**Base Permission:** `role.update`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `update-resource`
@@ -407,7 +421,8 @@
 
 ## role.definition.delete
 
-**Domain:** role  
+**Domain:** role
+
 **Description:** Delete a custom role definition
 
 ### Entry Points
@@ -420,7 +435,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role.delete`  
+**Base Permission:** `role.delete`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `delete-resource`
@@ -442,7 +458,8 @@
 
 ## role.binding.create
 
-**Domain:** role.binding  
+**Domain:** role.binding
+
 **Description:** Create a role binding (grant authority to a principal)
 
 ### Entry Points
@@ -455,7 +472,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role_binding.create`  
+**Base Permission:** `role_binding.create`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `grant-authority`
@@ -482,7 +500,8 @@
 
 ## role.binding.delete
 
-**Domain:** role.binding  
+**Domain:** role.binding
+
 **Description:** Delete a role binding (revoke authority from a principal)
 
 ### Entry Points
@@ -495,7 +514,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role_binding.delete`  
+**Base Permission:** `role_binding.delete`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `revoke-authority`
@@ -524,7 +544,8 @@
 
 ## group.member.add
 
-**Domain:** group  
+**Domain:** group
+
 **Description:** Add a member to a group
 
 ### Entry Points
@@ -537,7 +558,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `group.addMember`  
+**Base Permission:** `group.addMember`
+
 **Resource Resolver:** group-from-url
 
 **Effects:** `grant-authority`
@@ -564,7 +586,8 @@
 
 ## group.member.remove
 
-**Domain:** group  
+**Domain:** group
+
 **Description:** Remove a member from a group
 
 ### Entry Points
@@ -577,7 +600,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `group.removeMember`  
+**Base Permission:** `group.removeMember`
+
 **Resource Resolver:** group-from-url
 
 **Effects:** `revoke-authority`
@@ -604,7 +628,8 @@
 
 ## group.delete
 
-**Domain:** group  
+**Domain:** group
+
 **Description:** Delete a group
 
 ### Entry Points
@@ -617,7 +642,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `group.delete`  
+**Base Permission:** `group.delete`
+
 **Resource Resolver:** group-from-url
 
 **Effects:** `delete-resource`
@@ -639,7 +665,8 @@
 
 ## access.constraint.create
 
-**Domain:** access.constraint  
+**Domain:** access.constraint
+
 **Description:** Create an access constraint (tighten boundary)
 
 ### Entry Points
@@ -652,7 +679,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `access_constraint.admin`  
+**Base Permission:** `access_constraint.admin`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `tighten-boundary`
@@ -682,7 +710,8 @@
 
 ## access.constraint.update
 
-**Domain:** access.constraint  
+**Domain:** access.constraint
+
 **Description:** Update an access constraint (may relax or tighten boundary)
 
 ### Entry Points
@@ -695,7 +724,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `access_constraint.admin`  
+**Base Permission:** `access_constraint.admin`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `relax-boundary`, `tighten-boundary`
@@ -725,7 +755,8 @@
 
 ## access.constraint.delete
 
-**Domain:** access.constraint  
+**Domain:** access.constraint
+
 **Description:** Delete an access constraint (relax boundary)
 
 ### Entry Points
@@ -738,7 +769,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `access_constraint.admin`  
+**Base Permission:** `access_constraint.admin`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `relax-boundary`
@@ -768,7 +800,8 @@
 
 ## credential.token.create
 
-**Domain:** credential  
+**Domain:** credential
+
 **Description:** Create a user access token (UAT)
 
 ### Entry Points
@@ -781,7 +814,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `user.read`  
+**Base Permission:** `user.read`
+
 **Resource Resolver:** self-principal
 
 **Effects:** `mint-credential`
@@ -812,7 +846,8 @@
 
 ## credential.token.revoke
 
-**Domain:** credential  
+**Domain:** credential
+
 **Description:** Revoke a user access token
 
 ### Entry Points
@@ -825,7 +860,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `user.read`  
+**Base Permission:** `user.read`
+
 **Resource Resolver:** self-principal
 
 **Effects:** `revoke-authority`
@@ -856,7 +892,8 @@
 
 ## gcp.identity.create
 
-**Domain:** gcp.identity  
+**Domain:** gcp.identity
+
 **Description:** Create a GCP service account binding
 
 ### Entry Points
@@ -869,7 +906,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `gcp_service_account.create`  
+**Base Permission:** `gcp_service_account.create`
+
 **Resource Resolver:** project-from-body
 
 **Effects:** `assign-credential`
@@ -896,7 +934,8 @@
 
 ## gcp.identity.delete
 
-**Domain:** gcp.identity  
+**Domain:** gcp.identity
+
 **Description:** Delete a GCP service account binding
 
 ### Entry Points
@@ -909,7 +948,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `gcp_service_account.delete`  
+**Base Permission:** `gcp_service_account.delete`
+
 **Resource Resolver:** gcp-service-account-from-url
 
 **Effects:** `delete-resource`
@@ -931,7 +971,8 @@
 
 ## gcp.identity.assign
 
-**Domain:** gcp.identity  
+**Domain:** gcp.identity
+
 **Description:** Assign a GCP service account to an agent
 
 ### Entry Points
@@ -944,7 +985,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `gcp_service_account.assign`  
+**Base Permission:** `gcp_service_account.assign`
+
 **Resource Resolver:** gcp-service-account-from-url
 
 **Effects:** `assign-credential`
@@ -971,7 +1013,8 @@
 
 ## gcp.identity.mint
 
-**Domain:** gcp.identity  
+**Domain:** gcp.identity
+
 **Description:** Mint a GCP access token for a service account
 
 ### Entry Points
@@ -984,7 +1027,8 @@
 
 **Credentials:** `agent_jwt`
 
-**Base Permission:** `gcp_service_account.mint`  
+**Base Permission:** `gcp_service_account.mint`
+
 **Resource Resolver:** agent-gcp-service-account
 
 **Effects:** `mint-credential`
@@ -1012,7 +1056,8 @@
 
 ## agent.lifecycle.create
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Create an agent in a project
 
 ### Entry Points
@@ -1025,7 +1070,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `agent.create`  
+**Base Permission:** `agent.create`
+
 **Resource Resolver:** project-from-body
 
 **Effects:** `create-resource`
@@ -1040,7 +1086,8 @@
 
 ## agent.lifecycle.delete
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Delete an agent
 
 ### Entry Points
@@ -1053,7 +1100,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `agent.delete`  
+**Base Permission:** `agent.delete`
+
 **Resource Resolver:** agent-from-url
 
 **Effects:** `delete-resource`
@@ -1075,7 +1123,8 @@
 
 ## project.lifecycle.create
 
-**Domain:** project  
+**Domain:** project
+
 **Description:** Create a new project
 
 ### Entry Points
@@ -1088,7 +1137,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `project.create`  
+**Base Permission:** `project.create`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `create-resource`
@@ -1103,7 +1153,8 @@
 
 ## project.lifecycle.delete
 
-**Domain:** project  
+**Domain:** project
+
 **Description:** Delete a project
 
 ### Entry Points
@@ -1116,7 +1167,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `project.delete`  
+**Base Permission:** `project.delete`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `delete-resource`
@@ -1138,7 +1190,8 @@
 
 ## agent.message.send
 
-**Domain:** agent.message  
+**Domain:** agent.message
+
 **Description:** Send a message to an agent
 
 ### Entry Points
@@ -1152,7 +1205,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
 
-**Base Permission:** `agent.message`  
+**Base Permission:** `agent.message`
+
 **Resource Resolver:** agent-from-thread
 
 **Effects:** `emit-external-effect`
@@ -1183,7 +1237,8 @@
 
 ## user.admin.suspend
 
-**Domain:** user.admin  
+**Domain:** user.admin
+
 **Description:** Suspend a user account
 
 ### Entry Points
@@ -1196,7 +1251,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `user.suspend`  
+**Base Permission:** `user.suspend`
+
 **Resource Resolver:** user-from-url
 
 **Effects:** `change-principal-status`
@@ -1219,7 +1275,8 @@
 
 ## secret.read
 
-**Domain:** secret  
+**Domain:** secret
+
 **Description:** Read project secrets or environment variables containing secrets
 
 ### Entry Points
@@ -1233,7 +1290,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.read`  
+**Base Permission:** `project.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-secret`
@@ -1254,7 +1312,8 @@
 
 ## secret.write
 
-**Domain:** secret  
+**Domain:** secret
+
 **Description:** Create or update project secrets
 
 ### Entry Points
@@ -1269,7 +1328,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.update`  
+**Base Permission:** `project.update`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `create-resource`, `update-resource`, `delete-resource`
@@ -1291,7 +1351,8 @@
 
 ## user.admin.invite
 
-**Domain:** user.admin  
+**Domain:** user.admin
+
 **Description:** Invite a user to the platform
 
 ### Entry Points
@@ -1308,7 +1369,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `user.invite`  
+**Base Permission:** `user.invite`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `issue-credential`
@@ -1335,7 +1397,8 @@
 
 ## user.admin.promote
 
-**Domain:** user.admin  
+**Domain:** user.admin
+
 **Description:** Promote or demote a user's administrative level
 
 ### Entry Points
@@ -1348,7 +1411,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `user.promote`  
+**Base Permission:** `user.promote`
+
 **Resource Resolver:** user-from-url
 
 **Effects:** `change-authority`
@@ -1378,7 +1442,8 @@
 
 ## hub.authreset
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Reset all agent authentication credentials (emergency action)
 
 ### Entry Points
@@ -1391,7 +1456,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.auth_reset.execute`  
+**Base Permission:** `hub.auth_reset.execute`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `revoke-authority`
@@ -1418,7 +1484,8 @@
 
 ## hub.config.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read server configuration and schema
 
 ### Entry Points
@@ -1432,7 +1499,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.config.read`  
+**Base Permission:** `hub.config.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1447,7 +1515,8 @@
 
 ## hub.config.update
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Update server configuration sections
 
 ### Entry Points
@@ -1460,7 +1529,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.config.update`  
+**Base Permission:** `hub.config.update`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `update-resource`
@@ -1475,7 +1545,8 @@
 
 ## hub.maintenance.execute
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Execute maintenance operations including migrations and restarts
 
 ### Entry Points
@@ -1493,7 +1564,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.maintenance.execute`  
+**Base Permission:** `hub.maintenance.execute`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `update-resource`
@@ -1508,7 +1580,8 @@
 
 ## hub.adminmode.update
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Toggle admin/maintenance mode
 
 ### Entry Points
@@ -1521,7 +1594,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.admin_mode.update`  
+**Base Permission:** `hub.admin_mode.update`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `update-resource`
@@ -1536,7 +1610,8 @@
 
 ## hub.allowlist.update
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Manage the platform email allow list
 
 ### Entry Points
@@ -1552,7 +1627,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.allow_list.update`  
+**Base Permission:** `hub.allow_list.update`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `update-resource`
@@ -1567,7 +1643,8 @@
 
 ## hub.health.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read platform health summary and GCP quota status
 
 ### Entry Points
@@ -1581,7 +1658,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.health.read`  
+**Base Permission:** `hub.health.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1596,7 +1674,8 @@
 
 ## hub.diagnostics.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read diagnostic logs and messaging divergence data
 
 ### Entry Points
@@ -1611,7 +1690,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.diagnostics.read`  
+**Base Permission:** `hub.diagnostics.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1626,7 +1706,8 @@
 
 ## hub.scheduler.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read scheduler status and configuration
 
 ### Entry Points
@@ -1639,7 +1720,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.scheduler.read`  
+**Base Permission:** `hub.scheduler.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1654,7 +1736,8 @@
 
 ## hub.projectdefaults.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read project default settings
 
 ### Entry Points
@@ -1667,7 +1750,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.project_defaults.read`  
+**Base Permission:** `hub.project_defaults.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1682,7 +1766,8 @@
 
 ## hub.lifecyclehooks.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read lifecycle hook definitions
 
 ### Entry Points
@@ -1696,7 +1781,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.lifecycle_hooks.read`  
+**Base Permission:** `hub.lifecycle_hooks.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1711,7 +1797,8 @@
 
 ## hub.validate.execute
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Validate resource definitions against schema
 
 ### Entry Points
@@ -1724,7 +1811,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.validate.execute`  
+**Base Permission:** `hub.validate.execute`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1739,7 +1827,8 @@
 
 ## hub.integrations.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read integration configurations
 
 ### Entry Points
@@ -1753,7 +1842,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.integrations.read`  
+**Base Permission:** `hub.integrations.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1768,7 +1858,8 @@
 
 ## hub.teamsmanifest.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read Teams integration manifest
 
 ### Entry Points
@@ -1781,7 +1872,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.teams_manifest.read`  
+**Base Permission:** `hub.teams_manifest.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1796,7 +1888,8 @@
 
 ## hub.metrics.read
 
-**Domain:** hub  
+**Domain:** hub
+
 **Description:** Read metrics dashboard data
 
 ### Entry Points
@@ -1810,7 +1903,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `hub.metrics.read`  
+**Base Permission:** `hub.metrics.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
@@ -1825,7 +1919,8 @@
 
 ## agent.read
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Read agent metadata or list agents in a project
 
 ### Entry Points
@@ -1839,7 +1934,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `agent.read`  
+**Base Permission:** `agent.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -1854,7 +1950,8 @@
 
 ## agent.update
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Update agent configuration or metadata
 
 ### Entry Points
@@ -1867,7 +1964,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `agent.update`  
+**Base Permission:** `agent.update`
+
 **Resource Resolver:** agent-from-url
 
 **Effects:** `update-resource`
@@ -1882,7 +1980,8 @@
 
 ## agent.attach
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Attach to an agent session via WebSocket
 
 ### Entry Points
@@ -1895,7 +1994,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `agent.attach`  
+**Base Permission:** `agent.attach`
+
 **Resource Resolver:** agent-from-url
 
 **Effects:** `read-one`
@@ -1910,7 +2010,8 @@
 
 ## agent.portaccess
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Access forwarded ports on an agent
 
 ### Entry Points
@@ -1923,7 +2024,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `agent.port_access`  
+**Base Permission:** `agent.port_access`
+
 **Resource Resolver:** agent-from-url
 
 **Effects:** `read-one`
@@ -1938,7 +2040,8 @@
 
 ## agent.stopall
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Stop all running agents in a project
 
 ### Entry Points
@@ -1951,7 +2054,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `agent.stop_all`  
+**Base Permission:** `agent.stop_all`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `update-resource`
@@ -1966,7 +2070,8 @@
 
 ## agent.setmessagemode
 
-**Domain:** agent  
+**Domain:** agent
+
 **Description:** Change an agent's message mode
 
 ### Entry Points
@@ -1979,7 +2084,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `agent.set_message_mode`  
+**Base Permission:** `agent.set_message_mode`
+
 **Resource Resolver:** agent-from-url
 
 **Effects:** `update-resource`
@@ -1994,7 +2100,8 @@
 
 ## project.read
 
-**Domain:** project  
+**Domain:** project
+
 **Description:** Read project metadata or list projects
 
 ### Entry Points
@@ -2010,7 +2117,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `project.read`  
+**Base Permission:** `project.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2025,7 +2133,8 @@
 
 ## project.update
 
-**Domain:** project  
+**Domain:** project
+
 **Description:** Update project settings and metadata
 
 ### Entry Points
@@ -2039,7 +2148,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.update`  
+**Base Permission:** `project.update`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `update-resource`
@@ -2054,7 +2164,8 @@
 
 ## project.register
 
-**Domain:** project  
+**Domain:** project
+
 **Description:** Register a project or grove from an external source
 
 ### Entry Points
@@ -2068,7 +2179,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `project.register`  
+**Base Permission:** `project.register`
+
 **Resource Resolver:** project-from-body
 
 **Effects:** `create-resource`
@@ -2083,7 +2195,8 @@
 
 ## skill.read
 
-**Domain:** skill  
+**Domain:** skill
+
 **Description:** Read skill definitions or list/discover skills
 
 ### Entry Points
@@ -2098,7 +2211,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `skill.read`  
+**Base Permission:** `skill.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2113,7 +2227,8 @@
 
 ## skill.create
 
-**Domain:** skill  
+**Domain:** skill
+
 **Description:** Create a new skill definition
 
 ### Entry Points
@@ -2126,7 +2241,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `skill.create`  
+**Base Permission:** `skill.create`
+
 **Resource Resolver:** project-from-body
 
 **Effects:** `create-resource`
@@ -2141,7 +2257,8 @@
 
 ## skill.update
 
-**Domain:** skill  
+**Domain:** skill
+
 **Description:** Update an existing skill definition
 
 ### Entry Points
@@ -2154,7 +2271,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `skill.update`  
+**Base Permission:** `skill.update`
+
 **Resource Resolver:** skill-from-url
 
 **Effects:** `update-resource`
@@ -2169,7 +2287,8 @@
 
 ## skill.delete
 
-**Domain:** skill  
+**Domain:** skill
+
 **Description:** Delete a skill definition
 
 ### Entry Points
@@ -2182,7 +2301,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `skill.delete`  
+**Base Permission:** `skill.delete`
+
 **Resource Resolver:** skill-from-url
 
 **Effects:** `delete-resource`
@@ -2204,7 +2324,8 @@
 
 ## skill.register
 
-**Domain:** skill  
+**Domain:** skill
+
 **Description:** Register skills in a skill registry
 
 ### Entry Points
@@ -2221,7 +2342,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `skill.register`  
+**Base Permission:** `skill.register`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `create-resource`, `update-resource`, `delete-resource`
@@ -2243,7 +2365,8 @@
 
 ## template.read
 
-**Domain:** template  
+**Domain:** template
+
 **Description:** Read template definitions or discover available templates
 
 ### Entry Points
@@ -2258,7 +2381,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `template.read`  
+**Base Permission:** `template.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2273,7 +2397,8 @@
 
 ## template.create
 
-**Domain:** template  
+**Domain:** template
+
 **Description:** Create a new template or import resources
 
 ### Entry Points
@@ -2287,7 +2412,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `template.create`  
+**Base Permission:** `template.create`
+
 **Resource Resolver:** project-from-body
 
 **Effects:** `create-resource`
@@ -2302,7 +2428,8 @@
 
 ## template.update
 
-**Domain:** template  
+**Domain:** template
+
 **Description:** Update an existing template definition
 
 ### Entry Points
@@ -2315,7 +2442,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `template.update`  
+**Base Permission:** `template.update`
+
 **Resource Resolver:** template-from-url
 
 **Effects:** `update-resource`
@@ -2330,7 +2458,8 @@
 
 ## template.delete
 
-**Domain:** template  
+**Domain:** template
+
 **Description:** Delete a template definition
 
 ### Entry Points
@@ -2343,7 +2472,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `template.delete`  
+**Base Permission:** `template.delete`
+
 **Resource Resolver:** template-from-url
 
 **Effects:** `delete-resource`
@@ -2365,7 +2495,8 @@
 
 ## harnessconfig.read
 
-**Domain:** harnessconfig  
+**Domain:** harnessconfig
+
 **Description:** Read harness configurations or list available configs
 
 ### Entry Points
@@ -2379,7 +2510,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `harness_config.read`  
+**Base Permission:** `harness_config.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2394,7 +2526,8 @@
 
 ## harnessconfig.create
 
-**Domain:** harnessconfig  
+**Domain:** harnessconfig
+
 **Description:** Create a new harness configuration
 
 ### Entry Points
@@ -2407,7 +2540,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `harness_config.create`  
+**Base Permission:** `harness_config.create`
+
 **Resource Resolver:** project-from-body
 
 **Effects:** `create-resource`
@@ -2422,7 +2556,8 @@
 
 ## harnessconfig.update
 
-**Domain:** harnessconfig  
+**Domain:** harnessconfig
+
 **Description:** Update a harness configuration
 
 ### Entry Points
@@ -2435,7 +2570,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `harness_config.update`  
+**Base Permission:** `harness_config.update`
+
 **Resource Resolver:** harnessconfig-from-url
 
 **Effects:** `update-resource`
@@ -2450,7 +2586,8 @@
 
 ## harnessconfig.delete
 
-**Domain:** harnessconfig  
+**Domain:** harnessconfig
+
 **Description:** Delete a harness configuration
 
 ### Entry Points
@@ -2463,7 +2600,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `harness_config.delete`  
+**Base Permission:** `harness_config.delete`
+
 **Resource Resolver:** harnessconfig-from-url
 
 **Effects:** `delete-resource`
@@ -2485,7 +2623,8 @@
 
 ## group.read
 
-**Domain:** group  
+**Domain:** group
+
 **Description:** Read group details or list groups
 
 ### Entry Points
@@ -2499,7 +2638,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `group.read`  
+**Base Permission:** `group.read`
+
 **Resource Resolver:** group-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2514,7 +2654,8 @@
 
 ## group.create
 
-**Domain:** group  
+**Domain:** group
+
 **Description:** Create a new group
 
 ### Entry Points
@@ -2527,7 +2668,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `group.create`  
+**Base Permission:** `group.create`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `create-resource`
@@ -2542,7 +2684,8 @@
 
 ## group.update
 
-**Domain:** group  
+**Domain:** group
+
 **Description:** Update group metadata
 
 ### Entry Points
@@ -2555,7 +2698,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `group.update`  
+**Base Permission:** `group.update`
+
 **Resource Resolver:** group-from-url
 
 **Effects:** `update-resource`
@@ -2570,7 +2714,8 @@
 
 ## user.read
 
-**Domain:** user  
+**Domain:** user
+
 **Description:** Read user profile or list users
 
 ### Entry Points
@@ -2584,7 +2729,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `user.read`  
+**Base Permission:** `user.read`
+
 **Resource Resolver:** user-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2599,7 +2745,8 @@
 
 ## user.update
 
-**Domain:** user  
+**Domain:** user
+
 **Description:** Update user profile or settings
 
 ### Entry Points
@@ -2612,7 +2759,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `user.update`  
+**Base Permission:** `user.update`
+
 **Resource Resolver:** user-from-url
 
 **Effects:** `update-resource`
@@ -2627,7 +2775,8 @@
 
 ## broker.read
 
-**Domain:** broker  
+**Domain:** broker
+
 **Description:** Read runtime broker status or list brokers
 
 ### Entry Points
@@ -2641,7 +2790,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `broker.read`  
+**Base Permission:** `broker.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`, `list-scoped`
@@ -2656,7 +2806,8 @@
 
 ## gcp.identity.read
 
-**Domain:** gcp.identity  
+**Domain:** gcp.identity
+
 **Description:** Read GCP service account details or list accounts
 
 ### Entry Points
@@ -2670,7 +2821,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `gcp_service_account.read`  
+**Base Permission:** `gcp_service_account.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2685,7 +2837,8 @@
 
 ## gcp.identity.verify
 
-**Domain:** gcp.identity  
+**Domain:** gcp.identity
+
 **Description:** Verify a GCP service account's IAM configuration
 
 ### Entry Points
@@ -2698,7 +2851,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `gcp_service_account.verify`  
+**Base Permission:** `gcp_service_account.verify`
+
 **Resource Resolver:** gcp-identity-from-url
 
 **Effects:** `assign-credential`
@@ -2725,7 +2879,8 @@
 
 ## role.read
 
-**Domain:** role  
+**Domain:** role
+
 **Description:** Read role definitions and permission registry
 
 ### Entry Points
@@ -2740,7 +2895,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role.read`  
+**Base Permission:** `role.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`, `list-scoped`
@@ -2755,7 +2911,8 @@
 
 ## role.binding.read
 
-**Domain:** role.binding  
+**Domain:** role.binding
+
 **Description:** Read role binding assignments
 
 ### Entry Points
@@ -2769,7 +2926,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `role_binding.read`  
+**Base Permission:** `role_binding.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`, `list-scoped`
@@ -2784,7 +2942,8 @@
 
 ## access.constraint.read
 
-**Domain:** access.constraint  
+**Domain:** access.constraint
+
 **Description:** Read access constraint definitions
 
 ### Entry Points
@@ -2798,7 +2957,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `access_constraint.read`  
+**Base Permission:** `access_constraint.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`, `list-scoped`
@@ -2813,7 +2973,8 @@
 
 ## quota.read
 
-**Domain:** quota  
+**Domain:** quota
+
 **Description:** Read limit definitions, entitlements, and usage
 
 ### Entry Points
@@ -2830,7 +2991,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `quota.read`  
+**Base Permission:** `quota.read`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`, `list-scoped`
@@ -2845,7 +3007,8 @@
 
 ## quota.create
 
-**Domain:** quota  
+**Domain:** quota
+
 **Description:** Create limit definitions and entitlement bindings
 
 ### Entry Points
@@ -2859,7 +3022,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `quota.create`  
+**Base Permission:** `quota.create`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `create-resource`
@@ -2874,7 +3038,8 @@
 
 ## quota.update
 
-**Domain:** quota  
+**Domain:** quota
+
 **Description:** Update limit definitions and entitlement bindings
 
 ### Entry Points
@@ -2888,7 +3053,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `quota.update`  
+**Base Permission:** `quota.update`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `update-resource`
@@ -2903,7 +3069,8 @@
 
 ## quota.delete
 
-**Domain:** quota  
+**Domain:** quota
+
 **Description:** Delete limit definitions and entitlement bindings
 
 ### Entry Points
@@ -2917,7 +3084,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `quota.delete`  
+**Base Permission:** `quota.delete`
+
 **Resource Resolver:** hub-scoped
 
 **Effects:** `delete-resource`
@@ -2939,7 +3107,8 @@
 
 ## schedule.event.read
 
-**Domain:** schedule  
+**Domain:** schedule
+
 **Description:** Read scheduled events or list events in a project
 
 ### Entry Points
@@ -2955,7 +3124,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `scheduled_event.read`  
+**Base Permission:** `scheduled_event.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -2970,7 +3140,8 @@
 
 ## schedule.event.create
 
-**Domain:** schedule  
+**Domain:** schedule
+
 **Description:** Create a scheduled event or recurring schedule
 
 ### Entry Points
@@ -2984,7 +3155,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `scheduled_event.create`  
+**Base Permission:** `scheduled_event.create`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `create-resource`
@@ -2999,7 +3171,8 @@
 
 ## schedule.event.update
 
-**Domain:** schedule  
+**Domain:** schedule
+
 **Description:** Update a recurring schedule
 
 ### Entry Points
@@ -3012,7 +3185,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `scheduled_event.update`  
+**Base Permission:** `scheduled_event.update`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `update-resource`
@@ -3027,7 +3201,8 @@
 
 ## schedule.event.delete
 
-**Domain:** schedule  
+**Domain:** schedule
+
 **Description:** Cancel a scheduled event or delete a recurring schedule
 
 ### Entry Points
@@ -3041,7 +3216,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `scheduled_event.delete`  
+**Base Permission:** `scheduled_event.delete`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `delete-resource`
@@ -3063,7 +3239,8 @@
 
 ## chat.access
 
-**Domain:** chat  
+**Domain:** chat
+
 **Description:** Access chat threads, spaces, topics, and messages within a project
 
 ### Entry Points
@@ -3087,7 +3264,8 @@
 
 **Credentials:** `session_jwt`
 
-**Base Permission:** `project.read`  
+**Base Permission:** `project.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
@@ -3102,7 +3280,8 @@
 
 ## env.read
 
-**Domain:** env  
+**Domain:** env
+
 **Description:** Read project environment variables
 
 ### Entry Points
@@ -3116,7 +3295,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.read`  
+**Base Permission:** `project.read`
+
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`

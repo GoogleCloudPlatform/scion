@@ -3767,20 +3767,27 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 	// at the database level. This prevents future duplicates from any code
 	// path, including direct store.CreateRoleBinding bypasses.
 	// Uses IF NOT EXISTS so it's idempotent across restarts.
-	if dbProvider, ok := s.store.(interface{ DB() *sql.DB }); ok {
-		if db := dbProvider.DB(); db != nil {
-			const indexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS ` +
-				`idx_rolebinding_one_per_principal_per_project ` +
-				`ON role_bindings (principal_type, principal_id, scope_type, scope_id) ` +
-				`WHERE scope_type = 'project'`
-			if _, err := db.ExecContext(ctx, indexDDL); err != nil {
-				log.Warn("could not create D4 partial unique index — duplicates still prevented by application logic",
-					"error", err)
-			} else {
-				log.Info("D4 partial unique index installed on role_bindings")
-			}
-		}
+	// R4-1: D4 partial unique index installation is fail-closed.
+	// The index is the only D4 enforcement path for the generic role-binding
+	// endpoint (handlers_roles.go), so a silent failure would remove a
+	// security defense that other code depends on. Abort startup if the
+	// index cannot be installed (missing raw-DB capability or DDL failure).
+	dbProvider, ok := s.store.(interface{ DB() *sql.DB })
+	if !ok {
+		return fmt.Errorf("D4 partial unique index: store does not expose raw DB — cannot install index (fail-closed)")
 	}
+	db := dbProvider.DB()
+	if db == nil {
+		return fmt.Errorf("D4 partial unique index: raw DB is nil — cannot install index (fail-closed)")
+	}
+	const indexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS ` +
+		`idx_rolebinding_one_per_principal_per_project ` +
+		`ON role_bindings (principal_type, principal_id, scope_type, scope_id) ` +
+		`WHERE scope_type = 'project'`
+	if _, err := db.ExecContext(ctx, indexDDL); err != nil {
+		return fmt.Errorf("D4 partial unique index creation failed (fail-closed): %w", err)
+	}
+	log.Info("D4 partial unique index installed on role_bindings")
 
 	return nil
 }
