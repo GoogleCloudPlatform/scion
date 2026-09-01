@@ -1,8 +1,8 @@
 # Authorization Audit Findings Ledger — Phase 0 Baseline
 
-**Status:** C0 baseline  
-**Branch:** `scion/authz-audit`  
-**Base:** `scion/policy-fix` @ `5dff865f`  
+**Status:** C0 baseline
+**Branch:** `scion/authz-audit`
+**Base:** `scion/policy-fix` @ `5dff865f`
 **Date:** 2026-09-01
 
 ## Purpose

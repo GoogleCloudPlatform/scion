@@ -506,3 +506,367 @@ func TestC0_SubtractProjectIDs(t *testing.T) {
 	result3 := subtractProjectIDs(all, all)
 	assert.Nil(t, result3)
 }
+
+// ---------------------------------------------------------------------------
+// C0: isProjectOwner — direct-user-only with activation lifecycle
+// ---------------------------------------------------------------------------
+
+// TestC0_IsProjectOwner_DirectUserOnly verifies that isProjectOwner only
+// considers direct user bindings, not group-derived. Since the store-level
+// ErrDirectUserOnly guard prevents creating group-owner bindings, we verify
+// the defense-in-depth property by confirming:
+// 1. A user with a group-based project-ADMIN binding is not an owner.
+// 2. Only a direct user project-owner binding grants ownership.
+// 3. The store correctly prevents group-owner bindings (belt-and-suspenders).
+func TestC0_IsProjectOwner_DirectUserOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("c0-grp-user"), Email: "grp-owner@test.com",
+		DisplayName: "Group Owner", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID: tid("c0-grp-proj"), Name: "Group Project", Slug: "c0-grp-proj",
+		OwnerID: tid("c0-grp-other"), CreatedBy: tid("c0-grp-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create a group and add the user as a member.
+	grp := &store.Group{
+		ID:   tid("c0-owner-grp"),
+		Name: "Owner Group",
+		Slug: "c0-owner-group",
+	}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    grp.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   user.ID,
+		Role:       "member",
+	}))
+
+	// Give the GROUP a project-admin binding (group-owner is prevented by
+	// store validation). This tests that group-expanded admin access does
+	// NOT leak into ownership.
+	adminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      grp.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	// isProjectOwner must NOT return true — the user has admin access via
+	// group, but no direct owner binding.
+	assert.False(t, srv.authzService.isProjectOwner(ctx, user.ID, project.ID),
+		"C0: group-derived admin binding must NOT grant ownership via isProjectOwner")
+
+	// Verify belt-and-suspenders: store prevents creating group-owner bindings.
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      grp.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+	})
+	assert.Error(t, err, "C0: store must prevent group-owner binding creation (ErrDirectUserOnly)")
+
+	// Verify that a direct user binding DOES work.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
+	assert.True(t, srv.authzService.isProjectOwner(ctx, user.ID, project.ID),
+		"C0: direct user owner binding must grant ownership via isProjectOwner")
+}
+
+// TestC0_IsProjectOwner_ExpiredBinding verifies that an expired owner binding
+// does not grant ownership via isProjectOwner.
+func TestC0_IsProjectOwner_ExpiredBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("c0-exp-user"), Email: "exp-owner@test.com",
+		DisplayName: "Expired Owner", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	project := &store.Project{
+		ID: tid("c0-exp-proj"), Name: "Expired Project", Slug: "c0-exp-proj",
+		OwnerID: tid("c0-exp-other"), CreatedBy: tid("c0-exp-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create an owner binding that has already expired.
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	assert.False(t, srv.authzService.isProjectOwner(ctx, user.ID, project.ID),
+		"C0: expired owner binding must NOT grant ownership via isProjectOwner")
+}
+
+// TestC0_IsProjectOwner_FutureBinding verifies that a not-yet-active owner
+// binding does not grant ownership via isProjectOwner.
+func TestC0_IsProjectOwner_FutureBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("c0-fut-user"), Email: "fut-owner@test.com",
+		DisplayName: "Future Owner", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	project := &store.Project{
+		ID: tid("c0-fut-proj"), Name: "Future Project", Slug: "c0-fut-proj",
+		OwnerID: tid("c0-fut-other"), CreatedBy: tid("c0-fut-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create an owner binding that is not yet active (notBefore in the future).
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	future := time.Now().Add(1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+		NotBefore:        &future,
+	})
+	require.NoError(t, err)
+
+	assert.False(t, srv.authzService.isProjectOwner(ctx, user.ID, project.ID),
+		"C0: not-yet-active owner binding must NOT grant ownership via isProjectOwner")
+}
+
+// ---------------------------------------------------------------------------
+// C0: isProjectOwner gate — expired/future owners cannot manage membership
+// ---------------------------------------------------------------------------
+
+// TestC0_ExpiredOwnerCannotAddMember verifies that a user with an expired
+// owner binding is denied at the membership mutation gate.
+func TestC0_ExpiredOwnerCannotAddMember(t *testing.T) {
+	srv, st, _, _, project := setupProjectMembersTest(t)
+	ctx := context.Background()
+
+	expiredOwner := &store.User{
+		ID: tid("c0-exp-mgr"), Email: "exp-mgr@test.com",
+		DisplayName: "Expired Manager", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, expiredOwner))
+	ensureHubMembership(ctx, st, expiredOwner.ID)
+
+	// Create an expired owner binding for the project.
+	ownerRoleDef, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      expiredOwner.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	target := &store.User{
+		ID: tid("c0-exp-tgt"), Email: "exp-tgt@test.com",
+		DisplayName: "ExpTarget", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, target))
+	ensureHubMembership(ctx, st, target.ID)
+
+	memberRoleDef, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, expiredOwner, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: memberRoleDef.ID,
+			PrincipalType:    "user",
+			PrincipalID:      target.ID,
+		})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"C0: expired owner binding must not permit membership management")
+}
+
+// ---------------------------------------------------------------------------
+// C0: Agent list Mine/Shared integration tests
+// ---------------------------------------------------------------------------
+
+// TestC0_AgentListMineScopeOwnerOnly verifies that scope=mine on the agent
+// list endpoint returns only agents from projects the user directly owns,
+// not projects where they are admin or member.
+func TestC0_AgentListMineScopeOwnerOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("c0-agmine-u"), Email: "agmine@test.com",
+		DisplayName: "Agent Mine User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Create two projects.
+	ownedProj := &store.Project{
+		ID: tid("c0-agmine-op"), Name: "Owned Agent Proj", Slug: "c0-agmine-owned",
+		OwnerID: user.ID, CreatedBy: user.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	adminProj := &store.Project{
+		ID: tid("c0-agmine-ap"), Name: "Admin Agent Proj", Slug: "c0-agmine-admin",
+		OwnerID: tid("c0-agmine-oth"), CreatedBy: tid("c0-agmine-oth"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, ownedProj))
+	require.NoError(t, s.CreateProject(ctx, adminProj))
+
+	// Owner binding on ownedProj.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, ownedProj.ID, user.ID))
+
+	// Admin binding on adminProj.
+	adminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          adminProj.ID,
+		CreatedBy:        user.ID,
+	})
+	require.NoError(t, err)
+
+	// Create agents in both projects.
+	ownedAgent := &store.Agent{
+		ID:        tid("c0-agmine-oa"),
+		Slug:      "c0-owned-agent",
+		Name:      "owned-agent",
+		ProjectID: ownedProj.ID,
+		OwnerID:   user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	adminAgent := &store.Agent{
+		ID:        tid("c0-agmine-aa"),
+		Slug:      "c0-admin-agent",
+		Name:      "admin-agent",
+		ProjectID: adminProj.ID,
+		OwnerID:   tid("c0-agmine-oth"),
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ownedAgent))
+	require.NoError(t, s.CreateAgent(ctx, adminAgent))
+
+	// scope=mine should return only the owned project's agent.
+	rec := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/agents?scope=mine", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Agents []struct {
+			ID        string `json:"id"`
+			ProjectID string `json:"projectId"`
+		} `json:"agents"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var agentProjectIDs []string
+	for _, a := range resp.Agents {
+		agentProjectIDs = append(agentProjectIDs, a.ProjectID)
+	}
+	assert.Contains(t, agentProjectIDs, ownedProj.ID,
+		"C0: scope=mine must include agents from owned project")
+	assert.NotContains(t, agentProjectIDs, adminProj.ID,
+		"C0: scope=mine must NOT include agents from admin-only project")
+}
+
+// ---------------------------------------------------------------------------
+// C0: _capabilities in members list response
+// ---------------------------------------------------------------------------
+
+// TestC0_MembersListCapabilities_OwnerGetsManageMembers verifies that the
+// members list response includes _capabilities with manage_members for an
+// owner, and omits it for a non-owner.
+func TestC0_MembersListCapabilities_OwnerGetsManageMembers(t *testing.T) {
+	srv, st, owner, _, project := setupProjectMembersTest(t)
+	ctx := context.Background()
+
+	// Owner should get manage_members capability.
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/members", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var ownerResp listProjectMembersResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&ownerResp))
+	require.NotNil(t, ownerResp.Capabilities,
+		"C0: owner's members list should include _capabilities")
+	assert.Contains(t, ownerResp.Capabilities.Actions, "manage_members",
+		"C0: owner's _capabilities should include manage_members")
+
+	// Create an admin user.
+	admin := &store.User{
+		ID: tid("c0-cap-admin"), Email: "cap-admin@test.com",
+		DisplayName: "Cap Admin", Role: store.UserRoleMember, Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, st, admin.ID)
+
+	adminRoleDef, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        owner.ID,
+	})
+	require.NoError(t, err)
+
+	// Admin should NOT get manage_members capability.
+	rec = doRequestAsUser(t, srv, admin, http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/members", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var adminResp listProjectMembersResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&adminResp))
+	if adminResp.Capabilities != nil {
+		assert.NotContains(t, adminResp.Capabilities.Actions, "manage_members",
+			"C0: admin's _capabilities must NOT include manage_members")
+	}
+	// _capabilities being nil is also acceptable — means no membership mutation rights.
+}
