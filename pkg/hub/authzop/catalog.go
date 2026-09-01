@@ -69,10 +69,10 @@ type MutationExemption struct {
 // and pkg/k8s/ are outside the trust boundary.
 var SecurityMutationSymbols = map[string]string{
 	// Authority mutations — role bindings
-	"CreateRoleBinding":            "grant-authority",
-	"DeleteRoleBinding":            "revoke-authority",
+	"CreateRoleBinding":              "grant-authority",
+	"DeleteRoleBinding":              "revoke-authority",
 	"DeleteRoleBindingsForPrincipal": "revoke-authority",
-	"DeleteRoleBindingsForScope":   "revoke-authority",
+	"DeleteRoleBindingsForScope":     "revoke-authority",
 
 	// Role definition mutations
 	"CreateRoleDefinition":                  "create-resource",
@@ -104,17 +104,17 @@ var SecurityMutationSymbols = map[string]string{
 	"DeleteUserAccessToken": "revoke-authority",
 
 	// Credential mutations — agent credentials
-	"CreateAgentCredential":        "mint-credential",
-	"RevokeAgentCredential":        "revoke-authority",
+	"CreateAgentCredential":         "mint-credential",
+	"RevokeAgentCredential":         "revoke-authority",
 	"RevokeAgentCredentialsByAgent": "revoke-authority",
 
 	// Secret operations
-	"CreateSecret":       "create-resource",
-	"UpdateSecret":       "update-resource",
-	"UpsertSecret":       "create-resource",
-	"DeleteSecret":       "delete-resource",
+	"CreateSecret":         "create-resource",
+	"UpdateSecret":         "update-resource",
+	"UpsertSecret":         "create-resource",
+	"DeleteSecret":         "delete-resource",
 	"DeleteSecretsByScope": "delete-resource",
-	"GetSecretValue":     "read-secret",
+	"GetSecretValue":       "read-secret",
 
 	// Broker secret operations
 	"CreateBrokerSecret": "create-resource",
@@ -981,9 +981,9 @@ var Catalog = []OperationSpec{
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:                    "user.admin.promote",
-		Domain:                "user.admin",
-		Description:           "Promote or demote a user's administrative level",
+		ID:          "user.admin.promote",
+		Domain:      "user.admin",
+		Description: "Promote or demote a user's administrative level",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/promote", Method: "POST"},
 		},
@@ -1041,9 +1041,9 @@ var Catalog = []OperationSpec{
 	// Domain: hub — hub admin reads and configuration
 	// =====================================================================
 	{
-		ID:               "hub.config.read",
-		Domain:           "hub",
-		Description:      "Read server configuration and schema",
+		ID:          "hub.config.read",
+		Domain:      "hub",
+		Description: "Read server configuration and schema",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config/schema", Method: "GET"},
@@ -1059,9 +1059,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.config.update",
-		Domain:           "hub",
-		Description:      "Update server configuration sections",
+		ID:          "hub.config.update",
+		Domain:      "hub",
+		Description: "Update server configuration sections",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config/sections/{id}", Method: "PUT"},
 		},
@@ -1076,9 +1076,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.maintenance.execute",
-		Domain:           "hub",
-		Description:      "Execute maintenance operations including migrations and restarts",
+		ID:          "hub.maintenance.execute",
+		Domain:      "hub",
+		Description: "Execute maintenance operations including migrations and restarts",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations", Method: "GET"},
@@ -1098,9 +1098,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.adminmode.update",
-		Domain:           "hub",
-		Description:      "Toggle admin/maintenance mode",
+		ID:          "hub.adminmode.update",
+		Domain:      "hub",
+		Description: "Toggle admin/maintenance mode",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance", Method: "PUT"},
 		},
@@ -1115,9 +1115,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.allowlist.update",
-		Domain:           "hub",
-		Description:      "Manage the platform email allow list",
+		ID:          "hub.allowlist.update",
+		Domain:      "hub",
+		Description: "Manage the platform email allow list",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "PUT"},
@@ -1135,9 +1135,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.health.read",
-		Domain:           "hub",
-		Description:      "Read platform health summary and GCP quota status",
+		ID:          "hub.health.read",
+		Domain:      "hub",
+		Description: "Read platform health summary and GCP quota status",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/health/summary", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/gcp-quota", Method: "GET"},
@@ -1153,9 +1153,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.diagnostics.read",
-		Domain:           "hub",
-		Description:      "Read diagnostic logs and messaging divergence data",
+		ID:          "hub.diagnostics.read",
+		Domain:      "hub",
+		Description: "Read diagnostic logs and messaging divergence data",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs/stream", Method: "GET"},
@@ -1172,9 +1172,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.scheduler.read",
-		Domain:           "hub",
-		Description:      "Read scheduler status and configuration",
+		ID:          "hub.scheduler.read",
+		Domain:      "hub",
+		Description: "Read scheduler status and configuration",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/scheduler", Method: "GET"},
 		},
@@ -1189,9 +1189,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.projectdefaults.read",
-		Domain:           "hub",
-		Description:      "Read project default settings",
+		ID:          "hub.projectdefaults.read",
+		Domain:      "hub",
+		Description: "Read project default settings",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/project-defaults", Method: "GET"},
 		},
@@ -1206,9 +1206,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.lifecyclehooks.read",
-		Domain:           "hub",
-		Description:      "Read lifecycle hook definitions",
+		ID:          "hub.lifecyclehooks.read",
+		Domain:      "hub",
+		Description: "Read lifecycle hook definitions",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/lifecycle-hooks", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/lifecycle-hooks/{id}", Method: "GET"},
@@ -1224,9 +1224,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.validate.execute",
-		Domain:           "hub",
-		Description:      "Validate resource definitions against schema",
+		ID:          "hub.validate.execute",
+		Domain:      "hub",
+		Description: "Validate resource definitions against schema",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/validate-resources", Method: "POST"},
 		},
@@ -1241,9 +1241,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.integrations.read",
-		Domain:           "hub",
-		Description:      "Read integration configurations",
+		ID:          "hub.integrations.read",
+		Domain:      "hub",
+		Description: "Read integration configurations",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/{name}", Method: "GET"},
@@ -1259,9 +1259,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.teamsmanifest.read",
-		Domain:           "hub",
-		Description:      "Read Teams integration manifest",
+		ID:          "hub.teamsmanifest.read",
+		Domain:      "hub",
+		Description: "Read Teams integration manifest",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/teams/manifest", Method: "GET"},
 		},
@@ -1276,9 +1276,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "hub.metrics.read",
-		Domain:           "hub",
-		Description:      "Read metrics dashboard data",
+		ID:          "hub.metrics.read",
+		Domain:      "hub",
+		Description: "Read metrics dashboard data",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/metrics/{name}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/metrics-dashboard", Method: "GET"},
@@ -1298,9 +1298,9 @@ var Catalog = []OperationSpec{
 	// Domain: agent — agent read, update, and special operations
 	// =====================================================================
 	{
-		ID:               "agent.read",
-		Domain:           "agent",
-		Description:      "Read agent metadata or list agents in a project",
+		ID:          "agent.read",
+		Domain:      "agent",
+		Description: "Read agent metadata or list agents in a project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
@@ -1316,9 +1316,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "agent.update",
-		Domain:           "agent",
-		Description:      "Update agent configuration or metadata",
+		ID:          "agent.update",
+		Domain:      "agent",
+		Description: "Update agent configuration or metadata",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PUT"},
 		},
@@ -1333,9 +1333,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "agent.attach",
-		Domain:           "agent",
-		Description:      "Attach to an agent session via WebSocket",
+		ID:          "agent.attach",
+		Domain:      "agent",
+		Description: "Attach to an agent session via WebSocket",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/attach", Method: "GET"},
 		},
@@ -1350,9 +1350,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "agent.portaccess",
-		Domain:           "agent",
-		Description:      "Access forwarded ports on an agent",
+		ID:          "agent.portaccess",
+		Domain:      "agent",
+		Description: "Access forwarded ports on an agent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
 		},
@@ -1367,9 +1367,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "agent.stopall",
-		Domain:           "agent",
-		Description:      "Stop all running agents in a project",
+		ID:          "agent.stopall",
+		Domain:      "agent",
+		Description: "Stop all running agents in a project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/stop-all", Method: "POST"},
 		},
@@ -1384,9 +1384,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "agent.setmessagemode",
-		Domain:           "agent",
-		Description:      "Change an agent's message mode",
+		ID:          "agent.setmessagemode",
+		Domain:      "agent",
+		Description: "Change an agent's message mode",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message-mode", Method: "PUT"},
 		},
@@ -1405,9 +1405,9 @@ var Catalog = []OperationSpec{
 	// Domain: project — project read, update, and register
 	// =====================================================================
 	{
-		ID:               "project.read",
-		Domain:           "project",
-		Description:      "Read project metadata or list projects",
+		ID:          "project.read",
+		Domain:      "project",
+		Description: "Read project metadata or list projects",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "GET"},
@@ -1425,9 +1425,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "project.update",
-		Domain:           "project",
-		Description:      "Update project settings and metadata",
+		ID:          "project.update",
+		Domain:      "project",
+		Description: "Update project settings and metadata",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groves/{id}", Method: "PUT"},
@@ -1443,9 +1443,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "project.register",
-		Domain:           "project",
-		Description:      "Register a project or grove from an external source",
+		ID:          "project.register",
+		Domain:      "project",
+		Description: "Register a project or grove from an external source",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groves/register", Method: "POST"},
@@ -1465,9 +1465,9 @@ var Catalog = []OperationSpec{
 	// Domain: skill — skill CRUD
 	// =====================================================================
 	{
-		ID:               "skill.read",
-		Domain:           "skill",
-		Description:      "Read skill definitions or list/discover skills",
+		ID:          "skill.read",
+		Domain:      "skill",
+		Description: "Read skill definitions or list/discover skills",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "GET"},
@@ -1484,9 +1484,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "skill.create",
-		Domain:           "skill",
-		Description:      "Create a new skill definition",
+		ID:          "skill.create",
+		Domain:      "skill",
+		Description: "Create a new skill definition",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST"},
 		},
@@ -1501,9 +1501,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "skill.update",
-		Domain:           "skill",
-		Description:      "Update an existing skill definition",
+		ID:          "skill.update",
+		Domain:      "skill",
+		Description: "Update an existing skill definition",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "PUT"},
 		},
@@ -1518,9 +1518,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "skill.delete",
-		Domain:           "skill",
-		Description:      "Delete a skill definition",
+		ID:          "skill.delete",
+		Domain:      "skill",
+		Description: "Delete a skill definition",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "DELETE"},
 		},
@@ -1541,9 +1541,9 @@ var Catalog = []OperationSpec{
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "skill.register",
-		Domain:           "skill",
-		Description:      "Register skills in a skill registry",
+		ID:          "skill.register",
+		Domain:      "skill",
+		Description: "Register skills in a skill registry",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skill-registries", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skill-registries", Method: "GET"},
@@ -1572,9 +1572,9 @@ var Catalog = []OperationSpec{
 	// Domain: template — template CRUD
 	// =====================================================================
 	{
-		ID:               "template.read",
-		Domain:           "template",
-		Description:      "Read template definitions or discover available templates",
+		ID:          "template.read",
+		Domain:      "template",
+		Description: "Read template definitions or discover available templates",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "GET"},
@@ -1591,9 +1591,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "template.create",
-		Domain:           "template",
-		Description:      "Create a new template or import resources",
+		ID:          "template.create",
+		Domain:      "template",
+		Description: "Create a new template or import resources",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/resources/import", Method: "POST"},
@@ -1609,9 +1609,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "template.update",
-		Domain:           "template",
-		Description:      "Update an existing template definition",
+		ID:          "template.update",
+		Domain:      "template",
+		Description: "Update an existing template definition",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "PUT"},
 		},
@@ -1626,9 +1626,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "template.delete",
-		Domain:           "template",
-		Description:      "Delete a template definition",
+		ID:          "template.delete",
+		Domain:      "template",
+		Description: "Delete a template definition",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "DELETE"},
 		},
@@ -1653,9 +1653,9 @@ var Catalog = []OperationSpec{
 	// Domain: harnessconfig — harness configuration CRUD
 	// =====================================================================
 	{
-		ID:               "harnessconfig.read",
-		Domain:           "harnessconfig",
-		Description:      "Read harness configurations or list available configs",
+		ID:          "harnessconfig.read",
+		Domain:      "harnessconfig",
+		Description: "Read harness configurations or list available configs",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "GET"},
@@ -1671,9 +1671,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "harnessconfig.create",
-		Domain:           "harnessconfig",
-		Description:      "Create a new harness configuration",
+		ID:          "harnessconfig.create",
+		Domain:      "harnessconfig",
+		Description: "Create a new harness configuration",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "POST"},
 		},
@@ -1688,9 +1688,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "harnessconfig.update",
-		Domain:           "harnessconfig",
-		Description:      "Update a harness configuration",
+		ID:          "harnessconfig.update",
+		Domain:      "harnessconfig",
+		Description: "Update a harness configuration",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "PUT"},
 		},
@@ -1705,9 +1705,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "harnessconfig.delete",
-		Domain:           "harnessconfig",
-		Description:      "Delete a harness configuration",
+		ID:          "harnessconfig.delete",
+		Domain:      "harnessconfig",
+		Description: "Delete a harness configuration",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "DELETE"},
 		},
@@ -1732,9 +1732,9 @@ var Catalog = []OperationSpec{
 	// Domain: group — group read, create, update
 	// =====================================================================
 	{
-		ID:               "group.read",
-		Domain:           "group",
-		Description:      "Read group details or list groups",
+		ID:          "group.read",
+		Domain:      "group",
+		Description: "Read group details or list groups",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "GET"},
@@ -1750,9 +1750,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "group.create",
-		Domain:           "group",
-		Description:      "Create a new group",
+		ID:          "group.create",
+		Domain:      "group",
+		Description: "Create a new group",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "POST"},
 		},
@@ -1767,9 +1767,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "group.update",
-		Domain:           "group",
-		Description:      "Update group metadata",
+		ID:          "group.update",
+		Domain:      "group",
+		Description: "Update group metadata",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "PUT"},
 		},
@@ -1788,9 +1788,9 @@ var Catalog = []OperationSpec{
 	// Domain: user — user read and update
 	// =====================================================================
 	{
-		ID:               "user.read",
-		Domain:           "user",
-		Description:      "Read user profile or list users",
+		ID:          "user.read",
+		Domain:      "user",
+		Description: "Read user profile or list users",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "GET"},
@@ -1806,9 +1806,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "user.update",
-		Domain:           "user",
-		Description:      "Update user profile or settings",
+		ID:          "user.update",
+		Domain:      "user",
+		Description: "Update user profile or settings",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PUT"},
 		},
@@ -1827,9 +1827,9 @@ var Catalog = []OperationSpec{
 	// Domain: broker — runtime broker read
 	// =====================================================================
 	{
-		ID:               "broker.read",
-		Domain:           "broker",
-		Description:      "Read runtime broker status or list brokers",
+		ID:          "broker.read",
+		Domain:      "broker",
+		Description: "Read runtime broker status or list brokers",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}", Method: "GET"},
@@ -1849,9 +1849,9 @@ var Catalog = []OperationSpec{
 	// Domain: gcp.identity — GCP identity read and verify
 	// =====================================================================
 	{
-		ID:               "gcp.identity.read",
-		Domain:           "gcp.identity",
-		Description:      "Read GCP service account details or list accounts",
+		ID:          "gcp.identity.read",
+		Domain:      "gcp.identity",
+		Description: "Read GCP service account details or list accounts",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts/{id}", Method: "GET"},
@@ -1898,9 +1898,9 @@ var Catalog = []OperationSpec{
 	// Domain: role — role definition and binding reads
 	// =====================================================================
 	{
-		ID:               "role.read",
-		Domain:           "role",
-		Description:      "Read role definitions and permission registry",
+		ID:          "role.read",
+		Domain:      "role",
+		Description: "Read role definitions and permission registry",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/{id}", Method: "GET"},
@@ -1917,9 +1917,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "role.binding.read",
-		Domain:           "role.binding",
-		Description:      "Read role binding assignments",
+		ID:          "role.binding.read",
+		Domain:      "role.binding",
+		Description: "Read role binding assignments",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings/{id}", Method: "GET"},
@@ -1935,9 +1935,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "access.constraint.read",
-		Domain:           "access.constraint",
-		Description:      "Read access constraint definitions",
+		ID:          "access.constraint.read",
+		Domain:      "access.constraint",
+		Description: "Read access constraint definitions",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints/{id}", Method: "GET"},
@@ -1957,9 +1957,9 @@ var Catalog = []OperationSpec{
 	// Domain: quota — quota/limits management
 	// =====================================================================
 	{
-		ID:               "quota.read",
-		Domain:           "quota",
-		Description:      "Read limit definitions, entitlements, and usage",
+		ID:          "quota.read",
+		Domain:      "quota",
+		Description: "Read limit definitions, entitlements, and usage",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "GET"},
@@ -1978,9 +1978,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "quota.create",
-		Domain:           "quota",
-		Description:      "Create limit definitions and entitlement bindings",
+		ID:          "quota.create",
+		Domain:      "quota",
+		Description: "Create limit definitions and entitlement bindings",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "POST"},
@@ -1996,9 +1996,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "quota.update",
-		Domain:           "quota",
-		Description:      "Update limit definitions and entitlement bindings",
+		ID:          "quota.update",
+		Domain:      "quota",
+		Description: "Update limit definitions and entitlement bindings",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "PUT"},
@@ -2014,9 +2014,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "quota.delete",
-		Domain:           "quota",
-		Description:      "Delete limit definitions and entitlement bindings",
+		ID:          "quota.delete",
+		Domain:      "quota",
+		Description: "Delete limit definitions and entitlement bindings",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "DELETE"},
@@ -2042,9 +2042,9 @@ var Catalog = []OperationSpec{
 	// Domain: schedule — scheduled event management
 	// =====================================================================
 	{
-		ID:               "schedule.event.read",
-		Domain:           "schedule",
-		Description:      "Read scheduled events or list events in a project",
+		ID:          "schedule.event.read",
+		Domain:      "schedule",
+		Description: "Read scheduled events or list events in a project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events/{id}", Method: "GET"},
@@ -2062,9 +2062,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "schedule.event.create",
-		Domain:           "schedule",
-		Description:      "Create a scheduled event or recurring schedule",
+		ID:          "schedule.event.create",
+		Domain:      "schedule",
+		Description: "Create a scheduled event or recurring schedule",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules", Method: "POST"},
@@ -2080,9 +2080,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "schedule.event.update",
-		Domain:           "schedule",
-		Description:      "Update a recurring schedule",
+		ID:          "schedule.event.update",
+		Domain:      "schedule",
+		Description: "Update a recurring schedule",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "PUT"},
 		},
@@ -2097,9 +2097,9 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:               "schedule.event.delete",
-		Domain:           "schedule",
-		Description:      "Cancel a scheduled event or delete a recurring schedule",
+		ID:          "schedule.event.delete",
+		Domain:      "schedule",
+		Description: "Cancel a scheduled event or delete a recurring schedule",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events/{id}", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "DELETE"},
@@ -2125,9 +2125,9 @@ var Catalog = []OperationSpec{
 	// Domain: chat — chat access (project-scoped)
 	// =====================================================================
 	{
-		ID:               "chat.access",
-		Domain:           "chat",
-		Description:      "Access chat threads, spaces, topics, and messages within a project",
+		ID:          "chat.access",
+		Domain:      "chat",
+		Description: "Access chat threads, spaces, topics, and messages within a project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "PUT"},
@@ -2157,9 +2157,9 @@ var Catalog = []OperationSpec{
 	// Domain: env — project environment variable access
 	// =====================================================================
 	{
-		ID:               "env.read",
-		Domain:           "env",
-		Description:      "Read project environment variables",
+		ID:          "env.read",
+		Domain:      "env",
+		Description: "Read project environment variables",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "GET"},
@@ -2276,6 +2276,321 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/github-app/installations/", Kind: ExemptionHubAdmin, Reason: "GitHub App installation by ID, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/github-app/installations/discover", Kind: ExemptionHubAdmin, Reason: "GitHub App installation discover, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/github-app/sync-permissions", Kind: ExemptionHubAdmin, Reason: "GitHub App permission sync, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
+}
+
+// MutationClassifications maps every discovered security-relevant mutation
+// call site to either a catalog operation or a reviewed exemption. This table
+// is the R3 exit-gate artifact: every scanner-discovered site must appear
+// here, and every entry here must still be discoverable by the scanner.
+//
+// Organized by source file for reviewability.
+var MutationClassifications = []MutationClassification{
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_project_members.go — project membership operations
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_project_members.go", Function: "addProjectMember", Symbol: "CreateRoleBinding", OperationID: "project.membership.add"},
+	{File: "pkg/hub/handlers_project_members.go", Function: "removeProjectMember", Symbol: "DeleteRoleBinding", OperationID: "project.membership.remove"},
+	{File: "pkg/hub/handlers_project_members.go", Function: "updateProjectMemberRole", Symbol: "CreateRoleBinding", OperationID: "project.membership.update"},
+	{File: "pkg/hub/handlers_project_members.go", Function: "updateProjectMemberRole", Symbol: "DeleteRoleBinding", OperationID: "project.membership.update"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_roles.go — role/binding CRUD
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_roles.go", Function: "createRoleBinding", Symbol: "CreateRoleBinding", OperationID: "role.binding.create"},
+	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleBinding", Symbol: "DeleteRoleBinding", OperationID: "role.binding.delete"},
+	{File: "pkg/hub/handlers_roles.go", Function: "createRoleDefinition", Symbol: "CreateRoleDefinition", OperationID: "role.definition.create"},
+	{File: "pkg/hub/handlers_roles.go", Function: "updateRoleDefinition", Symbol: "UpdateRoleDefinition", OperationID: "role.definition.update"},
+	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleDefinition", Symbol: "DeleteRoleDefinition", OperationID: "role.definition.delete"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_access_constraints.go
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_access_constraints.go", Function: "createAccessConstraint", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
+	{File: "pkg/hub/handlers_access_constraints.go", Function: "updateAccessConstraint", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
+	{File: "pkg/hub/handlers_access_constraints.go", Function: "deleteAccessConstraint", Symbol: "DeleteAccessConstraint", OperationID: "access.constraint.delete"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_groups.go — group CRUD and membership
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_groups.go", Function: "createGroup", Symbol: "CreateGroup", OperationID: "group.create"},
+	{File: "pkg/hub/handlers_groups.go", Function: "createGroup", Symbol: "AddGroupMember", OperationID: "group.create"},
+	{File: "pkg/hub/handlers_groups.go", Function: "updateGroup", Symbol: "UpdateGroup", OperationID: "group.update"},
+	{File: "pkg/hub/handlers_groups.go", Function: "deleteGroup", Symbol: "DeleteGroup", OperationID: "group.delete"},
+	{File: "pkg/hub/handlers_groups.go", Function: "addGroupMember", Symbol: "AddGroupMember", OperationID: "group.member.add"},
+	{File: "pkg/hub/handlers_groups.go", Function: "removeGroupMember", Symbol: "RemoveGroupMember", OperationID: "group.member.remove"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_gcp_identity.go — GCP service account operations
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "deleteGCPServiceAccount", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "handleAgentGCPToken", Symbol: "GenerateAccessToken", OperationID: "gcp.identity.mint"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "CreateServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "DeleteServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "DeleteServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "DeleteServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "SetIAMPolicy", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "SetIAMPolicy", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "runGCPServiceAccountVerification", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "runGCPServiceAccountVerification", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_gcp_identity_scoped.go — hub-scoped GCP identity
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "deleteGCPServiceAccountByID", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/useraccesstoken.go — user access token CRUD
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/useraccesstoken.go", Function: "CreateToken", Symbol: "CreateUserAccessToken", OperationID: "credential.token.create"},
+	{File: "pkg/hub/useraccesstoken.go", Function: "RevokeToken", Symbol: "RevokeUserAccessToken", OperationID: "credential.token.revoke"},
+	{File: "pkg/hub/useraccesstoken.go", Function: "DeleteToken", Symbol: "DeleteUserAccessToken", OperationID: "credential.token.revoke"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_users_core.go — user management
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.suspend"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_agents_core.go — agent lifecycle
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_agents_core.go", Function: "performAgentDelete", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent delete handler, route-guarded by agent.update permission", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "performAgentDelete", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent delete cleanup, revokes credentials as part of delete", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "createAgentInProject", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "createAgentInProject", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "createAgentInProject", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "createAgentInProject", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "handleAgentTokenRefresh", Symbol: "RevokeAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent token refresh, agent-JWT auth; old credential revoked on refresh", Scope: "pkg/hub/handlers_agents_core.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_agent_create_helpers.go
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_agent_create_helpers.go", Function: "handleExistingAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Existing agent cleanup during create, route-guarded by agent.create path", Scope: "pkg/hub/handlers_agent_create_helpers.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_agent_lifecycle.go
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_agent_lifecycle.go", Function: "suspendAgent", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent suspend revokes credentials, route-guarded by agent.update permission", Scope: "pkg/hub/handlers_agent_lifecycle.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_projects_core.go — project lifecycle
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, cleans up bindings on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, cleans up bindings on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectGroup", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates project groups", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: adds creator to members group", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: adds creator to members group", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: updates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectOwnerRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates owner role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates project role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up GCP service accounts", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up project groups", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete handler, route-guarded by project.update permission", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up role bindings", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteSecretsByScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up secrets", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "handleProjectRegister", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project register rollback, deletes on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/project_clone.go
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/project_clone.go", Function: "handleProjectClone", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project clone rollback, deletes on failure", Scope: "pkg/hub/project_clone.go"}},
+	{File: "pkg/hub/project_clone.go", Function: "handleProjectClone", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project clone rollback, cleans up bindings on failure", Scope: "pkg/hub/project_clone.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_auth.go — auth flow user provisioning
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_auth.go", Function: "provisionUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User provisioning during auth login flow, pre-authorization", Scope: "pkg/hub/handlers_auth.go"}},
+	{File: "pkg/hub/handlers_auth.go", Function: "provisionUser", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User record update during auth login flow", Scope: "pkg/hub/handlers_auth.go"}},
+	{File: "pkg/hub/handlers_auth.go", Function: "handleAuthRefresh", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User last-login update during token refresh", Scope: "pkg/hub/handlers_auth.go"}},
+	{File: "pkg/hub/handlers_auth.go", Function: "deleteSuperAdminBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Super-admin self-demotion, hub-admin operation", Scope: "pkg/hub/handlers_auth.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/web.go — OAuth/session middleware
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/web.go", Function: "handleOAuthCallback", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "OAuth callback user provisioning", Scope: "pkg/hub/web.go"}},
+	{File: "pkg/hub/web.go", Function: "handleOAuthCallback", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "OAuth callback user record update", Scope: "pkg/hub/web.go"}},
+	{File: "pkg/hub/web.go", Function: "proxyAuthMiddleware", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Proxy auth user provisioning", Scope: "pkg/hub/web.go"}},
+	{File: "pkg/hub/web.go", Function: "proxyAuthMiddleware", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Proxy auth user record update", Scope: "pkg/hub/web.go"}},
+	{File: "pkg/hub/web.go", Function: "sessionToBearerMiddleware", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Session-to-bearer token conversion middleware", Scope: "pkg/hub/web.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_test_login.go — dev/test login
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_test_login.go", Function: "handleTestLogin", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Development-only test login endpoint", Scope: "pkg/hub/handlers_test_login.go"}},
+	{File: "pkg/hub/handlers_test_login.go", Function: "handleTestLogin", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Development-only test login endpoint", Scope: "pkg/hub/handlers_test_login.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/admin_allow_list.go — hub admin: allow-list management
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListAdd", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list add, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
+	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListByEmail", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list remove, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
+	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListImport", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list import, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/admin_invites.go — hub admin: invite management
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/admin_invites.go", Function: "handleAdminInviteDelete", Symbol: "DeleteInviteCode", OperationID: "user.admin.invite"},
+	{File: "pkg/hub/admin_invites.go", Function: "handleAdminInviteRevoke", Symbol: "RevokeInviteCode", OperationID: "user.admin.invite"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/admin_user_invite.go — hub admin: user invite
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/admin_user_invite.go", Function: "handleAdminUserInvite", Symbol: "CreateUser", OperationID: "user.admin.invite"},
+	{File: "pkg/hub/admin_user_invite.go", Function: "handleAdminUserInviteBulk", Symbol: "CreateUser", OperationID: "user.admin.invite"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_chat_secrets.go — chat integration secrets
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_chat_secrets.go", Function: "HasChatIntegrationSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Chat integration secret check, route-guarded by hub admin", Scope: "pkg/hub/handlers_chat_secrets.go"}},
+	{File: "pkg/hub/handlers_chat_secrets.go", Function: "LoadChatIntegrationSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Chat integration secret load, route-guarded by hub admin", Scope: "pkg/hub/handlers_chat_secrets.go"}},
+	{File: "pkg/hub/handlers_chat_secrets.go", Function: "SetChatIntegrationSecret", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Chat integration secret write, route-guarded by hub admin", Scope: "pkg/hub/handlers_chat_secrets.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_github_app.go — GitHub App admin
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_github_app.go", Function: "loadGitHubAppSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "GitHub App secret read, hub-admin operation", Scope: "pkg/hub/handlers_github_app.go"}},
+	{File: "pkg/hub/handlers_github_app.go", Function: "setGitHubAppSecret", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "GitHub App secret write, hub-admin operation", Scope: "pkg/hub/handlers_github_app.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/invite_service.go — invite code creation
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/invite_service.go", Function: "CreateInvite", Symbol: "CreateInviteCode", OperationID: "user.admin.invite"},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/seed.go — server startup seed/reconciliation
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/seed.go", Function: "ReconcileSuperAdminBindings", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: reconcile super-admin role bindings", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "ReconcileSuperAdminBindings", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: reconcile super-admin role bindings", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "ReconcileSuperAdminBindings", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: promote/demote super-admin users", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "ReconcileSuperAdminBindings", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: promote/demote super-admin users", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "backfillProjectOwnerRoleBindings", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: backfill project owner role bindings", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "backfillUserRoleBindings", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: backfill user role bindings", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "ensureDevUserRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: ensure dev user role binding", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "ensureHubMembership", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: ensure hub membership for user", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "reconcileBuiltInRole", Symbol: "CreateRoleDefinition", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: create built-in role definition", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "reconcileBuiltInRole", Symbol: "UpdateSystemRoleDefinitionPermissions", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: reconcile built-in role permissions", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "seedDefaultGroupsAndBindings", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: seed default groups", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "seedDevUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: seed dev user", Scope: "pkg/hub/seed.go"}},
+	{File: "pkg/hub/seed.go", Function: "seedHubMemberRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: seed hub member role binding", Scope: "pkg/hub/seed.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/server.go — server infrastructure
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/server.go", Function: "RecordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential provisioning during agent create, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/oidckeys.go — OIDC key infrastructure
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS read, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys.go", Function: "loadKeysetFromDB", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys.go", Function: "loadOrCreateKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load-or-create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/lifecycle_hook_executor.go — pre-start hook execution
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Pre-start hook: generates GCP token for hook execution", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/maintenance_executors.go — maintenance operations
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/maintenance_executors.go", Function: "Run", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Maintenance executor reads secrets, hub-admin operation", Scope: "pkg/hub/maintenance_executors.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/system_identity.go
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/system_identity.go", Function: "updateDevUserRecord", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Dev mode user record update, system identity management", Scope: "pkg/hub/system_identity.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/gcp_token_cache.go / gcp_token_iam.go — GCP token infrastructure
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/gcp_token_cache.go", Function: "GenerateAccessToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "GCP token cache, delegates to IAM GenerateAccessToken", Scope: "pkg/hub/gcp_token_cache.go"}},
+	{File: "pkg/hub/gcp_token_iam.go", Function: "GenerateAccessToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "GCP IAM token generation, infrastructure implementation", Scope: "pkg/hub/gcp_token_iam.go"}},
+	{File: "pkg/hub/gcp_token_iam.go", Function: "VerifyImpersonation", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "GCP impersonation verification, infrastructure implementation", Scope: "pkg/hub/gcp_token_iam.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/brokerauth.go — broker authentication infrastructure
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "CreateBrokerRegistration", Symbol: "CreateJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "GenerateAndStoreSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret generation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/brokerclient.go / controlchannel_client.go / httpdispatcher.go
+	// — agent delete dispatch infrastructure
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/brokerclient.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker client agent delete dispatch, infrastructure adapter", Scope: "pkg/hub/brokerclient.go"}},
+	{File: "pkg/hub/controlchannel_client.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Control channel agent delete dispatch, infrastructure adapter", Scope: "pkg/hub/controlchannel_client.go"}},
+	{File: "pkg/hub/controlchannel_client.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Control channel agent delete dispatch, infrastructure adapter", Scope: "pkg/hub/controlchannel_client.go"}},
+	{File: "pkg/hub/httpdispatcher.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "HTTP dispatcher agent delete, infrastructure adapter", Scope: "pkg/hub/httpdispatcher.go"}},
+	{File: "pkg/hub/httpdispatcher.go", Function: "DispatchAgentDelete", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "HTTP dispatcher agent delete dispatch, infrastructure adapter", Scope: "pkg/hub/httpdispatcher.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/store/entadapter/ — store layer implementation
+	// -----------------------------------------------------------------------
+	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteAgent implementation", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject implementation", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to CreateSecret", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to UpdateSecret", Scope: "pkg/store/entadapter"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/store/storetest/ — store interface conformance test fixtures
+	// -----------------------------------------------------------------------
+	{File: "pkg/store/storetest/domains.go", Function: "AgentDomain", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: agent domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "DeleteGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "UpdateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain update", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "DeleteGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GroupDomain", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group domain update", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "seedGCPScopeMix", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP scope seeding", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerJoinTokenDomain", Symbol: "CreateJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker join token domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain update", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_project_broker.go", Function: "ProjectDomain", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: project domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain update", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "InviteCodeDomain", Symbol: "CreateInviteCode", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: invite code domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "InviteCodeDomain", Symbol: "DeleteInviteCode", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: invite code domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain update", Scope: "pkg/store/storetest"}},
 }
 
 // CatalogOperationIDs returns the set of all operation IDs in the catalog.
