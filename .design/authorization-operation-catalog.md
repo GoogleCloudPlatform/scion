@@ -112,7 +112,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
 **Base Permission:** `project.manage`  
 **Resource Resolver:** project-from-url
@@ -164,7 +164,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
 **Base Permission:** `project.manage`  
 **Resource Resolver:** project-from-url
@@ -219,7 +219,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
 **Base Permission:** `project.manage`  
 **Resource Resolver:** project-from-url
@@ -267,7 +267,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
 **Base Permission:** `project.read`  
 **Resource Resolver:** project-from-url
@@ -295,7 +295,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
 **Base Permission:** `project.manage`  
 **Resource Resolver:** project-from-url

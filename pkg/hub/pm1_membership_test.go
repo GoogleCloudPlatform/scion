@@ -1002,7 +1002,7 @@ func TestC0_MembersListCapabilities_OwnerGetsManageMembers(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// G3: Admin should get an explicit empty _capabilities (not nil/omitted).
+	// RS1 D5: Admin should get manage_members capability (replacing C0 owner-only).
 	rec = doRequestAsUser(t, srv, admin, http.MethodGet,
 		"/api/v1/projects/"+project.ID+"/members", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -1010,11 +1010,11 @@ func TestC0_MembersListCapabilities_OwnerGetsManageMembers(t *testing.T) {
 	var adminResp listProjectMembersResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&adminResp))
 	require.NotNil(t, adminResp.Capabilities,
-		"G3: admin's members list must include explicit _capabilities (not omitted)")
-	assert.NotContains(t, adminResp.Capabilities.Actions, "manage_members",
-		"G3: admin's _capabilities must NOT include manage_members")
-	assert.Empty(t, adminResp.Capabilities.Actions,
-		"G3: admin's _capabilities.actions must be an empty list")
+		"RS1 D5: admin's members list must include explicit _capabilities (not omitted)")
+	assert.Contains(t, adminResp.Capabilities.Actions, "manage_members",
+		"RS1 D5: admin's _capabilities must include manage_members")
+	assert.True(t, adminResp.Capabilities.CanManageMembers,
+		"RS1 D5: admin can manage ordinary members")
 }
 
 // ---------------------------------------------------------------------------

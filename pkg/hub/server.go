@@ -1304,7 +1304,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.membershipService = NewProjectMembershipService(
 		s, srv.authzService,
 		logging.Subsystem("hub.membership"),
-		srv.emitMutationAudit,
 	)
 
 	// Wire the caller-permission checker for agent service-account assignment.

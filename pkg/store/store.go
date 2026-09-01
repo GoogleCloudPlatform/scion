@@ -75,6 +75,13 @@ type Store interface {
 	// Migrate applies any pending database migrations.
 	Migrate(ctx context.Context) error
 
+	// WithTx executes fn inside a database transaction. All store operations
+	// performed via the Store passed to fn participate in the same transaction.
+	// If fn returns nil the transaction is committed; otherwise it is rolled
+	// back and the error is returned to the caller. Nested calls are
+	// pass-through (the inner callback receives the same transactional store).
+	WithTx(ctx context.Context, fn func(tx Store) error) error
+
 	// Agent operations
 	AgentStore
 

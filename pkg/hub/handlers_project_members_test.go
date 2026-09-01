@@ -467,10 +467,10 @@ func TestProjectMembers_S1_HubMemberCannotListAllBindings(t *testing.T) {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// C0: Project admin cannot manage membership (owner-only containment)
+// RS1 D5: Project admin CAN manage ordinary members (replacing C0 owner-only containment)
 // ---------------------------------------------------------------------------
 
-func TestC0_AdminCannotAddMember(t *testing.T) {
+func TestRS1_AdminCanAddMember(t *testing.T) {
 	srv, st, owner, _, project := setupProjectMembersTest(t)
 	ctx := context.Background()
 
@@ -514,7 +514,7 @@ func TestC0_AdminCannotAddMember(t *testing.T) {
 	memberRoleDef, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Admin tries to add a member — should be denied.
+	// RS1 D5: Admin adds a member — should succeed.
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
 		"/api/v1/projects/"+project.ID+"/members",
 		addProjectMemberRequest{
@@ -522,16 +522,8 @@ func TestC0_AdminCannotAddMember(t *testing.T) {
 			PrincipalType:    "user",
 			PrincipalID:      target.ID,
 		})
-	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"C0: project-admin must not be able to add members")
-
-	// Verify stable denial code.
-	var errResp map[string]interface{}
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	errObj, ok := errResp["error"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, ErrCodeRoleAssignmentForbidden, errObj["code"],
-		"C0: denial code must be stable product-level, not raw evaluator output")
+	assert.Equal(t, http.StatusCreated, rec.Code,
+		"RS1 D5: project-admin must be able to add ordinary members")
 }
 
 func TestC0_AdminCannotAddAdmin(t *testing.T) {
@@ -823,10 +815,10 @@ func TestC0_AdminCannotRemoveAdmin(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C0: Stable denial codes (not raw evaluator output)
+// RS1: Stable denial codes (not raw evaluator output)
 // ---------------------------------------------------------------------------
 
-func TestC0_DenialCodesAreStable(t *testing.T) {
+func TestRS1_DenialCodesAreStable(t *testing.T) {
 	srv, st, owner, _, project := setupProjectMembersTest(t)
 	ctx := context.Background()
 
@@ -854,9 +846,6 @@ func TestC0_DenialCodesAreStable(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	memberRoleDef, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-
 	target := &store.User{
 		ID:          tid("c0-target-dc"),
 		Email:       "targetdc@test.com",
@@ -868,11 +857,11 @@ func TestC0_DenialCodesAreStable(t *testing.T) {
 	require.NoError(t, st.CreateUser(ctx, target))
 	ensureHubMembership(ctx, st, target.ID)
 
-	// Admin tries to add a member — denied with ROLE_ASSIGNMENT_FORBIDDEN.
+	// RS1 D5: Admin tries to add an ADMIN — denied (only owners can manage admin/owner roles).
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
 		"/api/v1/projects/"+project.ID+"/members",
 		addProjectMemberRequest{
-			RoleDefinitionID: memberRoleDef.ID,
+			RoleDefinitionID: adminRoleDef.ID,
 			PrincipalType:    "user",
 			PrincipalID:      target.ID,
 		})
@@ -884,7 +873,7 @@ func TestC0_DenialCodesAreStable(t *testing.T) {
 	require.True(t, ok, "response must have error object")
 
 	// Verify the code is the stable product-level code.
-	assert.Equal(t, ErrCodeRoleAssignmentForbidden, errObj["code"],
+	assert.Equal(t, ErrCodeTargetRoleProtected, errObj["code"],
 		"denial must use stable code, not raw evaluator output")
 
 	// Verify the message does NOT contain internal permission names.

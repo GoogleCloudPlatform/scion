@@ -591,9 +591,8 @@ func TestRS1_LifecycleEnforcement_ExpiredOwnerNotCounted(t *testing.T) {
 	// Even though there are two owner bindings, the expired one shouldn't count.
 	// The active owner count should still be 1.
 	svc := &ProjectMembershipService{
-		store:     s,
-		nowFunc:   time.Now,
-		emitAudit: func(context.Context, *store.MutationAuditRecord) {},
+		store:   s,
+		nowFunc: time.Now,
 	}
 	count, err := svc.countActiveDirectOwners(ctx, projectID)
 	require.NoError(t, err)
@@ -631,9 +630,8 @@ func TestRS1_LifecycleEnforcement_FutureOwnerNotCounted(t *testing.T) {
 	require.NoError(t, err)
 
 	svc := &ProjectMembershipService{
-		store:     s,
-		nowFunc:   time.Now,
-		emitAudit: func(context.Context, *store.MutationAuditRecord) {},
+		store:   s,
+		nowFunc: time.Now,
 	}
 	count, err := svc.countActiveDirectOwners(ctx, projectID)
 	require.NoError(t, err)

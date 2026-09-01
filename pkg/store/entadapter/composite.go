@@ -82,11 +82,45 @@ type CompositeStore struct {
 	*AccessConstraintStore
 
 	client *ent.Client
+	inTx   bool // true when this CompositeStore wraps a transaction
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
 // interface purely through its embedded Ent-backed sub-stores.
 var _ store.Store = (*CompositeStore)(nil)
+
+// WithTx executes fn inside a database transaction. All store operations
+// performed via the Store passed to fn participate in the same transaction.
+// If fn returns nil the transaction is committed; otherwise it is rolled back
+// and the error is returned. Nested calls are pass-through.
+func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if c.inTx {
+		// Already inside a transaction — pass through to avoid double-nesting.
+		return fn(c)
+	}
+	tx, err := c.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	txClient := tx.Client()
+	txStore := NewCompositeStore(txClient)
+	txStore.inTx = true
+
+	defer func() {
+		// Safety net: if Commit was not called (i.e. fn panicked or returned
+		// an error), ensure the transaction is rolled back. Rollback after
+		// Commit is a no-op in ent.
+		_ = tx.Rollback()
+	}()
+
+	if err := fn(txStore); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
 
 // NewCompositeStore creates a store.Store backed entirely by the given Ent
 // client. Each domain sub-store shares the same client and therefore the same
