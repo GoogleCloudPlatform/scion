@@ -303,7 +303,11 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 					nil)
 				return
 			}
-			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID)
+			var readOpts []messaging.ReadThreadOption
+			if s.webChatStore != nil {
+				readOpts = append(readOpts, messaging.WithReadTopicLookup(s.webChatStore))
+			}
+			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID, readOpts...)
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
 			} else {

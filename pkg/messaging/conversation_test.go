@@ -943,3 +943,205 @@ func TestDEF21_InfraErrorMustNotMint(t *testing.T) {
 		t.Errorf("DEF-21: upserter was called on infra error — spurious conversation minted")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DEF-100: ResolveThreadConversationForRead topic-lookup intercept tests
+// ---------------------------------------------------------------------------
+
+func TestDEF100_ReadResolveViaTopicLookup(t *testing.T) {
+	// DEF-100: native topic with conversation_id — the read path must resolve
+	// via the topic's linked conversation_id, NOT via external_ref (which is '').
+	cs := &mockConversationStore{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"native-topic-1": "conv-linked-abc",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		"native-topic-1", "proj-1",
+		WithReadTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("DEF-100: expected non-nil result for native topic with conversation_id")
+	}
+	if got.ConversationID != "conv-linked-abc" {
+		t.Errorf("DEF-100: expected conversation_id conv-linked-abc, got %q", got.ConversationID)
+	}
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
+		t.Errorf("DEF-100: expected GetTopicConversationIDIncludingDeleted, got %q", lookup.calledMethod)
+	}
+}
+
+func TestDEF100_ReadResolveTopicNoConversationID(t *testing.T) {
+	// Topic exists but has no conversation_id (not yet backfilled). Must return nil.
+	cs := &mockConversationStore{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"topic-no-conv": "", // exists but no conversation_id
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		"topic-no-conv", "proj-1",
+		WithReadTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("DEF-100: expected nil for topic without conversation_id, got %+v", got)
+	}
+}
+
+func TestDEF100_ReadResolveFallsThroughForNonNativeTopic(t *testing.T) {
+	// Thread is NOT a native topic (store.ErrNotFound) — must fall through
+	// to external_ref lookup and find the conversation that way. This is the
+	// path for non-native surfaces (Discord, Telegram) that have a well-formed
+	// external_ref on the conversations row.
+	cs := &mockConversationStore{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{}, // empty = no topics
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Write a conversation with a well-formed external_ref (as non-native
+	// surfaces do).
+	writeResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger,
+		"non-native-thread-1", "proj-1")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		"non-native-thread-1", "proj-1",
+		WithReadTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("DEF-100: expected non-nil result — non-native thread should resolve via external_ref")
+	}
+	if got.ConversationID != writeResult.ConversationID {
+		t.Errorf("ConversationID mismatch: write=%q, read=%q",
+			writeResult.ConversationID, got.ConversationID)
+	}
+}
+
+func TestDEF100_ReadResolveInfraError(t *testing.T) {
+	// Infrastructure error from topic lookup must NOT fall through to
+	// external_ref lookup — must return nil.
+	cs := &mockConversationStore{}
+	lookup := &mockTopicLookupWithError{
+		err: errors.New("connection refused"),
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Write a conversation so it exists in the store.
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger,
+		"thread-infra-err", "proj-1")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		"thread-infra-err", "proj-1",
+		WithReadTopicLookup(lookup))
+
+	if got != nil {
+		t.Errorf("DEF-100: expected nil on infra error, got %+v — must not fall through", got)
+	}
+}
+
+func TestDEF100_ReadResolveWithoutTopicLookup_BackwardsCompat(t *testing.T) {
+	// Without WithReadTopicLookup, the function must behave exactly as before —
+	// resolve via external_ref. This is backwards compatibility.
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	writeResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger,
+		"thread-compat", "proj-1")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		"thread-compat", "proj-1") // no WithReadTopicLookup
+
+	if got == nil {
+		t.Fatal("expected non-nil result — backwards compat with no topic lookup")
+	}
+	if got.ConversationID != writeResult.ConversationID {
+		t.Errorf("ConversationID mismatch: write=%q, read=%q",
+			writeResult.ConversationID, got.ConversationID)
+	}
+}
+
+func TestDEF100_ReadResolveDMKeyBypassesTopicLookup(t *testing.T) {
+	// dm:-prefixed ThreadIDs must NOT trigger the topic lookup intercept.
+	// DeriveConversationKey returns kind="direct" for dm: keys, and the
+	// intercept only fires for kind="group" — so this is implicitly safe.
+	// Test it explicitly.
+	cs := &mockConversationStore{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{}, // empty = no topics
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	dmKey := "dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
+
+	// Write the DM conversation first.
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger, dmKey, "")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		dmKey, "",
+		WithReadTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("expected non-nil result for dm: key with topic lookup option")
+	}
+	// The topic lookup should NOT have been called (kind="direct", not "group").
+	if lookup.calledMethod != "" {
+		t.Errorf("topic lookup should not have been called for dm: key, got %q", lookup.calledMethod)
+	}
+}
+
+func TestDEF100_ReadResolveSoftDeletedTopic(t *testing.T) {
+	// Soft-deleted native topic: GetTopicConversationIDIncludingDeleted still
+	// returns the conversation_id. The read path must resolve it.
+	cs := &mockConversationStore{}
+	lookup := &mockTopicLookup{
+		topics: map[string]string{
+			"deleted-topic": "conv-deleted-123",
+		},
+		deleted: map[string]bool{
+			"deleted-topic": true,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ResolveThreadConversationForRead(
+		context.Background(), cs, logger,
+		"deleted-topic", "proj-1",
+		WithReadTopicLookup(lookup))
+
+	if got == nil {
+		t.Fatal("DEF-100: expected non-nil result for soft-deleted native topic")
+	}
+	if got.ConversationID != "conv-deleted-123" {
+		t.Errorf("expected conversation_id conv-deleted-123, got %q", got.ConversationID)
+	}
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
+		t.Errorf("expected GetTopicConversationIDIncludingDeleted, got %q", lookup.calledMethod)
+	}
+}

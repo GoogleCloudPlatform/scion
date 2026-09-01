@@ -167,11 +167,19 @@ func (s *rsWebChatStore) GetThreads(context.Context, string, string, int) ([]Web
 	return nil, nil
 }
 func (s *rsWebChatStore) MarkThreadRead(context.Context, string, string, string) error { return nil }
-func (s *rsWebChatStore) GetTopicConversationID(context.Context, string) (string, error) {
-	return "", nil
+func (s *rsWebChatStore) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.DeletedAt != nil {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
 }
-func (s *rsWebChatStore) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
-	return "", nil
+func (s *rsWebChatStore) GetTopicConversationIDIncludingDeleted(_ context.Context, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
 }
 func (s *rsWebChatStore) CreateTopic(context.Context, WebChatTopic) error { return nil }
 func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, error) {
@@ -374,18 +382,20 @@ func TestReadSwitch_S1_Thread_FlagOn_ConversationResolved(t *testing.T) {
 	projectID := rsProject(t, s, "s1-thread-resolved-project")
 	threadKey := "thread-key-resolved-" + tid("s1-thread-resolved")
 
+	// Seed the thread conversation first so we have a ConversationID to
+	// link to the topic.
+	extRef := fmt.Sprintf("thread:%s:%s", projectID, threadKey)
+	convID := seedConversation(t, s, "native", extRef, "group")
+
 	// webChatStore fixture is load-bearing: without it the flag-ON thread
 	// branch is never entered (wcs == nil guard), producing a false-green.
+	// DEF-100: the topic's ConversationID must be set — the read resolver now
+	// resolves native topics via topic lookup, not external_ref. A topic
+	// without ConversationID is treated as "not yet backfilled" and returns nil.
 	wcs := &rsWebChatStore{topics: map[string]*WebChatTopic{
-		threadKey: {ID: threadKey, ProjectID: projectID, Name: "test-thread"},
+		threadKey: {ID: threadKey, ProjectID: projectID, Name: "test-thread", ConversationID: convID},
 	}}
 	srv.SetWebChatStore(wcs)
-
-	// Seed the thread conversation. ResolveThreadConversationForRead uses
-	// DeriveConversationKey({ThreadID: threadKey, ProjectID: projectID})
-	// which produces "thread:{projectID}:{threadKey}".
-	extRef := fmt.Sprintf("thread:%s:%s", projectID, threadKey)
-	seedConversation(t, s, "native", extRef, "group")
 
 	delta := fallbackDelta(func() {
 		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+threadKey+"/messages", nil)

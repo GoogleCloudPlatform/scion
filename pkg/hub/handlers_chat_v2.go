@@ -1865,7 +1865,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// Thread key — look up the topic to get the projectID for the external_ref.
 			if wcs != nil {
 				if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
-					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID)
+					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
+						messaging.WithReadTopicLookup(wcs))
 				}
 			}
 		}
