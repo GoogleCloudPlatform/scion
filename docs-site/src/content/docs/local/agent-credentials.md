@@ -138,6 +138,7 @@ This is the simplest method, relying on standard environment variables to provid
 **Required Sources:**
 - **Claude**: `ANTHROPIC_API_KEY`
 - **Gemini**: `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+- **Antigravity**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` (lowest-priority fallback method)
 - **OpenCode**: `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (Anthropic preferred)
 - **Codex**: `CODEX_API_KEY` or `OPENAI_API_KEY` (Codex-specific key preferred)
 - **Hermes**: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` (in that order)
@@ -229,6 +230,10 @@ For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to
 
 :::tip[Antigravity Vertex AI & ADC]
 For the Antigravity harness, `vertex-ai` authentication is powered entirely by Google Cloud Application Default Credentials (ADC) plus the Google Cloud project (`GOOGLE_CLOUD_PROJECT`) and location/region (`GOOGLE_CLOUD_LOCATION` or `GOOGLE_CLOUD_REGION`) environment variables, and no longer requires `AGY_TOKEN`. At runtime, Scion sets the `AGY_ADC_AUTH` environment variable to `true` and maps `gcloud-adc` (if uploaded) to `GOOGLE_APPLICATION_CREDENTIALS`. This mode requires AGY CLI >= 1.1.10.
+:::
+
+:::tip[Antigravity API Key Fallback]
+In addition to Vertex AI and OAuth refresh tokens, the Antigravity harness supports direct API Key authentication. Evaluation priority is `vertex-ai` > `oauth-token` > `api-key`. If either `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set and no higher-priority auth is resolved, the provisioner automatically configures `modelProvider: "Gemini"` inside the agent's `settings.json` and authenticates using this key.
 :::
 
 :::caution[Defensive Auth Protection]
