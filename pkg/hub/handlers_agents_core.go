@@ -235,11 +235,69 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	query := r.URL.Query()
+	identity := GetIdentityFromContext(ctx)
 
+	// RS2: Unauthenticated callers get an empty list immediately.
+	if identity == nil {
+		writeJSON(w, http.StatusOK, ListAgentsResponse{
+			Agents:     []AgentWithCapabilities{},
+			TotalCount: 0,
+			ServerTime: time.Now().UTC(),
+		})
+		return
+	}
+
+	// RS2: Resolve authorization scope FIRST — before building filter or cursor
+	// binding. This is the single authoritative scope decision for the request.
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	if err != nil {
+		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
+			"error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"unable to resolve authorization", nil)
+		return
+	}
+
+	if scopeResult.Scopes.IsNone() {
+		// Legitimate no-authority result. Return empty list without querying
+		// the store. No broad resource query is issued for None.
+		writeJSON(w, http.StatusOK, ListAgentsResponse{
+			Agents:     []AgentWithCapabilities{},
+			TotalCount: 0,
+			ServerTime: time.Now().UTC(),
+		})
+		return
+	}
+
+	// RS2: Slug-to-ID resolution for projectId filter.
+	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
+	// The resolution must not become a cross-scope existence oracle: nonexistent
+	// and unauthorized slugs are externally indistinguishable — both silently
+	// produce an unmatched filter that returns zero results.
 	projectID := query.Get("projectId")
 	if projectID != "" && gouuid.Validate(projectID) != nil {
-		if project, err := s.store.GetProjectBySlug(ctx, projectID); err == nil && project != nil {
+		// Looks like a slug. Resolve within the authorized scope to prevent
+		// the slug lookup from disclosing projects outside the caller's authority.
+		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
+		if lookupErr != nil || project == nil {
+			// Slug not found — indistinguishable from unauthorized.
+			projectID = ""
+		} else if !scopeResult.Scopes.Contains(project.ID) {
+			// Project exists but is outside the caller's authorized scope.
+			// Treat identically to "not found" to prevent an existence oracle.
+			projectID = ""
+		} else {
 			projectID = project.ID
+		}
+		// When slug resolution fails (not found or unauthorized), leave
+		// projectID empty. The store filter will return all authorized agents
+		// (no project restriction), which is correct: it prevents the caller
+		// from distinguishing "slug doesn't exist" from "slug exists but I
+		// can't see it".
+		if projectID == "" {
+			// Force empty result: filter to an impossible project ID so the
+			// caller cannot infer slug existence from result count changes.
+			projectID = "00000000-0000-0000-0000-000000000000"
 		}
 	}
 
@@ -259,29 +317,39 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.Labels = parsed
 	}
 
-	// scope=mine: agents in projects the user directly owns (active
-	//   project-owner RoleBinding) or agents the user created.
-	// scope=shared: agents in projects where the user has effective access
-	//   but is NOT in the "mine" owner set.
-	// mine=true (legacy alias): same as scope=mine.
+	// RS2: Push the authorized project predicate into the store filter.
+	// This INTERSECTS with all other caller filters — it never replaces
+	// or unions with them. For All, AuthorizedProjectIDs remains nil, but
+	// project-scoped constraint exclusions still apply.
+	if !scopeResult.Scopes.IsAll() {
+		filter.AuthorizedProjectIDs = scopeResult.Scopes.ProjectIDs()
+	}
+	if len(scopeResult.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = scopeResult.ExcludedProjectIDs
+	}
+
+	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
 	//
-	// C0-CONTAINMENT: G2 — Mine uses only active direct project-owner
-	// RoleBinding set (no legacy OwnerID). Agent Mine also includes agents
-	// the user created (filter.OwnerID is the agent creator, not project
-	// owner — this is intentional agent-specific semantics).
+	// Agent Mine = agents in Mine projects (active direct project-owner
+	// RoleBinding). Agent creator/OwnerID metadata must NOT expand either set.
+	// mine=true is preserved only as an exact alias of scope=mine.
 	//
-	// C0-CONTAINMENT: G1 — Shared uses active effective RoleBinding access
-	// (direct + group-derived, lifecycle-filtered). Contract decision to
-	// relax: Phase 1 Mine/Shared semantics.
+	// Agent Shared = agents in Shared projects (effective project.read access
+	// minus Mine projects).
+	//
+	// Classification is an intersection with authority, not an authorization bypass.
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			// Agent Mine: agents created by the user OR in owned projects.
-			filter.OwnerID = userIdent.ID()
 			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
 			if len(ownerIDs) > 0 {
 				filter.MemberOrOwnerProjectIDs = ownerIDs
+			} else {
+				// No active direct owner bindings — return empty.
+				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
 			}
+			// RS2: Do NOT set filter.OwnerID. Agent creator ownership must
+			// not expand the Mine set beyond owned projects (D6 decision).
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -294,19 +362,22 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 			sharedIDs := subtractProjectIDs(allEffectiveIDs, ownerIDs)
 			if len(sharedIDs) > 0 {
 				filter.MemberProjectIDs = sharedIDs
-				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
+			// RS2: Do NOT set filter.ExcludeOwnerID. Agent creator metadata
+			// has no classification role (D6 decision).
 		}
 	default:
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				filter.OwnerID = userIdent.ID()
 				ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
 				if len(ownerIDs) > 0 {
 					filter.MemberOrOwnerProjectIDs = ownerIDs
+				} else {
+					filter.MemberOrOwnerProjectIDs = []string{"__none__"}
 				}
+				// RS2: Do NOT set filter.OwnerID (same as scope=mine).
 			}
 		}
 	}
@@ -318,8 +389,12 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("agents", filter)
+	// RS2: Cursor binding computed AFTER authorization scope and all caller
+	// filters are set. The binding includes the authorization predicate and
+	// principal/credential context so a cursor minted before an authority,
+	// group, constraint, or credential-scope change cannot be replayed.
+	cursorBinding := scopedCursorBinding("agents", filter, identity)
+	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
 			BadRequest(w, err.Error())
@@ -327,81 +402,32 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var items []store.Agent
-	var nextCursor string
-	var totalCount int
-
-	// Scope-aware list authorization: resolve the caller's authorized project
-	// set from role bindings instead of using a binary admin-view check on a
-	// synthetic hub resource.
-	if identity == nil {
-		// Unauthenticated: return empty list.
-		items = []store.Agent{}
-	} else {
-		scopes := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
-		if !scopes.IsNone() {
-			// All or explicit scope set: push authorized IDs into the store
-			// query so pagination and totals reflect only the visible set.
-			// For All, AuthorizedProjectIDs remains nil (no filter applied).
-			if !scopes.IsAll() {
-				filter.AuthorizedProjectIDs = scopes.ProjectIDs()
-			}
-			result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		} else {
-			// No role bindings resolved. Fall back to per-item policy filtering
-			// for backward compatibility during the transition period before
-			// CO1 cutover completes. After cutover, all principals will have
-			// role bindings and this path will not be reached.
-			result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Agent], error) {
-				page, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-				if err != nil {
-					return authorizedCandidatePage[store.Agent]{}, err
-				}
-				return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
-			}, agentResource, func(a *store.Agent) string { return authorizedListCursor(a.Created, a.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-			if err != nil {
-				writeAuthorizedListError(w, err)
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		}
+	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
+	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	// Enrich agents with project and broker names
+	// RS2: Enrichment runs only after the authorized store result is obtained.
 	s.enrichAgents(ctx, items)
 
-	// Compute per-item and scope capabilities for authorized items
+	// Compute per-item and scope capabilities for authorized items.
 	agents := make([]AgentWithCapabilities, 0, len(items))
-	if identity == nil {
-		for i := range items {
-			agents = append(agents, AgentWithCapabilities{Agent: items[i]})
-		}
-	} else {
-		resources := make([]Resource, len(items))
-		for i := range items {
-			resources[i] = agentResource(&items[i])
-		}
-		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
-			agents = append(agents, AgentWithCapabilities{Agent: items[i], Cap: cap})
-		}
+	resources := make([]Resource, len(items))
+	for i := range items {
+		resources[i] = agentResource(&items[i])
+	}
+	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
+		agents = append(agents, AgentWithCapabilities{Agent: items[i], Cap: cap})
 	}
 
 	// Compute messageability for each agent relative to the viewer.
-	if identity != nil {
-		for i := range agents {
-			agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
-		}
+	for i := range agents {
+		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
 	}
 
-	var scopeCap *Capabilities
-	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
-	}
+	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,

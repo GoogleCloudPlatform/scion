@@ -135,6 +135,41 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	query := r.URL.Query()
+	identity := GetIdentityFromContext(ctx)
+
+	// RS2: Unauthenticated callers get an empty list immediately.
+	if identity == nil {
+		writeJSON(w, http.StatusOK, ListProjectsResponse{
+			Projects:     []ProjectWithCapabilities{},
+			LegacyGroves: []ProjectWithCapabilities{},
+			TotalCount:   0,
+		})
+		return
+	}
+
+	// RS2: Resolve authorization scope FIRST — before building filter or cursor
+	// binding. This is the single authoritative scope decision for the request.
+	// Resolution dependency failures fail closed with 500; None is a legitimate
+	// authorization result producing an empty list without a broad query.
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+	if err != nil {
+		slog.WarnContext(ctx, "listProjects: authorization scope resolution failed (fail-closed)",
+			"error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"unable to resolve authorization", nil)
+		return
+	}
+
+	if scopeResult.Scopes.IsNone() {
+		// Legitimate no-authority result. Return empty list without querying
+		// the store. No broad resource query is issued for None.
+		writeJSON(w, http.StatusOK, ListProjectsResponse{
+			Projects:     []ProjectWithCapabilities{},
+			LegacyGroves: []ProjectWithCapabilities{},
+			TotalCount:   0,
+		})
+		return
+	}
 
 	filter := store.ProjectFilter{
 		OwnerID:   query.Get("ownerId"),
@@ -159,23 +194,30 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope=mine: projects where the user has an active direct project-owner
-	//   RoleBinding. See G2 containment below.
-	// scope=shared: projects where the user has effective access (group
-	//   membership or any RoleBinding) but is NOT in the "mine" set.
-	// mine=true (legacy alias): same as scope=mine.
+	// RS2: Push the authorized project predicate into the store filter.
+	// This INTERSECTS with all other caller filters — it never replaces
+	// or unions with them. For All, AuthorizedProjectIDs remains nil (no
+	// filter restriction — the scope truly is system-wide), but project-
+	// scoped constraint exclusions still apply.
+	if !scopeResult.Scopes.IsAll() {
+		filter.AuthorizedProjectIDs = scopeResult.Scopes.ProjectIDs()
+	}
+	if len(scopeResult.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = scopeResult.ExcludedProjectIDs
+	}
+
+	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
 	//
-	// C0-CONTAINMENT: F-QA-01, F-PLAN-01 — Mine selects only active direct
-	// project-owner bindings. Shared excludes the owner set rather than relying
-	// on legacy OwnerID. Contract decision to relax: Phase 1 Mine/Shared
-	// semantics.
-	// C0-CONTAINMENT: G2 — Mine uses only the active direct project-owner
-	// RoleBinding set. Legacy Project.OwnerID is NOT used as a second authority
-	// source. If the user has no active owner bindings, Mine returns empty.
+	// Mine = projects with an active direct project-owner RoleBinding.
+	// Shared = projects with current effective project.read access (direct +
+	// transitive group grants) minus Mine.
 	//
-	// C0-CONTAINMENT: G1 — Shared uses active effective RoleBinding access
-	// (direct + group-derived, lifecycle-filtered). Future/expired bindings are
-	// excluded. Contract decision to relax: Phase 1 Mine/Shared semantics.
+	// Classification is an INTERSECTION with authority, not an authorization
+	// bypass. A system-wide caller still gets correct Mine/Shared when
+	// explicitly requesting those scopes.
+	//
+	// Legacy Project.OwnerID and ExcludeOwnerID have no authorization or
+	// classification role (D6 frozen decision).
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -200,7 +242,6 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 			sharedIDs := subtractProjectIDs(allEffectiveIDs, ownerIDs)
 			if len(sharedIDs) > 0 {
 				filter.MemberProjectIDs = sharedIDs
-				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
@@ -226,8 +267,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("projects", filter)
+	// RS2: Cursor binding computed AFTER authorization scope and all caller
+	// filters are set. The binding includes the authorization predicate and
+	// principal/credential context so a cursor minted before an authority,
+	// group, constraint, or credential-scope change cannot be replayed.
+	cursorBinding := scopedCursorBinding("projects", filter, identity)
+	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
 			BadRequest(w, err.Error())
@@ -235,74 +280,28 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var items []store.Project
-	var nextCursor string
-	var totalCount int
-
-	// Scope-aware list authorization: resolve the caller's authorized project
-	// set from role bindings instead of using a binary admin-view check on a
-	// synthetic hub resource.
-	if identity == nil {
-		// Unauthenticated: return empty list.
-		items = []store.Project{}
-	} else {
-		scopes := s.authzService.ResolveListScopes(ctx, identity, "project.list")
-		if !scopes.IsNone() {
-			// All or explicit scope set: push authorized IDs into the store
-			// query so pagination and totals reflect only the visible set.
-			// For All, AuthorizedProjectIDs remains nil (no filter applied).
-			if !scopes.IsAll() {
-				filter.AuthorizedProjectIDs = scopes.ProjectIDs()
-			}
-			result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		} else {
-			// No role bindings resolved. Fall back to per-item policy filtering
-			// for backward compatibility during the transition period before
-			// CO1 cutover completes. After cutover, all principals will have
-			// role bindings and this path will not be reached.
-			result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Project], error) {
-				page, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-				if err != nil {
-					return authorizedCandidatePage[store.Project]{}, err
-				}
-				return authorizedCandidatePage[store.Project]{Items: page.Items, NextCursor: page.NextCursor}, nil
-			}, projectResource, func(p *store.Project) string { return authorizedListCursor(p.Created, p.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-			if err != nil {
-				writeAuthorizedListError(w, err)
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		}
+	result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
+	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	// Enrich owner display names
+	// RS2: Enrichment runs only after the authorized store result is obtained.
+	// It must not trigger lookups for filtered-out resources.
 	s.enrichProjectOwnerNames(ctx, items)
 
-	// Compute per-item and scope capabilities for authorized items
+	// Compute per-item and scope capabilities for authorized items.
 	projects := make([]ProjectWithCapabilities, 0, len(items))
-	if identity == nil {
-		for i := range items {
-			projects = append(projects, ProjectWithCapabilities{Project: items[i]})
-		}
-	} else {
-		resources := make([]Resource, len(items))
-		for i := range items {
-			resources[i] = projectResource(&items[i])
-		}
-		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project") {
-			projects = append(projects, ProjectWithCapabilities{Project: items[i], Cap: cap})
-		}
+	resources := make([]Resource, len(items))
+	for i := range items {
+		resources[i] = projectResource(&items[i])
+	}
+	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project") {
+		projects = append(projects, ProjectWithCapabilities{Project: items[i], Cap: cap})
 	}
 
-	var scopeCap *Capabilities
-	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
-	}
+	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{
 		Projects:     projects,

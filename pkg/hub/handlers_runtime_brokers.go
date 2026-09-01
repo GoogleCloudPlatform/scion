@@ -606,8 +606,8 @@ func mergeProjectIDs(sources ...[]string) []string {
 
 // subtractProjectIDs returns IDs from all that are NOT in exclude.
 //
-// C0-CONTAINMENT: F-PLAN-01 — used to compute Shared = all-membership minus
-// owner-only set. Contract decision to relax: Phase 1 Mine/Shared semantics.
+// F-PLAN-01 (resolved-rs2 for project/agent list) — used to compute Shared =
+// all-membership minus owner-only set. Still used by broker list endpoint.
 func subtractProjectIDs(all, exclude []string) []string {
 	if len(exclude) == 0 {
 		return all
@@ -717,9 +717,9 @@ func (s *Server) resolveUserEffectiveProjectIDs(ctx context.Context, userID stri
 // direct project-owner RoleBinding. This is the C0-containment definition of
 // "mine": only projects the user directly owns.
 //
-// C0-CONTAINMENT: F-QA-01 — Mine must select only active direct project-owner
-// bindings, not all project-scoped bindings. The contract decision to relax
-// this restriction is Phase 1 Mine/Shared semantics.
+// F-QA-01 (resolved-rs2 for project/agent list) — Mine must select only active
+// direct project-owner bindings, not all project-scoped bindings. Still used
+// by broker list endpoint.
 func (s *Server) resolveUserOwnerProjectIDs(ctx context.Context, userID string) []string {
 	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil || len(bindings) == 0 {

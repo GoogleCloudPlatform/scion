@@ -631,6 +631,16 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 		}
 	}
 
+	// RS2: ExcludedProjectIDs — exclude agents from specific projects when
+	// project-scoped constraints block the list permission. Fail-closed:
+	// malformed IDs are silently skipped (they can't match real rows anyway).
+	if len(filter.ExcludedProjectIDs) > 0 {
+		excludeIDs := parseUUIDList(filter.ExcludedProjectIDs)
+		if len(excludeIDs) > 0 {
+			preds = append(preds, agent.ProjectIDNotIn(excludeIDs...))
+		}
+	}
+
 	// Exclude soft-deleted agents unless explicitly requested.
 	if !filter.IncludeDeleted {
 		preds = append(preds, agent.DeletedAtIsNil())

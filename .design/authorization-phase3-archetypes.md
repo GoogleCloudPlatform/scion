@@ -42,19 +42,31 @@ before/after field requirements.
 
 ### 2. Cross-Scope Read/List
 
-**Selected operation:** Project list
+**Selected operations:** Project list, Agent list
 
 | Evidence              | Location                                          |
 |-----------------------|---------------------------------------------------|
-| Handler               | `pkg/hub/handlers_projects_core.go:131` — `listProjects()` |
-| Entry point           | `GET /api/v1/projects`                             |
-| Scope resolution      | `ResolveAuthorizedScopes()` at `authz_scope.go`   |
-| Mine/Shared filter    | `handlers_projects_core.go:168-176` (C0 containment markers) |
-| Scope-pushed queries  | Project IDs pushed into store query               |
+| Project list handler  | `pkg/hub/handlers_projects_core.go` — `listProjects()` |
+| Agent list handler    | `pkg/hub/handlers_agents_core.go` — `listAgents()` |
+| Project entry point   | `GET /api/v1/projects`                             |
+| Agent entry point     | `GET /api/v1/agents`                               |
+| Scope resolution      | `ResolveListScopes()` at `authz_list.go` — returns `(ListScopeResult, error)` for fail-closed error propagation |
+| Scope result type     | `ListScopeResult` with `Scopes ScopeSet` + `ExcludedProjectIDs []string` |
+| Store-pushed queries  | `AuthorizedProjectIDs` and `ExcludedProjectIDs` pushed into `ProjectFilter` / `AgentFilter` |
+| Mine/Shared (D6)      | Mine = active direct project-owner RoleBinding; Shared = effective access minus Mine |
+| Cursor binding        | `scopedCursorBinding()` at `authorized_list.go` — SHA-256 of endpoint + filter + principal/credential context |
+| Slug oracle fix       | Agent list: nonexistent and unauthorized slugs produce indistinguishable empty results |
+| Constraint reduction  | All scope reduced by project-scoped AccessConstraint exclusions |
+| Catalog operations    | `project.list` and `agent.list` (split from read-one in RS2) |
+| Tests                 | `rs2_list_authz_test.go`: `TestRS2_ProjectListScopePushed`, `TestRS2_ProjectListMineSharedClassification`, `TestRS2_ProjectListCursorBinding`, `TestRS2_AgentListScopePushed`, `TestRS2_AgentListMineSharedClassification`, `TestRS2_AgentListSlugOracle`, `TestRS2_ScopedUATListRestriction`, `TestRS2_ExpiredBindingExcludedFromList`, `TestRS2_NoTransitionalFallbackInListHandlers` |
 
-**Why this archetype:** Demonstrates authorized scope resolution, scope-pushed
-pagination, Mine/Shared classification, and the requirement that totals and
-rows agree with the authorized scope set.
+**Why this archetype:** Demonstrates authorized scope resolution with fail-closed
+error propagation, scope-pushed pagination where rows/totals/cursors all derive
+from the same authorized predicate, D6 Mine/Shared classification using
+RoleBinding-only project sets (no legacy OwnerID), cursor binding that includes
+principal/credential context to prevent cross-scope replay, slug-to-ID oracle
+prevention, All-scope constraint reduction, and AST proof that transitional
+per-item authorization fallback has been removed.
 
 ### 3. Destructive/Protected-Target Action
 

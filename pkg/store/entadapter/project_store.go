@@ -479,6 +479,16 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 		}
 	}
 
+	// RS2: ExcludedProjectIDs — exclude specific projects from an All scope
+	// when project-scoped constraints block the list permission. Fail-closed:
+	// malformed IDs are silently skipped (they can't match real rows anyway).
+	if len(filter.ExcludedProjectIDs) > 0 {
+		excludeIDs, _ := parseUUIDs(filter.ExcludedProjectIDs)
+		if len(excludeIDs) > 0 {
+			query.Where(project.IDNotIn(excludeIDs...))
+		}
+	}
+
 	totalCount := 0
 	if !opts.SkipTotalCount {
 		var err error

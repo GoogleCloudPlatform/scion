@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 90
+**Operations:** 92
 
 ## Table of Contents
 
@@ -53,13 +53,15 @@
 - [hub.integrations.read](#hubintegrationsread) — Read integration configurations
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
 - [hub.metrics.read](#hubmetricsread) — Read metrics dashboard data
-- [agent.read](#agentread) — Read agent metadata or list agents in a project
+- [agent.read](#agentread) — Read a single agent's metadata by ID
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.attach](#agentattach) — Attach to an agent session via WebSocket
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
 - [agent.stopall](#agentstopall) — Stop all running agents in a project
 - [agent.setmessagemode](#agentsetmessagemode) — Change an agent's message mode
-- [project.read](#projectread) — Read project metadata or list projects
+- [project.read](#projectread) — Read a single project's metadata by ID or slug
+- [project.list](#projectlist) — List projects within the caller's authorized scope
 - [project.update](#projectupdate) — Update project settings and metadata
 - [project.register](#projectregister) — Register a project or grove from an external source
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
@@ -1921,13 +1923,12 @@
 
 **Domain:** agent
 
-**Description:** Read agent metadata or list agents in a project
+**Description:** Read a single agent's metadata by ID
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/agents/{id}` |
 
 **Principals:** `user`, `agent`
@@ -1936,15 +1937,56 @@
 
 **Base Permission:** `agent.read`
 
-**Resource Resolver:** project-from-url
+**Resource Resolver:** agent-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.list
+
+**Domain:** agent
+
+**Description:** List agents within the caller's authorized project scope
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.list`
+
+**Resource Resolver:** list-scope-resolver
+
+**Effects:** `list-scoped`
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| scope-pushed-query | security | Rows, totalCount, and nextCursor come from the same SQL predicate that includes the authorization scope | Yes |
+| cursor-scope-binding | security | Cursor binding includes endpoint, caller filters, authorization scope, and principal/credential context | Yes |
+| no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
+| slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+
+### Tests
+
+- `pkg/hub:TestRS2_AgentListScopePushed`
+- `pkg/hub:TestRS2_AgentListMineSharedClassification`
+- `pkg/hub:TestRS2_AgentListSlugOracle`
 
 ---
 
@@ -2102,15 +2144,13 @@
 
 **Domain:** project
 
-**Description:** Read project metadata or list projects
+**Description:** Read a single project's metadata by ID or slug
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects` |
 | http_route | GET | `/api/v1/projects/{id}` |
-| http_route | GET | `/api/v1/groves` |
 | http_route | GET | `/api/v1/groves/{id}` |
 
 **Principals:** `user`, `agent`
@@ -2121,13 +2161,54 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.list
+
+**Domain:** project
+
+**Description:** List projects within the caller's authorized scope
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects` |
+| http_route | GET | `/api/v1/groves` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `project.list`
+
+**Resource Resolver:** list-scope-resolver
+
+**Effects:** `list-scoped`
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| scope-pushed-query | security | Rows, totalCount, and nextCursor come from the same SQL predicate that includes the authorization scope | Yes |
+| cursor-scope-binding | security | Cursor binding includes endpoint, caller filters, authorization scope, and principal/credential context | Yes |
+| no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+
+### Tests
+
+- `pkg/hub:TestRS2_ProjectListScopePushed`
+- `pkg/hub:TestRS2_ProjectListMineSharedClassification`
+- `pkg/hub:TestRS2_ProjectListCursorBinding`
 
 ---
 

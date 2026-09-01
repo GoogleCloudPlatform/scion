@@ -314,6 +314,12 @@ type AgentFilter struct {
 	// reflect only the authorized set. A nil value means no authorization
 	// filtering. An empty non-nil slice means no agents are authorized.
 	AuthorizedProjectIDs []string
+
+	// ExcludedProjectIDs, when non-nil, excludes agents whose project_id is in
+	// this set from the result. RS2: used when a system-wide admin has project-
+	// scoped constraints that block the list permission for specific projects.
+	// An empty or nil slice means no exclusions.
+	ExcludedProjectIDs []string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -446,6 +452,13 @@ type ProjectFilter struct {
 	// (caller has admin view or filtering is handled elsewhere). An empty non-nil
 	// slice means no projects are authorized — the query returns zero results.
 	AuthorizedProjectIDs []string
+
+	// ExcludedProjectIDs, when non-nil, excludes projects whose ID is in this
+	// set from the result. RS2: used when a system-wide admin has project-scoped
+	// constraints that block the list permission for specific projects. The
+	// exclusion composes by intersection with all other filters (including
+	// AuthorizedProjectIDs). An empty or nil slice means no exclusions.
+	ExcludedProjectIDs []string
 }
 
 // RuntimeBrokerStore defines runtime broker persistence operations.

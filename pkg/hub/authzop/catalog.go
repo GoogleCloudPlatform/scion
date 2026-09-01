@@ -1334,20 +1334,51 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "agent.read",
 		Domain:      "agent",
-		Description: "Read agent metadata or list agents in a project",
+		Description: "Read a single agent's metadata by ID",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
-		ResourceResolver: "project-from-url",
+		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.read",
-		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	// RS2: agent.list — split from agent.read because the list operation
+	// has distinct authorization semantics: scope-based resolution with
+	// store-pushed intersection, Mine/Shared classification via project
+	// ownership (not agent creator), slug oracle prevention, and cursor
+	// binding that includes the authorization context.
+	{
+		ID:          "agent.list",
+		Domain:      "agent",
+		Description: "List agents within the caller's authorized project scope",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "list-scope-resolver",
+		BasePermission:   "agent.list",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "scope-pushed-query", Description: "Rows, totalCount, and nextCursor come from the same SQL predicate that includes the authorization scope", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "cursor-scope-binding", Description: "Cursor binding includes endpoint, caller filters, authorization scope, and principal/credential context", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "no-broad-query-on-none", Description: "ScopeSetNone produces empty list without issuing any resource query", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "slug-not-oracle", Description: "Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent", Kind: InvariantSecurity, FailClosed: true},
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestRS2_AgentListScopePushed"},
+			{Package: "pkg/hub", Function: "TestRS2_AgentListMineSharedClassification"},
+			{Package: "pkg/hub", Function: "TestRS2_AgentListSlugOracle"},
+		},
 	},
 	{
 		ID:          "agent.update",
@@ -1441,22 +1472,51 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "project.read",
 		Domain:      "project",
-		Description: "Read project metadata or list projects",
+		Description: "Read a single project's metadata by ID or slug",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groves", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groves/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "project.read",
-		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	// RS2: project.list — split from project.read because the list operation
+	// has distinct authorization semantics: scope-based resolution with
+	// store-pushed intersection, Mine/Shared classification, and cursor binding
+	// that includes the authorization context.
+	{
+		ID:          "project.list",
+		Domain:      "project",
+		Description: "List projects within the caller's authorized scope",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groves", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "list-scope-resolver",
+		BasePermission:   "project.list",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "scope-pushed-query", Description: "Rows, totalCount, and nextCursor come from the same SQL predicate that includes the authorization scope", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "cursor-scope-binding", Description: "Cursor binding includes endpoint, caller filters, authorization scope, and principal/credential context", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "no-broad-query-on-none", Description: "ScopeSetNone produces empty list without issuing any resource query", Kind: InvariantSecurity, FailClosed: true},
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestRS2_ProjectListScopePushed"},
+			{Package: "pkg/hub", Function: "TestRS2_ProjectListMineSharedClassification"},
+			{Package: "pkg/hub", Function: "TestRS2_ProjectListCursorBinding"},
+		},
 	},
 	{
 		ID:          "project.update",

@@ -44,7 +44,8 @@ missing-eligibility-gate, information-leak, denial-quality.
 | **Current state** | The policy-fix branch added RoleBinding-based project ID resolution but did not filter by role name. |
 | **C0 containment** | Change `resolveUserRBProjectIDs` to accept a role filter parameter. For "mine", filter to `project-owner` only. For "shared", include all project-scoped bindings excluding those already in mine. |
 | **Contract decision to relax** | Phase 1 must define the exact semantics of Mine/Shared and whether admin bindings contribute to either. |
-| **Disposition** | `contained-c0` |
+| **RS2 resolution** | D6 Mine/Shared semantics implemented in RS2. Mine = active direct project-owner RoleBinding (via `MemberOrOwnerProjectIDs` with owner-only filter). Shared = effective access minus Mine. Both project and agent list handlers use scope-pushed authorization with correct classification. Agent creator/OwnerID does not expand Mine. Tests: `TestRS2_ProjectListMineSharedClassification`, `TestRS2_AgentListMineSharedClassification`. |
+| **Disposition** | `resolved-rs2` |
 
 ### F-QA-02: Project admin can manage membership mutations
 
@@ -144,7 +145,8 @@ missing-eligibility-gate, information-leak, denial-quality.
 | **Current state** | `ExcludeOwnerID` uses the legacy field. |
 | **C0 containment** | For "shared", use the new owner-binding-filtered project IDs from the mine resolver and exclude those from the full membership set. This decouples shared from the legacy OwnerID field for the exclusion. |
 | **Contract decision to relax** | Phase 1 defines Mine/Shared semantics definitively. |
-| **Disposition** | `contained-c0` |
+| **RS2 resolution** | `ExcludeOwnerID` removed from both project and agent list handlers. Shared is now computed as effective-access-minus-Mine using RoleBinding-based sets only. `Project.OwnerID` is treated as metadata with no authorization or classification role. The list handlers no longer reference `ExcludeOwnerID` at all. Tests: `TestRS2_ProjectListMineSharedClassification`, `TestRS2_AgentListMineSharedClassification`. |
+| **Disposition** | `resolved-rs2` |
 
 ### F-PLAN-02: Project admin can add another admin
 
