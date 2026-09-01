@@ -20,7 +20,8 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",
@@ -51,6 +52,8 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.62.1",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.11.0",
     "@types/qrcode": "^1.5.6",
