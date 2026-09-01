@@ -812,7 +812,7 @@ export class ScionPageAdminUsers extends LitElement {
     userId: string,
     updates: { role?: string; status?: string },
     userLabel?: string
-  ): Promise<void> {
+  ): Promise<{ securityReview: boolean }> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'PATCH',
       credentials: 'include',
@@ -822,7 +822,6 @@ export class ScionPageAdminUsers extends LitElement {
     if (!response.ok) {
       const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       if (errorBody) {
-        const action = updates.status === 'suspended' ? 'suspending' : 'updating';
         const label = userLabel ?? userId;
 
         const lockout = parseLockoutResponse(errorBody);
@@ -835,14 +834,14 @@ export class ScionPageAdminUsers extends LitElement {
             lockout,
           };
           this.showSecurityReview = true;
-          throw new Error(`Lockout conflict while ${action} user`);
+          return { securityReview: true };
         }
 
         const reviewDetail = parseSecurityReviewResponse(errorBody, label, 'system');
         if (reviewDetail) {
           this.securityReviewDetail = reviewDetail;
           this.showSecurityReview = true;
-          throw new Error(`Security review required for ${action} user`);
+          return { securityReview: true };
         }
 
         const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
@@ -850,9 +849,13 @@ export class ScionPageAdminUsers extends LitElement {
       }
       throw new Error(`HTTP ${response.status}`);
     }
+    return { securityReview: false };
   }
 
-  private async deleteUser(userId: string, userLabel?: string): Promise<void> {
+  private async deleteUser(
+    userId: string,
+    userLabel?: string
+  ): Promise<{ securityReview: boolean }> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'DELETE',
       credentials: 'include',
@@ -872,14 +875,14 @@ export class ScionPageAdminUsers extends LitElement {
             lockout,
           };
           this.showSecurityReview = true;
-          throw new Error('Lockout conflict while deleting user');
+          return { securityReview: true };
         }
 
         const reviewDetail = parseSecurityReviewResponse(errorBody, label, 'system');
         if (reviewDetail) {
           this.securityReviewDetail = reviewDetail;
           this.showSecurityReview = true;
-          throw new Error('Security review required for deleting user');
+          return { securityReview: true };
         }
 
         const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
@@ -887,6 +890,7 @@ export class ScionPageAdminUsers extends LitElement {
       }
       throw new Error(`HTTP ${response.status}`);
     }
+    return { securityReview: false };
   }
 
   private promptChangeRole(user: AdminUser, newRole: UserRole): void {
@@ -899,7 +903,8 @@ export class ScionPageAdminUsers extends LitElement {
       confirmLabel: action,
       user,
       action: async () => {
-        await this.updateUser(user.id, { role: newRole });
+        const result = await this.updateUser(user.id, { role: newRole });
+        if (result.securityReview) return;
         this.showFeedback('success', `${user.displayName || user.email} is now ${roleLabel}.`);
         void this.loadUsers(
           this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
@@ -920,7 +925,12 @@ export class ScionPageAdminUsers extends LitElement {
       user,
       action: async () => {
         const newStatus = suspending ? 'suspended' : 'active';
-        await this.updateUser(user.id, { status: newStatus }, user.displayName || user.email);
+        const result = await this.updateUser(
+          user.id,
+          { status: newStatus },
+          user.displayName || user.email
+        );
+        if (result.securityReview) return;
         this.showFeedback(
           'success',
           `${user.displayName || user.email} has been ${suspending ? 'suspended' : 'reactivated'}.`
@@ -945,7 +955,8 @@ export class ScionPageAdminUsers extends LitElement {
       confirmLabel: user.status === 'invited' ? 'Remove' : 'Delete',
       user,
       action: async () => {
-        await this.deleteUser(user.id, user.displayName || user.email);
+        const result = await this.deleteUser(user.id, user.displayName || user.email);
+        if (result.securityReview) return;
         this.showFeedback(
           'success',
           `${user.displayName || user.email} has been ${user.status === 'invited' ? 'removed' : 'deleted'}.`

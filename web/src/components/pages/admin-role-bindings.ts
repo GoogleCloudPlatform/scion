@@ -789,8 +789,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
           return;
         }
 
-        const msg = await extractApiError(res, `HTTP ${res.status}`);
-        this.actionFeedback = { message: msg, variant: 'danger' };
+        // Body already consumed by res.json() above — use direct fallback
+        this.actionFeedback = { message: `HTTP ${res.status}`, variant: 'danger' };
         return;
       }
 
@@ -843,8 +843,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
       });
 
       if (res.status === 404 || res.status === 405) {
-        // Atomic endpoint not available — fall back to create-then-delete
-        await this.replaceBindingFallback();
+        // Atomic endpoint not available — do not attempt non-atomic create-then-delete
+        this.actionFeedback = {
+          message:
+            'Atomic role replacement is not available. Please delete the existing binding first, then create a new one.',
+          variant: 'danger',
+        };
         return;
       }
 
@@ -893,8 +897,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
           return;
         }
 
-        const msg = await extractApiError(res, `HTTP ${res.status}`);
-        this.actionFeedback = { message: msg, variant: 'danger' };
+        // Body already consumed by res.json() above — use direct fallback
+        this.actionFeedback = { message: `HTTP ${res.status}`, variant: 'danger' };
         return;
       }
 
@@ -909,61 +913,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
       };
     } finally {
       this.actionInProgress = false;
-    }
-  }
-
-  /**
-   * Fallback: create new binding then delete old one (non-atomic).
-   * Used when the atomic :replace endpoint is not available.
-   */
-  private async replaceBindingFallback(): Promise<void> {
-    if (!this.replacingBinding || !this.replaceRoleId) return;
-    try {
-      // Create the new binding
-      const createBody = {
-        roleDefinitionId: this.replaceRoleId,
-        principalType: this.replacingBinding.principalType,
-        principalId: this.replacingBinding.principalId,
-        scopeType: this.replacingBinding.scopeType,
-        scopeId: this.replacingBinding.scopeId,
-      };
-
-      const createRes = await apiFetch('/api/v1/admin/role-bindings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createBody),
-      });
-
-      if (!createRes.ok) {
-        const msg = await extractApiError(createRes, `HTTP ${createRes.status}`);
-        this.actionFeedback = { message: msg, variant: 'danger' };
-        return;
-      }
-
-      // Delete the old binding
-      const deleteRes = await apiFetch(`/api/v1/admin/role-bindings/${this.replacingBinding.id}`, {
-        method: 'DELETE',
-      });
-
-      if (!deleteRes.ok) {
-        // Created new but failed to delete old — show warning
-        this.actionFeedback = {
-          message: 'New role assigned but failed to remove old binding. Please remove it manually.',
-          variant: 'danger',
-        };
-        void this.loadData();
-        return;
-      }
-
-      this.showReplaceDialog = false;
-      this.replacingBinding = null;
-      this.actionFeedback = { message: 'Role binding replaced', variant: 'success' };
-      void this.loadData();
-    } catch (err) {
-      this.actionFeedback = {
-        message: err instanceof Error ? err.message : 'Failed to replace binding',
-        variant: 'danger',
-      };
     }
   }
 

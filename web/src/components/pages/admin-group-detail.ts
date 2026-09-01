@@ -303,14 +303,15 @@ export class ScionPageAdminGroupDetail extends LitElement {
     this.boundaryError = '';
 
     try {
-      // Fetch boundaries targeting this group directly (exact group)
-      const exactRes = await apiFetch(
-        `/api/v1/admin/access-constraints?subjectKind=exact_group&subjectId=${encodeURIComponent(this.groupId)}`
-      );
-      // Fetch boundaries targeting this group's closure (members included)
-      const closureRes = await apiFetch(
-        `/api/v1/admin/access-constraints?subjectKind=group_closure&subjectId=${encodeURIComponent(this.groupId)}`
-      );
+      // Fetch exact-group and group-closure boundaries in parallel
+      const [exactRes, closureRes] = await Promise.all([
+        apiFetch(
+          `/api/v1/admin/access-constraints?subjectKind=exact_group&subjectId=${encodeURIComponent(this.groupId)}`
+        ),
+        apiFetch(
+          `/api/v1/admin/access-constraints?subjectKind=group_closure&subjectId=${encodeURIComponent(this.groupId)}`
+        ),
+      ]);
 
       const exactItems: AccessBoundarySummary[] = exactRes.ok
         ? (((await exactRes.json()) as { items: AccessBoundarySummary[] }).items ?? [])
