@@ -383,6 +383,28 @@ to other remotes will fail. This is a known limitation
 
 ---
 
+## Sandbox Runtime & Volumes
+
+When running agents as Cloud Run Sandboxes, Scion enforces security hardening and standardized mounting conventions to guarantee compatibility with modern harnesses.
+
+### Non-Root Execution (UID 1000)
+To align with secure-by-default execution practices, the Cloud Run Sandbox runtime executes agents as **non-root users** (`UID 1000`, matching the built-in `scion` user inside the base images), even though the host-side launcher process executes as `root` (UID 0).
+
+* **Harness Compatibility**: This hardening is critical for newer harnesses like Claude Code (≥ 2.1.246), which explicitly refuse to start with `root` or `sudo` privileges (even when configured with `--dangerously-skip-permissions`).
+* **Environment Injection**: The runtime explicitly maps and configures:
+  * `SCION_HOST_UID` & `SCION_HOST_GID` to `1000` so that `sciontool init` drops privileges.
+  * `HOME` directed to the agent-specific sandbox-mounted directory (e.g. `~/.gemini`).
+  * `USER` and `LOGNAME` environment variables forced to `scion`.
+* **Writability**: The broker ensures all agent homes, workspaces, and cached directories are pre-chowned to UID 1000 so the non-root runner can write and modify code without permission blocks.
+
+### Standardized Shared Volume Mounts
+Shared directories within the Cloud Run Sandbox are mounted at standard paths matching the Kubernetes runtime conventions, ensuring configuration portability across Single-Node and HA environments.
+
+* **Standard Mount Path**: All shared directories are mapped to `/scion-volumes/<name>` inside the sandbox container.
+* **Workspace & Read-Only Support**: The sandbox runtime fully supports mounting shared volumes within the workspace directory tree (using `in_workspace: true` to mount at `/workspace/.scion-volumes/<name>`) and enforces read-only locks when specified.
+
+---
+
 ## 6. Teardown
 
 Delete the Instance:

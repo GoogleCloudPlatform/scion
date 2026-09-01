@@ -3,14 +3,14 @@ title: Permissions & Policy
 description: Designing access control for Scion projects and agents.
 ---
 
-Scion implements a robust, principal-based access control system to manage resources across distributed projects and teams. The system is built on the **Permissions Foundation Phase 1** architecture, providing deterministic policy evaluation, declarative route guards, and comprehensive auditing.
+Scion implements a robust, principal-based access control system to manage resources across distributed projects and teams. The system is built on the **Permissions Foundation** architecture, providing deterministic authorization evaluation, declarative route guards, and comprehensive auditing.
 
-For a detailed technical specification of the policy language and agent identity claims, see the [Policy & Permissions Reference](/scion/reference/permissions-policy/).
+For a detailed technical specification of the permissions model, role definitions, access constraints, and agent identity claims, see the [Permissions & Access Constraints Reference](/scion/reference/permissions-policy/).
 
 ## Core Concepts
 
 ### Unified Authorization
-Scion uses a `UnifiedAuthMiddleware` to enforce declarative route guards across the Hub. Every request undergoes deterministic policy evaluation via a Decide path before reaching the handler, ensuring no resource can be accessed without explicit permission. Engine internals, settings handlers, User Access Token (UAT) endpoints, user management, integrations, and operations have all been converted to explicit permission-based checks, deprecating the legacy `requireAdmin` fallback.
+Scion uses a `UnifiedAuthMiddleware` to enforce declarative route guards across the Hub. Every request undergoes deterministic authorization evaluation via a Decide path before reaching the handler, ensuring no resource can be accessed without explicit permission. Engine internals, settings handlers, User Access Token (UAT) endpoints, user management, integrations, and operations have all been converted to explicit permission-based checks, deprecating the legacy `requireAdmin` fallback.
 
 ### Roles and Bindings
 Access is granted through explicit role assignments:
@@ -45,9 +45,9 @@ Scion uses a standardized set of actions:
 - **Administrative**: `manage`.
 - **Resource-Specific**: `start`, `stop`, `attach`, `message`.
 
-## Policy-Based Authorization
+## Access Control & Authorization
 
-Scion enforces strict policy-based authorization for all agent operations:
+Scion enforces strict role-binding-based authorization for all agent operations:
 - **Agent Creation**: Requires active membership in the target project.
 - **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator) or system administrators.
 - **Agent Deletion**: Only the agent's owner, a system administrator, or authorized agent callers can delete an agent. For an agent caller to perform a deletion, it must have `project:agent:lifecycle` (associated with the `full` role) and must target an agent within its own project (which closes a cross-project agent deletion vulnerability).
@@ -55,14 +55,14 @@ Scion enforces strict policy-based authorization for all agent operations:
 ### Membership-Based Project Access (Visibility Eradication)
 
 The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies.
-- **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is dynamically bound to per-project read policies (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent`).
+- **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is bound to per-project read and access roles using Project-scoped RoleBindings (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent` mappings).
 - **Fail-Closed Retrieval (404 Gate)**: Project read access is verified via a `CheckAccess` gate on retrieval. If a caller is not authorized to read the project, the API responds with a standard `404 Not Found` (rather than a `403 Forbidden`) to prevent callers from probing the existence of private projects.
 
 ### Scheduler Authorization & Owner-Based Access Control
 
-Scheduled events and recurring schedules are strictly protected using an **Owner-Based Access Control** model, combined with dedicated permissions and dynamic policy bindings:
+Scheduled events and recurring schedules are strictly protected using an **Owner-Based Access Control** model, combined with dedicated permissions and dynamic RoleBindings:
 - **Owner-Based Protection**: Only the creator (the owner) of a schedule/event, or a system-wide administrator, has the authority to view, update, delete, or otherwise manage a scheduled event or recurring schedule. This is enforced via creator/owner ID validation at the API handlers layer.
-- **Project Member Bindings**: During project creation or template synchronization, Scion backfills/seeds project-scoped scheduled event policies bound to the project's members group. This grants members the capability to schedule events within their project space.
+- **Project Member Bindings**: During project creation or template synchronization, Scion backfills/seeds project-scoped scheduled event RoleBindings bound to the project's members group. This grants members the capability to schedule events within their project space.
 - **Scheduler Permissions**: A set of 7 dedicated permissions are enforced across scheduler endpoints:
   - `scheduled_event.read`: Permission to read a scheduled event or recurring schedule.
   - `scheduled_event.list`: Permission to list scheduled events and recurring schedules.
@@ -72,46 +72,38 @@ Scheduled events and recurring schedules are strictly protected using an **Owner
   - `hub.scheduler.read`: Permission to read hub-wide scheduler configurations.
   - `hub.scheduler.update`: Permission to update hub-wide scheduler configurations.
 
-Scion uses a **Hierarchical Override Model** for policies. Policies can be attached at three levels:
+## Positive Authority & Monotonic Restrictions
 
-1.  **Hub Level**: Global policies applying to all resources.
-2.  **Project Level**: Policies applying to all resources within a specific project.
-3.  **Resource Level**: Policies applying to a single specific agent or template.
+Scion operates on a single positive-authority model using **RoleBindings** to grant permissions, supplemented by **AccessConstraints** to enforce maximum boundaries.
 
-### Resolution Logic
-When an action is attempted, Scion resolves effective permissions by traversing the hierarchy from the most specific to the most general:
-- A policy at the **Resource level** overrides a policy at the **Project level**.
-- A policy at the **Project level** overrides a global **Hub level** policy.
+### Positive-Authority (RoleBindings)
+All permissions in Scion are additive and must be explicitly granted via a RoleBinding.
+- **RoleDefinition**: A named set of allowed permissions (e.g., `project:viewer`, `project:developer`, `hub-admin`).
+- **RoleBinding**: Connects a principal (User, Agent, or Group) to a RoleDefinition.
+- **Scope**: RoleBindings exist at either `system` scope (system-wide permissions across the entire Hub) or `project` scope (permissions restricted to a single project space).
 
-This model allows for granular delegation, where project owners can manage their own team's access without global administrator intervention.
+### Monotonic Restrictions (AccessConstraints)
+An **AccessConstraint** is a maximum-permissions boundary that can only *reduce* (never widen) a principal's granted authority. It acts as an absolute ceiling.
+- **Ceiling Enforcement**: If a RoleBinding grants a principal 10 permissions, but an AccessConstraint limits that principal to a maximum of 3 specific permissions, the principal will only have those 3 permissions.
+- **Targeting**: AccessConstraints can target specific principals, entire group closures (a group and all its subgroups), or all principals (`all_principals`).
+- **Offline Recovery**: Under `disabled: true`, an AccessConstraint is deactivated. This is used in offline recovery to restore administrator access in the event of a lockout.
+
+### Resolution & Evaluation Logic
+On any authorization request (evaluated via the Hub's `Decide` endpoint):
+1. **Load Bindings**: The engine loads all active RoleBindings for the principal (including group memberships and synthetic agent scopes).
+2. **Resolve Allowed Set**: The union of all permissions from these RoleBindings is compiled into an "allowed permissions" set.
+3. **Apply AccessConstraints**: The engine queries and loads all non-disabled AccessConstraints that apply to the principal (matching on direct principal ID, group memberships, or `all_principals`).
+4. **Calculate Intersection**: The effective permission set is the intersection of the resolved allowed set and the AccessConstraints' `maximum_permissions` ceilings. If no positive RoleBinding grants the permission, or if an AccessConstraint excludes it, access is denied (**fail-closed**).
 
 ## Capability-Based Access Control
 
 The Hub API and Web UI utilize a capability gating system. Resource responses from the API include `_capabilities` annotations. These annotations explicitly state the actions the authenticated user is permitted to perform on that specific resource. This ensures granular UI controls (e.g., disabling the "Delete" button if the user lacks permission) and provides a secondary layer of API-level enforcement.
 
-## Policy Structure
-
-A policy defines the rules for access:
-
-```json
-{
-  "name": "Project Developer Policy",
-  "scopeType": "project",
-  "scopeId": "project-uuid",
-  "resourceType": "agent",
-  "actions": ["create", "read", "start", "stop"],
-  "effect": "allow"
-}
-```
-
-- **Effect**: Can be `allow` or `deny`.
-- **Conditions**: (Future) Optional rules based on resource labels or time-of-day.
-
 ## GCP Service Account Assignment Gates
 
 To prevent lateral privilege escalation—where an agent with low privileges creates a child agent with high privileges, or a user assigns a highly privileged GCP service account they shouldn't have access to—Scion implements a secure, **two-layer gate** for binding a GCP service account to any agent:
 
-1. **Layer 1: Scion Hub Policy**: The Hub's built-in policy engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion.
+1. **Layer 1: Scion Hub Authorization**: The Hub's built-in authorization engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion.
 2. **Layer 2: GCP IAM Policy (`actAs`)**: If `gcp_iam_check_mode` is set to `enforce` (see [Server Configuration Reference](/scion/reference/server-config/)), the Hub evaluates Google Cloud's IAM delegation model via the **GCP Policy Troubleshooter v3 API**. It verifies that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
 
 ### The `actAs` Validation Gate
@@ -120,7 +112,7 @@ The `actAs` (impersonation) check is critical because binding a service account 
 
 | Layer | Checked Authority | Action | Checked Principal |
 | :--- | :--- | :--- | :--- |
-| **Hub Policy** | Inside Scion | `ActionAssign` | Scion User/Agent |
+| **Hub Authorization** | Inside Scion | `ActionAssign` | Scion User/Agent |
 | **GCP IAM** | Inside Google Cloud | `iam.serviceAccounts.actAs` | Caller's GCP Principal |
 
 *Note: The Hub's own `roles/iam.serviceAccountTokenCreator` permission is used to perform impersonated credential probes. It is NOT the permission checked on the caller. The permission evaluated on the caller is `iam.serviceAccounts.actAs` (typically granted via `roles/iam.serviceAccountUser`).*
