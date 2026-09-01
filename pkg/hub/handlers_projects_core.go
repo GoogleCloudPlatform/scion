@@ -160,7 +160,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// scope=mine: projects where the user has an active direct project-owner
-	//   RoleBinding. Legacy Project.OwnerID is included for backward compat.
+	//   RoleBinding. See G2 containment below.
 	// scope=shared: projects where the user has effective access (group
 	//   membership or any RoleBinding) but is NOT in the "mine" set.
 	// mine=true (legacy alias): same as scope=mine.
