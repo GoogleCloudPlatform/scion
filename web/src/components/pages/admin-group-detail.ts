@@ -19,19 +19,35 @@
  *
  * Shows group info and delegates member management to the shared
  * group-member-editor component.
+ *
+ * Capability-gated actions:
+ *   - Edit button: visible iff `_capabilities.actions` contains `update`.
+ *   - Delete group: inside overflow dropdown, visible iff `delete` capability.
+ *   - project_agents groups: no Edit/Delete + system-managed notice.
+ *
+ * Owner display resolves UUID to display name via /api/v1/users/{id}.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, state, query } from 'lit/decorators.js';
 
 import type { AdminGroup } from '../../shared/types.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
+import { canGroup } from '../../shared/groups.js';
 import '../shared/group-member-editor.js';
 import '../shared/boundary-summary-notice.js';
+import '../shared/group-form-dialog.js';
+import '../shared/group-delete-dialog.js';
+import type { ScionGroupFormDialog } from '../shared/group-form-dialog.js';
+import type { ScionGroupDeleteDialog } from '../shared/group-delete-dialog.js';
+import type { GroupUpdatedDetail } from '../shared/group-form-dialog.js';
+import type { GroupDeletedDetail } from '../shared/group-delete-dialog.js';
 import { extractApiError } from '../../client/api.js';
 import { apiFetch } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { navigateTo } from '../../client/main.js';
+import { listMembers } from '../../client/groups-api.js';
 
 @customElement('scion-page-admin-group-detail')
 export class ScionPageAdminGroupDetail extends LitElement {
@@ -56,6 +72,21 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
   @state()
   private boundaryError = '';
+
+  // Owner display name resolution
+  @state()
+  private ownerDisplayName = '';
+
+  // Member count (for delete dialog impact copy)
+  @state()
+  private memberCount = 0;
+
+  // Dialog refs
+  @query('scion-group-form-dialog')
+  private editDialog!: ScionGroupFormDialog;
+
+  @query('scion-group-delete-dialog')
+  private deleteDialog!: ScionGroupDeleteDialog;
 
   static override styles = css`
     :host {
@@ -254,9 +285,29 @@ export class ScionPageAdminGroupDetail extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .header-actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .system-managed-alert {
+      margin-bottom: 1.5rem;
+    }
+
     @media (max-width: 768px) {
       .details-grid {
         grid-template-columns: 1fr 1fr;
+      }
+
+      .header {
+        flex-direction: column;
+      }
+
+      .header-actions {
+        width: 100%;
+        justify-content: flex-start;
       }
     }
   `;
@@ -290,11 +341,50 @@ export class ScionPageAdminGroupDetail extends LitElement {
       this.group = (await response.json()) as AdminGroup;
       dispatchPageTitle(this, this.group.name || this.groupId, 'Groups');
       void this.loadBoundaries();
+      void this.resolveOwnerName();
+      void this.loadMemberCount();
     } catch (err) {
       console.error('Failed to load group:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load group';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /**
+   * Resolve the owner UUID to a display name.
+   * Best-effort: falls back to the raw ID on any failure.
+   */
+  private async resolveOwnerName(): Promise<void> {
+    if (!this.group?.ownerId) {
+      this.ownerDisplayName = '';
+      return;
+    }
+
+    try {
+      const res = await apiFetch(`/api/v1/users/${encodeURIComponent(this.group.ownerId)}`);
+      if (res.ok) {
+        const user = (await res.json()) as { displayName?: string; email?: string };
+        this.ownerDisplayName = user.displayName || user.email || this.group.ownerId;
+      } else {
+        this.ownerDisplayName = this.group.ownerId;
+      }
+    } catch {
+      this.ownerDisplayName = this.group?.ownerId ?? '';
+    }
+  }
+
+  /**
+   * Load member count for the delete dialog impact copy.
+   */
+  private async loadMemberCount(): Promise<void> {
+    if (!this.group) return;
+    try {
+      const members = await listMembers(this.group.id);
+      this.memberCount = members.length;
+    } catch {
+      // Non-critical — leave at 0.
+      this.memberCount = 0;
     }
   }
 
@@ -376,6 +466,10 @@ export class ScionPageAdminGroupDetail extends LitElement {
     }
 
     const labels = this.group.labels ? Object.entries(this.group.labels) : [];
+    const isProjectAgents = this.group.groupType === 'project_agents';
+    const canEdit = !isProjectAgents && canGroup(this.group._capabilities, 'update');
+    const canDelete = !isProjectAgents && canGroup(this.group._capabilities, 'delete');
+    const ownerDisplay = this.ownerDisplayName || this.group.ownerId || '\u2014';
 
     return html`
       <a href="/admin/groups" class="back-link">
@@ -387,18 +481,63 @@ export class ScionPageAdminGroupDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <div class="group-icon ${this.group.groupType}">
-              <sl-icon
-                name="${this.group.groupType === 'project_agents' ? 'cpu' : 'people'}"
-              ></sl-icon>
+              <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
             </div>
             <h1>${this.group.name}</h1>
             <span class="type-badge ${this.group.groupType}">
-              ${this.group.groupType === 'project_agents' ? 'project agents' : 'explicit'}
+              ${isProjectAgents ? 'project agents' : 'explicit'}
             </span>
           </div>
           <span class="header-slug">${this.group.slug}</span>
         </div>
+
+        ${canEdit || canDelete
+          ? html`
+              <div class="header-actions">
+                ${canEdit
+                  ? html`
+                      <sl-button
+                        variant="default"
+                        size="small"
+                        @click=${() => this.handleEditClick()}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canDelete
+                  ? html`
+                      <sl-dropdown>
+                        <sl-button slot="trigger" variant="default" size="small" caret>
+                          <sl-icon name="three-dots-vertical"></sl-icon>
+                        </sl-button>
+                        <sl-menu>
+                          <sl-menu-item
+                            @click=${() => this.handleDeleteClick()}
+                            style="color: var(--sl-color-danger-600, #dc2626);"
+                          >
+                            <sl-icon slot="prefix" name="trash"></sl-icon>
+                            Delete group
+                          </sl-menu-item>
+                        </sl-menu>
+                      </sl-dropdown>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
       </div>
+
+      ${isProjectAgents
+        ? html`
+            <sl-alert variant="neutral" open class="system-managed-alert">
+              <sl-icon slot="icon" name="info-circle"></sl-icon>
+              This group is system-managed. Its membership mirrors the agents of project
+              ${this.group.projectId ?? 'unknown'} and cannot be edited.
+            </sl-alert>
+          `
+        : nothing}
 
       <div class="details-card">
         <div class="details-grid">
@@ -408,7 +547,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
           </div>
           <div class="detail-item">
             <span class="detail-label">Owner</span>
-            <span class="detail-value mono">${this.group.ownerId || '\u2014'}</span>
+            <span class="detail-value${this.ownerDisplayName ? '' : ' mono'}">${ownerDisplay}</span>
           </div>
           <div class="detail-item">
             <span class="detail-label">Created</span>
@@ -453,9 +592,39 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
       <scion-group-member-editor
         groupId=${this.group.id}
-        ?readOnly=${this.group.groupType === 'project_agents'}
+        ?readOnly=${isProjectAgents}
+        .capabilities=${this.group._capabilities}
       ></scion-group-member-editor>
+
+      <scion-group-form-dialog
+        .group=${this.group}
+        @group-updated=${(e: CustomEvent<GroupUpdatedDetail>) => this.handleGroupUpdated(e)}
+      ></scion-group-form-dialog>
+
+      <scion-group-delete-dialog
+        .group=${this.group}
+        .memberCount=${this.memberCount}
+        @group-deleted=${(e: CustomEvent<GroupDeletedDetail>) => this.handleGroupDeleted(e)}
+      ></scion-group-delete-dialog>
     `;
+  }
+
+  private handleEditClick(): void {
+    this.editDialog?.show();
+  }
+
+  private handleDeleteClick(): void {
+    this.deleteDialog?.show();
+  }
+
+  private handleGroupUpdated(e: CustomEvent<GroupUpdatedDetail>): void {
+    this.group = e.detail.group;
+    dispatchPageTitle(this, this.group.name || this.groupId, 'Groups');
+    void this.resolveOwnerName();
+  }
+
+  private handleGroupDeleted(_e: CustomEvent<GroupDeletedDetail>): void {
+    navigateTo('/admin/groups');
   }
 
   private renderLoading() {
