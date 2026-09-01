@@ -77,6 +77,8 @@ export class ScionAccessBoundaryStepper extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 0.75rem;
+      min-height: 44px;
+      min-width: 44px;
       border: none;
       background: none;
       cursor: default;
@@ -119,12 +121,12 @@ export class ScionAccessBoundaryStepper extends LitElement {
 
     .step-number.current {
       background: var(--sl-color-primary-600, #2563eb);
-      color: #ffffff;
+      color: var(--sl-color-neutral-0, #ffffff);
     }
 
     .step-number.completed {
       background: var(--sl-color-success-600, #16a34a);
-      color: #ffffff;
+      color: var(--sl-color-neutral-0, #ffffff);
     }
 
     .step-label {
@@ -154,20 +156,75 @@ export class ScionAccessBoundaryStepper extends LitElement {
     }
 
     @media (max-width: 768px) {
-      .step-label {
-        display: none;
-      }
-
       .stepper {
+        flex-direction: column;
+        align-items: stretch;
         gap: 0;
       }
 
+      .step {
+        flex-direction: row;
+        align-items: center;
+      }
+
       .step-connector {
-        width: 1.5rem;
+        width: 2px;
+        height: 1.5rem;
+        align-self: center;
       }
 
       .step-button {
         padding: 0.5rem;
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .step-label {
+        display: inline;
+      }
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .step-number {
+        border: 2px solid ButtonText;
+      }
+
+      .step-number.current {
+        border-color: Highlight;
+      }
+
+      .step-number.completed {
+        border-color: ButtonText;
+      }
+
+      .step-connector {
+        background: ButtonText;
+      }
+
+      .step-button.clickable:focus-visible {
+        outline: 2px solid Highlight;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .step-button {
+        transition: none;
+      }
+
+      .group-chevron {
+        transition: none;
       }
     }
   `;

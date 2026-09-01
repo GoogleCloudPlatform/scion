@@ -55,6 +55,7 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
   @state() private projectSearchResults: ProjectResult[] = [];
   @state() private projectSearchLoading = false;
   @state() private projectSearchOpen = false;
+  @state() private activeDescendantIndex = -1;
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private blurTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private searchRequestId = 0;
@@ -88,6 +89,7 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
       align-items: flex-start;
       gap: 0.75rem;
       padding: 0.875rem 1rem;
+      min-height: 44px;
       border: 2px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
       cursor: pointer;
@@ -163,8 +165,19 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
       display: flex;
       flex-direction: column;
       padding: 0.5rem 0.75rem;
+      min-height: 44px;
+      justify-content: center;
       cursor: pointer;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .search-option:focus-visible {
+      outline: 2px solid var(--sl-color-primary-600, #2563eb);
+      outline-offset: -2px;
+    }
+
+    .search-option.active-descendant {
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
     .search-option:last-child {
@@ -200,6 +213,62 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       font-size: 0.875rem;
       color: var(--scion-text, #1e293b);
+    }
+
+    @media (max-width: 768px) {
+      .scope-card {
+        width: 100%;
+      }
+
+      .project-search {
+        width: 100%;
+      }
+
+      .search-dropdown {
+        max-height: 180px;
+      }
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .scope-card {
+        border: 2px solid ButtonText;
+      }
+
+      .scope-card.selected {
+        border-color: Highlight;
+        background: none;
+      }
+
+      .scope-card:focus-visible {
+        outline: 2px solid Highlight;
+      }
+
+      .search-dropdown {
+        border: 2px solid ButtonText;
+      }
+
+      .search-option:hover,
+      .search-option.active-descendant {
+        outline: 2px solid Highlight;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .scope-card {
+        transition: none;
+      }
     }
   `;
 
@@ -260,6 +329,39 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
       if (requestId === this.searchRequestId) {
         this.projectSearchLoading = false;
       }
+    }
+  }
+
+  private handleProjectSearchKeydown(e: KeyboardEvent): void {
+    if (!this.projectSearchOpen) return;
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        if (this.activeDescendantIndex < this.projectSearchResults.length - 1) {
+          this.activeDescendantIndex++;
+        }
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        if (this.activeDescendantIndex > 0) {
+          this.activeDescendantIndex--;
+        }
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (
+          this.activeDescendantIndex >= 0 &&
+          this.activeDescendantIndex < this.projectSearchResults.length
+        ) {
+          this.selectProject(this.projectSearchResults[this.activeDescendantIndex]);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        this.projectSearchOpen = false;
+        this.activeDescendantIndex = -1;
+        break;
     }
   }
 
@@ -361,13 +463,21 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
                   value=${this.projectSearchQuery}
                   type="text"
                   autocomplete="off"
+                  role="combobox"
+                  aria-expanded=${this.projectSearchOpen ? 'true' : 'false'}
+                  aria-controls="project-search-listbox"
+                  aria-activedescendant=${this.activeDescendantIndex >= 0
+                    ? `project-option-${this.activeDescendantIndex}`
+                    : ''}
                   @sl-input=${(e: Event) => this.handleProjectSearchInput(e)}
+                  @keydown=${(e: KeyboardEvent) => this.handleProjectSearchKeydown(e)}
                   @sl-focus=${() => {
                     if (this.projectSearchResults.length > 0) this.projectSearchOpen = true;
                   }}
                   @sl-blur=${() => {
                     this.blurTimeoutId = setTimeout(() => {
                       this.projectSearchOpen = false;
+                      this.activeDescendantIndex = -1;
                       if (!this.selectedViaDropdown && this.projectSearchQuery.trim()) {
                         // Typed but didn't select — clear project
                         this.projectId = '';
@@ -379,17 +489,31 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
                 ></sl-input>
                 ${this.projectSearchOpen
                   ? html`
-                      <div class="search-dropdown">
+                      <div
+                        class="search-dropdown"
+                        id="project-search-listbox"
+                        role="listbox"
+                        aria-label="Project search results"
+                      >
                         ${this.projectSearchLoading
-                          ? html`<div class="search-loading">
+                          ? html`<div class="search-loading" role="status" aria-live="polite">
                               <sl-spinner></sl-spinner> Searching...
                             </div>`
                           : this.projectSearchResults.length === 0
-                            ? html`<div class="search-empty">No projects found</div>`
+                            ? html`<div class="search-empty" role="status" aria-live="polite">
+                                No projects found
+                              </div>`
                             : this.projectSearchResults.map(
-                                (project) => html`
+                                (project, idx) => html`
                                   <div
-                                    class="search-option"
+                                    class="search-option ${idx === this.activeDescendantIndex
+                                      ? 'active-descendant'
+                                      : ''}"
+                                    id="project-option-${idx}"
+                                    role="option"
+                                    aria-selected=${idx === this.activeDescendantIndex
+                                      ? 'true'
+                                      : 'false'}
                                     @mousedown=${(e: Event) => {
                                       e.preventDefault();
                                       this.selectProject(project);

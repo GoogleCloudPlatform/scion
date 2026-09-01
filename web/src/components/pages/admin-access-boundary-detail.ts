@@ -55,7 +55,9 @@ import type { PageRequestDetail } from '../shared/affected-principals-table.js';
 import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-timeline.js';
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
 
-type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting';
+type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
+
+const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
 
 @customElement('scion-page-admin-access-boundary-detail')
 export class ScionPageAdminAccessBoundaryDetail extends LitElement {
@@ -79,6 +81,10 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   // Delete flow
   @state() private showDeletePreview = false;
+
+  // Misc
+  private lastLoadTime = 0;
+  private boundVisibilityChange = this.handleVisibilityChange.bind(this);
 
   static override styles = css`
     :host {
@@ -135,6 +141,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0 0 0.375rem;
+      overflow-wrap: anywhere;
     }
 
     .header-badges {
@@ -445,6 +452,122 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     .delete-preview-overlay {
       margin-top: 1.25rem;
     }
+
+    /* Visually hidden */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* Permission denied */
+    .permission-denied-state {
+      text-align: center;
+      padding: 3rem 2rem;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+    }
+
+    .permission-denied-state sl-icon {
+      font-size: 2rem;
+      color: var(--sl-color-warning-500, #eab308);
+      margin-bottom: 0.5rem;
+    }
+
+    .permission-denied-state h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
+    }
+
+    .permission-denied-state p {
+      color: var(--scion-text-muted, #64748b);
+      margin: 0;
+    }
+
+    /* Responsive: mobile */
+    @media (max-width: 768px) {
+      .detail-page {
+        padding: 0.5rem 0.75rem 2rem;
+      }
+
+      .boundary-name {
+        font-size: 1.25rem;
+      }
+
+      .header-main {
+        flex-direction: column;
+      }
+
+      .header-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .definition-grid {
+        grid-template-columns: 1fr;
+        gap: 0.25rem 0;
+      }
+
+      .def-label {
+        font-size: 0.75rem;
+        margin-top: 0.5rem;
+      }
+
+      .effect-summary {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .perm-list {
+        gap: 0.25rem;
+      }
+    }
+
+    /* Tablet: affected principals table scroll */
+    @media (max-width: 1024px) {
+      .affected-table-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+    }
+
+    .affected-table-scroll {
+      position: relative;
+    }
+
+    /* Forced colors */
+    @media (forced-colors: active) {
+      .detail-section {
+        border: 1px solid ButtonText;
+      }
+
+      .perm-tag {
+        border: 1px solid ButtonText;
+      }
+
+      .recovery-disabled-banner {
+        border: 2px solid Highlight;
+      }
+
+      .effect-stat {
+        border: 1px solid ButtonText;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      .skeleton-line {
+        animation: none;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -455,6 +578,21 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     }
     setDocumentTitle('Access Boundary');
     void this.loadBoundary();
+    document.addEventListener('visibilitychange', this.boundVisibilityChange);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('visibilitychange', this.boundVisibilityChange);
+  }
+
+  private handleVisibilityChange(): void {
+    if (document.visibilityState === 'visible') {
+      const elapsed = Date.now() - this.lastLoadTime;
+      if (elapsed >= STALENESS_THRESHOLD_MS) {
+        void this.loadBoundary();
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -469,6 +607,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       const boundary = await accessBoundariesApi.get(this.boundaryId);
       this.boundary = boundary;
       this.phase = 'ready';
+      this.lastLoadTime = Date.now();
       setDocumentTitle(`Access Boundary: ${boundary.name}`);
 
       // Load affected principals
@@ -476,9 +615,15 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       // Load audit events
       void this.loadAuditEvents();
     } catch (err) {
-      if (err instanceof accessBoundariesApi.AccessBoundaryAPIError && err.httpStatus === 404) {
-        this.phase = 'not_found';
-        return;
+      if (err instanceof accessBoundariesApi.AccessBoundaryAPIError) {
+        if (err.httpStatus === 404) {
+          this.phase = 'not_found';
+          return;
+        }
+        if (err.httpStatus === 403) {
+          this.phase = 'permission_denied';
+          return;
+        }
       }
       this.errorMessage = err instanceof Error ? err.message : 'Failed to load access boundary';
       this.phase = 'error';
@@ -656,12 +801,35 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
         return this.renderError();
       case 'not_found':
         return this.renderNotFound();
+      case 'permission_denied':
+        return this.renderPermissionDenied();
       case 'ready':
       case 'deleting':
         return this.renderDetail();
       default:
         return nothing;
     }
+  }
+
+  private renderPermissionDenied() {
+    return html`
+      <div class="detail-page">
+        <div class="permission-denied-state" role="alert">
+          <sl-icon name="shield-lock"></sl-icon>
+          <h1>Permission Denied</h1>
+          <p>
+            You do not have permission to view this access boundary. Contact your administrator.
+          </p>
+          <sl-button
+            variant="default"
+            style="margin-top: 1rem;"
+            @click=${() => navigateTo('/admin/access-boundaries')}
+          >
+            Back to inventory
+          </sl-button>
+        </div>
+      </div>
+    `;
   }
 
   private renderLoading() {
@@ -845,7 +1013,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private renderRecoveryBanner(b: AccessBoundaryDetail) {
     return html`
-      <div class="recovery-disabled-banner">
+      <div class="recovery-disabled-banner" role="alert">
         <sl-icon name="lock"></sl-icon>
         <div class="recovery-banner-content">
           <div class="recovery-banner-title">Recovery-disabled — this boundary is immutable</div>
@@ -999,16 +1167,23 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
               `
             : nothing}
 
-          <scion-affected-principals-table
-            .principals=${this.affectedPrincipals}
-            .nextPageToken=${this.affectedNextToken}
-            .totalCount=${this.affectedTotalCount}
-            .totalCountExact=${this.affectedTotalCountExact}
-            .loading=${this.loadingAffected}
-            mode="detail"
-            @page-request=${(e: CustomEvent<PageRequestDetail>) =>
-              this.handleAffectedPageRequest(e)}
-          ></scion-affected-principals-table>
+          <div
+            class="affected-table-scroll"
+            tabindex="0"
+            role="region"
+            aria-label="Affected principals, scrollable"
+          >
+            <scion-affected-principals-table
+              .principals=${this.affectedPrincipals}
+              .nextPageToken=${this.affectedNextToken}
+              .totalCount=${this.affectedTotalCount}
+              .totalCountExact=${this.affectedTotalCountExact}
+              .loading=${this.loadingAffected}
+              mode="detail"
+              @page-request=${(e: CustomEvent<PageRequestDetail>) =>
+                this.handleAffectedPageRequest(e)}
+            ></scion-affected-principals-table>
+          </div>
 
           ${b.intersectingBoundaries.length > 0
             ? html`

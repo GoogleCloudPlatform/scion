@@ -431,6 +431,48 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       }
     }
 
+    .role-name {
+      overflow-wrap: anywhere;
+    }
+
+    .scope-tag {
+      overflow-wrap: anywhere;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .section {
+        border-color: ButtonText;
+      }
+
+      .role-card {
+        border-color: ButtonText;
+      }
+
+      .status-badge {
+        border: 1px solid ButtonText;
+      }
+
+      .error-state {
+        border: 1px solid ButtonText;
+      }
+
+      .layers-toggle {
+        border-top-color: ButtonText;
+      }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       .layers-toggle-header sl-icon {
         transition: none;
@@ -637,7 +679,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
     if (this.error) {
       return html`
-        <div class="error-state">
+        <div class="error-state" role="alert">
           <span>${this.error}</span>
           <sl-button size="small" @click=${() => this.loadEffectiveRoles()}> Retry </sl-button>
         </div>
@@ -753,7 +795,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     if (this.explainError) {
       return html`
         <div class="layers-content">
-          <div class="explain-error">
+          <div class="explain-error" role="alert">
             <sl-icon name="exclamation-triangle"></sl-icon>
             ${this.explainError}
             <sl-button size="small" @click=${() => this.loadExplainLayers()}> Retry </sl-button>

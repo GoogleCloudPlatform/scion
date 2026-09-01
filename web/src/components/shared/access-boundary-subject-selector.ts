@@ -132,6 +132,7 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
       align-items: flex-start;
       gap: 0.75rem;
       padding: 0.875rem 1rem;
+      min-height: 44px;
       border: 2px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
       cursor: pointer;
@@ -207,6 +208,59 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
 
     .warning {
       margin-top: 0;
+    }
+
+    fieldset {
+      border: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    @media (max-width: 768px) {
+      .option-cards {
+        flex-direction: column;
+      }
+
+      .option-card {
+        width: 100%;
+      }
+
+      .search-section {
+        padding: 0;
+      }
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .option-card {
+        border: 2px solid ButtonText;
+      }
+
+      .option-card.selected {
+        border-color: Highlight;
+        background: none;
+      }
+
+      .option-card:focus-visible {
+        outline: 2px solid Highlight;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .option-card {
+        transition: none;
+      }
     }
   `;
 
@@ -298,32 +352,35 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
 
     return html`
       <div class="subject-selector">
-        <div class="option-cards" role="radiogroup" aria-label="Subject type">
-          ${SUBJECT_OPTIONS.map((option) => {
-            const isSelected = option.value === this.selection;
-            return html`
-              <div
-                class=${classMap({ 'option-card': true, selected: isSelected })}
-                role="radio"
-                aria-checked=${isSelected ? 'true' : 'false'}
-                tabindex="0"
-                @click=${() => this.handleOptionSelect(option.value)}
-                @keydown=${(e: KeyboardEvent) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    this.handleOptionSelect(option.value);
-                  }
-                }}
-              >
-                <sl-icon class="option-icon" name=${option.icon}></sl-icon>
-                <div class="option-content">
-                  <div class="option-label">${option.label}</div>
-                  <div class="option-description">${option.description}</div>
+        <fieldset>
+          <legend class="sr-only">Subject type</legend>
+          <div class="option-cards" role="radiogroup" aria-label="Subject type">
+            ${SUBJECT_OPTIONS.map((option) => {
+              const isSelected = option.value === this.selection;
+              return html`
+                <div
+                  class=${classMap({ 'option-card': true, selected: isSelected })}
+                  role="radio"
+                  aria-checked=${isSelected ? 'true' : 'false'}
+                  tabindex="0"
+                  @click=${() => this.handleOptionSelect(option.value)}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      this.handleOptionSelect(option.value);
+                    }
+                  }}
+                >
+                  <sl-icon class="option-icon" name=${option.icon}></sl-icon>
+                  <div class="option-content">
+                    <div class="option-label">${option.label}</div>
+                    <div class="option-description">${option.description}</div>
+                  </div>
                 </div>
-              </div>
-            `;
-          })}
-        </div>
+              `;
+            })}
+          </div>
+        </fieldset>
 
         ${selectedOption?.needsSearch && selectedOption.searchType
           ? html`

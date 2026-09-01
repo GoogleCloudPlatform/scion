@@ -107,6 +107,7 @@ export class ScionMaximumPermissionSelector extends LitElement {
 
     .filter-tab {
       padding: 0.375rem 0.75rem;
+      min-height: 44px;
       font-size: 0.8125rem;
       font-weight: 500;
       border: none;
@@ -234,6 +235,8 @@ export class ScionMaximumPermissionSelector extends LitElement {
     .group-action-btn {
       font-size: 0.75rem;
       padding: 0.125rem 0.5rem;
+      min-height: 44px;
+      min-width: 44px;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
       background: var(--scion-surface, #ffffff);
@@ -258,6 +261,7 @@ export class ScionMaximumPermissionSelector extends LitElement {
       align-items: center;
       gap: 0.75rem;
       padding: 0.5rem 1rem;
+      min-height: 44px;
       border-bottom: 1px solid var(--scion-border-light, #f1f5f9);
       transition: background-color 0.1s ease;
     }
@@ -296,6 +300,7 @@ export class ScionMaximumPermissionSelector extends LitElement {
       color: var(--scion-text, #1e293b);
       font-family: var(--sl-font-mono, monospace);
       word-break: break-all;
+      overflow-wrap: anywhere;
     }
 
     .permission-new-badge {
@@ -343,6 +348,104 @@ export class ScionMaximumPermissionSelector extends LitElement {
 
     .error-state {
       color: var(--sl-color-danger-600, #dc2626);
+    }
+
+    @media (max-width: 768px) {
+      .controls {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .search-input {
+        min-width: 0;
+        width: 100%;
+      }
+
+      .filter-tabs {
+        justify-content: center;
+      }
+
+      .sticky-summary {
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+      }
+
+      .permission-row {
+        flex-wrap: wrap;
+      }
+
+      .permission-info {
+        flex-basis: 100%;
+        order: 2;
+        padding-left: 2rem;
+      }
+
+      .group-header {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+
+      .group-actions {
+        width: 100%;
+        justify-content: flex-end;
+      }
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .filter-tab.active {
+        border: 2px solid Highlight;
+      }
+
+      .permission-group {
+        border: 2px solid ButtonText;
+      }
+
+      .group-header {
+        border-bottom: 2px solid ButtonText;
+      }
+
+      .permission-row:focus-visible {
+        outline: 2px solid Highlight;
+      }
+
+      .group-action-btn {
+        border: 1px solid ButtonText;
+      }
+
+      .group-action-btn:hover {
+        border-color: Highlight;
+      }
+
+      .permission-status.retained {
+        color: ButtonText;
+      }
+
+      .permission-status.removed {
+        color: ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .filter-tab,
+      .group-action-btn,
+      .permission-row,
+      .permission-copy-btn,
+      .group-chevron {
+        transition: none;
+      }
     }
   `;
 
@@ -526,9 +629,31 @@ export class ScionMaximumPermissionSelector extends LitElement {
                 <button
                   class=${classMap({ 'filter-tab': true, active: this.filterView === view })}
                   role="tab"
+                  tabindex=${this.filterView === view ? '0' : '-1'}
                   aria-selected=${this.filterView === view ? 'true' : 'false'}
                   @click=${() => {
                     this.filterView = view;
+                  }}
+                  @keydown=${(e: KeyboardEvent) => {
+                    const views: FilterView[] = ['all', 'retained', 'removed'];
+                    const idx = views.indexOf(view);
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      const next = views[(idx + 1) % views.length];
+                      this.filterView = next;
+                      requestAnimationFrame(() => {
+                        const tabs = this.renderRoot.querySelectorAll('[role="tab"]');
+                        (tabs[(idx + 1) % views.length] as HTMLElement)?.focus();
+                      });
+                    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      const prev = views[(idx - 1 + views.length) % views.length];
+                      this.filterView = prev;
+                      requestAnimationFrame(() => {
+                        const tabs = this.renderRoot.querySelectorAll('[role="tab"]');
+                        (tabs[(idx - 1 + views.length) % views.length] as HTMLElement)?.focus();
+                      });
+                    }
                   }}
                 >
                   ${view === 'all' ? 'All' : view === 'retained' ? 'Retained' : 'Removed'}

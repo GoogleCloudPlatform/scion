@@ -57,6 +57,7 @@ import { isFeatureEnabled, ACCESS_BOUNDARIES_AUTHORING_FLAG } from '../../utils/
 
 const PAGE_SIZE = 25;
 const SEARCH_DEBOUNCE_MS = 300;
+const STALENESS_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
 // ---------------------------------------------------------------------------
 // Helper types
@@ -80,6 +81,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   @state() private totalCountExact = true;
   @state() private nextPageToken: PageToken | undefined;
   @state() private error: string | null = null;
+  @state() private permissionDenied = false;
   @state() private listCapabilities: AccessBoundaryListResponse['_capabilities'] | null = null;
 
   // --- Filter state ---
@@ -96,9 +98,14 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   // --- Sort ---
   @state() private sort: SortConfig = { field: 'risk_status', direction: 'desc' };
 
+  // --- Mobile card expansion ---
+  @state() private expandedCardIds: Set<string> = new Set();
+
   // --- Misc ---
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private abortController: AbortController | null = null;
+  private lastLoadTime = 0;
+  private boundVisibilityChange = this.handleVisibilityChange.bind(this);
 
   static override styles = css`
     :host {
@@ -339,6 +346,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     .boundary-name {
       font-weight: 500;
       font-size: 0.875rem;
+      overflow-wrap: anywhere;
     }
 
     /* Subject display */
@@ -563,6 +571,53 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       }
     }
 
+    /* Visually hidden (screen-reader accessible) */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* Live region for result counts */
+    .result-count-live {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 0.5rem;
+    }
+
+    /* Permission denied state */
+    .permission-denied-state {
+      text-align: center;
+      padding: 3rem 2rem;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+    }
+
+    .permission-denied-state sl-icon {
+      font-size: 3rem;
+      color: var(--sl-color-warning-500, #eab308);
+      margin-bottom: 1rem;
+    }
+
+    .permission-denied-state h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
+    }
+
+    .permission-denied-state p {
+      color: var(--scion-text-muted, #64748b);
+      margin: 0;
+    }
+
     /* Responsive: tablet */
     @media (max-width: 1024px) {
       table {
@@ -604,6 +659,12 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
         width: 100%;
         justify-content: flex-end;
       }
+
+      .pagination {
+        flex-wrap: wrap;
+        padding: 0.75rem;
+        gap: 0.5rem;
+      }
     }
 
     @media (min-width: 769px) {
@@ -627,6 +688,11 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       background-color: var(--scion-bg-subtle, #f1f5f9);
     }
 
+    .mobile-card:focus-within {
+      outline: 2px solid var(--sl-color-primary-600, #2563eb);
+      outline-offset: -2px;
+    }
+
     .mobile-card-header {
       display: flex;
       align-items: flex-start;
@@ -639,6 +705,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       font-weight: 600;
       font-size: 0.9375rem;
       color: var(--scion-text, #1e293b);
+      overflow-wrap: anywhere;
     }
 
     .mobile-card-meta {
@@ -654,6 +721,88 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
+
+    /* Mobile card expandable details */
+    .mobile-card-expand-btn {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-top: 0.5rem;
+      padding: 0.25rem 0;
+      background: none;
+      border: none;
+      font-size: 0.75rem;
+      color: var(--sl-color-primary-600, #2563eb);
+      cursor: pointer;
+      min-height: 44px;
+      min-width: 44px;
+    }
+
+    .mobile-card-expand-btn:focus-visible {
+      outline: 2px solid var(--sl-color-primary-600, #2563eb);
+      outline-offset: 2px;
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .mobile-card-details {
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .mobile-card-detail-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.25rem 0;
+      font-size: 0.8125rem;
+    }
+
+    .mobile-card-detail-label {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .mobile-card-detail-value {
+      color: var(--scion-text, #1e293b);
+    }
+
+    /* Forced colors (high-contrast mode) */
+    @media (forced-colors: active) {
+      .status-badge,
+      .risk-badge,
+      .scope-badge,
+      .subject-kind-badge {
+        border: 1px solid ButtonText;
+      }
+
+      .mobile-card,
+      .table-container {
+        border: 1px solid ButtonText;
+      }
+
+      tr.clickable-row:focus-within {
+        outline: 2px solid Highlight;
+      }
+
+      .skeleton-cell {
+        border: 1px solid GrayText;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      tr.clickable-row {
+        transition: none;
+      }
+
+      .mobile-card {
+        transition: none;
+      }
+
+      .skeleton-cell {
+        animation: none;
+      }
+    }
   `;
 
   // ---------------------------------------------------------------------------
@@ -666,12 +815,23 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     this.readFiltersFromURL();
     resetAllSequences();
     void this.loadData();
+    document.addEventListener('visibilitychange', this.boundVisibilityChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.cancelPendingSearch();
     this.abortController?.abort();
+    document.removeEventListener('visibilitychange', this.boundVisibilityChange);
+  }
+
+  private handleVisibilityChange(): void {
+    if (document.visibilityState === 'visible') {
+      const elapsed = Date.now() - this.lastLoadTime;
+      if (elapsed >= STALENESS_THRESHOLD_MS) {
+        void this.loadData();
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -739,6 +899,8 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       this.totalCountExact = data.totalCountExact ?? true;
       this.nextPageToken = data.nextPageToken;
       this.listCapabilities = data._capabilities ?? null;
+      this.lastLoadTime = Date.now();
+      this.permissionDenied = false;
     } catch (err) {
       if (err instanceof StaleResponseError) {
         // A newer request superseded this one — do nothing
@@ -749,7 +911,12 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       }
       console.error('Failed to load access boundaries:', err);
       if (err instanceof AccessBoundaryAPIError) {
-        this.error = err.message || `HTTP ${err.httpStatus}`;
+        if (err.httpStatus === 403) {
+          this.permissionDenied = true;
+          this.error = null;
+        } else {
+          this.error = err.message || `HTTP ${err.httpStatus}`;
+        }
       } else {
         this.error = err instanceof Error ? err.message : 'Failed to load access boundaries';
       }
@@ -1112,13 +1279,23 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       </p>
 
       ${this.renderFilterBar()}
+      <div class="result-count-live" role="status" aria-live="polite" aria-atomic="true">
+        ${!this.loading && this.items.length > 0
+          ? html`${this.totalCountExact ? this.totalCount : `${this.totalCount}+`}
+            ${this.totalCount === 1 ? 'boundary' : 'boundaries'}${this.hasActiveFilters
+              ? ' matching filters'
+              : ''}`
+          : nothing}
+      </div>
       ${this.loading && this.items.length === 0
         ? this.renderLoadingSkeleton()
-        : this.error
-          ? this.renderError()
-          : this.items.length === 0
-            ? this.renderEmpty()
-            : this.renderContent()}
+        : this.permissionDenied
+          ? this.renderPermissionDenied()
+          : this.error
+            ? this.renderError()
+            : this.items.length === 0
+              ? this.renderEmpty()
+              : this.renderContent()}
     `;
   }
 
@@ -1226,7 +1403,12 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
 
   private renderLoadingSkeleton() {
     return html`
-      <div class="skeleton-table" aria-label="Loading access boundaries">
+      <div
+        class="skeleton-table"
+        role="status"
+        aria-label="Loading access boundaries"
+        aria-live="polite"
+      >
         ${Array.from(
           { length: 5 },
           (_, i) => html`
@@ -1251,7 +1433,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
 
   private renderError() {
     return html`
-      <div class="error-state">
+      <div class="error-state" role="alert">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Access Boundaries</h2>
         <p>There was a problem connecting to the API.</p>
@@ -1260,6 +1442,19 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
+      </div>
+    `;
+  }
+
+  private renderPermissionDenied() {
+    return html`
+      <div class="permission-denied-state" role="alert">
+        <sl-icon name="shield-lock"></sl-icon>
+        <h2>Permission Denied</h2>
+        <p>
+          You do not have the required permission to view access boundaries. Contact your
+          administrator to request access.
+        </p>
       </div>
     `;
   }
@@ -1323,24 +1518,74 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   // Desktop table
   // ---------------------------------------------------------------------------
 
+  private sortAriaLabel(field: string): 'ascending' | 'descending' | 'none' {
+    if (this.sort.field !== field) return 'none';
+    return this.sort.direction === 'asc' ? 'ascending' : 'descending';
+  }
+
   private renderTable() {
     return html`
       <div class="table-container">
-        <div class="table-scroll">
-          <table role="table">
+        <div
+          class="table-scroll"
+          tabindex="0"
+          role="region"
+          aria-label="Access boundaries table, scrollable"
+        >
+          <table role="table" aria-label="Access boundaries">
+            <caption class="sr-only">
+              List of access boundaries showing name, scope, subject, schedule, retained
+              permissions, affected principals, and last updated time.
+            </caption>
             <thead>
               <tr>
-                <th class="sortable" @click=${() => this.toggleSort('name')}>
+                <th
+                  class="sortable"
+                  aria-sort=${this.sortAriaLabel('name')}
+                  @click=${() => this.toggleSort('name')}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      this.toggleSort('name');
+                    }
+                  }}
+                  tabindex="0"
+                  role="columnheader"
+                >
                   Name / Status ${this.renderSortIndicator('name')}
                 </th>
-                <th>Scope</th>
-                <th>Subject</th>
-                <th class="hide-tablet">Schedule</th>
-                <th class="hide-tablet">Retained permissions</th>
-                <th class="sortable hide-tablet" @click=${() => this.toggleSort('affected_count')}>
+                <th role="columnheader">Scope</th>
+                <th role="columnheader">Subject</th>
+                <th class="hide-tablet" role="columnheader">Schedule</th>
+                <th class="hide-tablet" role="columnheader">Retained permissions</th>
+                <th
+                  class="sortable hide-tablet"
+                  aria-sort=${this.sortAriaLabel('affected_count')}
+                  @click=${() => this.toggleSort('affected_count')}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      this.toggleSort('affected_count');
+                    }
+                  }}
+                  tabindex="0"
+                  role="columnheader"
+                >
                   Affected ${this.renderSortIndicator('affected_count')}
                 </th>
-                <th class="sortable" @click=${() => this.toggleSort('updated_at')}>
+                <th
+                  class="sortable"
+                  aria-sort=${this.sortAriaLabel('updated_at')}
+                  @click=${() => this.toggleSort('updated_at')}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      this.toggleSort('updated_at');
+                    }
+                  }}
+                  tabindex="0"
+                  role="columnheader"
+                >
                   Updated ${this.renderSortIndicator('updated_at')}
                 </th>
               </tr>
@@ -1371,7 +1616,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
         }}
       >
         <td class="name-cell">
-          <div class="boundary-name">${item.name}</div>
+          <div class="boundary-name" title="${item.name}">${item.name}</div>
           <span class="status-badge ${item.status}">
             <sl-icon name="${this.statusIcon(item.status)}"></sl-icon>
             ${this.statusLabel(item.status)}
@@ -1445,70 +1690,144 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   // Mobile cards
   // ---------------------------------------------------------------------------
 
+  private toggleCardExpand(id: string, e: Event): void {
+    e.stopPropagation();
+    const next = new Set(this.expandedCardIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    this.expandedCardIds = next;
+  }
+
   private renderCards() {
     return html`
-      ${this.items.map(
-        (item) => html`
-          <div
-            class="mobile-card"
-            tabindex="0"
-            role="link"
-            aria-label="View boundary: ${item.name}"
-            @click=${() => this.navigateToBoundary(item.id)}
-            @keydown=${(e: KeyboardEvent) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                this.navigateToBoundary(item.id);
-              }
-            }}
-          >
-            <div class="mobile-card-header">
-              <span class="mobile-card-name">${item.name}</span>
-              <span class="status-badge ${item.status}">
-                <sl-icon name="${this.statusIcon(item.status)}"></sl-icon>
-                ${this.statusLabel(item.status)}
-              </span>
-            </div>
-            <div class="mobile-card-meta">
-              <div>
-                <div class="mobile-card-label">Scope</div>
-                <span class="scope-badge">
-                  <sl-icon
-                    name="${item.scopeDisplay?.type === 'project' ? 'building' : 'globe'}"
-                  ></sl-icon>
-                  ${this.scopeDisplayLabel(item.scopeDisplay)}
+      <div role="list" aria-label="Access boundaries">
+        ${this.items.map((item) => {
+          const expanded = this.expandedCardIds.has(item.id);
+          return html`
+            <article
+              class="mobile-card"
+              role="listitem"
+              tabindex="0"
+              aria-label="View boundary: ${item.name}"
+              @click=${() => this.navigateToBoundary(item.id)}
+              @keydown=${(e: KeyboardEvent) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  this.navigateToBoundary(item.id);
+                }
+              }}
+            >
+              <div class="mobile-card-header">
+                <span class="mobile-card-name" title="${item.name}">${item.name}</span>
+                <span class="status-badge ${item.status}">
+                  <sl-icon name="${this.statusIcon(item.status)}"></sl-icon>
+                  ${this.statusLabel(item.status)}
                 </span>
               </div>
-              <div>
-                <div class="mobile-card-label">Subject</div>
-                <div class="subject-display">
-                  <span class="subject-kind-badge">
-                    <sl-icon name="${this.subjectKindIcon(item.subject)}"></sl-icon>
-                    ${this.subjectKindLabel(item.subject)}
+              <div class="mobile-card-meta">
+                <div>
+                  <div class="mobile-card-label">Scope</div>
+                  <span class="scope-badge">
+                    <sl-icon
+                      name="${item.scopeDisplay?.type === 'project' ? 'building' : 'globe'}"
+                    ></sl-icon>
+                    ${this.scopeDisplayLabel(item.scopeDisplay)}
                   </span>
                 </div>
-              </div>
-              <div>
-                <div class="mobile-card-label">Retained</div>
-                <span class="perm-summary">${this.renderPermissionSummary(item)}</span>
-              </div>
-              <div>
-                <div class="mobile-card-label">Updated</div>
-                <span class="meta-text">${this.formatRelativeTime(item.updatedAt)}</span>
-              </div>
-            </div>
-            ${item.risk?.length
-              ? html`
-                  <div class="risk-badges" style="margin-top: 0.5rem;">
-                    ${item.risk.map(
-                      (r) => html`<span class="risk-badge ${r}">${this.riskLabel(r)}</span>`
-                    )}
+                <div>
+                  <div class="mobile-card-label">Subject</div>
+                  <div class="subject-display">
+                    <span class="subject-kind-badge">
+                      <sl-icon name="${this.subjectKindIcon(item.subject)}"></sl-icon>
+                      ${this.subjectKindLabel(item.subject)}
+                    </span>
                   </div>
-                `
-              : nothing}
-          </div>
-        `
-      )}
+                </div>
+                <div>
+                  <div class="mobile-card-label">Retained</div>
+                  <span class="perm-summary">${this.renderPermissionSummary(item)}</span>
+                </div>
+                <div>
+                  <div class="mobile-card-label">Updated</div>
+                  <span class="meta-text">${this.formatRelativeTime(item.updatedAt)}</span>
+                </div>
+              </div>
+              ${item.risk?.length
+                ? html`
+                    <div class="risk-badges" style="margin-top: 0.5rem;">
+                      ${item.risk.map(
+                        (r) => html`<span class="risk-badge ${r}">${this.riskLabel(r)}</span>`
+                      )}
+                    </div>
+                  `
+                : nothing}
+              <button
+                class="mobile-card-expand-btn"
+                aria-expanded=${expanded ? 'true' : 'false'}
+                aria-controls="card-details-${item.id}"
+                @click=${(e: Event) => this.toggleCardExpand(item.id, e)}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.toggleCardExpand(item.id, e);
+                  }
+                }}
+              >
+                <sl-icon name=${expanded ? 'chevron-up' : 'chevron-down'}></sl-icon>
+                ${expanded ? 'Less details' : 'More details'}
+              </button>
+              ${expanded
+                ? html`
+                    <div class="mobile-card-details" id="card-details-${item.id}">
+                      <div class="mobile-card-detail-row">
+                        <span class="mobile-card-detail-label">Scope type</span>
+                        <span class="mobile-card-detail-value">
+                          ${item.scopeDisplay?.type === 'project' ? 'Project' : 'System'}
+                        </span>
+                      </div>
+                      <div class="mobile-card-detail-row">
+                        <span class="mobile-card-detail-label">Subject kind</span>
+                        <span class="mobile-card-detail-value">
+                          ${this.subjectKindLabel(item.subject)}
+                        </span>
+                      </div>
+                      <div class="mobile-card-detail-row">
+                        <span class="mobile-card-detail-label">Subject</span>
+                        <span class="mobile-card-detail-value" style="overflow-wrap: anywhere;">
+                          ${this.subjectDisplayLabel(item.subjectDisplay, item.subject)}
+                        </span>
+                      </div>
+                      <div class="mobile-card-detail-row">
+                        <span class="mobile-card-detail-label">Schedule</span>
+                        <span class="mobile-card-detail-value"> ${this.formatSchedule(item)} </span>
+                      </div>
+                      <div class="mobile-card-detail-row">
+                        <span class="mobile-card-detail-label">Affected</span>
+                        <span class="mobile-card-detail-value">
+                          ${this.renderAffectedCount(item)}
+                        </span>
+                      </div>
+                      ${item.risk?.length
+                        ? html`
+                            <div class="mobile-card-detail-row">
+                              <span class="mobile-card-detail-label">Risk</span>
+                              <span class="mobile-card-detail-value">
+                                ${item.risk.map((r) => this.riskLabel(r)).join(', ')}
+                              </span>
+                            </div>
+                          `
+                        : nothing}
+                    </div>
+                  `
+                : nothing}
+            </article>
+          `;
+        })}
+      </div>
     `;
   }
 

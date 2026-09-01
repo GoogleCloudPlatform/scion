@@ -383,6 +383,115 @@ export class ScionAccessBoundaryPreview extends LitElement {
       gap: 0.5rem;
       justify-content: center;
     }
+
+    .def-value {
+      overflow-wrap: anywhere;
+    }
+
+    .intersecting-name {
+      overflow-wrap: anywhere;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 768px) {
+      .preview-header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .preview-actions {
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .preview-actions sl-button {
+        width: 100%;
+      }
+
+      .definition-grid {
+        grid-template-columns: 1fr;
+        gap: 0.125rem;
+      }
+
+      .def-label {
+        font-weight: 600;
+        margin-top: 0.375rem;
+      }
+
+      .section-body {
+        padding: 0.5rem 0.75rem;
+      }
+
+      .temporal-state {
+        flex-wrap: wrap;
+        gap: 0.375rem;
+      }
+
+      .intersecting-item {
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .warning-item {
+        font-size: 0.75rem;
+      }
+
+      .commit-blocked {
+        font-size: 0.75rem;
+      }
+    }
+
+    @media (forced-colors: active) {
+      .preview-section {
+        border-color: ButtonText;
+      }
+
+      .section-title {
+        border-bottom-color: ButtonText;
+      }
+
+      .expiry-badge {
+        border: 1px solid ButtonText;
+      }
+
+      .warning-item {
+        border: 1px solid ButtonText;
+      }
+
+      .commit-blocked {
+        border: 1px solid ButtonText;
+      }
+
+      .commit-error {
+        border: 1px solid ButtonText;
+      }
+
+      .preview-actions {
+        border-top-color: ButtonText;
+      }
+
+      .temporal-state {
+        border: 1px solid ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -765,7 +874,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
 
   private renderLoading() {
     return html`
-      <div class="loading-state">
+      <div class="loading-state" role="status" aria-live="polite">
         <sl-spinner></sl-spinner>
         <p>${this.phase === 'polling' ? 'Computing impact analysis...' : 'Starting preview...'}</p>
         ${this.jobProgress
@@ -787,7 +896,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
 
   private renderError() {
     return html`
-      <div class="error-state">
+      <div class="error-state" role="alert">
         <sl-icon name="exclamation-circle"></sl-icon>
         <p>${this.error}</p>
         <div class="error-actions">
@@ -901,7 +1010,10 @@ export class ScionAccessBoundaryPreview extends LitElement {
                             ${this.relationshipLabel(b.relationship)}
                           </span>
                           <div>
-                            <span class="intersecting-name">
+                            <span
+                              class="intersecting-name"
+                              title="${b.name ?? '(name unavailable)'}"
+                            >
                               ${b.name ?? '(name unavailable)'}
                             </span>
                             <div class="intersecting-note">
@@ -949,7 +1061,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
         <!-- Commit blocked message -->
         ${!this.canCommit && this.commitBlockedReason
           ? html`
-              <div class="commit-blocked">
+              <div class="commit-blocked" role="status" aria-live="polite">
                 <sl-icon name="lock"></sl-icon>
                 <span>${this.commitBlockedReason}</span>
               </div>
@@ -957,7 +1069,9 @@ export class ScionAccessBoundaryPreview extends LitElement {
           : nothing}
 
         <!-- Commit error -->
-        ${this.commitError ? html`<div class="commit-error">${this.commitError}</div>` : nothing}
+        ${this.commitError
+          ? html`<div class="commit-error" role="alert">${this.commitError}</div>`
+          : nothing}
 
         <!-- Actions -->
         <div class="preview-actions">
@@ -1010,7 +1124,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
         <div class="section-body">
           <div class="definition-grid">
             <span class="def-label">Name</span>
-            <span class="def-value">${d.name}</span>
+            <span class="def-value" title="${d.name}">${d.name}</span>
             <span class="def-label">Purpose</span>
             <span class="def-value">${d.purpose}</span>
             <span class="def-label">Subject</span>

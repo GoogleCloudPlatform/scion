@@ -236,6 +236,68 @@ export class ScionAccessBoundaryImpactSummary extends LitElement {
       text-align: center;
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
+
+    .diff-table .perm-id {
+      overflow-wrap: anywhere;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 768px) {
+      .impact-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 0.5rem;
+      }
+
+      .stat-card {
+        padding: 0.5rem;
+      }
+
+      .stat-value {
+        font-size: 1rem;
+      }
+
+      .diff-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+    }
+
+    @media (forced-colors: active) {
+      .stat-card {
+        border: 1px solid ButtonText;
+      }
+
+      .lockout-check,
+      .completeness-check,
+      .future-impact {
+        border: 1px solid ButtonText;
+      }
+
+      .diff-table,
+      .diff-table th,
+      .diff-table td {
+        border-color: ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
 
   private formatDate(iso: string): string {
@@ -339,12 +401,15 @@ export class ScionAccessBoundaryImpactSummary extends LitElement {
 
     return html`
       <div class="section-heading">Permissions changed</div>
-      <table class="diff-table">
+      <table class="diff-table" role="table" aria-label="Permission changes">
+        <caption class="sr-only">
+          Permission changes showing loses and regains per permission
+        </caption>
         <thead>
           <tr>
-            <th>Permission</th>
-            <th>Loses</th>
-            <th>Regains</th>
+            <th scope="col">Permission</th>
+            <th scope="col">Loses</th>
+            <th scope="col">Regains</th>
           </tr>
         </thead>
         <tbody>
@@ -381,7 +446,7 @@ export class ScionAccessBoundaryImpactSummary extends LitElement {
     return html`
       ${this.renderCompletenessCheck()} ${this.renderLockoutCheck()}
 
-      <div class="impact-grid">
+      <div class="impact-grid" aria-label="Impact statistics">
         <div class="stat-card">
           <div class="stat-label">Current effective</div>
           <div class="stat-value">${i.current.effectivePermissionCount}</div>

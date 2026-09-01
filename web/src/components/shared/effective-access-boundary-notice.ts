@@ -113,6 +113,63 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
     .notice-link:hover {
       text-decoration: underline;
     }
+
+    /* Zoom / touch targets */
+    .notice-link {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .notice-text {
+      overflow-wrap: anywhere;
+    }
+
+    /* Utility: screen-reader-only */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* Responsive: mobile full-width */
+    @media (max-width: 768px) {
+      .notice {
+        border-radius: 0;
+        margin-left: -0.75rem;
+        margin-right: -0.75rem;
+        padding: 0.625rem 0.75rem;
+      }
+    }
+
+    /* High contrast mode */
+    @media (forced-colors: active) {
+      .notice {
+        border: 1px solid ButtonText;
+      }
+
+      .notice-link {
+        color: LinkText;
+      }
+
+      .notice sl-icon {
+        color: ButtonText;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
 
   private _initialLoadDone = false;
@@ -175,7 +232,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
     const explainHref = this.getExplainHref();
 
     return html`
-      <div class="notice ${this.inline ? 'inline' : ''}">
+      <div class="notice ${this.inline ? 'inline' : ''}" role="status">
         <sl-icon name="shield-exclamation"></sl-icon>
         <span class="notice-text">
           Effective access may be reduced by ${this.boundaryCount} access

@@ -248,6 +248,78 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
       justify-content: center;
       padding: 2rem;
     }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 768px) {
+      .timeline {
+        padding-left: 0.75rem;
+      }
+
+      .timeline-event {
+        padding: 0.5rem 0 0.5rem 0.75rem;
+      }
+
+      .event-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.25rem;
+      }
+
+      .event-meta {
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .event-counts {
+        flex-wrap: wrap;
+      }
+
+      .meta-value {
+        overflow-wrap: anywhere;
+      }
+    }
+
+    @media (forced-colors: active) {
+      .timeline::before {
+        background: ButtonText;
+      }
+
+      .timeline-dot {
+        border-color: Canvas;
+        forced-color-adjust: none;
+      }
+
+      .timeline-event {
+        border-bottom-color: ButtonText;
+      }
+
+      .event-classification,
+      .event-outcome-rejected {
+        border: 1px solid ButtonText;
+      }
+
+      .rejection-info {
+        border: 1px solid ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
 
   private eventTypeLabel(eventType: string): string {
@@ -329,7 +401,7 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
 
   private renderEvent(event: AccessBoundaryAuditEvent) {
     return html`
-      <div class="timeline-event">
+      <div class="timeline-event" role="listitem">
         <div class="timeline-dot ${this.eventDotClass(event.eventType)}"></div>
 
         <div class="event-header">
@@ -344,7 +416,9 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
           ${event.outcome === 'rejected'
             ? html`<span class="event-outcome-rejected">Rejected</span>`
             : nothing}
-          <span class="event-time">${this.formatDatetime(event.occurredAt)}</span>
+          <time class="event-time" datetime="${event.occurredAt}"
+            >${this.formatDatetime(event.occurredAt)}</time
+          >
         </div>
 
         <div class="event-body">
@@ -416,8 +490,9 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
   override render() {
     if (this.loading && this.events.length === 0) {
       return html`
-        <div class="loading-overlay">
-          <sl-spinner style="font-size: 1.5rem"></sl-spinner>
+        <div class="loading-overlay" role="status" aria-live="polite">
+          <sl-spinner></sl-spinner>
+          <span class="sr-only">Loading audit events</span>
         </div>
       `;
     }
@@ -427,7 +502,9 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
     }
 
     return html`
-      <div class="timeline">${this.events.map((event) => this.renderEvent(event))}</div>
+      <div class="timeline" role="list" aria-label="Access boundary audit timeline">
+        ${this.events.map((event) => this.renderEvent(event))}
+      </div>
 
       ${this.nextPageToken
         ? html`

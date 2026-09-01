@@ -156,6 +156,40 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
     }
+
+    fieldset {
+      border: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .validation-warning {
+        border: 2px solid Mark;
+      }
+
+      .utc-preview {
+        color: ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+      }
+    }
   `;
 
   private isoToLocalDatetime(iso: Iso8601): string {
@@ -275,43 +309,54 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
                 Times shown in: ${this.viewerTimeZone}
               </div>
 
-              <div class="datetime-fields">
-                <div class="datetime-field">
-                  <label class="field-label" for="not-before">Activation start (optional)</label>
-                  <sl-input
-                    id="not-before"
-                    type="datetime-local"
-                    value=${this.notBeforeLocal}
-                    @sl-input=${(e: Event) => this.handleNotBeforeChange(e)}
-                    help-text="Boundary is not in effect before this time"
-                  ></sl-input>
-                  ${this.notBeforeLocal
-                    ? html`<div class="utc-preview">
-                        UTC: ${this.formatUtcPreview(this.notBeforeLocal)}
-                      </div>`
-                    : nothing}
-                </div>
+              <fieldset>
+                <legend class="sr-only">Activation window date and time</legend>
+                <div class="datetime-fields">
+                  <div class="datetime-field">
+                    <label class="field-label" for="not-before">Activation start (optional)</label>
+                    <sl-input
+                      id="not-before"
+                      type="datetime-local"
+                      value=${this.notBeforeLocal}
+                      aria-describedby=${this.validationError ? 'schedule-validation-msg' : ''}
+                      @sl-input=${(e: Event) => this.handleNotBeforeChange(e)}
+                      help-text="Boundary is not in effect before this time"
+                    ></sl-input>
+                    ${this.notBeforeLocal
+                      ? html`<div class="utc-preview" aria-label="UTC equivalent">
+                          UTC: ${this.formatUtcPreview(this.notBeforeLocal)}
+                        </div>`
+                      : nothing}
+                  </div>
 
-                <div class="datetime-field">
-                  <label class="field-label" for="expires-at">Expiration (optional)</label>
-                  <sl-input
-                    id="expires-at"
-                    type="datetime-local"
-                    value=${this.expiresAtLocal}
-                    @sl-input=${(e: Event) => this.handleExpiresAtChange(e)}
-                    help-text="Boundary expires at this time"
-                  ></sl-input>
-                  ${this.expiresAtLocal
-                    ? html`<div class="utc-preview">
-                        UTC: ${this.formatUtcPreview(this.expiresAtLocal)}
-                      </div>`
-                    : nothing}
+                  <div class="datetime-field">
+                    <label class="field-label" for="expires-at">Expiration (optional)</label>
+                    <sl-input
+                      id="expires-at"
+                      type="datetime-local"
+                      value=${this.expiresAtLocal}
+                      aria-describedby=${this.validationError ? 'schedule-validation-msg' : ''}
+                      @sl-input=${(e: Event) => this.handleExpiresAtChange(e)}
+                      help-text="Boundary expires at this time"
+                    ></sl-input>
+                    ${this.expiresAtLocal
+                      ? html`<div class="utc-preview" aria-label="UTC equivalent">
+                          UTC: ${this.formatUtcPreview(this.expiresAtLocal)}
+                        </div>`
+                      : nothing}
+                  </div>
                 </div>
-              </div>
+              </fieldset>
 
               ${this.validationError
                 ? html`
-                    <sl-alert variant="warning" open class="validation-warning">
+                    <sl-alert
+                      variant="warning"
+                      open
+                      class="validation-warning"
+                      id="schedule-validation-msg"
+                      role="alert"
+                    >
                       <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
                       ${this.validationError}
                     </sl-alert>

@@ -314,6 +314,112 @@ export class ScionAffectedPrincipalsTable extends LitElement {
       align-items: center;
       gap: 0.25rem;
     }
+
+    .principal-name,
+    .principal-id {
+      overflow-wrap: anywhere;
+    }
+
+    .perm-tag {
+      overflow-wrap: anywhere;
+    }
+
+    .table-scroll-wrapper {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 768px) {
+      .principals-table {
+        display: none;
+      }
+
+      .mobile-card-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .mobile-card {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        padding: 0.75rem;
+        background: var(--scion-surface, #ffffff);
+      }
+
+      .mobile-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .mobile-card-field {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.375rem;
+      }
+
+      .mobile-card-field-label {
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.025em;
+        font-size: 0.625rem;
+        margin-bottom: 0.125rem;
+      }
+
+      .filter-bar sl-select {
+        min-width: 100%;
+        max-width: 100%;
+      }
+    }
+
+    @media (min-width: 769px) {
+      .mobile-card-list {
+        display: none;
+      }
+    }
+
+    @media (forced-colors: active) {
+      .principals-table,
+      .principals-table th,
+      .principals-table td {
+        border-color: ButtonText;
+      }
+
+      .change-section-header {
+        border-color: ButtonText;
+      }
+
+      .change-badge,
+      .perm-tag {
+        border: 1px solid ButtonText;
+      }
+
+      .mobile-card {
+        border-color: ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
 
   private principalIcon(type: string): string {
@@ -482,25 +588,90 @@ export class ScionAffectedPrincipalsTable extends LitElement {
     `;
   }
 
+  private renderPrincipalCard(p: AffectedPrincipal) {
+    const isRedacted = !!p.redacted || p.principal === null;
+
+    return html`
+      <div class="mobile-card">
+        <div class="mobile-card-header">
+          ${isRedacted
+            ? html`<span class="redacted-principal">(redacted)</span>`
+            : html`
+                <div class="principal-info">
+                  <sl-icon
+                    class="principal-type-icon"
+                    name="${this.principalIcon(p.principal?.type ?? 'user')}"
+                  ></sl-icon>
+                  <div>
+                    <div
+                      class="principal-name"
+                      title="${this.principalDisplayName(p.principal, isRedacted)}"
+                    >
+                      ${this.principalDisplayName(p.principal, isRedacted)}
+                    </div>
+                    ${p.principal?.id
+                      ? html`<div class="principal-id" title="${p.principal.id}">
+                          ${p.principal.id}
+                        </div>`
+                      : nothing}
+                  </div>
+                </div>
+              `}
+          <span class="change-badge ${p.changeKind}">${this.changeKindLabel(p.changeKind)}</span>
+        </div>
+        ${p.removedPermissions.length > 0 || p.regainedPermissions.length > 0
+          ? html`
+              <div class="mobile-card-field">
+                <div class="mobile-card-field-label">Permissions</div>
+                <div class="perm-list">
+                  ${p.removedPermissions.map(
+                    (perm) => html`<span class="perm-tag removed" title="${perm}">− ${perm}</span>`
+                  )}
+                  ${p.regainedPermissions.map(
+                    (perm) => html`<span class="perm-tag regained" title="${perm}">+ ${perm}</span>`
+                  )}
+                </div>
+              </div>
+            `
+          : nothing}
+        ${p.changeKind === 'no_effect' && p.noEffectReason
+          ? html`<div class="mobile-card-field">
+              <div class="no-effect-reason">${this.noEffectReasonLabel(p.noEffectReason)}</div>
+            </div>`
+          : nothing}
+      </div>
+    `;
+  }
+
   private renderTable(principals: AffectedPrincipal[], standalone: boolean) {
     if (principals.length === 0) {
       return html`<div class="empty-state">No principals in this section</div>`;
     }
 
     return html`
-      <table class="principals-table ${standalone ? 'standalone' : ''}">
-        <thead>
-          <tr>
-            <th>Principal</th>
-            <th>Effect</th>
-            <th>Permissions</th>
-            <th>Membership</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${principals.map((p) => this.renderPrincipalRow(p))}
-        </tbody>
-      </table>
+      <div class="table-scroll-wrapper">
+        <table
+          class="principals-table ${standalone ? 'standalone' : ''}"
+          role="table"
+          aria-label="Affected principals"
+        >
+          <caption class="sr-only">
+            Affected principals showing effect, permissions, and membership
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Principal</th>
+              <th scope="col">Effect</th>
+              <th scope="col">Permissions</th>
+              <th scope="col">Membership</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${principals.map((p) => this.renderPrincipalRow(p))}
+          </tbody>
+        </table>
+      </div>
+      <div class="mobile-card-list">${principals.map((p) => this.renderPrincipalCard(p))}</div>
     `;
   }
 
@@ -553,8 +724,9 @@ export class ScionAffectedPrincipalsTable extends LitElement {
   override render() {
     if (this.loading && this.principals.length === 0) {
       return html`
-        <div class="loading-overlay">
+        <div class="loading-overlay" role="status" aria-live="polite">
           <sl-spinner style="font-size: 1.5rem"></sl-spinner>
+          <span class="sr-only">Loading affected principals</span>
         </div>
       `;
     }

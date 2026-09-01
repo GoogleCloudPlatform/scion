@@ -167,6 +167,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 0.75rem;
+      min-height: 44px;
       background: var(--scion-bg-subtle, #f8fafc);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
@@ -372,6 +373,92 @@ export class ScionAuthorizationLayerStack extends LitElement {
       color: var(--scion-text-muted, #64748b);
       padding: 0.25rem 0;
       font-style: italic;
+    }
+
+    .layer-label,
+    .restriction-kind {
+      overflow-wrap: anywhere;
+    }
+
+    .denied-permission-id {
+      overflow-wrap: anywhere;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 768px) {
+      .layer-stack {
+        padding-left: 1rem;
+      }
+
+      .layer-header {
+        padding: 0.625rem 0.5rem;
+        min-height: 44px;
+        gap: 0.375rem;
+      }
+
+      .layer-detail {
+        padding: 0.375rem 0.5rem;
+      }
+
+      .boundary-row,
+      .restriction-row {
+        flex-wrap: wrap;
+        min-height: 44px;
+      }
+
+      .denied-item {
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .denied-reason {
+        text-align: left;
+        max-width: 100%;
+      }
+    }
+
+    @media (forced-colors: active) {
+      .layer-stack::before {
+        background: ButtonText;
+      }
+
+      .layer::before {
+        border-color: Canvas;
+        forced-color-adjust: none;
+      }
+
+      .layer-header {
+        border-color: ButtonText;
+      }
+
+      .layer-detail {
+        border-left-color: ButtonText;
+      }
+
+      .boundary-row + .boundary-row,
+      .restriction-row + .restriction-row,
+      .denied-item + .denied-item {
+        border-top-color: ButtonText;
+      }
+
+      .status-dot {
+        forced-color-adjust: none;
+      }
+
+      .reason-tag {
+        border: 1px solid ButtonText;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {

@@ -154,6 +154,24 @@ export class ScionAccessBoundaryStatus extends LitElement {
       background: var(--sl-color-warning-50, #fffbeb);
       color: var(--sl-color-warning-600, #d97706);
     }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .badge {
+        border: 1px solid ButtonText;
+      }
+    }
   `;
 
   private statusIcon(status: AccessBoundaryStatus): string {
@@ -234,6 +252,13 @@ export class ScionAccessBoundaryStatus extends LitElement {
         return 'Degraded';
       default:
         return r;
+    }
+  }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    if (!this.hasAttribute('role')) {
+      this.setAttribute('role', 'status');
     }
   }
 

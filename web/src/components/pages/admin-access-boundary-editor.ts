@@ -108,8 +108,9 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   // --- Validation ---
   @state() private step1Error = '';
 
-  // Bound beforeunload handler for dirty-draft detection
+  // Bound event handlers for dirty-draft detection
   private boundBeforeUnload = this.handleBeforeUnload.bind(this);
+  private boundPopState = this.handlePopState.bind(this);
 
   static override styles = css`
     :host {
@@ -212,6 +213,53 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       color: var(--sl-color-danger-600, #dc2626);
       margin-top: 0.25rem;
     }
+
+    /* Responsive: mobile */
+    @media (max-width: 768px) {
+      .editor-page {
+        padding: 0.5rem 0.75rem 2rem;
+      }
+
+      .editor-title {
+        font-size: 1.25rem;
+      }
+
+      .editor-header {
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .step-navigation {
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .nav-left,
+      .nav-right {
+        width: 100%;
+        justify-content: stretch;
+      }
+
+      .nav-left sl-button,
+      .nav-right sl-button {
+        flex: 1;
+      }
+    }
+
+    /* Forced colors */
+    @media (forced-colors: active) {
+      .field-error {
+        color: LinkText;
+        font-weight: bold;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -230,16 +278,34 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       this.draftScopeType = 'system';
     }
     window.addEventListener('beforeunload', this.boundBeforeUnload);
+    window.addEventListener('popstate', this.boundPopState);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('beforeunload', this.boundBeforeUnload);
+    window.removeEventListener('popstate', this.boundPopState);
   }
 
   private handleBeforeUnload(e: BeforeUnloadEvent): void {
     if (this.isDirty) {
       e.preventDefault();
+    }
+  }
+
+  private handlePopState(): void {
+    if (this.isDirty) {
+      const leave = confirm('You have unsaved changes. Are you sure you want to leave?');
+      if (!leave) {
+        // Push current state back to prevent navigation
+        window.history.pushState(
+          {},
+          '',
+          this.isEditMode
+            ? `/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`
+            : '/admin/access-boundaries/new'
+        );
+      }
     }
   }
 
@@ -568,7 +634,11 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
           <div class="char-count">${this.draftPurpose.length} characters</div>
         </div>
 
-        ${this.step1Error ? html`<div class="field-error">${this.step1Error}</div>` : nothing}
+        ${this.step1Error
+          ? html`<div class="field-error" role="alert" aria-live="assertive">
+              ${this.step1Error}
+            </div>`
+          : nothing}
       </div>
 
       ${this.renderStepNavigation()}

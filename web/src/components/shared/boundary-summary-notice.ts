@@ -266,6 +266,71 @@ export class ScionBoundarySummaryNotice extends LitElement {
       color: var(--sl-color-danger-600, #dc2626);
       padding: 0.5rem 0;
     }
+
+    /* Zoom / touch targets */
+    .section-header {
+      min-height: 44px;
+    }
+
+    .boundary-item a {
+      overflow-wrap: anywhere;
+    }
+
+    .boundary-item-text,
+    .boundary-name {
+      overflow-wrap: anywhere;
+    }
+
+    /* Utility: screen-reader-only */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* Responsive: mobile full-width */
+    @media (max-width: 768px) {
+      .boundary-section {
+        border-radius: 0;
+        margin-left: -0.75rem;
+        margin-right: -0.75rem;
+        padding: 1rem;
+      }
+    }
+
+    /* High contrast mode */
+    @media (forced-colors: active) {
+      .boundary-section {
+        border: 1px solid ButtonText;
+      }
+
+      .boundary-item .boundary-status {
+        border: 1px solid ButtonText;
+      }
+
+      .section-header:focus-visible {
+        outline: 2px solid Highlight;
+        outline-offset: 2px;
+      }
+
+      .collapse-icon {
+        color: ButtonText;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
 
   private get totalCount(): number {
@@ -279,8 +344,18 @@ export class ScionBoundarySummaryNotice extends LitElement {
       <div class="boundary-section">
         <div
           class="section-header"
+          role="button"
+          tabindex="0"
+          aria-expanded=${!this.collapsed}
+          aria-controls="boundary-section-body"
           @click=${() => {
             this.collapsed = !this.collapsed;
+          }}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              this.collapsed = !this.collapsed;
+            }
           }}
         >
           <div class="section-title-area">
@@ -297,16 +372,18 @@ export class ScionBoundarySummaryNotice extends LitElement {
         ${this.collapsed
           ? nothing
           : html`
-              <div class="section-body">
+              <div class="section-body" id="boundary-section-body">
                 ${this.loading
                   ? html`
-                      <div class="loading-notice">
+                      <div class="loading-notice" role="status" aria-live="polite">
                         <sl-spinner></sl-spinner>
                         Loading access boundaries...
                       </div>
                     `
                   : this.error
-                    ? html`<div class="error-notice">${this.error}</div>`
+                    ? html`<div class="error-notice" role="alert" aria-live="assertive">
+                        ${this.error}
+                      </div>`
                     : this.renderGroups()}
                 ${this.filterUrl
                   ? html`

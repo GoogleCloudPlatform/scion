@@ -94,6 +94,9 @@ export class ScionSecurityReviewDialog extends LitElement {
   /** Loading state for any in-progress action. */
   @state() private actionInProgress = false;
 
+  /** The element that had focus before the dialog opened. */
+  private _previouslyFocusedElement: HTMLElement | null = null;
+
   static override styles = css`
     :host {
       display: contents;
@@ -267,7 +270,116 @@ export class ScionSecurityReviewDialog extends LitElement {
       font-style: italic;
       margin-top: 0.5rem;
     }
+
+    /* Zoom / touch targets */
+    sl-button {
+      min-height: 44px;
+    }
+
+    .boundary-item-text,
+    .lockout-detail,
+    .review-description {
+      overflow-wrap: anywhere;
+    }
+
+    /* Utility: screen-reader-only */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* Responsive: full-width dialog on mobile */
+    @media (max-width: 768px) {
+      sl-dialog::part(panel) {
+        width: 100vw;
+        max-width: 100vw;
+        margin: 0;
+        border-radius: 0;
+        max-height: 100vh;
+      }
+
+      sl-dialog::part(body) {
+        overflow-y: auto;
+        max-height: calc(100vh - 8rem);
+      }
+
+      sl-dialog::part(footer) {
+        position: sticky;
+        bottom: 0;
+        background: var(--scion-surface, #ffffff);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+        padding: 0.75rem;
+      }
+    }
+
+    /* High contrast mode */
+    @media (forced-colors: active) {
+      .boundary-item {
+        border: 1px solid ButtonText;
+      }
+
+      .review-note {
+        border-left: 3px solid ButtonText;
+      }
+
+      .lockout-scope {
+        border: 1px solid ButtonText;
+      }
+
+      sl-button::part(base) {
+        border: 1px solid ButtonText;
+      }
+
+      .contact-admin {
+        border: 1px solid ButtonText;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
   `;
+
+  override updated(changed: Map<string, unknown>): void {
+    if (changed.has('open')) {
+      if (this.open) {
+        // Store the element that had focus before the dialog opened
+        this._previouslyFocusedElement = (document.activeElement as HTMLElement) ?? null;
+      } else if (changed.get('open') === true) {
+        // Dialog just closed -- restore focus to the trigger element
+        this._restoreFocus();
+      }
+    }
+  }
+
+  private _restoreFocus(): void {
+    if (this._previouslyFocusedElement) {
+      // Defer focus restoration to after the dialog close animation
+      requestAnimationFrame(() => {
+        this._previouslyFocusedElement?.focus();
+        this._previouslyFocusedElement = null;
+      });
+    }
+  }
+
+  private _handleKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && !this.actionInProgress) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchEvent(new CustomEvent('security-review-cancel'));
+    }
+  }
 
   override render() {
     if (!this.open || !this.detail) return nothing;
@@ -282,6 +394,7 @@ export class ScionSecurityReviewDialog extends LitElement {
             this.dispatchEvent(new CustomEvent('security-review-cancel'));
           }
         }}
+        @keydown=${(e: KeyboardEvent) => this._handleKeydown(e)}
       >
         ${this.detail.lockout
           ? this.renderLockoutConflict(this.detail.lockout)

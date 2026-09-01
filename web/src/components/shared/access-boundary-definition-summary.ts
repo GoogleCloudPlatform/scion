@@ -112,7 +112,12 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
       border: none;
       background: none;
       font-family: inherit;
-      padding: 0.125rem 0.25rem;
+      padding: 0.25rem 0.5rem;
+      min-height: 44px;
+      min-width: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       border-radius: var(--scion-radius, 0.5rem);
     }
 
@@ -145,16 +150,19 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
     .field-value {
       font-size: 0.875rem;
       color: var(--scion-text, #1e293b);
+      overflow-wrap: anywhere;
     }
 
     .field-value.purpose {
       white-space: pre-wrap;
       line-height: 1.5;
+      overflow-wrap: anywhere;
     }
 
     .field-value.mono {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.8125rem;
+      overflow-wrap: anywhere;
     }
 
     .permission-stats {
@@ -199,6 +207,74 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
       font-size: 0.875rem;
       border: 1px dashed var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
+    }
+
+    @media (max-width: 768px) {
+      .section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+      }
+
+      .permission-stats {
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .stat {
+        flex-direction: row;
+        gap: 0.5rem;
+        align-items: baseline;
+      }
+
+      .stat-value {
+        font-size: 1rem;
+      }
+
+      .field-value {
+        word-break: break-word;
+      }
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (forced-colors: active) {
+      .summary-section {
+        border: 2px solid ButtonText;
+      }
+
+      .section-header {
+        border-bottom: 2px solid ButtonText;
+      }
+
+      .edit-link {
+        color: LinkText;
+      }
+
+      .edit-link:focus-visible {
+        outline: 2px solid Highlight;
+      }
+
+      .stat-value.retained,
+      .stat-value.removed {
+        color: ButtonText;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        transition: none !important;
+      }
     }
   `;
 
@@ -264,7 +340,13 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
               Details
               <span class="section-step">Step 1</span>
             </span>
-            <button class="edit-link" @click=${() => this.emitNavigateToStep(1)}>Edit</button>
+            <button
+              class="edit-link"
+              aria-label="Edit name and purpose"
+              @click=${() => this.emitNavigateToStep(1)}
+            >
+              Edit
+            </button>
           </div>
           <div class="section-body">
             <div class="field">
@@ -289,7 +371,13 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
               Subject
               <span class="section-step">Step 2</span>
             </span>
-            <button class="edit-link" @click=${() => this.emitNavigateToStep(2)}>Edit</button>
+            <button
+              class="edit-link"
+              aria-label="Edit subject"
+              @click=${() => this.emitNavigateToStep(2)}
+            >
+              Edit
+            </button>
           </div>
           <div class="section-body">
             <div class="field">
@@ -310,7 +398,13 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
               Scope
               <span class="section-step">Step 3</span>
             </span>
-            <button class="edit-link" @click=${() => this.emitNavigateToStep(3)}>Edit</button>
+            <button
+              class="edit-link"
+              aria-label="Edit scope"
+              @click=${() => this.emitNavigateToStep(3)}
+            >
+              Edit
+            </button>
           </div>
           <div class="section-body">
             <div class="field">
@@ -331,7 +425,13 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
               Maximum Permissions
               <span class="section-step">Step 4</span>
             </span>
-            <button class="edit-link" @click=${() => this.emitNavigateToStep(4)}>Edit</button>
+            <button
+              class="edit-link"
+              aria-label="Edit maximum permissions"
+              @click=${() => this.emitNavigateToStep(4)}
+            >
+              Edit
+            </button>
           </div>
           <div class="section-body">
             <div class="permission-stats">
@@ -358,7 +458,13 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
               Activation Window
               <span class="section-step">Step 5</span>
             </span>
-            <button class="edit-link" @click=${() => this.emitNavigateToStep(5)}>Edit</button>
+            <button
+              class="edit-link"
+              aria-label="Edit activation window"
+              @click=${() => this.emitNavigateToStep(5)}
+            >
+              Edit
+            </button>
           </div>
           <div class="section-body">
             ${d.notBefore || d.expiresAt
