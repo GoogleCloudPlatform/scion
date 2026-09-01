@@ -621,7 +621,6 @@ export class ScionGroupFormDialog extends LitElement {
               </p>
             `
           : nothing}
-
         ${this.bannerError
           ? html`
               <sl-alert class="banner-error" variant="danger" open role="alert">
@@ -664,8 +663,7 @@ export class ScionGroupFormDialog extends LitElement {
             : nothing}
         </div>
 
-        ${this.mode === 'edit' ? this.renderOwnerPicker() : nothing}
-        ${this.renderLabelEditor()}
+        ${this.mode === 'edit' ? this.renderOwnerPicker() : nothing} ${this.renderLabelEditor()}
 
         <sl-button
           slot="footer"
@@ -738,16 +736,14 @@ export class ScionGroupFormDialog extends LitElement {
           label="Owner"
           value=${this.editOwnerId}
           ?disabled=${this.submitting}
-          @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) =>
-            this.handleOwnerChange(e)}
+          @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => this.handleOwnerChange(e)}
         ></scion-principal-picker>
         ${this.ownerChanged
           ? html`
               <div class="owner-warning" role="alert">
                 <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
                 <span
-                  >The new owner gains full control of this group (edit, delete,
-                  membership).</span
+                  >The new owner gains full control of this group (edit, delete, membership).</span
                 >
               </div>
             `
