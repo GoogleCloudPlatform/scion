@@ -1,0 +1,27 @@
+{
+  "$fixture": {
+    "endpoint": "PUT /api/v1/admin/access-constraints/ac-42",
+    "status": 409,
+    "designRef": "constraint-ui-ux-design.md §9.7 (this example is reproduced from the design verbatim in shape), §7.3; plan §WP B3",
+    "notes": "The authorization state the preview was computed against has moved. Distinct from REVISION_CONFLICT, which is about the boundary RECORD moving. Both can occur; the server reports the more specific one. retryable=true means 'preview again', not 'resend this request'."
+  },
+  "error": {
+    "code": "STALE_AUTHORIZATION_PREVIEW",
+    "message": "Authorization state changed after this preview.",
+    "retryable": true,
+    "correlationId": "req-3c0e9188",
+    "requestId": "req-3c0e9188",
+    "details": {
+      "changedKinds": ["group_membership", "role_binding"],
+      "previewId": "apv-5d1",
+      "previewGeneratedAt": "2026-08-31T14:29:02Z",
+      "stateRevisionAtPreview": "rv-2026-08-31T14:29:02Z-0x4c71",
+      "stateRevisionNow": "rv-2026-08-31T14:30:48Z-0x4c88",
+      "changeSummary": [
+        { "kind": "group_membership", "groupId": "grp-contractors", "changedPrincipalCount": 3 },
+        { "kind": "role_binding", "scope": { "type": "project", "projectId": "proj-atlas" }, "changedBindingCount": 1 }
+      ],
+      "remedy": "Recompute the impact preview and review the updated result before committing."
+    }
+  }
+}

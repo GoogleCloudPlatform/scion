@@ -1,0 +1,212 @@
+{
+  "$fixture": {
+    "endpoint": "GET /api/v1/admin/access-constraints?pageSize=25&pageToken=&q=deploy&scopeType=project&scopeId=proj-atlas&subjectKind=&status=&risk=",
+    "status": 200,
+    "designRef": "constraint-ui-ux-design.md §9.3, §6.1",
+    "notes": "Target shape. Current API returns {items:[store.AccessConstraint], totalCount} with offset/limit and no filters — see base inventory §4.3 items 1,2,3,6,7,11,12,13."
+  },
+  "items": [
+    {
+      "id": "ac-42",
+      "name": "Contractor deploy ceiling",
+      "purpose": "Contractors may inspect Atlas but never deploy or delete.",
+      "revision": "7",
+      "subject": {
+        "kind": "group_closure",
+        "groupId": "grp-contractors"
+      },
+      "subjectDisplay": {
+        "kind": "group_closure",
+        "label": "Everyone in Contractors",
+        "groupName": "Contractors",
+        "resolved": true,
+        "memberCount": 126
+      },
+      "scope": {
+        "type": "project",
+        "projectId": "proj-atlas"
+      },
+      "scopeDisplay": {
+        "type": "project",
+        "label": "Atlas",
+        "projectName": "Atlas",
+        "resolved": true
+      },
+      "status": "active",
+      "risk": ["lockout_sensitive"],
+      "health": {
+        "state": "healthy",
+        "unresolvedReferences": []
+      },
+      "maximumPermissionCount": 14,
+      "affectedPrincipalCount": 126,
+      "affectedPrincipalCountExact": true,
+      "appliesWhen": {
+        "notBefore": null,
+        "expiresAt": null
+      },
+      "createdBy": {
+        "type": "user",
+        "id": "usr-lin",
+        "displayName": "Lin Alvarez"
+      },
+      "createdAt": "2026-06-02T18:14:02Z",
+      "updatedBy": {
+        "type": "user",
+        "id": "usr-mori",
+        "displayName": "Sam Mori"
+      },
+      "updatedAt": "2026-08-28T11:03:47Z",
+      "_capabilities": {
+        "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+      }
+    },
+    {
+      "id": "ac-51",
+      "name": "Atlas break-glass window",
+      "purpose": "Temporarily widen the on-call boundary for the Q3 migration.",
+      "revision": "2",
+      "subject": {
+        "kind": "principal",
+        "principal": {
+          "type": "user",
+          "id": "usr-oncall-rota"
+        }
+      },
+      "subjectDisplay": {
+        "kind": "principal",
+        "label": "Priya Nadar",
+        "principalType": "user",
+        "principalName": "Priya Nadar",
+        "resolved": true
+      },
+      "scope": {
+        "type": "project",
+        "projectId": "proj-atlas"
+      },
+      "scopeDisplay": {
+        "type": "project",
+        "label": "Atlas",
+        "projectName": "Atlas",
+        "resolved": true
+      },
+      "status": "scheduled",
+      "risk": ["relaxation_scheduled"],
+      "health": {
+        "state": "healthy",
+        "unresolvedReferences": []
+      },
+      "maximumPermissionCount": 31,
+      "affectedPrincipalCount": 1,
+      "affectedPrincipalCountExact": true,
+      "appliesWhen": {
+        "notBefore": "2026-09-03T09:00:00Z",
+        "expiresAt": "2026-09-17T09:00:00Z"
+      },
+      "createdBy": {
+        "type": "user",
+        "id": "usr-mori",
+        "displayName": "Sam Mori"
+      },
+      "createdAt": "2026-08-30T16:41:19Z",
+      "updatedBy": {
+        "type": "user",
+        "id": "usr-mori",
+        "displayName": "Sam Mori"
+      },
+      "updatedAt": "2026-08-30T16:41:19Z",
+      "_capabilities": {
+        "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+      }
+    },
+    {
+      "id": "ac-63",
+      "name": "Deleted-group residue",
+      "purpose": "Legacy boundary from the 2025 vendor engagement.",
+      "revision": "1",
+      "subject": {
+        "kind": "group_closure",
+        "groupId": "grp-vendor-2025"
+      },
+      "subjectDisplay": {
+        "kind": "group_closure",
+        "label": "Unknown group (grp-vendor-2025)",
+        "groupName": null,
+        "resolved": false,
+        "memberCount": null
+      },
+      "scope": {
+        "type": "project",
+        "projectId": "proj-atlas"
+      },
+      "scopeDisplay": {
+        "type": "project",
+        "label": "Atlas",
+        "projectName": "Atlas",
+        "resolved": true
+      },
+      "status": "invalid_degraded",
+      "risk": ["degraded"],
+      "health": {
+        "state": "degraded",
+        "unresolvedReferences": [
+          {
+            "field": "subject.groupId",
+            "referenceType": "group",
+            "referenceId": "grp-vendor-2025",
+            "reason": "group_not_found"
+          }
+        ]
+      },
+      "maximumPermissionCount": 6,
+      "affectedPrincipalCount": 0,
+      "affectedPrincipalCountExact": false,
+      "appliesWhen": {
+        "notBefore": null,
+        "expiresAt": null
+      },
+      "createdBy": {
+        "type": "user",
+        "id": "usr-lin",
+        "displayName": "Lin Alvarez"
+      },
+      "createdAt": "2025-11-19T08:22:00Z",
+      "updatedBy": null,
+      "updatedAt": "2025-11-19T08:22:00Z",
+      "_capabilities": {
+        "actions": ["read", "readAudit", "previewCreate", "previewRelax", "delete"]
+      }
+    }
+  ],
+  "nextPageToken": "eyJvIjoyNSwiciI6IjIwMjYtMDgtMzFUMTQ6MjA6MDBaIn0",
+  "totalCount": 41,
+  "totalCountExact": true,
+  "snapshotAt": "2026-08-31T14:20:00Z",
+  "appliedFilters": {
+    "q": "deploy",
+    "scopeType": "project",
+    "scopeId": "proj-atlas",
+    "subjectKind": null,
+    "status": null,
+    "risk": null,
+    "pageSize": 25,
+    "sort": "updatedAt:desc"
+  },
+  "facets": {
+    "status": {
+      "active": 33,
+      "scheduled": 4,
+      "expired": 2,
+      "recovery_disabled": 1,
+      "invalid_degraded": 1
+    },
+    "subjectKind": {
+      "principal": 12,
+      "group_closure": 26,
+      "all_principals": 3
+    }
+  },
+  "_capabilities": {
+    "actions": ["read", "previewCreate"]
+  }
+}

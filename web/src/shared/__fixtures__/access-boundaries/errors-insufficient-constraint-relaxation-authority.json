@@ -1,0 +1,26 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraints/ac-42:delete",
+    "status": 403,
+    "designRef": "constraint-ui-ux-design.md §9.7, §7.6, §3.3; plan §WP B4",
+    "notes": "Relaxing a boundary restores authority. The actor may not restore authority they do not themselves hold — a delegation-ceiling rule applied to boundary removal. Distinct from MUTATION_PERMISSION_LOST: here the actor never had the authority; there they had it and the mutation took it away mid-flight. The matching preview is preview-delete-response.json, whose commitBlocked carries this same code with an empty _capabilities.actions."
+  },
+  "error": {
+    "code": "INSUFFICIENT_CONSTRAINT_RELAXATION_AUTHORITY",
+    "message": "You cannot restore authority you do not hold.",
+    "retryable": false,
+    "correlationId": "req-2b4471fa",
+    "requestId": "req-2b4471fa",
+    "details": {
+      "operation": "delete",
+      "constraintId": "ac-42",
+      "classification": "relax",
+      "missingPermissionIds": ["agent.delete", "role_binding.create"],
+      "actorHeldPermissionCount": 47,
+      "restoredPermissionCount": 8,
+      "affectedPrincipalCount": 118,
+      "scope": { "type": "project", "projectId": "proj-atlas" },
+      "remedy": "Ask a principal who holds agent.delete and role_binding.create in Atlas to commit this change, or narrow the relaxation to permissions you hold."
+    }
+  }
+}

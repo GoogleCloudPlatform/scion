@@ -83,6 +83,59 @@ const (
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// Governance error codes — B5 transactional governance for boundary mutations
+	// and adjacent-domain operations.
+
+	// ErrCodeStaleAuthorizationPreview is returned when authorization-relevant
+	// state (role bindings, group membership, principal status, constraints)
+	// changed between preview generation and commit.
+	ErrCodeStaleAuthorizationPreview = "stale_authorization_preview"
+
+	// ErrCodeInsufficientRelaxationAuthority is returned when the actor has
+	// access_constraint.admin but lacks sufficient authority over the permissions
+	// being restored by a relaxation or mixed-classification mutation.
+	ErrCodeInsufficientRelaxationAuthority = "insufficient_constraint_relaxation_authority"
+
+	// ErrCodeMutationPermissionLost is returned when the actor lost
+	// access_constraint.admin between preview and commit.
+	ErrCodeMutationPermissionLost = "mutation_permission_lost"
+
+	// ErrCodeSecurityReviewRequired is returned by adjacent-domain operations
+	// (group membership/deletion, role binding changes, user suspension) when
+	// the operation affects a boundary-relevant entity and requires impact
+	// review before proceeding.
+	ErrCodeSecurityReviewRequired = "security_review_required"
+
+	// B7 — HTTP API error codes for access boundary operations.
+
+	// ErrCodeResolutionFailed is returned when subject/scope/permission
+	// resolution encounters a fault during preview or commit.
+	ErrCodeResolutionFailed = "resolution_failed"
+
+	// ErrCodeSubjectNotFound is returned when the referenced subject (user,
+	// agent, or group) does not exist.
+	ErrCodeSubjectNotFound = "subject_not_found"
+
+	// ErrCodeScopeNotFound is returned when the referenced scope (project)
+	// does not exist.
+	ErrCodeScopeNotFound = "scope_not_found"
+
+	// ErrCodeScopeMismatch is returned when a boundary is applied outside
+	// its valid scope (e.g. a project boundary queried for another project).
+	ErrCodeScopeMismatch = "scope_mismatch"
+
+	// ErrCodePermissionRegistryChanged is returned when the permission
+	// registry revision changed between preview and commit.
+	ErrCodePermissionRegistryChanged = "permission_registry_changed"
+
+	// ErrCodeRevisionConflict is returned when an If-Match revision does not
+	// match the current revision of the constraint (optimistic concurrency).
+	ErrCodeRevisionConflict = "revision_conflict"
+
+	// ErrCodeRecoveryDisabledImmutable is returned when a mutation targets a
+	// recovery-disabled constraint, which cannot be modified via HTTP.
+	ErrCodeRecoveryDisabledImmutable = "recovery_disabled_immutable"
 )
 
 // writeError writes a JSON error response.

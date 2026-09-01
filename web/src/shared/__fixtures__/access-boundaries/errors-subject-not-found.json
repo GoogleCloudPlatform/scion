@@ -1,0 +1,26 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraint-previews",
+    "status": 422,
+    "designRef": "constraint-ui-ux-design.md §9.7, §9.1; plan §WP B2",
+    "notes": "422 not 404: the request is well-formed and the boundary route exists, but a typed reference inside the draft does not resolve. Today no such validation exists — SubjectSelector.Validate (access_constraint.go:61-83) checks shape only, never existence, and storeToHubAccessConstraint skips validation entirely on read-back (base inventory §3.3)."
+  },
+  "error": {
+    "code": "SUBJECT_NOT_FOUND",
+    "message": "The selected subject does not exist.",
+    "retryable": false,
+    "correlationId": "req-4e77d201",
+    "requestId": "req-4e77d201",
+    "details": {
+      "field": "draft.subject.groupId",
+      "subjectKind": "group_closure",
+      "referenceType": "group",
+      "referenceId": "grp-contarctors",
+      "reason": "group_not_found",
+      "remedy": "Select an existing group. Did you mean \"Contractors\" (grp-contractors)?",
+      "suggestions": [
+        { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
+      ]
+    }
+  }
+}

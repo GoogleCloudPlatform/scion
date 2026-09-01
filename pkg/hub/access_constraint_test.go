@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"testing"
 	"time"
@@ -109,6 +110,59 @@ func TestSubjectSelector_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		// Orphaned field rejection tests.
+		{
+			name: "principal with orphaned groupId",
+			subject: SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: "user",
+				PrincipalID:   "user1",
+				GroupID:       "group1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "group_closure with orphaned principalId",
+			subject: SubjectSelector{
+				Kind:        SubjectKindGroupClosure,
+				GroupID:     "group1",
+				PrincipalID: "user1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "group_closure with orphaned principalType",
+			subject: SubjectSelector{
+				Kind:          SubjectKindGroupClosure,
+				GroupID:       "group1",
+				PrincipalType: "user",
+			},
+			wantErr: true,
+		},
+		{
+			name: "all_principals with orphaned principalId",
+			subject: SubjectSelector{
+				Kind:        SubjectKindAllPrincipals,
+				PrincipalID: "user1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "all_principals with orphaned principalType",
+			subject: SubjectSelector{
+				Kind:          SubjectKindAllPrincipals,
+				PrincipalType: "user",
+			},
+			wantErr: true,
+		},
+		{
+			name: "all_principals with orphaned groupId",
+			subject: SubjectSelector{
+				Kind:    SubjectKindAllPrincipals,
+				GroupID: "group1",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -137,6 +191,7 @@ func TestConstraintScopeRef_Validate(t *testing.T) {
 		{name: "system scope", scope: ConstraintScopeRef{Type: ScopeTypeSystem}},
 		{name: "project scope", scope: ConstraintScopeRef{Type: ScopeTypeProject, ID: "proj-a"}},
 		{name: "project scope missing ID", scope: ConstraintScopeRef{Type: ScopeTypeProject}, wantErr: true},
+		{name: "system scope with non-empty ID", scope: ConstraintScopeRef{Type: ScopeTypeSystem, ID: "proj-1"}, wantErr: true},
 		{name: "invalid scope type", scope: ConstraintScopeRef{Type: "resource"}, wantErr: true},
 	}
 
@@ -285,7 +340,8 @@ func TestAccessConstraint_IsActive(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSubjectSelector_MatchesPrincipalClosure(t *testing.T) {
-	closure := closureOf("user1", "group1", "group2")
+	// Typed closure: "type:id" keys matching the evaluator's format.
+	closure := closureOf("user:user1", "group:group1", "group:group2")
 
 	cases := []struct {
 		name    string
@@ -342,11 +398,29 @@ func TestSubjectSelector_MatchesPrincipalClosure(t *testing.T) {
 			},
 			match: false,
 		},
+		{
+			name: "principal targeting group matches group in closure",
+			subject: SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: "group",
+				PrincipalID:   "group1",
+			},
+			match: true,
+		},
+		{
+			name: "agent principal not in user closure",
+			subject: SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: "agent",
+				PrincipalID:   "user1",
+			},
+			match: false,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.subject.MatchesPrincipalClosure(closure, "user1", "user")
+			got := tc.subject.MatchesPrincipalClosure(closure)
 			if got != tc.match {
 				t.Fatalf("MatchesPrincipalClosure() = %v, want %v", got, tc.match)
 			}
@@ -661,9 +735,9 @@ func TestFilterApplicableConstraints_SubjectMatching(t *testing.T) {
 		},
 	}
 
-	// User1 is in group1.
-	closure := closureOf("user1", "group1")
-	applicable := FilterApplicableConstraints(constraints, closure, "user1", "user", ScopeTypeSystem, "")
+	// User1 is in group1. Use typed closure keys.
+	closure := closureOf("user:user1", "group:group1")
+	applicable := FilterApplicableConstraints(constraints, closure, ScopeTypeSystem, "")
 
 	// Should match c1 (exact), c2 (group closure), c3 (all principals).
 	// Should NOT match c4 (different user).
@@ -716,10 +790,10 @@ func TestFilterApplicableConstraints_ScopeMatching(t *testing.T) {
 		},
 	}
 
-	closure := closureOf("user1")
+	closure := closureOf("user:user1")
 
 	// For project-a scope: should match system (c1) and project-a (c2).
-	applicable := FilterApplicableConstraints(constraints, closure, "user1", "user", ScopeTypeProject, "proj-a")
+	applicable := FilterApplicableConstraints(constraints, closure, ScopeTypeProject, "proj-a")
 	if len(applicable) != 2 {
 		t.Fatalf("expected 2 applicable constraints for proj-a, got %d", len(applicable))
 	}
@@ -1023,11 +1097,11 @@ func TestConstraint_GroupRemovalSafety(t *testing.T) {
 		MaximumPermissions: []string{"agent.read"},
 	}
 
-	// User1 is in group1 — constraint applies.
-	closureWithGroup := closureOf("user:user1", "group1")
+	// User1 is in group1 — constraint applies. Use typed keys.
+	closureWithGroup := closureOf("user:user1", "group:group1")
 	applicable := FilterApplicableConstraints(
 		[]*AccessConstraint{constraint},
-		closureWithGroup, "user1", "user",
+		closureWithGroup,
 		ScopeTypeSystem, "",
 	)
 	if len(applicable) != 1 {
@@ -1053,7 +1127,7 @@ func TestConstraint_GroupRemovalSafety(t *testing.T) {
 	closureWithoutGroup := closureOf("user:user1")
 	applicable = FilterApplicableConstraints(
 		[]*AccessConstraint{constraint},
-		closureWithoutGroup, "user1", "user",
+		closureWithoutGroup,
 		ScopeTypeSystem, "",
 	)
 	if len(applicable) != 0 {
@@ -1395,5 +1469,465 @@ func TestConstraint_StoreAllowsPermission(t *testing.T) {
 	}
 	if constraintAllowsPermission(c, "agent.create") {
 		t.Fatal("should NOT allow agent.create")
+	}
+}
+
+// ===========================================================================
+// B1 fix verification tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Fix 1: Exact-principal matching — group-targeted constraints must match
+// ---------------------------------------------------------------------------
+
+func TestMatchesPrincipalClosure_GroupTargetedPrincipalConstraint(t *testing.T) {
+	// A constraint {kind:principal, principalType:"group", principalID:"g1"}
+	// must match when "group:g1" is in the typed closure.
+	// Previously this never matched because the comparison was against the
+	// requester's type ("user"/"agent"), never "group".
+
+	typedClosure := closureOf("user:u1", "group:g1", "group:g2")
+
+	s := SubjectSelector{
+		Kind:          SubjectKindPrincipal,
+		PrincipalType: "group",
+		PrincipalID:   "g1",
+	}
+
+	if !s.MatchesPrincipalClosure(typedClosure) {
+		t.Fatal("principal constraint targeting group g1 should match when group:g1 is in closure")
+	}
+
+	// Same constraint but g1 not in closure.
+	noGroupClosure := closureOf("user:u1", "group:g2")
+	if s.MatchesPrincipalClosure(noGroupClosure) {
+		t.Fatal("principal constraint targeting group g1 should NOT match when g1 is absent")
+	}
+}
+
+func TestMatchesPrincipalClosure_AllPrincipalTypes(t *testing.T) {
+	// Verify typed matching for all principal types.
+	cases := []struct {
+		name          string
+		closure       map[string]struct{}
+		principalType string
+		principalID   string
+		wantMatch     bool
+	}{
+		{
+			name:          "user match",
+			closure:       closureOf("user:u1"),
+			principalType: "user",
+			principalID:   "u1",
+			wantMatch:     true,
+		},
+		{
+			name:          "agent match",
+			closure:       closureOf("agent:a1"),
+			principalType: "agent",
+			principalID:   "a1",
+			wantMatch:     true,
+		},
+		{
+			name:          "group match",
+			closure:       closureOf("group:g1"),
+			principalType: "group",
+			principalID:   "g1",
+			wantMatch:     true,
+		},
+		{
+			name:          "type mismatch: user ID as agent",
+			closure:       closureOf("user:u1"),
+			principalType: "agent",
+			principalID:   "u1",
+			wantMatch:     false,
+		},
+		{
+			name:          "type mismatch: agent ID as user",
+			closure:       closureOf("agent:a1"),
+			principalType: "user",
+			principalID:   "a1",
+			wantMatch:     false,
+		},
+		{
+			name:          "no bare ID match (typed keys required)",
+			closure:       closureOf("u1"), // bare ID, no type prefix
+			principalType: "user",
+			principalID:   "u1",
+			wantMatch:     false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: tc.principalType,
+				PrincipalID:   tc.principalID,
+			}
+			got := s.MatchesPrincipalClosure(tc.closure)
+			if got != tc.wantMatch {
+				t.Fatalf("MatchesPrincipalClosure() = %v, want %v", got, tc.wantMatch)
+			}
+		})
+	}
+}
+
+func TestMatchesPrincipalClosure_GroupClosureUsesTypedKey(t *testing.T) {
+	// group_closure subjects should use "group:" prefix for lookup.
+	s := SubjectSelector{
+		Kind:    SubjectKindGroupClosure,
+		GroupID: "g1",
+	}
+
+	// Match with typed key.
+	if !s.MatchesPrincipalClosure(closureOf("user:u1", "group:g1")) {
+		t.Fatal("group_closure should match with typed group:g1 key")
+	}
+
+	// No match with bare key.
+	if s.MatchesPrincipalClosure(closureOf("user:u1", "g1")) {
+		t.Fatal("group_closure should NOT match bare g1 key (must be group:g1)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 5: NormalizePrincipalType
+// ---------------------------------------------------------------------------
+
+func TestNormalizePrincipalType(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"user", "user"},
+		{"agent", "agent"},
+		{"dev", "user"},
+		{"federated_user", "user"},
+		{"federated_agent", "agent"},
+		{"group", "group"},
+		{"broker", "broker"},
+		{"unknown", "unknown"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := NormalizePrincipalType(tc.input)
+			if got != tc.want {
+				t.Fatalf("NormalizePrincipalType(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 6: No bare-ID over-match — typed keys prevent cross-type collision
+// ---------------------------------------------------------------------------
+
+func TestFilterApplicableConstraints_NoBareidOvermatch(t *testing.T) {
+	// A constraint targeting {principal, user, "shared-id"} should NOT match
+	// when "shared-id" exists in the closure only as "group:shared-id".
+	// Previously, the bare-ID closure would strip the type prefix and match.
+
+	constraints := []*AccessConstraint{
+		{
+			ID:   "c1",
+			Name: "target-user-shared-id",
+			Subject: SubjectSelector{
+				Kind:          SubjectKindPrincipal,
+				PrincipalType: "user",
+				PrincipalID:   "shared-id",
+			},
+			Scope:              ConstraintScopeRef{Type: ScopeTypeSystem},
+			MaximumPermissions: []string{"agent.read"},
+		},
+	}
+
+	// Closure has "shared-id" as a group, not as a user.
+	closure := closureOf("user:real-user", "group:shared-id")
+	applicable := FilterApplicableConstraints(constraints, closure, ScopeTypeSystem, "")
+
+	if len(applicable) != 0 {
+		t.Fatal("user constraint should NOT match group:shared-id (typed keys prevent cross-type collision)")
+	}
+
+	// Same ID as a user should match.
+	closureWithUser := closureOf("user:shared-id")
+	applicable = FilterApplicableConstraints(constraints, closureWithUser, ScopeTypeSystem, "")
+
+	if len(applicable) != 1 {
+		t.Fatal("user constraint should match user:shared-id")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1+5 combined: dev/federated principals with group constraints
+// ---------------------------------------------------------------------------
+
+func TestFilterApplicableConstraints_DevPrincipalWithGroupConstraint(t *testing.T) {
+	// A constraint targeting group:g1 should match a dev principal whose
+	// normalized closure includes group:g1.
+
+	constraint := &AccessConstraint{
+		ID:   "c1",
+		Name: "group-constraint",
+		Subject: SubjectSelector{
+			Kind:          SubjectKindPrincipal,
+			PrincipalType: "group",
+			PrincipalID:   "g1",
+		},
+		Scope:              ConstraintScopeRef{Type: ScopeTypeSystem},
+		MaximumPermissions: []string{"agent.read"},
+	}
+
+	// Dev principal with normalized closure (dev → user).
+	normalizedClosure := closureOf("user:dev-user", "group:g1")
+	applicable := FilterApplicableConstraints(
+		[]*AccessConstraint{constraint}, normalizedClosure,
+		ScopeTypeSystem, "",
+	)
+
+	if len(applicable) != 1 {
+		t.Fatal("group-targeted principal constraint should match when group:g1 is in normalized closure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Exact-group subject vs group-closure subject distinction
+// ---------------------------------------------------------------------------
+
+func TestFilterApplicableConstraints_ExactGroupVsGroupClosure(t *testing.T) {
+	// An exact-group constraint {principal, group, G} targets the group
+	// principal itself. A group_closure constraint {group_closure, G}
+	// targets all effective members of G.
+	// Both should match when group:G is in the closure, but they mean
+	// different things semantically.
+
+	exactGroupConstraint := &AccessConstraint{
+		ID:   "exact",
+		Name: "exact-group",
+		Subject: SubjectSelector{
+			Kind:          SubjectKindPrincipal,
+			PrincipalType: "group",
+			PrincipalID:   "g1",
+		},
+		Scope:              ConstraintScopeRef{Type: ScopeTypeSystem},
+		MaximumPermissions: []string{"agent.read"},
+	}
+
+	groupClosureConstraint := &AccessConstraint{
+		ID:   "closure",
+		Name: "group-closure",
+		Subject: SubjectSelector{
+			Kind:    SubjectKindGroupClosure,
+			GroupID: "g1",
+		},
+		Scope:              ConstraintScopeRef{Type: ScopeTypeSystem},
+		MaximumPermissions: []string{"agent.read"},
+	}
+
+	// User in group g1: both should match.
+	userInGroup := closureOf("user:u1", "group:g1")
+	applicable := FilterApplicableConstraints(
+		[]*AccessConstraint{exactGroupConstraint, groupClosureConstraint},
+		userInGroup, ScopeTypeSystem, "",
+	)
+
+	if len(applicable) != 2 {
+		t.Fatalf("both exact-group and group-closure constraints should match, got %d", len(applicable))
+	}
+
+	// User NOT in group g1: neither should match.
+	userNotInGroup := closureOf("user:u1", "group:g2")
+	applicable = FilterApplicableConstraints(
+		[]*AccessConstraint{exactGroupConstraint, groupClosureConstraint},
+		userNotInGroup, ScopeTypeSystem, "",
+	)
+
+	if len(applicable) != 0 {
+		t.Fatalf("neither constraint should match when user is not in group g1, got %d", len(applicable))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 201+ constraints: all evaluated, no fixed-limit bypass
+// ---------------------------------------------------------------------------
+
+func TestFilterApplicableConstraints_LargeConstraintCount(t *testing.T) {
+	// Ensure that all constraints are evaluated even beyond historical limits.
+	const count = 250
+	constraints := make([]*AccessConstraint, count)
+	for i := 0; i < count; i++ {
+		constraints[i] = &AccessConstraint{
+			ID:   fmt.Sprintf("c%d", i),
+			Name: fmt.Sprintf("constraint-%d", i),
+			Subject: SubjectSelector{
+				Kind: SubjectKindAllPrincipals,
+			},
+			Scope:              ConstraintScopeRef{Type: ScopeTypeSystem},
+			MaximumPermissions: []string{"agent.read"},
+		}
+	}
+
+	closure := closureOf("user:u1")
+	applicable := FilterApplicableConstraints(constraints, closure, ScopeTypeSystem, "")
+
+	if len(applicable) != count {
+		t.Fatalf("expected all %d constraints to be applicable, got %d", count, len(applicable))
+	}
+
+	// Intersection of 250 constraints all allowing only "agent.read" should
+	// still deny "agent.create".
+	restrictions := ConstraintsToRestrictions(applicable, testNow)
+	if len(restrictions) != count {
+		t.Fatalf("expected %d restrictions, got %d", count, len(restrictions))
+	}
+
+	for i, r := range restrictions {
+		if !r.Check("agent.read") {
+			t.Fatalf("restriction %d should allow agent.read", i)
+		}
+		if r.Check("agent.create") {
+			t.Fatalf("restriction %d should deny agent.create", i)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// normalizeClosureTypes tests
+// ---------------------------------------------------------------------------
+
+func TestNormalizeClosureTypes(t *testing.T) {
+	input := map[string]struct{}{
+		"dev:u1":             {},
+		"federated_user:u2":  {},
+		"federated_agent:a1": {},
+		"user:u3":            {},
+		"agent:a2":           {},
+		"group:g1":           {},
+		"broker:b1":          {},
+	}
+
+	got := normalizeClosureTypes(input)
+
+	expected := map[string]struct{}{
+		"user:u1":   {},
+		"user:u2":   {},
+		"agent:a1":  {},
+		"user:u3":   {},
+		"agent:a2":  {},
+		"group:g1":  {},
+		"broker:b1": {},
+	}
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %d entries, got %d", len(expected), len(got))
+	}
+
+	for key := range expected {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("missing expected key %q in normalized closure", key)
+		}
+	}
+
+	// Verify dev:u1 was normalized away.
+	if _, ok := got["dev:u1"]; ok {
+		t.Fatal("dev:u1 should have been normalized to user:u1")
+	}
+	if _, ok := got["federated_user:u2"]; ok {
+		t.Fatal("federated_user:u2 should have been normalized to user:u2")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consistency: lockout guard and evaluator agree on group-targeted constraints
+// ---------------------------------------------------------------------------
+
+func TestGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing.T) {
+	// The lockout guard (userBlockedByConstraints) and the evaluator
+	// (MatchesPrincipalClosure) must both match a {principal, group, G}
+	// constraint when G is in the user's closure.
+
+	ptrS := func(s string) *string { return &s }
+	s := &Server{}
+
+	// Store-level constraint for lockout check.
+	storeConstraint := &store.AccessConstraint{
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: ptrS("group"),
+		SubjectPrincipalID:   ptrS("admin-group"),
+		MaximumPermissions:   []string{"agent.read"}, // excludes access_constraint.admin
+	}
+
+	user := adminUserInfo{userID: "u1", groupIDs: []string{"admin-group"}}
+
+	// Lockout guard says blocked.
+	lockoutBlocked := s.userBlockedByConstraints(context.TODO(), user, []*store.AccessConstraint{storeConstraint})
+	if !lockoutBlocked {
+		t.Fatal("lockout guard should detect that user is blocked by group-targeted constraint")
+	}
+
+	// Evaluator (hub-level) should also match.
+	hubSelector := SubjectSelector{
+		Kind:          SubjectKindPrincipal,
+		PrincipalType: "group",
+		PrincipalID:   "admin-group",
+	}
+	typedClosure := closureOf("user:u1", "group:admin-group")
+	evaluatorMatches := hubSelector.MatchesPrincipalClosure(typedClosure)
+	if !evaluatorMatches {
+		t.Fatal("evaluator should also match the group-targeted constraint")
+	}
+
+	// Both agree: consistency check passes.
+}
+
+// ---------------------------------------------------------------------------
+// Super-admin boundary applies identically
+// ---------------------------------------------------------------------------
+
+func TestFilterApplicableConstraints_SuperAdminBoundary(t *testing.T) {
+	// Super-admin should be subject to constraints just like any other user.
+	// all_principals constraints apply regardless of role.
+	constraint := &AccessConstraint{
+		ID:   "c1",
+		Name: "restrict-all",
+		Subject: SubjectSelector{
+			Kind: SubjectKindAllPrincipals,
+		},
+		Scope:              ConstraintScopeRef{Type: ScopeTypeSystem},
+		MaximumPermissions: []string{"agent.read"},
+	}
+
+	superAdminClosure := closureOf("user:super-admin-user")
+	applicable := FilterApplicableConstraints(
+		[]*AccessConstraint{constraint}, superAdminClosure,
+		ScopeTypeSystem, "",
+	)
+
+	if len(applicable) != 1 {
+		t.Fatal("all_principals constraint should apply to super-admin")
+	}
+
+	restrictions := ConstraintsToRestrictions(applicable, testNow)
+	if restrictions[0].Check("agent.create") {
+		t.Fatal("agent.create should be denied by constraint even for super-admin")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unknown subject kind: fail-open (returns false, constraint not applied)
+// ---------------------------------------------------------------------------
+
+func TestMatchesPrincipalClosure_UnknownKindFailsOpen(t *testing.T) {
+	s := SubjectSelector{
+		Kind:          SubjectKind("unknown_kind"),
+		PrincipalType: "user",
+		PrincipalID:   "u1",
+	}
+
+	closure := closureOf("user:u1")
+	if s.MatchesPrincipalClosure(closure) {
+		t.Fatal("unknown subject kind should return false (not applied)")
 	}
 }

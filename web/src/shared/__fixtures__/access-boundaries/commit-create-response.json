@@ -1,0 +1,51 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraints",
+    "status": 201,
+    "responseHeaders": {
+      "ETag": "\"1\"",
+      "Location": "/api/v1/admin/access-constraints/ac-77"
+    },
+    "designRef": "constraint-ui-ux-design.md §9.5",
+    "notes": "Commit returns the record, the new revision, the audit event ID, the correlation ID, and the committed classification/diff summary — design §9.5 requires all five so the UI can confirm what was actually applied rather than what was previewed. Today create returns the bare store record with no audit at all (base inventory §3.6)."
+  },
+  "constraint": {
+    "id": "ac-77",
+    "name": "Contractor deploy ceiling",
+    "purpose": "Contractors may inspect Atlas but never deploy or delete.",
+    "revision": "1",
+    "subject": { "kind": "group_closure", "groupId": "grp-contractors" },
+    "scope": { "type": "project", "projectId": "proj-atlas" },
+    "status": "active",
+    "maximumPermissions": [
+      "agent.read", "agent.list", "agent.logs.read", "project.read", "project.list",
+      "skill.read", "skill.list", "role.read", "role_binding.read", "group.read",
+      "user.read", "hub.health.read", "quota.read", "scheduled_event.read"
+    ],
+    "appliesWhen": { "notBefore": null, "expiresAt": null },
+    "createdBy": { "type": "user", "id": "usr-mori", "displayName": "Sam Mori" },
+    "createdAt": "2026-08-31T14:31:02Z",
+    "updatedBy": { "type": "user", "id": "usr-mori", "displayName": "Sam Mori" },
+    "updatedAt": "2026-08-31T14:31:02Z",
+    "_capabilities": {
+      "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+    }
+  },
+  "revision": "1",
+  "auditEventId": "aev-c1f8",
+  "correlationId": "req-9d41a7c2",
+  "requestId": "req-9d41a7c2",
+  "committed": {
+    "previewId": "apv-8d2",
+    "classification": "tighten",
+    "affectedPrincipalCount": 126,
+    "losingPrincipalCount": 118,
+    "regainingPrincipalCount": 0,
+    "permissionDiffSummary": {
+      "removedPermissionCount": 8,
+      "addedPermissionCount": 0
+    },
+    "matchedPreview": true,
+    "committedAt": "2026-08-31T14:31:02Z"
+  }
+}

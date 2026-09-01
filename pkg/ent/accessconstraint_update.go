@@ -211,6 +211,41 @@ func (_u *AccessConstraintUpdate) SetNillableDisabled(v *bool) *AccessConstraint
 	return _u
 }
 
+// SetRevision sets the "revision" field.
+func (_u *AccessConstraintUpdate) SetRevision(v int64) *AccessConstraintUpdate {
+	_u.mutation.ResetRevision()
+	_u.mutation.SetRevision(v)
+	return _u
+}
+
+// SetNillableRevision sets the "revision" field if the given value is not nil.
+func (_u *AccessConstraintUpdate) SetNillableRevision(v *int64) *AccessConstraintUpdate {
+	if v != nil {
+		_u.SetRevision(*v)
+	}
+	return _u
+}
+
+// AddRevision adds value to the "revision" field.
+func (_u *AccessConstraintUpdate) AddRevision(v int64) *AccessConstraintUpdate {
+	_u.mutation.AddRevision(v)
+	return _u
+}
+
+// SetPurpose sets the "purpose" field.
+func (_u *AccessConstraintUpdate) SetPurpose(v string) *AccessConstraintUpdate {
+	_u.mutation.SetPurpose(v)
+	return _u
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_u *AccessConstraintUpdate) SetNillablePurpose(v *string) *AccessConstraintUpdate {
+	if v != nil {
+		_u.SetPurpose(*v)
+	}
+	return _u
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_u *AccessConstraintUpdate) SetCreatedBy(v string) *AccessConstraintUpdate {
 	_u.mutation.SetCreatedBy(v)
@@ -228,6 +263,26 @@ func (_u *AccessConstraintUpdate) SetNillableCreatedBy(v *string) *AccessConstra
 // ClearCreatedBy clears the value of the "created_by" field.
 func (_u *AccessConstraintUpdate) ClearCreatedBy() *AccessConstraintUpdate {
 	_u.mutation.ClearCreatedBy()
+	return _u
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (_u *AccessConstraintUpdate) SetUpdatedBy(v string) *AccessConstraintUpdate {
+	_u.mutation.SetUpdatedBy(v)
+	return _u
+}
+
+// SetNillableUpdatedBy sets the "updated_by" field if the given value is not nil.
+func (_u *AccessConstraintUpdate) SetNillableUpdatedBy(v *string) *AccessConstraintUpdate {
+	if v != nil {
+		_u.SetUpdatedBy(*v)
+	}
+	return _u
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (_u *AccessConstraintUpdate) ClearUpdatedBy() *AccessConstraintUpdate {
+	_u.mutation.ClearUpdatedBy()
 	return _u
 }
 
@@ -293,6 +348,11 @@ func (_u *AccessConstraintUpdate) check() error {
 	if v, ok := _u.mutation.ScopeType(); ok {
 		if err := accessconstraint.ScopeTypeValidator(v); err != nil {
 			return &ValidationError{Name: "scope_type", err: fmt.Errorf(`ent: validator failed for field "AccessConstraint.scope_type": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Purpose(); ok {
+		if err := accessconstraint.PurposeValidator(v); err != nil {
+			return &ValidationError{Name: "purpose", err: fmt.Errorf(`ent: validator failed for field "AccessConstraint.purpose": %w`, err)}
 		}
 	}
 	return nil
@@ -363,11 +423,26 @@ func (_u *AccessConstraintUpdate) sqlSave(ctx context.Context) (_node int, err e
 	if value, ok := _u.mutation.Disabled(); ok {
 		_spec.SetField(accessconstraint.FieldDisabled, field.TypeBool, value)
 	}
+	if value, ok := _u.mutation.Revision(); ok {
+		_spec.SetField(accessconstraint.FieldRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedRevision(); ok {
+		_spec.AddField(accessconstraint.FieldRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Purpose(); ok {
+		_spec.SetField(accessconstraint.FieldPurpose, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(accessconstraint.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(accessconstraint.FieldCreatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.UpdatedBy(); ok {
+		_spec.SetField(accessconstraint.FieldUpdatedBy, field.TypeString, value)
+	}
+	if _u.mutation.UpdatedByCleared() {
+		_spec.ClearField(accessconstraint.FieldUpdatedBy, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(accessconstraint.FieldUpdated, field.TypeTime, value)
@@ -574,6 +649,41 @@ func (_u *AccessConstraintUpdateOne) SetNillableDisabled(v *bool) *AccessConstra
 	return _u
 }
 
+// SetRevision sets the "revision" field.
+func (_u *AccessConstraintUpdateOne) SetRevision(v int64) *AccessConstraintUpdateOne {
+	_u.mutation.ResetRevision()
+	_u.mutation.SetRevision(v)
+	return _u
+}
+
+// SetNillableRevision sets the "revision" field if the given value is not nil.
+func (_u *AccessConstraintUpdateOne) SetNillableRevision(v *int64) *AccessConstraintUpdateOne {
+	if v != nil {
+		_u.SetRevision(*v)
+	}
+	return _u
+}
+
+// AddRevision adds value to the "revision" field.
+func (_u *AccessConstraintUpdateOne) AddRevision(v int64) *AccessConstraintUpdateOne {
+	_u.mutation.AddRevision(v)
+	return _u
+}
+
+// SetPurpose sets the "purpose" field.
+func (_u *AccessConstraintUpdateOne) SetPurpose(v string) *AccessConstraintUpdateOne {
+	_u.mutation.SetPurpose(v)
+	return _u
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_u *AccessConstraintUpdateOne) SetNillablePurpose(v *string) *AccessConstraintUpdateOne {
+	if v != nil {
+		_u.SetPurpose(*v)
+	}
+	return _u
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_u *AccessConstraintUpdateOne) SetCreatedBy(v string) *AccessConstraintUpdateOne {
 	_u.mutation.SetCreatedBy(v)
@@ -591,6 +701,26 @@ func (_u *AccessConstraintUpdateOne) SetNillableCreatedBy(v *string) *AccessCons
 // ClearCreatedBy clears the value of the "created_by" field.
 func (_u *AccessConstraintUpdateOne) ClearCreatedBy() *AccessConstraintUpdateOne {
 	_u.mutation.ClearCreatedBy()
+	return _u
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (_u *AccessConstraintUpdateOne) SetUpdatedBy(v string) *AccessConstraintUpdateOne {
+	_u.mutation.SetUpdatedBy(v)
+	return _u
+}
+
+// SetNillableUpdatedBy sets the "updated_by" field if the given value is not nil.
+func (_u *AccessConstraintUpdateOne) SetNillableUpdatedBy(v *string) *AccessConstraintUpdateOne {
+	if v != nil {
+		_u.SetUpdatedBy(*v)
+	}
+	return _u
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (_u *AccessConstraintUpdateOne) ClearUpdatedBy() *AccessConstraintUpdateOne {
+	_u.mutation.ClearUpdatedBy()
 	return _u
 }
 
@@ -669,6 +799,11 @@ func (_u *AccessConstraintUpdateOne) check() error {
 	if v, ok := _u.mutation.ScopeType(); ok {
 		if err := accessconstraint.ScopeTypeValidator(v); err != nil {
 			return &ValidationError{Name: "scope_type", err: fmt.Errorf(`ent: validator failed for field "AccessConstraint.scope_type": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Purpose(); ok {
+		if err := accessconstraint.PurposeValidator(v); err != nil {
+			return &ValidationError{Name: "purpose", err: fmt.Errorf(`ent: validator failed for field "AccessConstraint.purpose": %w`, err)}
 		}
 	}
 	return nil
@@ -756,11 +891,26 @@ func (_u *AccessConstraintUpdateOne) sqlSave(ctx context.Context) (_node *Access
 	if value, ok := _u.mutation.Disabled(); ok {
 		_spec.SetField(accessconstraint.FieldDisabled, field.TypeBool, value)
 	}
+	if value, ok := _u.mutation.Revision(); ok {
+		_spec.SetField(accessconstraint.FieldRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedRevision(); ok {
+		_spec.AddField(accessconstraint.FieldRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Purpose(); ok {
+		_spec.SetField(accessconstraint.FieldPurpose, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(accessconstraint.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(accessconstraint.FieldCreatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.UpdatedBy(); ok {
+		_spec.SetField(accessconstraint.FieldUpdatedBy, field.TypeString, value)
+	}
+	if _u.mutation.UpdatedByCleared() {
+		_spec.ClearField(accessconstraint.FieldUpdatedBy, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(accessconstraint.FieldUpdated, field.TypeTime, value)

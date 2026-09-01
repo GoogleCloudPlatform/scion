@@ -1,0 +1,29 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraints",
+    "status": 409,
+    "designRef": "constraint-ui-ux-design.md §9.7, §7.2; plan §WP B5",
+    "notes": "Emitted from inside the mutation transaction after evaluating the POST-state, not from a pre-check. Today this is a pre-check outside the write that returns 403 via writeForbidden with the plain message 'lockout prevention: …' (handlers_access_constraints.go:252-257, 460-546) — see base inventory §3.4. Zero resolved admins must produce THIS error, never a degraded-state pass."
+  },
+  "error": {
+    "code": "CONSTRAINT_ADMIN_LOCKOUT",
+    "message": "This boundary would leave no one able to manage access boundaries.",
+    "retryable": false,
+    "correlationId": "req-7a12c9d0",
+    "requestId": "req-7a12c9d0",
+    "details": {
+      "checkedPermissionIds": ["access_constraint.admin"],
+      "remainingActiveDirectAdmins": 0,
+      "actorRetainsMutationAuthority": false,
+      "evaluatedAtRevisionVector": "rv-2026-08-31T14:31:02Z-0x91ab",
+      "excludedAdmins": [
+        { "type": "user", "id": "usr-mori", "displayName": "Sam Mori", "reason": "subject_match" },
+        { "type": "user", "id": "usr-lin", "displayName": "Lin Alvarez", "reason": "subject_match" }
+      ],
+      "excludedAdminCount": 2,
+      "excludedAdminsTruncated": false,
+      "remedy": "Add access_constraint.admin to this boundary's maximum permissions, or narrow the subject so at least one active administrator is not affected.",
+      "scope": { "type": "system" }
+    }
+  }
+}

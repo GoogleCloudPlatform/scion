@@ -25,8 +25,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type { AdminGroup } from '../../shared/types.js';
+import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
+import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import '../shared/group-member-editor.js';
+import '../shared/boundary-summary-notice.js';
 import { extractApiError } from '../../client/api.js';
+import { apiFetch } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 
 @customElement('scion-page-admin-group-detail')
@@ -42,6 +46,16 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
   @state()
   private error: string | null = null;
+
+  // Access boundary state
+  @state()
+  private boundaryGroups: BoundarySummaryGroup[] = [];
+
+  @state()
+  private boundaryLoading = false;
+
+  @state()
+  private boundaryError = '';
 
   static override styles = css`
     :host {
@@ -275,11 +289,54 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
       this.group = (await response.json()) as AdminGroup;
       dispatchPageTitle(this, this.group.name || this.groupId, 'Groups');
+      void this.loadBoundaries();
     } catch (err) {
       console.error('Failed to load group:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load group';
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async loadBoundaries(): Promise<void> {
+    this.boundaryLoading = true;
+    this.boundaryError = '';
+
+    try {
+      // Fetch exact-group and group-closure boundaries in parallel
+      const [exactRes, closureRes] = await Promise.all([
+        apiFetch(
+          `/api/v1/admin/access-constraints?subjectKind=exact_group&subjectId=${encodeURIComponent(this.groupId)}`
+        ),
+        apiFetch(
+          `/api/v1/admin/access-constraints?subjectKind=group_closure&subjectId=${encodeURIComponent(this.groupId)}`
+        ),
+      ]);
+
+      const exactItems: AccessBoundarySummary[] = exactRes.ok
+        ? (((await exactRes.json()) as { items: AccessBoundarySummary[] }).items ?? [])
+        : [];
+      const closureItems: AccessBoundarySummary[] = closureRes.ok
+        ? (((await closureRes.json()) as { items: AccessBoundarySummary[] }).items ?? [])
+        : [];
+
+      this.boundaryGroups = [
+        {
+          label: 'Exact group',
+          items: exactItems,
+          filterUrl: `/admin/access-boundaries?subjectKind=exact_group&subjectId=${encodeURIComponent(this.groupId)}`,
+        },
+        {
+          label: 'Group closure',
+          items: closureItems,
+          filterUrl: `/admin/access-boundaries?subjectKind=group_closure&subjectId=${encodeURIComponent(this.groupId)}`,
+        },
+      ];
+    } catch (err) {
+      console.error('Failed to load boundaries for group:', err);
+      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access boundaries';
+    } finally {
+      this.boundaryLoading = false;
     }
   }
 
@@ -383,6 +440,16 @@ export class ScionPageAdminGroupDetail extends LitElement {
             : nothing}
         </div>
       </div>
+
+      <scion-boundary-summary-notice
+        label="Access boundaries"
+        .groups=${this.boundaryGroups}
+        ?loading=${this.boundaryLoading}
+        error=${this.boundaryError}
+        filterUrl="/admin/access-boundaries?subjectKind=group&subjectId=${encodeURIComponent(
+          this.groupId
+        )}"
+      ></scion-boundary-summary-notice>
 
       <scion-group-member-editor
         groupId=${this.group.id}

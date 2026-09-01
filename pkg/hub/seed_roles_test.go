@@ -164,6 +164,22 @@ func TestBuiltInRoles_SuperAdminHasAllPermissions(t *testing.T) {
 		"super-admin must have ALL registry permissions")
 }
 
+// TestBuiltInRoles_HubAdminConstraintPermissions verifies that hub-admin holds
+// access_constraint.read but does NOT hold access_constraint.admin.
+// Constraint administration requires explicit super-admin authority.
+func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
+	adminPerms := hubAdminPermissionIDs()
+	permSet := make(map[string]bool, len(adminPerms))
+	for _, p := range adminPerms {
+		permSet[p] = true
+	}
+
+	assert.True(t, permSet["access_constraint.read"],
+		"hub-admin must include access_constraint.read")
+	assert.False(t, permSet["access_constraint.admin"],
+		"hub-admin must NOT include access_constraint.admin — constraint admin requires super-admin")
+}
+
 // TestBuiltInRoles_ProjectMemberPermissions verifies that the curated
 // project-member role contains expected permissions and excludes permissions
 // that should be reserved for higher roles.

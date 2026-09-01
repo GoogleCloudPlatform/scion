@@ -23,7 +23,10 @@ var (
 		{Name: "not_before", Type: field.TypeTime, Nullable: true},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "disabled", Type: field.TypeBool, Default: false},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "purpose", Type: field.TypeString, Default: "system constraint"},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}

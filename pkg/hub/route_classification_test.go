@@ -199,6 +199,10 @@ var routePermissionClassifications = map[string]string{
 	// Access Constraints (AC1)
 	"/api/v1/admin/access-constraints":  "hub-admin:access_constraint",
 	"/api/v1/admin/access-constraints/": "hub-admin:access_constraint",
+
+	// Access Constraint Previews (B7)
+	"/api/v1/admin/access-constraint-previews":  "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraint-previews/": "hub-admin:access_constraint",
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {

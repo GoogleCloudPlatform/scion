@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -163,6 +164,11 @@ type Decision struct {
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// Provenance contains the full decision provenance when Explain=true.
+	// For non-explain requests, this is populated with minimal data
+	// (matched grant and deny reason).
+	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
@@ -274,12 +280,31 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// Track resolution errors for explain provenance.
+	var resolutionErrors []string
+
 	// ── Step 2: Resolve principal closure ─────────────────────────────
 	principals, err := a.authorizationPrincipals(ctx, principal.Identity)
 	if err != nil {
 		a.logger.Warn("failed to resolve authorization principals",
 			"principal_id", principal.ID, "error", err)
-		return decorateDecision(Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}, principal, credential)
+		errMsg := "principal resolution error: " + err.Error()
+		if request.Explain {
+			resolutionErrors = append(resolutionErrors, errMsg)
+		}
+		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				Errors:          resolutionErrors,
+				DenyReasons:     []string{"principal resolution error (fail-closed)"},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, principal, credential)
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -288,7 +313,17 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	for _, p := range principals {
 		key := p.Type + ":" + p.ID
 		closure[key] = struct{}{}
+		// Default: single-element path (overridden below for groups).
 		membershipPaths[key] = []string{p.ID}
+	}
+
+	// Build real membership path chains for group principals when
+	// Explain=true. For non-explain requests, single-element paths are
+	// sufficient (performance optimization).
+	directKey := principals[0].Type + ":" + principals[0].ID
+	membershipPaths[directKey] = []string{principals[0].ID}
+	if request.Explain {
+		a.buildMembershipPathChains(ctx, principals[0], principals, membershipPaths)
 	}
 
 	// ── Step 3: Load active role bindings (batched) ───────────────────
@@ -296,7 +331,23 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	if err != nil {
 		a.logger.Warn("failed to load role bindings",
 			"principal_id", principal.ID, "error", err)
-		return decorateDecision(Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}, principal, credential)
+		errMsg := "binding resolution error: " + err.Error()
+		if request.Explain {
+			resolutionErrors = append(resolutionErrors, errMsg)
+		}
+		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				Errors:          resolutionErrors,
+				DenyReasons:     []string{"binding resolution error (fail-closed)"},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, principal, credential)
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -305,7 +356,23 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	if err != nil {
 		a.logger.Warn("failed to load role definitions",
 			"principal_id", principal.ID, "error", err)
-		return decorateDecision(Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}, principal, credential)
+		errMsg := "role resolution error: " + err.Error()
+		if request.Explain {
+			resolutionErrors = append(resolutionErrors, errMsg)
+		}
+		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				Errors:          resolutionErrors,
+				DenyReasons:     []string{"role resolution error (fail-closed)"},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, principal, credential)
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -350,7 +417,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// 7c. Access constraints (AC1).
-	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
 	restrictions = append(restrictions, acRestrictions...)
 
 	// ── Step 8: Evaluate via AK1 kernel ───────────────────────────────
@@ -409,6 +476,26 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 11: Finalize provenance ─────────────────────────────────
+	// When Explain=true, include resolution errors and full provenance.
+	// When Explain=false, strip provenance to minimal data for performance.
+	if decision.Provenance != nil {
+		if request.Explain {
+			decision.Provenance.Errors = append(decision.Provenance.Errors, resolutionErrors...)
+		} else {
+			// Non-explain: keep only the minimal provenance (matched grant,
+			// deny reason) to avoid serializing large structures.
+			decision.Provenance = &DecisionProvenance{
+				Permission:      decision.Provenance.Permission,
+				Grants:          decision.Provenance.Grants,
+				DenyReasons:     decision.Provenance.DenyReasons,
+				Restrictions:    []RestrictionProvenance{},
+				InactiveGrants:  []GrantDetail{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+	}
+
 	result := decorateDecision(decision, principal, credential)
 
 	// Emit decision audit if emitter is configured.
@@ -447,17 +534,18 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 }
 
 func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Identity) ([]store.PrincipalRef, error) {
-	principals := []store.PrincipalRef{{Type: identity.Type(), ID: identity.ID()}}
+	// Normalize the identity type to canonical form (dev→user,
+	// federated_agent→agent, etc.) using the single canonical normalization.
+	normalizedType := NormalizePrincipalType(identity.Type())
+	principals := []store.PrincipalRef{{Type: normalizedType, ID: identity.ID()}}
 	var (
 		groups []string
 		err    error
 	)
-	switch identity.Type() {
-	case "user", "dev", "federated_user":
-		principals[0].Type = "user"
+	switch normalizedType {
+	case "user":
 		groups, err = a.store.GetEffectiveGroups(ctx, identity.ID())
-	case "agent", "federated_agent":
-		principals[0].Type = "agent"
+	case "agent":
 		groups, err = a.store.GetEffectiveGroupsForAgent(ctx, identity.ID())
 	default:
 		return principals, nil
@@ -469,6 +557,148 @@ func (a *AuthzService) authorizationPrincipals(ctx context.Context, identity Ide
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: groupID})
 	}
 	return principals, nil
+}
+
+// buildMembershipPathChains builds real membership path chains for group
+// principals. For each group in the principal closure, it computes the chain
+// from the requesting principal through intermediate groups to the target
+// group. This replaces the single-element stub paths.
+//
+// The resulting paths are stored in membershipPaths using typed composite keys.
+func (a *AuthzService) buildMembershipPathChains(
+	ctx context.Context,
+	directPrincipal store.PrincipalRef,
+	principals []store.PrincipalRef,
+	membershipPaths map[string][]string,
+) {
+	// Collect all group IDs in the closure.
+	groupIDs := make(map[string]bool)
+	for _, p := range principals {
+		if p.Type == "group" {
+			groupIDs[p.ID] = true
+		}
+	}
+	if len(groupIDs) == 0 {
+		return
+	}
+
+	// Build a child→parent adjacency from the group hierarchy.
+	// For each group, get its parent groups and build the reverse mapping.
+	childToParents := make(map[string][]string)
+	for gid := range groupIDs {
+		parents, err := a.store.GetParentGroups(ctx, gid)
+		if err != nil {
+			// Best-effort: on error, keep the single-element path.
+			continue
+		}
+		for _, parentID := range parents {
+			if groupIDs[parentID] {
+				childToParents[gid] = append(childToParents[gid], parentID)
+			}
+		}
+	}
+
+	// Identify the principal's direct groups (groups that directly contain
+	// the principal, not via other groups).
+	directGroups := make(map[string]bool)
+	switch directPrincipal.Type {
+	case "user", "dev", "federated_user":
+		members, err := a.store.GetUserGroups(ctx, directPrincipal.ID)
+		if err == nil {
+			for _, m := range members {
+				if groupIDs[m.GroupID] {
+					directGroups[m.GroupID] = true
+				}
+			}
+		}
+	case "agent", "federated_agent":
+		// For agents, direct groups come from GetEffectiveGroupsForAgent.
+		// We cannot distinguish direct vs transitive from the flat list,
+		// so we use GetGroupMembership to check direct membership.
+		for gid := range groupIDs {
+			_, err := a.store.GetGroupMembership(ctx, gid, "agent", directPrincipal.ID)
+			if err == nil {
+				directGroups[gid] = true
+			}
+		}
+	}
+
+	// For each group, build a path from the direct principal through
+	// intermediate groups. Uses BFS to find shortest path.
+	principalKey := directPrincipal.Type + ":" + directPrincipal.ID
+	for gid := range groupIDs {
+		key := "group:" + gid
+		if directGroups[gid] {
+			// Directly a member: path is [principal, group].
+			membershipPaths[key] = []string{principalKey, key}
+			continue
+		}
+
+		// BFS from direct groups to find a path to gid.
+		path := bfsGroupPath(directGroups, gid, childToParents)
+		if len(path) > 0 {
+			// Prepend the principal.
+			fullPath := make([]string, 0, len(path)+1)
+			fullPath = append(fullPath, principalKey)
+			for _, p := range path {
+				fullPath = append(fullPath, "group:"+p)
+			}
+			membershipPaths[key] = fullPath
+		}
+		// Otherwise keep the single-element fallback from the closure builder.
+	}
+}
+
+// bfsGroupPath finds a path from any direct group to the target group using BFS
+// over the child→parent adjacency. Returns the path as group IDs (without the
+// principal), or nil if no path is found.
+func bfsGroupPath(directGroups map[string]bool, target string, childToParents map[string][]string) []string {
+	if directGroups[target] {
+		return []string{target}
+	}
+
+	// Reverse the child→parent map to parent→child for BFS from target.
+	parentToChildren := make(map[string][]string)
+	for child, parents := range childToParents {
+		for _, parent := range parents {
+			parentToChildren[parent] = append(parentToChildren[parent], child)
+		}
+	}
+
+	// BFS from the target backwards through the hierarchy to find a direct group.
+	type queueItem struct {
+		id   string
+		path []string
+	}
+	visited := map[string]bool{target: true}
+	queue := []queueItem{{id: target, path: []string{target}}}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, child := range parentToChildren[current.id] {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			newPath := make([]string, len(current.path)+1)
+			copy(newPath, current.path)
+			newPath[len(current.path)] = child
+
+			if directGroups[child] {
+				// Found a path. Reverse it to go from direct group to target.
+				reversed := make([]string, len(newPath))
+				for i, j := 0, len(newPath)-1; i < len(newPath); i, j = i+1, j-1 {
+					reversed[i] = newPath[j]
+				}
+				return reversed
+			}
+			queue = append(queue, queueItem{id: child, path: newPath})
+		}
+	}
+
+	return nil
 }
 
 // =============================================================================
@@ -509,7 +739,131 @@ func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 			d.Reason = "default deny"
 		}
 	}
+
+	// Populate DecisionProvenance from the kernel provenance.
+	d.Provenance = buildDecisionProvenance(kd.Provenance)
+
 	return d
+}
+
+// buildDecisionProvenance converts KernelProvenance to the external
+// DecisionProvenance type.
+func buildDecisionProvenance(kp KernelProvenance) *DecisionProvenance {
+	dp := &DecisionProvenance{
+		Permission:           kp.Permission,
+		EffectivePermissions: kp.EffectivePermissions,
+		DenyReasons:          kp.DenyReasons,
+	}
+
+	// Map granting (active) bindings.
+	for _, gb := range kp.GrantingBindings {
+		dp.Grants = append(dp.Grants, grantProvenanceToDetail(gb))
+	}
+
+	// Map rejected (inactive) bindings.
+	for _, rb := range kp.RejectedCandidates {
+		detail := grantProvenanceToDetail(rb)
+		if len(rb.RejectReasons) > 0 {
+			detail.InactiveReason = rb.RejectReasons[0]
+		}
+		dp.InactiveGrants = append(dp.InactiveGrants, detail)
+	}
+
+	// Map restrictions with boundary metadata.
+	for _, rr := range kp.Restrictions {
+		rp := RestrictionProvenance{
+			Kind:          rr.Kind,
+			Description:   rr.Description,
+			Applied:       rr.Applied,
+			Detail:        rr.Detail,
+			BoundaryName:  rr.BoundaryName,
+			BoundaryID:    rr.BoundaryID,
+			BoundaryScope: formatBoundaryScope(rr.BoundaryScopeType, rr.BoundaryScopeID),
+		}
+		// Separate credential/status restrictions from boundary restrictions.
+		if rr.Kind == "credential_scope" || rr.Kind == "delegation_ceiling" || rr.Kind == "suspension" {
+			dp.StatusRestrictions = append(dp.StatusRestrictions, rp)
+		} else {
+			dp.Restrictions = append(dp.Restrictions, rp)
+		}
+	}
+
+	// Collect unique membership paths from all evaluated bindings.
+	seenPaths := make(map[string]bool)
+	collectPath := func(gp GrantProvenance) {
+		if len(gp.MembershipPath) == 0 {
+			return
+		}
+		targetKey := gp.PrincipalType + ":" + gp.PrincipalID
+		if seenPaths[targetKey] {
+			return
+		}
+		seenPaths[targetKey] = true
+
+		kind := "direct"
+		if gp.PrincipalType == "group" {
+			if len(gp.MembershipPath) > 2 {
+				kind = "group_closure"
+			} else {
+				kind = "group_membership"
+			}
+		}
+		dp.MembershipPaths = append(dp.MembershipPaths, MembershipPathDetail{
+			TargetID: targetKey,
+			Path:     gp.MembershipPath,
+			Kind:     kind,
+		})
+	}
+	for _, gb := range kp.GrantingBindings {
+		collectPath(gb)
+	}
+	for _, rb := range kp.RejectedCandidates {
+		collectPath(rb)
+	}
+
+	// Ensure non-nil slices for JSON serialization.
+	if dp.Grants == nil {
+		dp.Grants = []GrantDetail{}
+	}
+	if dp.InactiveGrants == nil {
+		dp.InactiveGrants = []GrantDetail{}
+	}
+	if dp.Restrictions == nil {
+		dp.Restrictions = []RestrictionProvenance{}
+	}
+	if dp.MembershipPaths == nil {
+		dp.MembershipPaths = []MembershipPathDetail{}
+	}
+
+	return dp
+}
+
+// grantProvenanceToDetail converts a kernel GrantProvenance to a GrantDetail.
+func grantProvenanceToDetail(gp GrantProvenance) GrantDetail {
+	return GrantDetail{
+		BindingID:         gp.BindingID,
+		RoleID:            gp.RoleID,
+		RoleName:          gp.RoleName,
+		ScopeType:         gp.ScopeType,
+		ScopeID:           gp.ScopeID,
+		PrincipalType:     gp.PrincipalType,
+		PrincipalID:       gp.PrincipalID,
+		ContainsRequested: gp.ContainsRequested,
+		MembershipPath:    gp.MembershipPath,
+		Permissions:       gp.Permissions,
+		RejectReasons:     gp.RejectReasons,
+	}
+}
+
+// formatBoundaryScope formats scope type and ID into a human-readable string.
+func formatBoundaryScope(scopeType, scopeID string) string {
+	if scopeType == "" {
+		return ""
+	}
+	if scopeID == "" {
+		return scopeType
+	}
+	return scopeType + ":" + scopeID
 }
 
 // =============================================================================
@@ -739,7 +1093,6 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
-	principal PrincipalContext,
 	resource ResourceContext,
 ) []Restriction {
 	// R-1 fix: page through all constraints instead of capping at 200.
@@ -768,18 +1121,11 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		}
 	}
 
-	// Build a bare-ID closure for SubjectSelector matching. The kernel
-	// closure uses typed keys (type:id), but SubjectSelector.MatchesPrincipalClosure
-	// expects bare IDs.
-	bareClosure := make(map[string]struct{}, len(closure))
-	for key := range closure {
-		// Extract the bare ID from "type:id" format.
-		if idx := strings.Index(key, ":"); idx >= 0 {
-			bareClosure[key[idx+1:]] = struct{}{}
-		} else {
-			bareClosure[key] = struct{}{}
-		}
-	}
+	// Normalize all closure keys so that dev/federated variants match
+	// the canonical "user"/"agent" types used in constraint subjects.
+	// The closure already uses typed "type:id" keys; normalization ensures
+	// consistency regardless of how the closure was built.
+	normalizedClosure := normalizeClosureTypes(closure)
 
 	scopeType := ""
 	scopeID := ""
@@ -791,12 +1137,38 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 	}
 
 	applicable := FilterApplicableConstraints(
-		hubConstraints, bareClosure,
-		principal.ID, string(principal.Kind),
+		hubConstraints, normalizedClosure,
 		scopeType, scopeID,
 	)
 
-	return ConstraintsToRestrictions(applicable, time.Now())
+	// R1 fix: capture time once to avoid TOCTOU between ConstraintsToRestrictions
+	// and the enrichment loop. Two separate time.Now() calls could diverge at
+	// a constraint's active-window boundary, breaking the positional 1:1
+	// correspondence.
+	now := time.Now()
+	restrictions := ConstraintsToRestrictions(applicable, now)
+
+	// Enrich restrictions with boundary metadata. ConstraintsToRestrictions
+	// builds the Description with constraint name/ID but does not populate the
+	// structured boundary fields added for provenance explain. We match each
+	// restriction back to its source constraint by position (1:1 correspondence
+	// with the applicable list, skipping nil/inactive which ConstraintsToRestrictions
+	// also skips — guaranteed identical because we use the same `now` value).
+	ri := 0
+	for _, c := range applicable {
+		if c == nil || !c.IsActive(now) {
+			continue
+		}
+		if ri < len(restrictions) {
+			restrictions[ri].BoundaryName = c.Name
+			restrictions[ri].BoundaryID = c.ID
+			restrictions[ri].BoundaryScopeType = c.Scope.Type
+			restrictions[ri].BoundaryScopeID = c.Scope.ID
+		}
+		ri++
+	}
+
+	return restrictions
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
@@ -818,6 +1190,27 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 		offset += len(page)
 	}
 	return all, nil
+}
+
+// normalizeClosureTypes normalizes the principal types in a typed closure map.
+// It maps dev/federated variants to their canonical types (user/agent) so
+// constraint subjects using "user" or "agent" match all equivalent types.
+//
+// Keys are expected in "type:id" format. Keys without a colon are passed
+// through unchanged.
+func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
+	normalized := make(map[string]struct{}, len(closure))
+	for key := range closure {
+		if idx := strings.IndexByte(key, ':'); idx >= 0 {
+			keyType := key[:idx]
+			keyID := key[idx+1:]
+			normType := NormalizePrincipalType(keyType)
+			normalized[normType+":"+keyID] = struct{}{}
+		} else {
+			normalized[key] = struct{}{}
+		}
+	}
+	return normalized
 }
 
 // =============================================================================
@@ -1071,6 +1464,9 @@ func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bo
 
 // storeToHubAccessConstraint converts a store AccessConstraint to a hub
 // AccessConstraint. Returns nil if the store constraint is nil.
+// Runs Validate() on subject and scope and marks the constraint as degraded
+// (with a warning log) if validation fails on stored records, rather than
+// silently discarding them.
 func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 	if sc == nil {
 		return nil
@@ -1080,6 +1476,12 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 		Name:               sc.Name,
 		MaximumPermissions: sc.MaximumPermissions,
 		Disabled:           sc.Disabled,
+		Revision:           sc.Revision,
+		Purpose:            sc.Purpose,
+		UpdatedBy:          sc.UpdatedBy,
+		CreatedBy:          sc.CreatedBy,
+		CreatedAt:          sc.CreatedAt,
+		UpdatedAt:          sc.UpdatedAt,
 	}
 	// Map subject.
 	hc.Subject = SubjectSelector{
@@ -1106,6 +1508,22 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 	if sc.ExpiresAt != nil {
 		hc.Condition.ExpiresAt = *sc.ExpiresAt
 	}
+
+	// Validate converted subject and scope. Invalid stored records are
+	// marked as degraded for B7's ResolutionHealth, not dropped — this
+	// preserves record inclusion (does not silently drop) while surfacing
+	// data quality issues via the Degraded flag.
+	if err := hc.Subject.Validate(); err != nil {
+		slog.Warn("degraded access constraint: invalid stored subject",
+			"constraint_id", sc.ID, "constraint_name", sc.Name, "error", err)
+		hc.Degraded = true
+	}
+	if err := hc.Scope.Validate(); err != nil {
+		slog.Warn("degraded access constraint: invalid stored scope",
+			"constraint_id", sc.ID, "constraint_name", sc.Name, "error", err)
+		hc.Degraded = true
+	}
+
 	return hc
 }
 
@@ -1158,19 +1576,28 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 // getEffectivePermissions resolves the set of permission IDs granted to a
 // principal via role bindings. Uses the batched query path.
 func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalType, principalID string, scopeType, scopeID string) ([]string, error) {
+	// Normalize principal type: dev/federated variants resolve groups
+	// through the same paths as user/agent and must be treated identically
+	// for constraint matching and group expansion.
+	normalizedType := NormalizePrincipalType(principalType)
+
 	// Build principals: direct principal + group-expanded.
-	principals := []store.PrincipalRef{{Type: principalType, ID: principalID}}
+	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
 	var groupIDs []string
 	var err error
-	switch principalType {
+	switch normalizedType {
 	case store.RoleBindingPrincipalUser:
 		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
 	case store.RoleBindingPrincipalAgent:
 		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for permission expansion",
+		// Fail closed: group resolution failure means we cannot evaluate
+		// group_closure constraints correctly. Return empty permissions
+		// rather than silently skipping group constraints.
+		a.logger.Warn("failed to get effective groups for permission expansion (fail-closed)",
 			"principalType", principalType, "principalID", principalID, "error", err)
+		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
 	}
 	for _, gid := range groupIDs {
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
@@ -1235,11 +1662,7 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		if scopeType == store.RoleScopeProject {
 			resourceCtx.ProjectID = scopeID
 		}
-		principal := PrincipalContext{
-			Kind: PrincipalKind(principalType),
-			ID:   principalID,
-		}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, principal, resourceCtx)
+		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
 		if len(restrictions) > 0 {
 			var filtered []string
 			for _, permID := range result {

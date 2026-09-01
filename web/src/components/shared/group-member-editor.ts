@@ -29,10 +29,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { GroupMember, AdminGroup } from '../../shared/types.js';
 import type { PrincipalChangeDetail } from './principal-picker.js';
+import type { SecurityReviewDetail } from './security-review-dialog.js';
+import { parseSecurityReviewResponse, parseLockoutResponse } from './security-review-dialog.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
+import './security-review-dialog.js';
 
 @customElement('scion-group-member-editor')
 export class ScionGroupMemberEditor extends LitElement {
@@ -69,6 +72,10 @@ export class ScionGroupMemberEditor extends LitElement {
 
   // Removing state
   @state() private removingMember: string | null = null;
+
+  // Security review dialog state
+  @state() private securityReviewDetail: SecurityReviewDetail | null = null;
+  @state() private showSecurityReview = false;
 
   static override styles = css`
     :host {
@@ -488,9 +495,42 @@ export class ScionGroupMemberEditor extends LitElement {
       );
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(
-          await extractApiError(response, `Failed to remove member (HTTP ${response.status})`)
-        );
+        // Check for security review or lockout responses
+        const errorBody = (await response.json().catch(() => null)) as Record<
+          string,
+          unknown
+        > | null;
+        if (errorBody) {
+          const lockout = parseLockoutResponse(errorBody);
+          if (lockout) {
+            this.securityReviewDetail = {
+              entityLabel: displayName,
+              contextLabel: `group ${this.groupId}`,
+              boundaries: [],
+              canCommit: false,
+              lockout,
+            };
+            this.showSecurityReview = true;
+            return;
+          }
+
+          const reviewDetail = parseSecurityReviewResponse(
+            errorBody,
+            displayName,
+            `group ${this.groupId}`
+          );
+          if (reviewDetail) {
+            this.securityReviewDetail = reviewDetail;
+            this.showSecurityReview = true;
+            return;
+          }
+
+          // Not a structured error we handle — fall through
+          const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+          throw new Error(msg ?? `Failed to remove member (HTTP ${response.status})`);
+        }
+
+        throw new Error(`Failed to remove member (HTTP ${response.status})`);
       }
 
       await this.loadMembers();
@@ -542,10 +582,23 @@ export class ScionGroupMemberEditor extends LitElement {
   }
 
   override render() {
-    if (this.compact) {
-      return this.renderCompact();
-    }
-    return this.renderStandalone();
+    return html`
+      ${this.compact ? this.renderCompact() : this.renderStandalone()}
+      ${this.renderSecurityReviewDialog()}
+    `;
+  }
+
+  private renderSecurityReviewDialog() {
+    return html`
+      <scion-security-review-dialog
+        ?open=${this.showSecurityReview}
+        .detail=${this.securityReviewDetail}
+        @security-review-cancel=${() => {
+          this.showSecurityReview = false;
+          this.securityReviewDetail = null;
+        }}
+      ></scion-security-review-dialog>
+    `;
   }
 
   private renderStandalone() {

@@ -107,6 +107,19 @@ type Restriction struct {
 	// Description is a human-readable explanation.
 	Description string
 
+	// BoundaryName is the name of the access constraint (boundary) that
+	// imposed this restriction. Empty for non-boundary restrictions.
+	BoundaryName string
+
+	// BoundaryID is the ID of the access constraint (boundary).
+	BoundaryID string
+
+	// BoundaryScopeType is the scope type of the boundary ("system", "project").
+	BoundaryScopeType string
+
+	// BoundaryScopeID is the scope ID of the boundary (e.g., project ID).
+	BoundaryScopeID string
+
 	// Check returns true if the given permission is ALLOWED by this
 	// restriction. Returning false means the restriction removes the
 	// permission. A nil Check function means "deny everything" — the
@@ -242,8 +255,12 @@ func Evaluate(req KernelRequest) KernelDecision {
 	var restrictions []RestrictionResult
 	for _, r := range req.Restrictions {
 		rr := RestrictionResult{
-			Kind:        r.Kind,
-			Description: r.Description,
+			Kind:              r.Kind,
+			Description:       r.Description,
+			BoundaryName:      r.BoundaryName,
+			BoundaryID:        r.BoundaryID,
+			BoundaryScopeType: r.BoundaryScopeType,
+			BoundaryScopeID:   r.BoundaryScopeID,
 		}
 		if r.Check == nil || !r.Check(req.Permission) {
 			if hasPermission {
@@ -302,6 +319,10 @@ func Evaluate(req KernelRequest) KernelDecision {
 func evaluateBinding(req KernelRequest, cb *CandidateBinding) GrantProvenance {
 	role := req.RoleDefinitions[cb.RoleDefinitionID]
 
+	// O2: Build typed composite key (type:id) early to prevent collisions
+	// between different principal types with the same ID.
+	compositeKey := cb.PrincipalType + ":" + cb.PrincipalID
+
 	prov := GrantProvenance{
 		BindingID:     cb.BindingID,
 		PrincipalID:   cb.PrincipalID,
@@ -315,17 +336,18 @@ func evaluateBinding(req KernelRequest, cb *CandidateBinding) GrantProvenance {
 		prov.Permissions = sortedKeys(role.Permissions)
 	}
 
-	// Set membership path from the closure.
-	if paths, ok := req.MembershipPaths[cb.PrincipalID]; ok {
+	// Set membership path from the closure using typed composite key
+	// to match the closure key format built by Decide.
+	if paths, ok := req.MembershipPaths[compositeKey]; ok {
+		prov.MembershipPath = paths
+	} else if paths, ok := req.MembershipPaths[cb.PrincipalID]; ok {
+		// Fallback: try bare ID for backward compatibility.
 		prov.MembershipPath = paths
 	} else {
 		prov.MembershipPath = []string{cb.PrincipalID}
 	}
 
 	// Check 1: Is the binding's principal in the principal closure?
-	// O2: Use typed composite key (type:id) to prevent collisions between
-	// different principal types with the same ID.
-	compositeKey := cb.PrincipalType + ":" + cb.PrincipalID
 	if _, inClosure := req.PrincipalClosure[compositeKey]; !inClosure {
 		prov.RejectReasons = append(prov.RejectReasons, "principal not in closure")
 		return prov

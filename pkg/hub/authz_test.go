@@ -1234,6 +1234,7 @@ func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
 		SubjectKind:        store.ConstraintSubjectAllPrincipals,
 		ScopeType:          store.RoleScopeSystem,
 		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "R-2 test: constraint intersection",
 	})
 	require.NoError(t, err)
 
@@ -1242,6 +1243,118 @@ func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
 
 	assert.Contains(t, perms, "agent.read", "permission in constraint's maximum set must be present")
 	assert.NotContains(t, perms, "project.read", "permission outside constraint's maximum set must be excluded")
+}
+
+// ===========================================================================
+// B1 integration tests: fail-closed behavior and type normalization
+// ===========================================================================
+
+// TestGetEffectivePermissions_PrincipalConstraintTargetingGroup verifies that
+// a {principal, group, G} constraint is enforced by getEffectivePermissions
+// when the user is a member of group G.
+// Regression test for B1 fix 1: exact-principal matching fail-open.
+func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("b1-group-constraint-user")
+	groupID := tid("b1-target-group")
+
+	// Create user and group.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "b1group@test.com", DisplayName: "B1GroupUser",
+		Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "b1-target-group", Name: "B1 Target Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: groupID, MemberID: userID,
+		MemberType: store.GroupMemberTypeUser,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Grant agent.read + project.read.
+	rd := createTestRoleDefinition(t, s, "b1-multi-perm-role", store.RoleScopeSystem,
+		[]string{"agent.read", "project.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create a constraint targeting group:b1-target-group that allows only agent.read.
+	groupIDStr := groupID
+	principalType := "group"
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "b1-group-targeting-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &principalType,
+		SubjectPrincipalID:   &groupIDStr,
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "B1 test: group-targeted principal constraint",
+	})
+	require.NoError(t, err)
+
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, perms, "agent.read", "agent.read should survive the constraint")
+	assert.NotContains(t, perms, "project.read",
+		"project.read should be removed by group-targeted principal constraint")
+}
+
+// TestGetEffectivePermissions_ProjectScopeConstraint verifies that project-scoped
+// constraints are applied in getEffectivePermissions.
+// Regression test for B1: constraint intersection on project scope.
+func TestGetEffectivePermissions_ProjectScopeConstraint(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("b1-proj-user")
+	projID := tid("b1-proj")
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "b1proj@test.com", DisplayName: "B1ProjUser",
+		Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "B1 Project", Slug: "b1-proj",
+	}))
+
+	rd := createTestRoleDefinition(t, s, "b1-proj-role", store.RoleScopeProject,
+		[]string{"agent.read", "agent.create"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create project-scoped constraint allowing only agent.read.
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:               "b1-proj-constraint",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          store.RoleScopeProject,
+		ScopeID:            projID,
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "B1 test: project-scoped constraint",
+	})
+	require.NoError(t, err)
+
+	perms, err := authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeProject, projID)
+	require.NoError(t, err)
+
+	assert.Contains(t, perms, "agent.read")
+	assert.NotContains(t, perms, "agent.create",
+		"project-scoped constraint should remove agent.create")
 }
 
 // createTestRoleDefinition creates a custom role definition for tests.
@@ -1255,4 +1368,168 @@ func createTestRoleDefinition(t *testing.T, s store.Store, name, scopeType strin
 	})
 	require.NoError(t, err)
 	return rd
+}
+
+// ===========================================================================
+// R1: Fail-closed error-path regression tests
+// ===========================================================================
+
+// errorInjectingStore wraps a real store and allows injecting errors into
+// specific methods. All other methods delegate to the embedded store.
+type errorInjectingStore struct {
+	store.Store
+	getEffectiveGroupsErr         error
+	getEffectiveGroupsForAgentErr error
+	getGroupMembersErr            error
+}
+
+func (s *errorInjectingStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
+	if s.getEffectiveGroupsErr != nil {
+		return nil, s.getEffectiveGroupsErr
+	}
+	return s.Store.GetEffectiveGroups(ctx, userID)
+}
+
+func (s *errorInjectingStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
+	if s.getEffectiveGroupsForAgentErr != nil {
+		return nil, s.getEffectiveGroupsForAgentErr
+	}
+	return s.Store.GetEffectiveGroupsForAgent(ctx, agentID)
+}
+
+func (s *errorInjectingStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
+	if s.getGroupMembersErr != nil {
+		return nil, s.getGroupMembersErr
+	}
+	return s.Store.GetGroupMembers(ctx, groupID)
+}
+
+// TestGetEffectivePermissions_GroupResolutionFailure_FailsClosed verifies that
+// when GetEffectiveGroups returns an error, getEffectivePermissions returns an
+// error (fail-closed) instead of silently continuing with empty group closure.
+//
+// Regression test for B1 fix 2: store fault → evaluator denies.
+func TestGetEffectivePermissions_GroupResolutionFailure_FailsClosed(t *testing.T) {
+	_, realStore := authzTestSetup(t)
+	ctx := context.Background()
+
+	userID := tid("r1-failclose-user")
+	require.NoError(t, realStore.CreateUser(ctx, &store.User{
+		ID: userID, Email: "r1fail@test.com", DisplayName: "R1FailUser",
+		Role: "member", Status: "active",
+	}))
+
+	// Grant a permission so we'd see results if the function didn't fail.
+	rd := createTestRoleDefinition(t, realStore, "r1-fail-role", store.RoleScopeSystem,
+		[]string{"agent.read"})
+	_, err := realStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Create an AuthzService with the error-injecting store wrapper.
+	injectedErr := errors.New("simulated store failure")
+	errStore := &errorInjectingStore{
+		Store:                 realStore,
+		getEffectiveGroupsErr: injectedErr,
+	}
+	authzWithErr := NewAuthzService(errStore, slog.Default())
+
+	perms, err := authzWithErr.getEffectivePermissions(ctx,
+		store.RoleBindingPrincipalUser, userID, store.RoleScopeSystem, "")
+
+	// Must fail closed: return error, not partial results.
+	assert.Error(t, err, "getEffectivePermissions must fail closed on group resolution error")
+	assert.Nil(t, perms, "permissions must be nil on group resolution failure")
+	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
+}
+
+// TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed verifies
+// that when GetGroupMembers returns an error during lockout resolution,
+// resolveConstraintAdminUsers propagates the error (fail-closed) instead of
+// silently continuing with incomplete admin data.
+//
+// Regression test for B1 fix 4a: lockout helper store fault → reject mutation.
+func TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
+	srv, realStore := testServer(t)
+	ctx := context.Background()
+
+	// Create a group and a role with constraint-admin permission.
+	groupID := tid("r1-lockout-group")
+	require.NoError(t, realStore.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "r1-lockout-group", Name: "R1 Lockout Group",
+	}))
+
+	// Create a custom role with access_constraint.admin and bind to group.
+	rd := createTestRoleDefinition(t, realStore, "r1-admin-role", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin})
+	_, err := realStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Inject GetGroupMembers error and replace the store on the server.
+	injectedErr := errors.New("simulated GetGroupMembers failure")
+	errStore := &errorInjectingStore{
+		Store:              realStore,
+		getGroupMembersErr: injectedErr,
+	}
+	srv.store = errStore
+
+	_, err = srv.resolveConstraintAdminUsers(ctx, ScopeTypeSystem, "")
+
+	// Must fail closed: error propagates instead of continuing with empty members.
+	assert.Error(t, err, "resolveConstraintAdminUsers must propagate GetGroupMembers error")
+	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
+}
+
+// TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed verifies
+// that when GetEffectiveGroups returns an error during lockout resolution,
+// resolveConstraintAdminUsers propagates the error (fail-closed) instead of
+// silently setting groupIDs to nil.
+//
+// Regression test for B1 fix 4b: lockout helper store fault → reject mutation.
+func TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
+	srv, realStore := testServer(t)
+	ctx := context.Background()
+
+	// Create a user and bind them directly to a constraint-admin role.
+	userID := tid("r1-lockout-user")
+	require.NoError(t, realStore.CreateUser(ctx, &store.User{
+		ID: userID, Email: "r1lockout@test.com", DisplayName: "R1LockoutUser",
+		Role: "member", Status: "active",
+	}))
+
+	rd := createTestRoleDefinition(t, realStore, "r1-admin-role2", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin})
+	_, err := realStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Inject GetEffectiveGroups error and replace the store on the server.
+	injectedErr := errors.New("simulated GetEffectiveGroups failure")
+	errStore := &errorInjectingStore{
+		Store:                 realStore,
+		getEffectiveGroupsErr: injectedErr,
+	}
+	srv.store = errStore
+
+	_, err = srv.resolveConstraintAdminUsers(ctx, ScopeTypeSystem, "")
+
+	// Must fail closed: error propagates instead of setting groupIDs = nil.
+	assert.Error(t, err, "resolveConstraintAdminUsers must propagate GetEffectiveGroups error")
+	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }

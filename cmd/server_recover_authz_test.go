@@ -57,6 +57,7 @@ func createTestConstraint(t *testing.T, ctx context.Context, s *entadapter.Compo
 		SubjectPrincipalID:   &pID,
 		ScopeType:            "system",
 		MaximumPermissions:   []string{"project.read", "project.list"},
+		Purpose:              "test constraint for recovery",
 		CreatedBy:            "test-admin",
 		CreatedAt:            time.Now(),
 		UpdatedAt:            time.Now(),

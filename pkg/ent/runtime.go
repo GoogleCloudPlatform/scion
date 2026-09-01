@@ -85,12 +85,22 @@ func init() {
 	accessconstraintDescDisabled := accessconstraintFields[11].Descriptor()
 	// accessconstraint.DefaultDisabled holds the default value on creation for the disabled field.
 	accessconstraint.DefaultDisabled = accessconstraintDescDisabled.Default.(bool)
+	// accessconstraintDescRevision is the schema descriptor for revision field.
+	accessconstraintDescRevision := accessconstraintFields[12].Descriptor()
+	// accessconstraint.DefaultRevision holds the default value on creation for the revision field.
+	accessconstraint.DefaultRevision = accessconstraintDescRevision.Default.(int64)
+	// accessconstraintDescPurpose is the schema descriptor for purpose field.
+	accessconstraintDescPurpose := accessconstraintFields[13].Descriptor()
+	// accessconstraint.DefaultPurpose holds the default value on creation for the purpose field.
+	accessconstraint.DefaultPurpose = accessconstraintDescPurpose.Default.(string)
+	// accessconstraint.PurposeValidator is a validator for the "purpose" field. It is called by the builders before save.
+	accessconstraint.PurposeValidator = accessconstraintDescPurpose.Validators[0].(func(string) error)
 	// accessconstraintDescCreated is the schema descriptor for created field.
-	accessconstraintDescCreated := accessconstraintFields[13].Descriptor()
+	accessconstraintDescCreated := accessconstraintFields[16].Descriptor()
 	// accessconstraint.DefaultCreated holds the default value on creation for the created field.
 	accessconstraint.DefaultCreated = accessconstraintDescCreated.Default.(func() time.Time)
 	// accessconstraintDescUpdated is the schema descriptor for updated field.
-	accessconstraintDescUpdated := accessconstraintFields[14].Descriptor()
+	accessconstraintDescUpdated := accessconstraintFields[17].Descriptor()
 	// accessconstraint.DefaultUpdated holds the default value on creation for the updated field.
 	accessconstraint.DefaultUpdated = accessconstraintDescUpdated.Default.(func() time.Time)
 	// accessconstraint.UpdateDefaultUpdated holds the default value on update for the updated field.

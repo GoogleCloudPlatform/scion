@@ -66,14 +66,12 @@ func ConstraintsToRestrictions(constraints []*AccessConstraint, now time.Time) [
 // store returns all potentially matching constraints and the caller needs
 // to do additional filtering (e.g., subject matching).
 //
-// principalClosure is the set of principal IDs (direct + transitive groups).
-// directPrincipalID and directPrincipalType identify the requesting principal.
+// typedClosure is the set of typed principal keys ("type:id" format, e.g.
+// "user:u1", "group:g1", "agent:a1") including transitive group memberships.
 // scopeType and scopeID identify the target scope.
 func FilterApplicableConstraints(
 	constraints []*AccessConstraint,
-	principalClosure map[string]struct{},
-	directPrincipalID string,
-	directPrincipalType string,
+	typedClosure map[string]struct{},
 	scopeType string,
 	scopeID string,
 ) []*AccessConstraint {
@@ -89,8 +87,8 @@ func FilterApplicableConstraints(
 			continue
 		}
 
-		// Check subject applicability.
-		if !c.Subject.MatchesPrincipalClosure(principalClosure, directPrincipalID, directPrincipalType) {
+		// Check subject applicability using the typed closure.
+		if !c.Subject.MatchesPrincipalClosure(typedClosure) {
 			continue
 		}
 

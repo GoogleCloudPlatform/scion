@@ -1,0 +1,34 @@
+{
+  "$fixture": {
+    "designRef": "constraint-ui-ux-implementation-plan.md §WP B7 (canonical code list); constraint-ui-ux-design.md §9.7 (code → HTTP → UI table)",
+    "notes": "Index of the 12 canonical B7 codes plus the adjacent-domain code from design §9.6. CASING CONFLICT — see gap G2 in ../status/wp0-base-inventory.md: all 30 existing ErrCode* constants in pkg/hub/errors.go:44-86 are lower_snake_case, these are SCREAMING_SNAKE_CASE per the frozen design. Escalated to the coordinator, not silently resolved here.",
+    "envelopeNote": "Every fixture wraps its payload in {\"error\": {...}}, matching pkg/hub/errors.go:39-41 (ErrorResponse). Fields `code`, `message`, `details`, `requestId` already exist on APIError (errors.go:31-37). Fields `correlationId` and `retryable` are ADDITIVE and required by design §9.7."
+  },
+  "codes": [
+    { "code": "CONSTRAINT_ADMIN_LOCKOUT", "http": 409, "retryable": false, "fixture": "errors-constraint-admin-lockout.json", "uiTreatment": "Block the commit. Name the excluded administrators and offer the narrowing remedy inline.", "workPackage": "B5" },
+    { "code": "STALE_AUTHORIZATION_PREVIEW", "http": 409, "retryable": true, "fixture": "errors-stale-authorization-preview.json", "uiTreatment": "Offer 'Preview again'. Show what changed by kind. Never auto-retry the commit.", "workPackage": "B3" },
+    { "code": "PREVIEW_INCOMPLETE", "http": 409, "retryable": true, "fixture": "errors-preview-incomplete.json", "uiTreatment": "Block the commit. Surface the degradation reasons and state that counts were lower bounds.", "workPackage": "B3" },
+    { "code": "RESOLUTION_FAILED", "http": 503, "retryable": true, "fixture": "errors-resolution-failed.json", "uiTreatment": "'Impact could not be determined' — never 'no impact'. Offer retry. Note that enforcement is failing closed.", "workPackage": "B1, B3" },
+    { "code": "SUBJECT_NOT_FOUND", "http": 422, "retryable": false, "fixture": "errors-subject-not-found.json", "uiTreatment": "Field-level error on the subject picker, with suggestions when available.", "workPackage": "B2" },
+    { "code": "SCOPE_NOT_FOUND", "http": 422, "retryable": false, "fixture": "errors-scope-not-found.json", "uiTreatment": "Field-level error on the scope picker.", "workPackage": "B2" },
+    { "code": "SCOPE_MISMATCH", "http": 422, "retryable": false, "fixture": "errors-scope-mismatch.json", "uiTreatment": "Field-level error spanning subject and scope; offer the alternative scopes.", "workPackage": "B2" },
+    { "code": "PERMISSION_REGISTRY_CHANGED", "http": 409, "retryable": true, "fixture": "errors-permission-registry-changed.json", "uiTreatment": "Force a re-preview and require an explicit decision on each newly registered permission.", "workPackage": "B2, B3" },
+    { "code": "INSUFFICIENT_CONSTRAINT_RELAXATION_AUTHORITY", "http": 403, "retryable": false, "fixture": "errors-insufficient-constraint-relaxation-authority.json", "uiTreatment": "Disable the commit control with this reason; name the missing permissions. Prefer surfacing it via preview.commitBlocked before the user attempts a commit.", "workPackage": "B4" },
+    { "code": "MUTATION_PERMISSION_LOST", "http": 403, "retryable": false, "fixture": "errors-mutation-permission-lost.json", "uiTreatment": "Explain that the actor's own authority changed; the draft is preserved, not invalid.", "workPackage": "B4, B5" },
+    { "code": "REVISION_CONFLICT", "http": 412, "retryable": true, "fixture": "errors-revision-conflict.json", "uiTreatment": "Offer reload-and-reapply. Show who changed it and which fields conflict. Never silently overwrite.", "workPackage": "B2" },
+    { "code": "RECOVERY_DISABLED_IMMUTABLE", "http": 409, "retryable": false, "fixture": "errors-recovery-disabled-immutable.json", "uiTreatment": "Explain the recovery state and that no in-product re-enable exists. Offer the recreate path.", "workPackage": "B6" },
+    { "code": "SECURITY_REVIEW_REQUIRED", "http": 409, "retryable": false, "fixture": "errors-security-review-required.json", "uiTreatment": "Adjacent-domain surfaces only. Link to the impact preview; do not offer a force-through.", "workPackage": "B7, F7", "note": "From design §9.6, not the B7 twelve." }
+  ],
+  "existingCodeCollisions": {
+    "note": "These pkg/hub ErrCode* values could plausibly be returned by the same routes and must not be confused with the new codes.",
+    "entries": [
+      { "existing": "version_conflict", "http": 409, "newAnalogue": "REVISION_CONFLICT", "wireCompatible": false, "reason": "Different HTTP status (409 vs 412) and different detail shape." },
+      { "existing": "conflict", "http": 409, "newAnalogue": "CONSTRAINT_ADMIN_LOCKOUT", "wireCompatible": false, "reason": "Today lockout returns 403 forbidden via writeForbidden, not 409 conflict." },
+      { "existing": "forbidden", "http": 403, "newAnalogue": "MUTATION_PERMISSION_LOST / INSUFFICIENT_CONSTRAINT_RELAXATION_AUTHORITY", "wireCompatible": false, "reason": "Generic 'Insufficient permissions' message with no details map." },
+      { "existing": "validation_error", "http": 400, "newAnalogue": "SUBJECT_NOT_FOUND / SCOPE_NOT_FOUND / SCOPE_MISMATCH", "wireCompatible": false, "reason": "Status changes from 400 to 422; reference-resolution failures are semantic, not syntactic." },
+      { "existing": "invalid_request", "http": 400, "newAnalogue": "none", "wireCompatible": true, "reason": "Still correct for malformed JSON and unknown permission IDs (validatePermissionIDs, handlers_roles.go:783-798)." },
+      { "existing": "not_found", "http": 404, "newAnalogue": "none", "wireCompatible": true, "reason": "Still correct when the boundary ID itself does not exist." },
+      { "existing": "unavailable", "http": 503, "newAnalogue": "RESOLUTION_FAILED", "wireCompatible": false, "reason": "Same status, but RESOLUTION_FAILED carries the failedStage and enforcement note." }
+    ]
+  }
+}

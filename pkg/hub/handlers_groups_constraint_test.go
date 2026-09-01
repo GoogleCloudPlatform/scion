@@ -45,6 +45,7 @@ func createGroupClosureConstraint(t *testing.T, s store.Store, groupID string) {
 		SubjectGroupID:     strPtr(groupID),
 		ScopeType:          store.RoleScopeSystem,
 		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "test constraint for group closure",
 		CreatedBy:          "test",
 	})
 	require.NoError(t, err)
@@ -62,6 +63,7 @@ func createGroupPrincipalConstraint(t *testing.T, s store.Store, groupID string)
 		SubjectPrincipalID:   strPtr(groupID),
 		ScopeType:            store.RoleScopeSystem,
 		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test constraint for group principal",
 		CreatedBy:            "test",
 	})
 	require.NoError(t, err)

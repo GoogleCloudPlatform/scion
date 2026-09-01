@@ -86,3 +86,17 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  * to fall back to wave-1 UI for rollback.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
+
+/**
+ * Access Boundaries read flag — gates inventory, detail, and explain pages.
+ * Default OFF — not yet in general availability.
+ * Enable via server injection or localStorage: scion:feature:web.access_boundaries_read=true
+ */
+export const ACCESS_BOUNDARIES_READ_FLAG = 'web.access_boundaries_read';
+
+/**
+ * Access Boundaries authoring flag — gates create, edit, and delete flows.
+ * Default OFF — not yet in general availability.
+ * Enable via server injection or localStorage: scion:feature:web.access_boundaries_authoring=true
+ */
+export const ACCESS_BOUNDARIES_AUTHORING_FLAG = 'web.access_boundaries_authoring';
