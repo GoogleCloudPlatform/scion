@@ -247,8 +247,8 @@ The following containment changes are implemented on `scion/authz-audit`:
    `isProjectOwnerOrAdmin` in the `canDelegateProjectMembership` path.
 
 3. **Stable public denial codes** (F-QA-03, F-QA-04): Membership governance denials
-   return stable codes (`ROLE_ASSIGNMENT_FORBIDDEN`, `TARGET_ROLE_PROTECTED`,
-   `LAST_OWNER`) instead of raw evaluator output. Internal provenance is logged.
+   return stable codes (`role_assignment_forbidden`, `target_role_protected`,
+   `last_owner`) instead of raw evaluator output. Internal provenance is logged.
 
 4. **Group admin restriction preserved** (F-PLAN-04): `directUserOnlyProjectRoles`
    keeps both `project-owner` and `project-admin` as user-only, more restrictive than

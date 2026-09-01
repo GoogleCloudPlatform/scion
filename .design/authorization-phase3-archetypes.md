@@ -1,6 +1,6 @@
 # Phase 3 Reference Archetype Selections
 
-**Status:** Phase 1 (CT1) — selected and verified  
+**Status:** Phase 1 (CT1) — approved and frozen  
 **Date:** 2026-09-01  
 **Parent contract:** `authorization-operation-contract.md`
 
@@ -27,7 +27,7 @@ exists.
 | C0 containment        | Owner-only gate via `canDelegateProjectMembership()` at `authz_candelegate.go:379` |
 | Delegation check      | Double CanDelegate: `GrantTypeProjectMembership` + `GrantTypeRoleBinding` |
 | Last-owner invariant  | `countDirectOwnerBindings()` at `handlers_projects_core.go:773` |
-| Stable denial codes   | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
+| Stable denial codes   | `role_assignment_forbidden`, `target_role_protected`, `last_owner` |
 | Existing tests         | `pm1_membership_test.go`, `handlers_project_members_test.go` |
 
 **Why this archetype:** Contains all three authority effects (grant, change,

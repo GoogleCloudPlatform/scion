@@ -155,7 +155,8 @@ const (
 
 	// ErrCodeLastOwner indicates an operation was rejected because it would
 	// remove the last direct-user project-owner binding.
-	ErrCodeLastOwner = "LAST_OWNER"
+	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
+	ErrCodeLastOwner = "last_owner"
 )
 
 // writeError writes a JSON error response.

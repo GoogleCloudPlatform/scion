@@ -1174,7 +1174,7 @@ func TestRenderMarkdown_SmokeSections(t *testing.T) {
 		"**Event Type:** `test.grant`",
 		"**After Fields:** target_role",
 		"**Atomic:** Yes",
-		"`LAST_OWNER`",
+		"`last_owner`",
 		"### Tests",
 		"[test.authority](#testauthority)",
 	}

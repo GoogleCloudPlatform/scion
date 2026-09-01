@@ -572,7 +572,7 @@ const (
 	DenialForbidden               DenialCode = "forbidden"
 	DenialRoleAssignmentForbidden DenialCode = "role_assignment_forbidden"
 	DenialTargetRoleProtected     DenialCode = "target_role_protected"
-	DenialLastOwner               DenialCode = "LAST_OWNER"
+	DenialLastOwner               DenialCode = "last_owner"
 	DenialInsufficientPermissions DenialCode = "insufficient_permissions"
 	DenialScopeViolation          DenialCode = "scope_violation"
 	DenialPrincipalIneligible     DenialCode = "principal_ineligible"

@@ -424,7 +424,7 @@ product-level reasons, not internal evaluator details.
 | `forbidden`                   | Generic insufficient permissions                    |
 | `role_assignment_forbidden`   | Actor lacks authority to manage membership          |
 | `target_role_protected`       | Target role requires elevated governance authority  |
-| `LAST_OWNER`                  | Would remove the last direct-user project owner     |
+| `last_owner`                  | Would remove the last direct-user project owner     |
 | `insufficient_permissions`    | Actor lacks specific base permission                |
 | `scope_violation`             | Operation crosses scope boundary                    |
 | `principal_ineligible`        | Principal kind not admitted for this operation       |
@@ -438,9 +438,9 @@ public failure contract.
 
 ### 11.2 Casing Convention
 
-Existing wire codes use mixed casing (`LAST_OWNER` vs `role_assignment_forbidden`).
-Phase 1 preserves existing wire codes for compatibility. The decision packet
-(CT1 decisions) addresses casing normalization.
+All denial codes use `lower_snake_case`. The `LAST_OWNER` wire code was
+normalized to `last_owner` as an approved breaking change (D7, Option B).
+New denial codes must follow the `lower_snake_case` convention.
 
 Internal evaluator details, missing-permission names, and explain provenance
 must be retained in structured logs and audit data but never exposed in public

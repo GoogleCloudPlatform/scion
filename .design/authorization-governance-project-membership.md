@@ -1,45 +1,44 @@
 # Domain Governance Appendix: Project Membership
 
-**Status:** Phase 1 (CT1) — pending user approval  
-**Date:** 2026-09-01  
+**Status:** Phase 1 (CT1) — approved and frozen  
+**Decision authority:** `ptone@google.com`  
+**Approval date:** 2026-09-01  
 **Parent contract:** `authorization-operation-contract.md`  
 **Implementation plan:** `authz-audit-implementation-plan.md` (scratchpad)  
-**C0 containment:** `authz-audit-findings.md`
+**C0 containment:** `authz-audit-findings.md`  
+**Decision record:** CT1 decision packet (D1–D8)
 
 ## Purpose
 
-This appendix defines the governance rules for project membership operations.
-It is the first domain governance appendix, not the canonical abstraction.
-Other domains (constraints, credentials, group membership) will have their own
-appendices using the same domain-neutral vocabulary from the parent contract.
-
-All governance rules below are proposed defaults from the implementation plan's
-recommended membership matrix. They are **pending user approval**. The contract
-code supports either approved outcome without encoding an unapproved hierarchy
-assumption.
+This appendix defines the approved governance rules for project membership
+operations. It is the first domain governance appendix, not the canonical
+abstraction. Other domains (constraints, credentials, group membership) will
+have their own appendices using the same domain-neutral vocabulary from the
+parent contract.
 
 ## 1. Project Roles
 
 | Role             | Scope     | Principal kinds        | Notes                          |
 |------------------|-----------|------------------------|--------------------------------|
 | `project-owner`  | project   | Direct user only       | At least one must always exist |
-| `project-admin`  | project   | Direct user only (C0)  | Group eligibility pending      |
+| `project-admin`  | project   | Direct user only (C0); groups approved (D3) | Group eligibility approved but not yet implemented |
 | `project-member` | project   | User, agent, or group  | Standard access                |
 
-**C0 containment status:**
-- Both `project-owner` and `project-admin` are currently direct-user-only.
-- The frozen design permits groups to receive up to `project-admin`.
-- Decision #3 in the CT1 decision packet addresses group eligibility.
+**D3 status:**
+- `project-owner` remains permanently direct-user-only.
+- `project-admin` group eligibility is approved. C0 currently blocks it via
+  `directUserOnlyProjectRoles`; removal is a Phase 3 reference implementation task.
+- Groups may never hold `project-owner`.
 
-## 2. Governance Matrix (Proposed)
+## 2. Governance Matrix (Approved)
 
 This matrix specifies which actor roles may perform which membership operations
-on which target roles. It is the recommended contract from the implementation
-plan.
+on which target roles. Approved by decision authority; implementation deferred
+to RS1 typed governance.
 
 | Operation                            | project-member | project-admin | project-owner |
 |--------------------------------------|:--------------:|:-------------:|:-------------:|
-| View direct and effective members    | Optional†      | Yes           | Yes           |
+| View direct and effective members    | Yes (D8)†      | Yes           | Yes           |
 | Add an ordinary member               | No             | Yes           | Yes           |
 | Change or remove an ordinary member  | No             | Yes           | Yes           |
 | Add, promote, demote, or remove admin| No             | No            | Yes           |
@@ -47,20 +46,34 @@ plan.
 | Demote or remove an owner            | No             | No            | Yes‡          |
 | Change a binding outside this project| No             | No            | No            |
 
-†Member view access is a product decision (CT1 decision packet item not
-currently listed but may be added).  
+†D8: Members may view direct and effective project access under `project.read`,
+subject to group-domain privacy boundaries. Mutation capabilities are governed
+separately by the typed governance matrix.  
 ‡Subject to last-owner invariant: at least one active direct owner must remain.
 
 ### Current C0 containment
 
 C0 restricts **all** membership mutations (POST, PATCH, DELETE) to
-`project-owner` only. This is more restrictive than the proposed matrix, which
-would allow admins to manage ordinary members. The containment is temporary
+`project-owner` only. This is more restrictive than the approved matrix, which
+allows admins to manage ordinary members. The containment is temporary
 and must not be relaxed without:
 
-1. Approval of the governance matrix above.
-2. Implementation of target-role governance checks.
-3. Regression tests for each actor/target combination.
+1. Implementation of target-role governance checks (RS1).
+2. Regression tests for each actor/target combination.
+
+### Group membership governance (D3)
+
+Binding a project role to a group is the project-governed delegation point.
+Subsequent group membership mutations are governed solely by group roles and
+bindings, with **no linked project-authority verification**.
+
+**Temporary over-restriction:** The current `canDelegateGroupMembership`
+implementation performs a cross-domain effective-authority scan that checks
+project-level authority when mutating groups that hold project roles. This
+does NOT match the approved decision and is explicitly recorded as a temporary
+over-restriction to be removed in the appropriate Phase 3 reference work.
+The approved behavior is: group membership governance uses only group roles,
+not linked project authority.
 
 ## 3. Operation Contracts
 
@@ -101,7 +114,7 @@ and must not be relaxed without:
 | **Governance**      | `peer_superior`: see matrix; both old and new role checked|
 | **Invariants**      | `last-owner-guard` (security, fail-closed)                |
 | **Audit**           | `membership.update` — context: actor_id, project_id; before: old_role; after: new_role, target_principal; atomic |
-| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
+| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `last_owner` |
 | **Tests**           | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
 
 ### 3.3 project.membership.remove
@@ -121,7 +134,7 @@ and must not be relaxed without:
 | **Governance**      | `peer_superior`: see matrix; revoked role checked         |
 | **Invariants**      | `last-owner-guard` (security, fail-closed)                |
 | **Audit**           | `membership.remove` — context: actor_id, project_id; before: removed_role, target_principal; atomic |
-| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
+| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `last_owner` |
 | **Tests**           | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
 
 **Note on revocation delegation:** The previous contract claimed non-amplification
@@ -149,9 +162,9 @@ Revocation requires governance (actor/target relationship) but not delegation.
 | **Denial codes**    | `forbidden`                                               |
 | **Tests**           | `pkg/hub:TestProjectMembership_*`                         |
 
-## 4. Proposed Semantics
+## 4. Approved Semantics
 
-### 4.1 Mine and Shared Classification
+### 4.1 Mine and Shared Classification (D6)
 
 - **Mine**: projects where the user has an active, direct `project-owner`
   RoleBinding. "Active" means `NotBefore <= now` and (`ExpiresAt` is nil or
@@ -162,33 +175,48 @@ Revocation requires governance (actor/target relationship) but not delegation.
   group-derived) but lacks an active direct owner binding. Group-derived access
   is included.
 
+**Target:** Derive Mine and Shared only from active RoleBindings. Shared =
+effective accessible projects minus Mine. The legacy `Project.OwnerID` field
+is retained as metadata only — it carries no authorization semantics.
+
 A scheduled or expired owner binding does not count as "Mine" until/unless it
 becomes active.
 
-### 4.2 Self-Removal
+### 4.2 Self-Removal (D1)
 
-Whether a project owner may remove their own binding is a product decision
-(CT1 decision packet item #1). The last-owner invariant prevents removing the
-last owner regardless.
+An owner may remove their own binding, subject to the last-owner invariant.
+The last-owner guard prevents removing the last active direct owner regardless
+of whether it is self-removal or third-party removal. Ownership transfer is
+accomplished via add-new-owner → self-remove sequence.
 
-### 4.3 Ownership Transfer
+RS1 adds `POST /api/v1/projects/{id}/transfer-ownership` for atomic
+single-step transfer.
 
-Explicit ownership transfer semantics must be decided rather than inherited
-from generic delete+add behavior (CT1 decision packet item #1).
+### 4.3 Ownership Transfer (D1)
 
-### 4.4 Scheduled and Future Owners
+Current transfer is add-new-owner → self-remove (two-step). RS1 adds an
+atomic transfer endpoint. Self-removal and atomic transfer are complementary:
+self-removal is a building block; atomic transfer is the preferred ergonomic
+path.
 
-A scheduled or future owner binding (`NotBefore > now`) does not grant
-ownership authority at decision time. The implementation plan strongly
-recommends active-at-decision-time semantics. Edge cases are documented in
-CT1 decision packet item #2.
+### 4.4 Scheduled and Future Owners (D2)
 
-### 4.5 Multiple Simultaneous Bindings
+Active-at-decision-time only. A scheduled or future owner binding
+(`NotBefore > now`) does not grant ownership authority at decision time.
+An expired binding (`ExpiresAt <= now`) does not grant ownership authority.
+Both `isProjectOwner` and `countDirectOwnerBindings` enforce activation
+lifecycle consistently.
 
-Whether a principal may hold multiple project-scoped role bindings
-simultaneously (e.g., both owner and admin) is addressed in CT1 decision
-packet item #4. Under the current union model, duplicate bindings are additive
-and harmless, but they complicate governance and audit.
+### 4.5 Multiple Simultaneous Bindings (D4)
+
+One direct project-scoped role binding per principal per project. The current
+store unique index includes `role_definition_id`, permitting different roles
+per principal/project. RS1 adds a constraint for single direct binding per
+principal/project and implements atomic replacement. Multi-role binding
+migration is handled deterministically.
+
+Group-derived authority remains additive (union model) — this constraint
+applies only to direct bindings.
 
 ## 5. Invariants
 
@@ -205,11 +233,13 @@ within the same transaction.
 ### 5.2 Direct-User-Only Invariant
 
 `project-owner` bindings must have a direct user principal (not a group or
-agent). This prevents group restructuring from orphaning a project.
+agent). This prevents group restructuring from orphaning a project. This is a
+permanent invariant.
 
-`project-admin` is currently also direct-user-only (C0 containment). The
-frozen design permits group principals for admin; see CT1 decision packet
-item #3.
+`project-admin` is currently also direct-user-only (C0 containment). Group
+principals for admin are approved (D3) but not yet implemented. Removal of
+`project-admin` from `directUserOnlyProjectRoles` is a Phase 3 reference
+implementation task.
 
 ## 6. C0 Containment Markers
 
@@ -229,4 +259,4 @@ and the contract decision required to relax it:
 | `errors.go:87`                        | —          | Stable denial codes              |
 
 These markers must not be removed without the corresponding governance matrix
-approval and regression tests.
+implementation (RS1) and regression tests.

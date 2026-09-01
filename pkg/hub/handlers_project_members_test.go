@@ -330,13 +330,13 @@ func TestProjectMembers_ChangeRole_LastOwnerGuard(t *testing.T) {
 		updateProjectMemberRequest{
 			RoleDefinitionID: memberRoleDef.ID,
 		})
-	assert.Equal(t, http.StatusConflict, rec.Code, "should get 409 LAST_OWNER")
+	assert.Equal(t, http.StatusConflict, rec.Code, "should get 409 last_owner")
 
 	// Verify the error code.
 	var errResp map[string]interface{}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	if errObj, ok := errResp["error"].(map[string]interface{}); ok {
-		assert.Equal(t, "LAST_OWNER", errObj["code"])
+		assert.Equal(t, "last_owner", errObj["code"])
 	}
 }
 
@@ -428,12 +428,12 @@ func TestProjectMembers_Remove_LastOwnerGuard(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete,
 		"/api/v1/projects/"+project.ID+"/members/"+ownerBindingID, nil)
-	assert.Equal(t, http.StatusConflict, rec.Code, "should get 409 LAST_OWNER")
+	assert.Equal(t, http.StatusConflict, rec.Code, "should get 409 last_owner")
 
 	var errResp map[string]interface{}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	if errObj, ok := errResp["error"].(map[string]interface{}); ok {
-		assert.Equal(t, "LAST_OWNER", errObj["code"])
+		assert.Equal(t, "last_owner", errObj["code"])
 	}
 }
 
