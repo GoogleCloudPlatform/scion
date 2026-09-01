@@ -123,6 +123,12 @@ func (s SubjectSelector) MatchesPrincipalClosure(
 ) bool {
 	switch s.Kind {
 	case SubjectKindPrincipal:
+		// Guard against malformed selectors: a missing PrincipalType would
+		// produce a typed key like ":someID" which could never match a
+		// well-formed closure entry.
+		if s.PrincipalType == "" {
+			return false
+		}
 		// Look up the typed key: the constraint's principalType + principalID.
 		key := s.PrincipalType + ":" + s.PrincipalID
 		_, ok := typedClosure[key]

@@ -410,16 +410,21 @@ export async function pollPreviewJobUntilDone(
     }
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, interval);
+      const timer = setTimeout(() => {
+        // Remove the abort listener when the timeout completes normally
+        // to prevent memory leak of event listeners on the signal.
+        if (signal && onAbort) {
+          signal.removeEventListener('abort', onAbort);
+        }
+        resolve();
+      }, interval);
+      let onAbort: (() => void) | undefined;
       if (signal) {
-        signal.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timer);
-            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-          },
-          { once: true }
-        );
+        onAbort = () => {
+          clearTimeout(timer);
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
       }
     });
 

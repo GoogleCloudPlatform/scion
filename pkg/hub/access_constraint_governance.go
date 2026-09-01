@@ -841,11 +841,16 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 	}
 
 	if err := gs.store.DeleteRoleBinding(ctx, oldBindingID); err != nil {
-		// The new binding already exists. Log the error — the system is now
-		// overly permissive (both bindings active) but this is detectable
-		// and recoverable, unlike the data-loss alternative.
-		gs.logger.Error("failed to delete old binding after creating replacement; both bindings now active",
-			"old_binding_id", oldBindingID, "new_binding_id", created.ID, "error", err)
+		// Compensating action: delete the newly created binding to prevent
+		// inconsistent state where both old and new bindings are active.
+		if delErr := gs.store.DeleteRoleBinding(ctx, created.ID); delErr != nil {
+			gs.logger.Error("failed to roll back new binding after old-binding delete failure; both bindings now active",
+				"old_binding_id", oldBindingID, "new_binding_id", created.ID,
+				"delete_error", err, "rollback_error", delErr)
+		} else {
+			gs.logger.Warn("rolled back new binding after old-binding delete failure",
+				"old_binding_id", oldBindingID, "new_binding_id", created.ID, "error", err)
+		}
 		return nil, fmt.Errorf("failed to delete old binding: %w", err)
 	}
 

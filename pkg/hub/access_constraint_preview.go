@@ -1887,11 +1887,17 @@ func (ps *PreviewService) GetPreviewJob(ctx context.Context, jobID string) (*Pre
 	defer job.mu.Unlock()
 	// Return a snapshot to avoid races on the caller side.
 	// Copy fields individually — never copy sync.Mutex.
+	// Deep-copy Progress so the caller cannot observe mutations after unlock.
+	var progressCopy *JobProgress
+	if job.Progress != nil {
+		p := *job.Progress
+		progressCopy = &p
+	}
 	snapshot := &PreviewJob{
 		JobID:       job.JobID,
 		Status:      job.Status,
 		Operation:   job.Operation,
-		Progress:    job.Progress,
+		Progress:    progressCopy,
 		Result:      job.Result,
 		Error:       job.Error,
 		allImpacted: job.allImpacted,

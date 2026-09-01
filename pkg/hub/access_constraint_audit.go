@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -96,6 +97,10 @@ type ImpactCounts struct {
 type BoundaryAuditWriter struct {
 	logger  *slog.Logger
 	nowFunc func() time.Time
+
+	// mu protects entries from concurrent access (appended during commits,
+	// read during queries).
+	mu sync.RWMutex
 
 	// entries stores audit entries in-memory. In a real deployment this would
 	// be backed by the same database transaction as the mutation. Because the
@@ -174,7 +179,9 @@ func (w *BoundaryAuditWriter) WriteAuditEntry(ctx context.Context, req AuditRequ
 
 	// Persist the entry. This is the critical path — failure here means the
 	// mutation must be rolled back.
+	w.mu.Lock()
 	w.entries = append(w.entries, entry)
+	w.mu.Unlock()
 
 	w.logger.Info("boundary audit entry written",
 		"audit_id", entry.ID,
@@ -193,13 +200,17 @@ func (w *BoundaryAuditWriter) WriteAuditEntry(ctx context.Context, req AuditRequ
 // GetEntries returns all persisted audit entries. Used for testing and
 // read-only provenance queries.
 func (w *BoundaryAuditWriter) GetEntries() []BoundaryAuditEntry {
+	w.mu.RLock()
 	result := make([]BoundaryAuditEntry, len(w.entries))
 	copy(result, w.entries)
+	w.mu.RUnlock()
 	return result
 }
 
 // GetEntriesForConstraint returns audit entries for a specific constraint.
 func (w *BoundaryAuditWriter) GetEntriesForConstraint(constraintID string) []BoundaryAuditEntry {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	var result []BoundaryAuditEntry
 	for _, e := range w.entries {
 		if e.ConstraintID == constraintID {

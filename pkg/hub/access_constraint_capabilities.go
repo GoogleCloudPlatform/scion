@@ -151,6 +151,13 @@ func (cs *CapabilitiesService) computeRestrictions(ctx context.Context, actor Pr
 				typedClosure["group:"+gid] = struct{}{}
 			}
 		}
+	} else if principalType == "agent" {
+		groups, err := cs.store.GetEffectiveGroupsForAgent(ctx, actor.ID)
+		if err == nil {
+			for _, gid := range groups {
+				typedClosure["group:"+gid] = struct{}{}
+			}
+		}
 	}
 
 	// Load constraints at this scope.
