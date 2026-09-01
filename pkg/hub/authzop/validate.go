@@ -208,6 +208,9 @@ func (s *OperationSpec) Validate() error {
 		if s.AuditObligation.EventType == "" {
 			errs = append(errs, errors.New("audit obligation: event type is required"))
 		}
+		if len(s.AuditObligation.ContextFields) == 0 {
+			errs = append(errs, errors.New("audit obligation: at least one context field is required"))
+		}
 		// Validate before/after fields against effect requirements.
 		if needsBeforeFields && len(s.AuditObligation.BeforeFields) == 0 {
 			errs = append(errs, errors.New("audit obligation: before fields are required by declared effects"))
@@ -241,6 +244,9 @@ func (s *OperationSpec) Validate() error {
 		}
 		if s.ExternalPolicy.RetryPolicy == "" {
 			errs = append(errs, errors.New("external policy: retry policy is required"))
+		}
+		if s.ExternalPolicy.FailureMode == FailureCompensate && s.ExternalPolicy.Compensation == "" {
+			errs = append(errs, errors.New("external policy: compensate failure mode requires a non-empty compensation description"))
 		}
 	}
 

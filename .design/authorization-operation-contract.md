@@ -34,7 +34,7 @@ constraint.relax
 ```
 
 Validation enforces:
-- Lowercase letters, digits, dots, and underscores only.
+- Dot-separated segments of lowercase letters and digits only.
 - At least two dot-separated segments (domain + verb).
 - No leading, trailing, or consecutive dots.
 - No empty segments.
@@ -199,9 +199,14 @@ does not grant the actor any new permissions.
 | `mint-credential`     | Yes                 | Credential authority governance        |
 | `assign-credential`   | Yes                 | Assignment governance                  |
 
-Authority grant/change effects do not intrinsically require governance;
-governance is a target-relationship check that must be declared explicitly
-when the domain requires it.
+Authority grant/change effects do not intrinsically require governance at
+the domain-neutral level. The effect validation tables above define the
+minimum obligations that all operations must satisfy regardless of domain.
+Domain governance appendices (e.g., project membership) impose additional
+requirements: the project membership appendix declares `peer_superior`
+governance for `grant-authority` operations, but this is a domain-specific
+rule, not a generic effect obligation. AF1 domain-level validators enforce
+domain-specific governance requirements beyond the base effect minimums.
 
 #### 6.2.3 Authority Evaluation Requirements
 

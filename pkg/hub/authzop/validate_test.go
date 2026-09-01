@@ -82,6 +82,7 @@ func validExternalSpec() OperationSpec {
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:              "agent.dispatch",
+			ContextFields:          []string{"actor_id", "project_id"},
 			AfterFields:            []string{"dispatch_id"},
 			Atomic:                 false,
 			NonAtomicJustification: "External dispatch is fire-and-forget; audit is best-effort",
@@ -636,10 +637,11 @@ func TestValidate_AuditBeforeAfterFieldRequirements(t *testing.T) {
 				s.ExternalPolicy = makeExternalPolicy()
 			}
 			s.AuditObligation = &AuditObligation{
-				EventType:    "test",
-				BeforeFields: tc.before,
-				AfterFields:  tc.after,
-				Atomic:       true,
+				EventType:     "test",
+				ContextFields: []string{"actor_id"},
+				BeforeFields:  tc.before,
+				AfterFields:   tc.after,
+				Atomic:        true,
 			}
 			err := s.Validate()
 			if tc.wantErr == "" {
@@ -658,13 +660,45 @@ func TestValidate_AuditBeforeAfterFieldRequirements(t *testing.T) {
 	}
 }
 
-func TestValidate_AuditNonAtomicRequiresJustification(t *testing.T) {
+func TestValidate_AuditRequiresContextFields(t *testing.T) {
 	s := validSpec()
 	s.Effects = []SecurityEffect{EffectDeleteResource}
 	s.AuditObligation = &AuditObligation{
 		EventType:    "test.delete",
 		BeforeFields: []string{"resource_id"},
-		Atomic:       false,
+		Atomic:       true,
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for audit obligation without context fields")
+	}
+	if !strings.Contains(err.Error(), "at least one context field is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_AuditWithContextFieldsPasses(t *testing.T) {
+	s := validSpec()
+	s.Effects = []SecurityEffect{EffectDeleteResource}
+	s.AuditObligation = &AuditObligation{
+		EventType:     "test.delete",
+		ContextFields: []string{"actor_id"},
+		BeforeFields:  []string{"resource_id"},
+		Atomic:        true,
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected valid, got: %v", err)
+	}
+}
+
+func TestValidate_AuditNonAtomicRequiresJustification(t *testing.T) {
+	s := validSpec()
+	s.Effects = []SecurityEffect{EffectDeleteResource}
+	s.AuditObligation = &AuditObligation{
+		EventType:     "test.delete",
+		ContextFields: []string{"actor_id"},
+		BeforeFields:  []string{"resource_id"},
+		Atomic:        false,
 	}
 	err := s.Validate()
 	if err == nil {
@@ -679,9 +713,10 @@ func TestValidate_AuditAtomicNoJustificationNeeded(t *testing.T) {
 	s := validSpec()
 	s.Effects = []SecurityEffect{EffectDeleteResource}
 	s.AuditObligation = &AuditObligation{
-		EventType:    "test.delete",
-		BeforeFields: []string{"resource_id"},
-		Atomic:       true,
+		EventType:     "test.delete",
+		ContextFields: []string{"actor_id"},
+		BeforeFields:  []string{"resource_id"},
+		Atomic:        true,
 	}
 	if err := s.Validate(); err != nil {
 		t.Errorf("expected valid, got: %v", err)
@@ -692,9 +727,10 @@ func TestValidate_AuditFieldsNonEmptyAndUnique(t *testing.T) {
 	s := validSpec()
 	s.Effects = []SecurityEffect{EffectDeleteResource}
 	s.AuditObligation = &AuditObligation{
-		EventType:    "test",
-		BeforeFields: []string{"", "dup", "dup"},
-		Atomic:       true,
+		EventType:     "test",
+		ContextFields: []string{"actor_id"},
+		BeforeFields:  []string{"", "dup", "dup"},
+		Atomic:        true,
 	}
 	err := s.Validate()
 	if err == nil {
@@ -732,6 +768,10 @@ func TestValidate_ExternalPolicyFields(t *testing.T) {
 		{"unknown failure mode", func(p *ExternalEffectPolicy) { p.FailureMode = "unknown" }, "unknown failure mode"},
 		{"missing idempotency", func(p *ExternalEffectPolicy) { p.IdempotencyKey = "" }, "idempotency key description is required"},
 		{"missing retry", func(p *ExternalEffectPolicy) { p.RetryPolicy = "" }, "retry policy is required"},
+		{"compensate without compensation", func(p *ExternalEffectPolicy) {
+			p.FailureMode = FailureCompensate
+			p.Compensation = ""
+		}, "compensate failure mode requires"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1186,8 +1226,9 @@ func TestRenderMarkdown_Credentials(t *testing.T) {
 func makeAuditForEffect(eff SecurityEffect) *AuditObligation {
 	req := effectAuditFieldRequirements[eff]
 	a := &AuditObligation{
-		EventType: "test",
-		Atomic:    true,
+		EventType:     "test",
+		ContextFields: []string{"actor_id"},
+		Atomic:        true,
 	}
 	if req.NeedsBefore {
 		a.BeforeFields = []string{"state"}

@@ -234,8 +234,9 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 }
 
 // anchorID converts an operation ID to a GitHub-compatible Markdown anchor.
+// Operation IDs are validated as lowercase-only, so no case conversion needed.
 func anchorID(id OperationID) string {
-	return strings.ReplaceAll(strings.ToLower(string(id)), ".", "")
+	return strings.ReplaceAll(string(id), ".", "")
 }
 
 // escapeTableCell escapes pipe characters in a Markdown table cell value.
