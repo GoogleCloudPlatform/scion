@@ -464,13 +464,13 @@ export class ScionProjectMembersEditor extends LitElement {
         source: b.source || 'direct',
       }));
 
-      // C0-CONTAINMENT: server-driven advisory read-only for non-owners.
-      // If the server returns _capabilities without manage_members, hide
-      // mutation controls. When _capabilities is absent (older server or
-      // non-user identity), fall through to the parent-supplied readOnly.
-      if (data._capabilities) {
-        this.serverReadOnly = !(data._capabilities.actions || []).includes('manage_members');
-      }
+      // C0-CONTAINMENT: G3 — server-driven advisory read-only for non-owners.
+      // Reset on every load: if _capabilities is present, check for
+      // manage_members. The server returns an explicit empty object for
+      // non-owners (not omitted), so this deterministically becomes true
+      // for admins. When _capabilities is absent (older server or non-user
+      // identity), default to read-only as a fail-closed fallback.
+      this.serverReadOnly = !(data._capabilities?.actions || []).includes('manage_members');
 
       // Load project roles for the role picker.
       if (rolesRes.ok) {

@@ -857,16 +857,325 @@ func TestC0_MembersListCapabilities_OwnerGetsManageMembers(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Admin should NOT get manage_members capability.
+	// G3: Admin should get an explicit empty _capabilities (not nil/omitted).
 	rec = doRequestAsUser(t, srv, admin, http.MethodGet,
 		"/api/v1/projects/"+project.ID+"/members", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var adminResp listProjectMembersResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&adminResp))
-	if adminResp.Capabilities != nil {
-		assert.NotContains(t, adminResp.Capabilities.Actions, "manage_members",
-			"C0: admin's _capabilities must NOT include manage_members")
+	require.NotNil(t, adminResp.Capabilities,
+		"G3: admin's members list must include explicit _capabilities (not omitted)")
+	assert.NotContains(t, adminResp.Capabilities.Actions, "manage_members",
+		"G3: admin's _capabilities must NOT include manage_members")
+	assert.Empty(t, adminResp.Capabilities.Actions,
+		"G3: admin's _capabilities.actions must be an empty list")
+}
+
+// ---------------------------------------------------------------------------
+// C0/G2: Project list Mine endpoint tests
+// ---------------------------------------------------------------------------
+
+// TestC0_ProjectListMine_OnlyActiveOwnerBindings verifies that scope=mine
+// returns only projects with an active direct project-owner binding.
+func TestC0_ProjectListMine_OnlyActiveOwnerBindings(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("g2-mine-user"), Email: "g2-mine@test.com",
+		DisplayName: "G2 Mine User", Role: store.UserRoleMember, Status: "active",
 	}
-	// _capabilities being nil is also acceptable — means no membership mutation rights.
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Project 1: user has active direct owner binding.
+	ownedProj := &store.Project{
+		ID: tid("g2-owned"), Name: "G2 Owned", Slug: "g2-owned",
+		OwnerID: user.ID, CreatedBy: user.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, ownedProj))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, ownedProj.ID, user.ID))
+
+	// Project 2: user has admin binding only.
+	adminProj := &store.Project{
+		ID: tid("g2-admin"), Name: "G2 Admin", Slug: "g2-admin",
+		OwnerID: tid("g2-other"), CreatedBy: tid("g2-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, adminProj))
+	adminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          adminProj.ID,
+		CreatedBy:        user.ID,
+	})
+	require.NoError(t, err)
+
+	// Project 3: user is legacy OwnerID but has NO owner RoleBinding.
+	staleProj := &store.Project{
+		ID: tid("g2-stale"), Name: "G2 Stale", Slug: "g2-stale",
+		OwnerID: user.ID, CreatedBy: user.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, staleProj))
+	// Deliberately no createProjectOwnerRoleBinding — stale legacy ownership.
+
+	// Project 4: user has expired owner binding.
+	expiredProj := &store.Project{
+		ID: tid("g2-expired"), Name: "G2 Expired", Slug: "g2-expired",
+		OwnerID: tid("g2-other"), CreatedBy: tid("g2-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, expiredProj))
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          expiredProj.ID,
+		CreatedBy:        "system",
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	// scope=mine should return ONLY the actively-owned project.
+	rec := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/projects?scope=mine", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var projectIDs []string
+	for _, p := range resp.Projects {
+		projectIDs = append(projectIDs, p.Project.ID)
+	}
+	assert.Contains(t, projectIDs, ownedProj.ID,
+		"G2: scope=mine must include project with active direct owner binding")
+	assert.NotContains(t, projectIDs, adminProj.ID,
+		"G2: scope=mine must NOT include project with admin-only binding")
+	assert.NotContains(t, projectIDs, staleProj.ID,
+		"G2: scope=mine must NOT include project with only stale legacy OwnerID")
+	assert.NotContains(t, projectIDs, expiredProj.ID,
+		"G2: scope=mine must NOT include project with expired owner binding")
+}
+
+// ---------------------------------------------------------------------------
+// C0/G1: Project list Shared endpoint tests
+// ---------------------------------------------------------------------------
+
+// TestC0_ProjectListShared_IncludesGroupDerived verifies that scope=shared
+// includes projects where the user has group-derived active access.
+func TestC0_ProjectListShared_IncludesGroupDerived(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("g1-shared-u"), Email: "g1-shared@test.com",
+		DisplayName: "G1 Shared User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Create a group and add the user.
+	grp := &store.Group{
+		ID: tid("g1-grp"), Name: "G1 Group", Slug: "g1-group",
+	}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    grp.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   user.ID,
+		Role:       "member",
+	}))
+
+	// Project with group-based member binding (should appear in Shared).
+	groupProj := &store.Project{
+		ID: tid("g1-grp-proj"), Name: "G1 Group Proj", Slug: "g1-grp-proj",
+		OwnerID: tid("g1-other"), CreatedBy: tid("g1-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, groupProj))
+	memberRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      grp.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          groupProj.ID,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	// Project with expired-only direct binding (should NOT appear in Shared).
+	expiredProj := &store.Project{
+		ID: tid("g1-exp-proj"), Name: "G1 Expired Proj", Slug: "g1-exp-proj",
+		OwnerID: tid("g1-other"), CreatedBy: tid("g1-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, expiredProj))
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          expiredProj.ID,
+		CreatedBy:        "system",
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	// Project with future-only direct binding (should NOT appear in Shared).
+	futureProj := &store.Project{
+		ID: tid("g1-fut-proj"), Name: "G1 Future Proj", Slug: "g1-fut-proj",
+		OwnerID: tid("g1-other"), CreatedBy: tid("g1-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, futureProj))
+	future := time.Now().Add(1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          futureProj.ID,
+		CreatedBy:        "system",
+		NotBefore:        &future,
+	})
+	require.NoError(t, err)
+
+	// scope=shared
+	rec := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/projects?scope=shared", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var projectIDs []string
+	for _, p := range resp.Projects {
+		projectIDs = append(projectIDs, p.Project.ID)
+	}
+	assert.Contains(t, projectIDs, groupProj.ID,
+		"G1: scope=shared must include project with active group-derived binding")
+	assert.NotContains(t, projectIDs, expiredProj.ID,
+		"G1: scope=shared must NOT include project with expired-only binding")
+	assert.NotContains(t, projectIDs, futureProj.ID,
+		"G1: scope=shared must NOT include project with future-only binding")
+}
+
+// ---------------------------------------------------------------------------
+// C0/G1: Agent list Shared endpoint tests
+// ---------------------------------------------------------------------------
+
+// TestC0_AgentListShared_IncludesGroupDerivedExcludesExpired verifies that
+// agent scope=shared includes agents from group-derived projects and excludes
+// agents from projects with only expired bindings.
+func TestC0_AgentListShared_IncludesGroupDerivedExcludesExpired(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("g1-agsh-u"), Email: "g1-agsh@test.com",
+		DisplayName: "G1 Agent Shared", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Group with user membership.
+	grp := &store.Group{
+		ID: tid("g1-agsh-grp"), Name: "G1 AgSh Group", Slug: "g1-agsh-group",
+	}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    grp.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   user.ID,
+		Role:       "member",
+	}))
+
+	// Project with group-based access → agent should appear in Shared.
+	groupProj := &store.Project{
+		ID: tid("g1-agsh-gp"), Name: "G1 AgSh Group Proj", Slug: "g1-agsh-gp",
+		OwnerID: tid("g1-agsh-oth"), CreatedBy: tid("g1-agsh-oth"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, groupProj))
+	memberRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      grp.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          groupProj.ID,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	groupAgent := &store.Agent{
+		ID: tid("g1-agsh-ga"), Slug: "g1-group-agent", Name: "group-agent",
+		ProjectID: groupProj.ID, OwnerID: tid("g1-agsh-oth"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, groupAgent))
+
+	// Project with expired-only binding → agent should NOT appear in Shared.
+	expiredProj := &store.Project{
+		ID: tid("g1-agsh-ep"), Name: "G1 AgSh Exp Proj", Slug: "g1-agsh-ep",
+		OwnerID: tid("g1-agsh-oth"), CreatedBy: tid("g1-agsh-oth"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, expiredProj))
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          expiredProj.ID,
+		CreatedBy:        "system",
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	expiredAgent := &store.Agent{
+		ID: tid("g1-agsh-ea"), Slug: "g1-expired-agent", Name: "expired-agent",
+		ProjectID: expiredProj.ID, OwnerID: tid("g1-agsh-oth"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, expiredAgent))
+
+	// scope=shared
+	rec := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/agents?scope=shared", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Agents []struct {
+			ID        string `json:"id"`
+			ProjectID string `json:"projectId"`
+		} `json:"agents"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var agentIDs []string
+	for _, a := range resp.Agents {
+		agentIDs = append(agentIDs, a.ID)
+	}
+	assert.Contains(t, agentIDs, groupAgent.ID,
+		"G1: agent scope=shared must include agent from group-derived project")
+	assert.NotContains(t, agentIDs, expiredAgent.ID,
+		"G1: agent scope=shared must NOT include agent from expired-only project")
 }

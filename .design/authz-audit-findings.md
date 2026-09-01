@@ -194,9 +194,10 @@ missing-eligibility-gate, information-leak, denial-quality.
 | **Severity** | Medium |
 | **Description** | The PATCH handler's create-then-delete sequence avoids a missing-binding window but may leave both bindings active if deletion fails. |
 | **Current state** | Fixed to create-then-delete order. Duplicate-binding window is harmless under union model. Failed delete is logged and the old binding remains (strictly additive). |
-| **C0 containment** | Acceptable for C0. The brief duplicate window grants the superset of both roles' permissions, which is never less than intended. |
+| **C0 containment** | Not addressed in C0. The brief duplicate window grants the superset of both roles' permissions, which does not amplify beyond pre-operation authority. However, a failed delete during demotion leaves the target's broader authority active indefinitely, failing the requested revocation. |
+| **Residual risk** | A failed delete during role demotion silently preserves the old, broader binding. The target retains their original authority until manual intervention. This does not grant new authority but does defeat the intent of the demotion. |
 | **Contract decision to relax** | Phase 3 (reference slice RS1) will implement atomic role transitions. |
-| **Disposition** | `accepted-risk` — the current behavior is safe under the union model. |
+| **Disposition** | `deferred-phase-3` |
 
 ### F-PLAN-06: S1 cross-scope disclosure via role-bindings admin endpoint
 
@@ -228,9 +229,9 @@ missing-eligibility-gate, information-leak, denial-quality.
 |---|---|---|---|---|---|
 | Critical | 3 | 0 | 3 | 0 | 0 |
 | High | 4 | 3 | 1 | 0 | 0 |
-| Medium | 5 | 1 | 3 | 0 | 1 |
+| Medium | 5 | 1 | 3 | 1 | 0 |
 | Low | 3 | 1 | 1 | 1 | 0 |
-| **Total** | **15** | **5** | **8** | **1** | **1** |
+| **Total** | **15** | **5** | **8** | **2** | **0** |
 
 ## C0 Containment Changes
 

@@ -185,10 +185,10 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		items = append(items, info)
 	}
 
-	// C0-CONTAINMENT: Compute advisory membership-management capabilities.
-	// Only project owners can manage membership; admins see read-only.
-	// This lets the UI hide mutation controls for non-owners without waiting
-	// for a 403 round-trip. Server enforcement remains mandatory.
+	// C0-CONTAINMENT: G3 — Compute advisory membership-management capabilities.
+	// Only project owners get manage_members; all other authenticated users get
+	// an explicit empty capability object so the UI deterministically becomes
+	// read-only. Server enforcement remains mandatory.
 	//
 	// Contract decision to relax: align with Phase 1 CanDelegate relaxation.
 	var memberCaps *Capabilities
@@ -196,6 +196,8 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		if user, ok := identity.(UserIdentity); ok {
 			if s.authzService.isProjectOwner(ctx, user.ID(), projectID) {
 				memberCaps = &Capabilities{Actions: []string{"manage_members"}}
+			} else {
+				memberCaps = &Capabilities{Actions: []string{}}
 			}
 		}
 	}

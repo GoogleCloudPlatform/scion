@@ -265,12 +265,18 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	//   but is NOT in the "mine" owner set.
 	// mine=true (legacy alias): same as scope=mine.
 	//
-	// C0-CONTAINMENT: F-QA-01 — Mine selects only active direct project-owner
-	// bindings. Shared excludes the owner set. Contract decision to relax:
-	// Phase 1 Mine/Shared semantics.
+	// C0-CONTAINMENT: G2 — Mine uses only active direct project-owner
+	// RoleBinding set (no legacy OwnerID). Agent Mine also includes agents
+	// the user created (filter.OwnerID is the agent creator, not project
+	// owner — this is intentional agent-specific semantics).
+	//
+	// C0-CONTAINMENT: G1 — Shared uses active effective RoleBinding access
+	// (direct + group-derived, lifecycle-filtered). Contract decision to
+	// relax: Phase 1 Mine/Shared semantics.
 	switch query.Get("scope") {
 	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			// Agent Mine: agents created by the user OR in owned projects.
 			filter.OwnerID = userIdent.ID()
 			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
 			if len(ownerIDs) > 0 {
@@ -279,12 +285,13 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			allMemberIDs := mergeProjectIDs(
+			// Active effective access: direct user + group-derived, lifecycle-filtered.
+			allEffectiveIDs := mergeProjectIDs(
 				s.resolveUserProjectIDs(ctx, userIdent.ID()),
-				s.resolveUserRBProjectIDs(ctx, userIdent.ID()),
+				s.resolveUserEffectiveProjectIDs(ctx, userIdent.ID()),
 			)
 			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
-			sharedIDs := subtractProjectIDs(allMemberIDs, ownerIDs)
+			sharedIDs := subtractProjectIDs(allEffectiveIDs, ownerIDs)
 			if len(sharedIDs) > 0 {
 				filter.MemberProjectIDs = sharedIDs
 				filter.ExcludeOwnerID = userIdent.ID()
