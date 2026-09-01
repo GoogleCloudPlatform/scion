@@ -44,6 +44,29 @@ export const PROJECT_DIRECT_USER_ONLY_ROLES = ['project-owner'];
  */
 export const PROJECT_OWNER_ROLE_NAMES = ['project-owner', 'owner'];
 
+/**
+ * Role names that represent project administrator status.
+ */
+export const PROJECT_ADMIN_ROLE_NAMES = ['project-admin', 'admin'];
+
+// ---------------------------------------------------------------------------
+// Role tier classification
+// ---------------------------------------------------------------------------
+
+/** The management tier a role belongs to. */
+export type RoleTier = 'owner' | 'admin' | 'member';
+
+/**
+ * Classify a role name into its management tier. Owner-tier roles require
+ * `canManageOwners`, admin-tier requires `canManageAdmins`, and everything
+ * else falls under the member tier (`canManageMembers`).
+ */
+export function getRoleTier(roleName: string): RoleTier {
+  if (PROJECT_OWNER_ROLE_NAMES.includes(roleName)) return 'owner';
+  if (PROJECT_ADMIN_ROLE_NAMES.includes(roleName)) return 'admin';
+  return 'member';
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle helpers
 // ---------------------------------------------------------------------------

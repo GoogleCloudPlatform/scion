@@ -32,6 +32,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import type { MembershipCapabilities } from '../../shared/types.js';
 import type { PrincipalChangeDetail } from './principal-picker.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
@@ -39,6 +40,7 @@ import {
   PROJECT_DIRECT_USER_ONLY_ROLES,
   PROJECT_OWNER_ROLE_NAMES,
   getPrincipalIcon,
+  getRoleTier,
 } from './role-binding-utils.js';
 
 // ---------------------------------------------------------------------------
@@ -111,14 +113,18 @@ export class ScionProjectMembersEditor extends LitElement {
   // Remove state
   @state() private removingMemberId: string | null = null;
 
-  // C0-CONTAINMENT: advisory read-only flag derived from server-returned
-  // membership _capabilities. Only project owners get manage_members; admins
-  // see read-only controls. Server enforcement is mandatory regardless.
-  @state() private serverReadOnly = false;
+  // Membership capabilities returned by the server — drives per-row
+  // visibility of edit/remove buttons and the transfer ownership UI.
+  @state() private capabilities: MembershipCapabilities | null = null;
+
+  // Transfer ownership dialog state
+  @state() private transferDialogOpen = false;
+  @state() private transferNewOwnerId = '';
+  @state() private transferLoading = false;
+  @state() private transferError: string | null = null;
 
   // Action feedback
-  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
-    null;
+  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
 
   static override styles = css`
     :host {
@@ -152,6 +158,13 @@ export class ScionProjectMembersEditor extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
       margin: 0;
+    }
+
+    .section-header-actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-shrink: 0;
     }
 
     .member-count {
@@ -402,7 +415,8 @@ export class ScionProjectMembersEditor extends LitElement {
         padding: 1rem;
       }
 
-      th, td {
+      th,
+      td {
         padding: 0.5rem 0.75rem;
       }
     }
@@ -442,21 +456,23 @@ export class ScionProjectMembersEditor extends LitElement {
     try {
       // PM1: Use project-scoped members endpoint + roles list in parallel.
       const [membersRes, rolesRes] = await Promise.all([
-        apiFetch(
-          `/api/v1/projects/${encodeURIComponent(this.projectId)}/members`
-        ),
+        apiFetch(`/api/v1/projects/${encodeURIComponent(this.projectId)}/members`),
         apiFetch('/api/v1/admin/roles'),
       ]);
 
       if (!membersRes.ok) {
-        throw new Error(
-          await extractApiError(membersRes, `HTTP ${membersRes.status}`)
-        );
+        throw new Error(await extractApiError(membersRes, `HTTP ${membersRes.status}`));
       }
 
       const data = (await membersRes.json()) as {
         items?: ProjectMemberBinding[];
-        _capabilities?: { actions?: string[] };
+        _capabilities?: {
+          canManageMembers?: boolean;
+          canManageAdmins?: boolean;
+          canManageOwners?: boolean;
+          canTransfer?: boolean;
+          actions?: string[];
+        };
       };
       // Server returns enriched items with roleName and source.
       this.members = (data.items || []).map((b) => ({
@@ -464,25 +480,30 @@ export class ScionProjectMembersEditor extends LitElement {
         source: b.source || 'direct',
       }));
 
-      // C0-CONTAINMENT: G3 — server-driven advisory read-only for non-owners.
-      // Reset on every load: if _capabilities is present, check for
-      // manage_members. The server returns an explicit empty object for
-      // non-owners (not omitted), so this deterministically becomes true
-      // for admins. When _capabilities is absent (older server or non-user
-      // identity), default to read-only as a fail-closed fallback.
-      this.serverReadOnly = !(data._capabilities?.actions || []).includes('manage_members');
+      // Parse membership capabilities from the server response.
+      // When _capabilities is absent (older server), default to null
+      // which makes effectiveReadOnly true (fail-closed).
+      const rawCaps = data._capabilities;
+      if (rawCaps) {
+        this.capabilities = {
+          canManageMembers: rawCaps.canManageMembers ?? false,
+          canManageAdmins: rawCaps.canManageAdmins ?? false,
+          canManageOwners: rawCaps.canManageOwners ?? false,
+          canTransfer: rawCaps.canTransfer ?? false,
+          actions: rawCaps.actions ?? [],
+        };
+      } else {
+        this.capabilities = null;
+      }
 
       // Load project roles for the role picker.
       if (rolesRes.ok) {
         const rolesData = (await rolesRes.json()) as { items?: ProjectRole[] };
-        this.projectRoles = (rolesData.items || []).filter(
-          (r) => r.scopeType === 'project'
-        );
+        this.projectRoles = (rolesData.items || []).filter((r) => r.scopeType === 'project');
       }
     } catch (err) {
       console.error('Failed to load project members:', err);
-      this.error =
-        err instanceof Error ? err.message : 'Failed to load project members';
+      this.error = err instanceof Error ? err.message : 'Failed to load project members';
     } finally {
       this.loading = false;
     }
@@ -495,9 +516,30 @@ export class ScionProjectMembersEditor extends LitElement {
   // getPrincipalIcon is imported from ./role-binding-utils.js
 
   /** Effective read-only: true when the parent says read-only OR the server
-   *  advisory indicates the current user cannot manage members. */
+   *  advisory indicates the current user cannot manage any membership tier. */
   private get effectiveReadOnly(): boolean {
-    return this.readOnly || this.serverReadOnly;
+    if (this.readOnly) return true;
+    if (!this.capabilities) return true; // fail-closed when capabilities absent
+    return !(
+      this.capabilities.canManageMembers ||
+      this.capabilities.canManageAdmins ||
+      this.capabilities.canManageOwners
+    );
+  }
+
+  /** Returns true if the current user can manage the given member based on
+   *  the member's role tier and the user's capabilities. */
+  private canManageMember(member: ProjectMemberBinding): boolean {
+    if (!this.capabilities) return false;
+    const tier = getRoleTier(member.roleName);
+    switch (tier) {
+      case 'owner':
+        return this.capabilities.canManageOwners;
+      case 'admin':
+        return this.capabilities.canManageAdmins;
+      case 'member':
+        return this.capabilities.canManageMembers;
+    }
   }
 
   /** Returns true if a role name represents project ownership. */
@@ -507,19 +549,12 @@ export class ScionProjectMembersEditor extends LitElement {
 
   private get directOwnerCount(): number {
     return this.members.filter(
-      (m) =>
-        m.source === 'direct' &&
-        m.principalType === 'user' &&
-        this.isOwnerRole(m.roleName)
+      (m) => m.source === 'direct' && m.principalType === 'user' && this.isOwnerRole(m.roleName)
     ).length;
   }
 
   private isLastDirectOwner(member: ProjectMemberBinding): boolean {
-    if (
-      member.source !== 'direct' ||
-      member.principalType !== 'user'
-    )
-      return false;
+    if (member.source !== 'direct' || member.principalType !== 'user') return false;
     if (!this.isOwnerRole(member.roleName)) return false;
     return this.directOwnerCount <= 1;
   }
@@ -528,6 +563,21 @@ export class ScionProjectMembersEditor extends LitElement {
     let roles = this.projectRoles;
     if (this.addPrincipalType === 'group') {
       roles = roles.filter((r) => !PROJECT_DIRECT_USER_ONLY_ROLES.includes(r.name));
+    }
+    // Filter by capabilities: only show roles the user can assign.
+    if (this.capabilities) {
+      const caps = this.capabilities;
+      roles = roles.filter((r) => {
+        const tier = getRoleTier(r.name);
+        switch (tier) {
+          case 'owner':
+            return caps.canManageOwners;
+          case 'admin':
+            return caps.canManageAdmins;
+          case 'member':
+            return caps.canManageMembers;
+        }
+      });
     }
     return roles;
   }
@@ -560,19 +610,16 @@ export class ScionProjectMembersEditor extends LitElement {
     try {
       // PM1: Use project-scoped members endpoint.
       // suppressAccessDeniedToast: the dialog renders errors inline (RC-C fix).
-      const res = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(this.projectId)}/members`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roleDefinitionId: this.addRoleId,
-            principalType: this.addPrincipalType,
-            principalId: this.addPrincipalId.trim(),
-          }),
-          suppressAccessDeniedToast: true,
-        }
-      );
+      const res = await apiFetch(`/api/v1/projects/${encodeURIComponent(this.projectId)}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roleDefinitionId: this.addRoleId,
+          principalType: this.addPrincipalType,
+          principalId: this.addPrincipalId.trim(),
+        }),
+        suppressAccessDeniedToast: true,
+      });
 
       if (!res.ok) {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
@@ -583,8 +630,7 @@ export class ScionProjectMembersEditor extends LitElement {
       void this.loadData();
     } catch (err) {
       console.error('Failed to add member:', err);
-      this.addError =
-        err instanceof Error ? err.message : 'Failed to add member';
+      this.addError = err instanceof Error ? err.message : 'Failed to add member';
     } finally {
       this.addLoading = false;
     }
@@ -607,10 +653,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
     // R1: Prevent demoting the last direct owner to a non-owner role.
     const newRoleName = this.getRoleNameById(this.changeRoleId);
-    if (
-      this.isLastDirectOwner(this.changeMember) &&
-      !this.isOwnerRole(newRoleName)
-    ) {
+    if (this.isLastDirectOwner(this.changeMember) && !this.isOwnerRole(newRoleName)) {
       this.actionFeedback = {
         message:
           'Cannot change the last direct project owner to a non-owner role. Transfer ownership first.',
@@ -649,8 +692,7 @@ export class ScionProjectMembersEditor extends LitElement {
     } catch (err) {
       console.error('Failed to change role:', err);
       this.actionFeedback = {
-        message:
-          err instanceof Error ? err.message : 'Failed to change role',
+        message: err instanceof Error ? err.message : 'Failed to change role',
         variant: 'danger',
       };
     } finally {
@@ -658,24 +700,18 @@ export class ScionProjectMembersEditor extends LitElement {
     }
   }
 
-  private async handleRemoveMember(
-    member: ProjectMemberBinding
-  ): Promise<void> {
+  private async handleRemoveMember(member: ProjectMemberBinding): Promise<void> {
     if (this.isLastDirectOwner(member)) {
       this.actionFeedback = {
-        message:
-          'Cannot remove the last direct project owner. Transfer ownership first.',
+        message: 'Cannot remove the last direct project owner. Transfer ownership first.',
         variant: 'danger',
       };
       return;
     }
 
-    const displayName =
-      member.principalDisplayName || member.principalId;
+    const displayName = member.principalDisplayName || member.principalId;
     if (
-      !(await showConfirm(
-        `Remove ${member.principalType} "${displayName}" from this project?`
-      ))
+      !(await showConfirm(`Remove ${member.principalType} "${displayName}" from this project?`))
     ) {
       return;
     }
@@ -698,12 +734,61 @@ export class ScionProjectMembersEditor extends LitElement {
     } catch (err) {
       console.error('Failed to remove member:', err);
       this.actionFeedback = {
-        message:
-          err instanceof Error ? err.message : 'Failed to remove member',
+        message: err instanceof Error ? err.message : 'Failed to remove member',
         variant: 'danger',
       };
     } finally {
       this.removingMemberId = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Transfer ownership
+  // ---------------------------------------------------------------------------
+
+  private openTransferDialog(): void {
+    this.transferNewOwnerId = '';
+    this.transferError = null;
+    this.transferDialogOpen = true;
+  }
+
+  private async handleTransferOwnership(): Promise<void> {
+    if (!this.transferNewOwnerId.trim()) {
+      this.transferError = 'Please enter a user ID or email';
+      return;
+    }
+
+    this.transferLoading = true;
+    this.transferError = null;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/transfer-ownership`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            newOwnerId: this.transferNewOwnerId.trim(),
+          }),
+          suppressAccessDeniedToast: true,
+        }
+      );
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+
+      this.transferDialogOpen = false;
+      this.actionFeedback = {
+        message: 'Ownership transferred successfully',
+        variant: 'success',
+      };
+      void this.loadData();
+    } catch (err) {
+      console.error('Failed to transfer ownership:', err);
+      this.transferError = err instanceof Error ? err.message : 'Failed to transfer ownership';
+    } finally {
+      this.transferLoading = false;
     }
   }
 
@@ -727,25 +812,29 @@ export class ScionProjectMembersEditor extends LitElement {
             ${this.sectionTitle}
             <span class="member-count">(${this.members.length})</span>
           </h2>
-          ${this.sectionDescription
-            ? html`<p>${this.sectionDescription}</p>`
+          ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
+        </div>
+        <div class="section-header-actions">
+          ${this.capabilities?.canTransfer
+            ? html`
+                <sl-button variant="warning" size="small" outline @click=${this.openTransferDialog}>
+                  <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                  Transfer Ownership
+                </sl-button>
+              `
+            : nothing}
+          ${!this.effectiveReadOnly
+            ? html`
+                <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
+                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                  Add Member
+                </sl-button>
+              `
             : nothing}
         </div>
-        ${!this.effectiveReadOnly
-          ? html`
-              <sl-button
-                variant="primary"
-                size="small"
-                @click=${this.openAddDialog}
-              >
-                <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                Add Member
-              </sl-button>
-            `
-          : nothing}
       </div>
-      ${this.renderBody()} ${this.renderAddDialog()}
-      ${this.renderChangeRoleDialog()}
+      ${this.renderBody()} ${this.renderAddDialog()} ${this.renderChangeRoleDialog()}
+      ${this.renderTransferDialog()}
     `;
   }
 
@@ -759,25 +848,34 @@ export class ScionProjectMembersEditor extends LitElement {
               ${this.sectionTitle}
               <span class="member-count">(${this.members.length})</span>
             </h2>
-            ${this.sectionDescription
-              ? html`<p>${this.sectionDescription}</p>`
+            ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
+          </div>
+          <div class="section-header-actions">
+            ${this.capabilities?.canTransfer
+              ? html`
+                  <sl-button
+                    variant="warning"
+                    size="small"
+                    outline
+                    @click=${this.openTransferDialog}
+                  >
+                    <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                    Transfer Ownership
+                  </sl-button>
+                `
+              : nothing}
+            ${!this.effectiveReadOnly
+              ? html`
+                  <sl-button size="small" variant="default" @click=${this.openAddDialog}>
+                    <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                    Add Member
+                  </sl-button>
+                `
               : nothing}
           </div>
-          ${!this.effectiveReadOnly
-            ? html`
-                <sl-button
-                  size="small"
-                  variant="default"
-                  @click=${this.openAddDialog}
-                >
-                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                  Add Member
-                </sl-button>
-              `
-            : nothing}
         </div>
-        ${this.renderBody()} ${this.renderAddDialog()}
-        ${this.renderChangeRoleDialog()}
+        ${this.renderBody()} ${this.renderAddDialog()} ${this.renderChangeRoleDialog()}
+        ${this.renderTransferDialog()}
       </div>
     `;
   }
@@ -808,20 +906,14 @@ export class ScionProjectMembersEditor extends LitElement {
 
   private renderBody() {
     if (this.loading) {
-      return html`
-        <div class="loading-state">
-          <sl-spinner></sl-spinner> Loading members...
-        </div>
-      `;
+      return html` <div class="loading-state"><sl-spinner></sl-spinner> Loading members...</div> `;
     }
 
     if (this.error) {
       return html`
         <div class="error-state">
           <span>${this.error}</span>
-          <sl-button size="small" @click=${() => this.loadData()}>
-            Retry
-          </sl-button>
+          <sl-button size="small" @click=${() => this.loadData()}> Retry </sl-button>
         </div>
       `;
     }
@@ -834,11 +926,7 @@ export class ScionProjectMembersEditor extends LitElement {
           <p>Add members to grant access to this project.</p>
           ${!this.effectiveReadOnly
             ? html`
-                <sl-button
-                  variant="primary"
-                  size="small"
-                  @click=${this.openAddDialog}
-                >
+                <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
                   <sl-icon slot="prefix" name="person-plus"></sl-icon>
                   Add Member
                 </sl-button>
@@ -860,9 +948,7 @@ export class ScionProjectMembersEditor extends LitElement {
               <th>Member</th>
               <th>Role</th>
               <th class="hide-mobile">Source</th>
-              ${!this.effectiveReadOnly
-                ? html`<th class="actions-cell">Actions</th>`
-                : nothing}
+              ${!this.effectiveReadOnly ? html`<th class="actions-cell">Actions</th>` : nothing}
             </tr>
           </thead>
           <tbody>
@@ -875,8 +961,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
   private renderMemberRow(member: ProjectMemberBinding) {
     const isRemoving = this.removingMemberId === member.id;
-    const displayName =
-      member.principalDisplayName || member.principalId;
+    const displayName = member.principalDisplayName || member.principalId;
     const isGroupDerived = member.source !== 'direct';
     const lastOwner = this.isLastDirectOwner(member);
 
@@ -885,9 +970,7 @@ export class ScionProjectMembersEditor extends LitElement {
         <td>
           <div class="member-identity">
             <div class="member-icon ${member.principalType}">
-              <sl-icon
-                name="${getPrincipalIcon(member.principalType)}"
-              ></sl-icon>
+              <sl-icon name="${getPrincipalIcon(member.principalType)}"></sl-icon>
             </div>
             <div class="member-info">
               <span class="member-name">${displayName}</span>
@@ -899,9 +982,7 @@ export class ScionProjectMembersEditor extends LitElement {
           <span class="role-badge">${member.roleName}</span>
         </td>
         <td class="hide-mobile">
-          <span
-            class="provenance-badge ${isGroupDerived ? 'group-derived' : 'direct'}"
-          >
+          <span class="provenance-badge ${isGroupDerived ? 'group-derived' : 'direct'}">
             ${isGroupDerived
               ? html`<sl-icon name="diagram-3"></sl-icon> Via group:
                   ${member.sourceGroupName || member.source}`
@@ -911,37 +992,38 @@ export class ScionProjectMembersEditor extends LitElement {
         ${!this.effectiveReadOnly
           ? html`
               <td class="actions-cell">
-                ${!isGroupDerived
-                  ? html`
-                      ${this.projectRoles.length > 0
-                        ? html`
-                            <sl-icon-button
-                              name="pencil"
-                              label="Change role"
-                              ?disabled=${isRemoving || lastOwner}
-                              @click=${() =>
-                                this.openChangeRoleDialog(member)}
-                            ></sl-icon-button>
-                          `
-                        : ''}
-                      <sl-icon-button
-                        name="trash"
-                        label="Remove member"
-                        ?disabled=${isRemoving || lastOwner}
-                        @click=${() => this.handleRemoveMember(member)}
-                      ></sl-icon-button>
-                      ${lastOwner
-                        ? html`<sl-tooltip
-                            content="Last direct owner — cannot change role or remove"
-                          >
-                            <sl-icon
-                              name="shield-lock"
-                              style="color: var(--sl-color-warning-500)"
-                            ></sl-icon>
-                          </sl-tooltip>`
-                        : ''}
-                    `
-                  : html`<span class="meta-text">Inherited</span>`}
+                ${isGroupDerived
+                  ? html`<span class="meta-text">Inherited</span>`
+                  : this.canManageMember(member)
+                    ? html`
+                        ${this.projectRoles.length > 0
+                          ? html`
+                              <sl-icon-button
+                                name="pencil"
+                                label="Change role"
+                                ?disabled=${isRemoving || lastOwner}
+                                @click=${() => this.openChangeRoleDialog(member)}
+                              ></sl-icon-button>
+                            `
+                          : ''}
+                        <sl-icon-button
+                          name="trash"
+                          label="Remove member"
+                          ?disabled=${isRemoving || lastOwner}
+                          @click=${() => this.handleRemoveMember(member)}
+                        ></sl-icon-button>
+                        ${lastOwner
+                          ? html`<sl-tooltip
+                              content="Last direct owner — cannot change role or remove"
+                            >
+                              <sl-icon
+                                name="shield-lock"
+                                style="color: var(--sl-color-warning-500)"
+                              ></sl-icon>
+                            </sl-tooltip>`
+                          : ''}
+                      `
+                    : nothing}
               </td>
             `
           : nothing}
@@ -1008,9 +1090,7 @@ export class ScionProjectMembersEditor extends LitElement {
                   }}
                 >
                   ${this.addFilteredRoles.map(
-                    (role) => html`
-                      <sl-option value=${role.id}>${role.name}</sl-option>
-                    `
+                    (role) => html` <sl-option value=${role.id}>${role.name}</sl-option> `
                   )}
                 </sl-select>
               </div>
@@ -1018,17 +1098,14 @@ export class ScionProjectMembersEditor extends LitElement {
                 ? html`
                     <div class="validation-warning">
                       <sl-icon name="info-circle"></sl-icon>
-                      Group members will inherit this project role. Owner role
-                      is not available for groups.
+                      Group members will inherit this project role. Owner role is not available for
+                      groups.
                     </div>
                   `
                 : ''}
             `
           : ''}
-
-        ${this.addError
-          ? html`<div class="dialog-error">${this.addError}</div>`
-          : nothing}
+        ${this.addError ? html`<div class="dialog-error">${this.addError}</div>` : nothing}
 
         <sl-button
           slot="footer"
@@ -1067,9 +1144,7 @@ export class ScionProjectMembersEditor extends LitElement {
       >
         <p>
           Change role for
-          <strong
-            >${this.changeMember.principalDisplayName ||
-            this.changeMember.principalId}</strong
+          <strong>${this.changeMember.principalDisplayName || this.changeMember.principalId}</strong
           >:
         </p>
         <div class="form-group">
@@ -1086,11 +1161,7 @@ export class ScionProjectMembersEditor extends LitElement {
                   this.changeMember?.principalType !== 'group' ||
                   !PROJECT_DIRECT_USER_ONLY_ROLES.includes(r.name)
               )
-              .map(
-                (role) => html`
-                  <sl-option value=${role.id}>${role.name}</sl-option>
-                `
-              )}
+              .map((role) => html` <sl-option value=${role.id}>${role.name}</sl-option> `)}
           </sl-select>
         </div>
 
@@ -1112,6 +1183,61 @@ export class ScionProjectMembersEditor extends LitElement {
           this.changeRoleId === this.changeMember.roleDefinitionId}
           @click=${() => this.handleChangeRole()}
           >Update Role</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+  private renderTransferDialog() {
+    if (!this.transferDialogOpen) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Transfer Project Ownership"
+        open
+        @sl-request-close=${() => {
+          if (!this.transferLoading) this.transferDialogOpen = false;
+        }}
+      >
+        <p>
+          Transfer ownership of this project to another user. The current owner will retain
+          membership but lose owner privileges.
+        </p>
+        <div class="form-group">
+          <sl-input
+            label="New Owner (User ID or Email)"
+            placeholder="Enter user ID or email address"
+            .value=${this.transferNewOwnerId}
+            @sl-input=${(e: Event) => {
+              this.transferNewOwnerId = (e.target as HTMLInputElement).value;
+            }}
+          ></sl-input>
+        </div>
+
+        ${this.transferError
+          ? html`<div class="dialog-error">${this.transferError}</div>`
+          : nothing}
+
+        <div class="validation-warning">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          This action cannot be undone. The new owner will have full control of this project.
+        </div>
+
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.transferLoading}
+          @click=${() => {
+            this.transferDialogOpen = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          ?loading=${this.transferLoading}
+          ?disabled=${!this.transferNewOwnerId.trim()}
+          @click=${() => this.handleTransferOwnership()}
+          >Transfer Ownership</sl-button
         >
       </sl-dialog>
     `;

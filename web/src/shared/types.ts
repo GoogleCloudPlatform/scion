@@ -810,6 +810,19 @@ export interface Capabilities {
 }
 
 /**
+ * Membership-specific capabilities returned in the project members API
+ * `_capabilities` field. Provides granular boolean flags indicating which
+ * tiers of project membership the current user can manage.
+ */
+export interface MembershipCapabilities {
+  canManageMembers: boolean;
+  canManageAdmins: boolean;
+  canManageOwners: boolean;
+  canTransfer: boolean;
+  actions: string[];
+}
+
+/**
  * Check whether a capability set permits a specific action.
  * Returns false (fail-closed) when capabilities are undefined.
  */
