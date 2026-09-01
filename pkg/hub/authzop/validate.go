@@ -24,47 +24,41 @@ import (
 // a non-nil error describing every violation found. Validation is fail-closed:
 // a spec that fails Validate() must not be accepted into any catalog or
 // enforcement path.
-//
-// Validation checks:
-//   - All required fields are present and non-empty.
-//   - All enum values belong to their closed vocabulary.
-//   - No duplicate operation IDs or entry points within a spec.
-//   - Authority effects require a delegation policy.
-//   - Boundary effects require governance.
-//   - Audit-requiring effects require an audit obligation (or an exemption).
-//   - Invariants that are security-critical must be fail-closed.
-//   - At least one test reference is present.
-//   - Exemptions have valid kinds and non-empty reasons.
 func (s *OperationSpec) Validate() error {
 	var errs []error
 
-	// Required fields.
-	if s.ID == "" {
-		errs = append(errs, errors.New("operation ID is required"))
-	}
+	// --- Required fields ---
+	errs = append(errs, s.validateID()...)
+
 	if s.Domain == "" {
 		errs = append(errs, errors.New("domain is required"))
 	}
 	if s.Description == "" {
 		errs = append(errs, errors.New("description is required"))
 	}
-	if len(s.EntryPoints) == 0 && len(s.Exemptions) == 0 {
-		errs = append(errs, errors.New("at least one entry point is required (or an exemption must justify its absence)"))
+	if len(s.EntryPoints) == 0 && !s.waives(WaiveEntryPoints) {
+		errs = append(errs, errors.New("at least one entry point is required (or waive entry_points)"))
 	}
-	if len(s.Principals) == 0 && len(s.Exemptions) == 0 {
-		errs = append(errs, errors.New("at least one principal kind is required (or an exemption must justify its absence)"))
+	if len(s.Principals) == 0 && !s.waives(WaivePrincipals) {
+		errs = append(errs, errors.New("at least one principal kind is required (or waive principals)"))
 	}
-	if s.BasePermission == "" && len(s.Exemptions) == 0 {
-		errs = append(errs, errors.New("base permission is required (or an exemption must justify its absence)"))
+	if len(s.Credentials) == 0 && !s.waives(WaiveCredentials) {
+		errs = append(errs, errors.New("at least one credential kind is required (or waive credentials)"))
 	}
-	if s.ResourceResolver == "" && len(s.Exemptions) == 0 {
-		errs = append(errs, errors.New("resource resolver is required (or an exemption must justify its absence)"))
+	if s.BasePermission == "" && !s.waives(WaiveBasePermission) {
+		errs = append(errs, errors.New("base permission is required (or waive base_permission)"))
+	}
+	if s.ResourceResolver == "" && !s.waives(WaiveResourceResolver) {
+		errs = append(errs, errors.New("resource resolver is required (or waive resource_resolver)"))
 	}
 	if len(s.Effects) == 0 {
 		errs = append(errs, errors.New("at least one security effect is required"))
 	}
+	if len(s.DenialCodes) == 0 && !s.waives(WaiveDenialCodes) {
+		errs = append(errs, errors.New("at least one denial code is required (or waive denial_codes)"))
+	}
 
-	// Entry point validation.
+	// --- Entry point validation ---
 	epSeen := make(map[string]bool)
 	for i, ep := range s.EntryPoints {
 		if ep.Kind == "" {
@@ -75,8 +69,11 @@ func (s *OperationSpec) Validate() error {
 		if ep.Pattern == "" {
 			errs = append(errs, fmt.Errorf("entry point [%d]: pattern is required", i))
 		}
-		if ep.Kind == EntryPointHTTPRoute && ep.Method == "" {
-			errs = append(errs, fmt.Errorf("entry point [%d]: method is required for HTTP routes", i))
+		if httpLikeEntryPoints[ep.Kind] && ep.Method == "" {
+			errs = append(errs, fmt.Errorf("entry point [%d]: method is required for %s entry points", i, ep.Kind))
+		}
+		if !httpLikeEntryPoints[ep.Kind] && ep.Method != "" {
+			errs = append(errs, fmt.Errorf("entry point [%d]: method must be empty for %s entry points", i, ep.Kind))
 		}
 		key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
 		if epSeen[key] {
@@ -85,7 +82,7 @@ func (s *OperationSpec) Validate() error {
 		epSeen[key] = true
 	}
 
-	// Principal kind validation.
+	// --- Principal kind validation ---
 	pkSeen := make(map[PrincipalKind]bool)
 	for i, pk := range s.Principals {
 		if !validPrincipalKinds[pk] {
@@ -97,10 +94,27 @@ func (s *OperationSpec) Validate() error {
 		pkSeen[pk] = true
 	}
 
-	// Security effect validation.
-	hasAuthorityEffect := false
-	hasBoundaryEffect := false
+	// --- Credential kind validation ---
+	ckSeen := make(map[CredentialKind]bool)
+	for i, ck := range s.Credentials {
+		if !validCredentialKinds[ck] {
+			errs = append(errs, fmt.Errorf("credential [%d]: unknown kind %q", i, ck))
+		}
+		if ckSeen[ck] {
+			errs = append(errs, fmt.Errorf("credential [%d]: duplicate credential kind %q", i, ck))
+		}
+		ckSeen[ck] = true
+	}
+
+	// --- Security effect validation and obligation collection ---
+	requiredDelegation := DelegationNone
+	requiresGovernance := false
+	requiredAuthorityEval := AuthorityEvalNone
 	hasAuditRequiredEffect := false
+	needsBeforeFields := false
+	needsAfterFields := false
+	needsExternalPolicy := false
+
 	effSeen := make(map[SecurityEffect]bool)
 	for i, eff := range s.Effects {
 		if !validSecurityEffects[eff] {
@@ -110,28 +124,60 @@ func (s *OperationSpec) Validate() error {
 			errs = append(errs, fmt.Errorf("effect [%d]: duplicate security effect %q", i, eff))
 		}
 		effSeen[eff] = true
-		if eff.IsAuthorityEffect() {
-			hasAuthorityEffect = true
+
+		// Collect delegation requirement.
+		if req, ok := effectDelegationRequirements[eff]; ok {
+			if delegationStrength[req] > delegationStrength[requiredDelegation] {
+				requiredDelegation = req
+			}
 		}
-		if eff.IsBoundaryEffect() {
-			hasBoundaryEffect = true
+
+		// Collect governance requirement.
+		if effectGovernanceRequired[eff] {
+			requiresGovernance = true
 		}
+
+		// Collect authority evaluation requirement.
+		if req, ok := effectAuthorityEvalRequirements[eff]; ok {
+			if authorityEvalStrength[req] > authorityEvalStrength[requiredAuthorityEval] {
+				requiredAuthorityEval = req
+			}
+		}
+
+		// Collect audit requirements.
 		if eff.RequiresAudit() {
 			hasAuditRequiredEffect = true
+			if afr, ok := effectAuditFieldRequirements[eff]; ok {
+				if afr.NeedsBefore {
+					needsBeforeFields = true
+				}
+				if afr.NeedsAfter {
+					needsAfterFields = true
+				}
+			}
+		}
+
+		// External effect policy requirement.
+		if eff == EffectEmitExternal {
+			needsExternalPolicy = true
 		}
 	}
 
-	// Authority effects require delegation policy.
-	if hasAuthorityEffect && s.Delegation == nil {
-		errs = append(errs, errors.New("authority effects require a delegation policy"))
+	// --- Delegation validation ---
+	if !validDelegationKinds[s.DelegationKind] {
+		errs = append(errs, fmt.Errorf("unknown delegation kind %q", s.DelegationKind))
+	}
+	if delegationStrength[s.DelegationKind] < delegationStrength[requiredDelegation] {
+		errs = append(errs, fmt.Errorf("effects require delegation kind %q but spec declares %q", requiredDelegation, s.DelegationKind))
+	}
+	if s.DelegationKind != DelegationNone && s.DelegationDescription == "" {
+		errs = append(errs, errors.New("delegation description is required when delegation kind is not none"))
 	}
 
-	// Boundary effects require governance.
-	if hasBoundaryEffect && s.Governance == nil {
-		errs = append(errs, errors.New("boundary effects require a governance policy"))
+	// --- Governance validation ---
+	if requiresGovernance && s.Governance == nil {
+		errs = append(errs, errors.New("effects require a governance policy"))
 	}
-
-	// Governance validation.
 	if s.Governance != nil {
 		if s.Governance.Kind == "" {
 			errs = append(errs, errors.New("governance policy: kind is required"))
@@ -146,19 +192,59 @@ func (s *OperationSpec) Validate() error {
 		}
 	}
 
-	// Audit-requiring effects need an audit obligation or exemption.
-	if hasAuditRequiredEffect && s.AuditObligation == nil && !s.hasExemptionKind(ExemptionTestFixture) {
-		errs = append(errs, errors.New("effects requiring audit must have an audit obligation (or a test_fixture exemption)"))
+	// --- Authority evaluation validation ---
+	if !validAuthorityEvalKinds[s.AuthorityEval] {
+		errs = append(errs, fmt.Errorf("unknown authority evaluation kind %q", s.AuthorityEval))
+	}
+	if authorityEvalStrength[s.AuthorityEval] < authorityEvalStrength[requiredAuthorityEval] {
+		errs = append(errs, fmt.Errorf("effects require authority evaluation %q but spec declares %q", requiredAuthorityEval, s.AuthorityEval))
 	}
 
-	// Audit obligation validation.
+	// --- Audit obligation validation ---
+	if hasAuditRequiredEffect && s.AuditObligation == nil && !s.waives(WaiveAuditObligation) {
+		errs = append(errs, errors.New("effects requiring audit must have an audit obligation (or waive audit_obligation)"))
+	}
 	if s.AuditObligation != nil {
 		if s.AuditObligation.EventType == "" {
 			errs = append(errs, errors.New("audit obligation: event type is required"))
 		}
+		// Validate before/after fields against effect requirements.
+		if needsBeforeFields && len(s.AuditObligation.BeforeFields) == 0 {
+			errs = append(errs, errors.New("audit obligation: before fields are required by declared effects"))
+		}
+		if needsAfterFields && len(s.AuditObligation.AfterFields) == 0 {
+			errs = append(errs, errors.New("audit obligation: after fields are required by declared effects"))
+		}
+		// Validate non-empty/unique fields.
+		errs = append(errs, validateAuditFields("context", s.AuditObligation.ContextFields)...)
+		errs = append(errs, validateAuditFields("before", s.AuditObligation.BeforeFields)...)
+		errs = append(errs, validateAuditFields("after", s.AuditObligation.AfterFields)...)
+		// Atomicity justification.
+		if !s.AuditObligation.Atomic && s.AuditObligation.NonAtomicJustification == "" {
+			errs = append(errs, errors.New("audit obligation: non-atomic audit requires a justification"))
+		}
 	}
 
-	// Invariant validation.
+	// --- External effect policy validation ---
+	if needsExternalPolicy && s.ExternalPolicy == nil {
+		errs = append(errs, errors.New("emit-external-effect requires an external effect policy"))
+	}
+	if s.ExternalPolicy != nil {
+		if !validExternalDeliveryModes[s.ExternalPolicy.DeliveryMode] {
+			errs = append(errs, fmt.Errorf("external policy: unknown delivery mode %q", s.ExternalPolicy.DeliveryMode))
+		}
+		if !validExternalFailureModes[s.ExternalPolicy.FailureMode] {
+			errs = append(errs, fmt.Errorf("external policy: unknown failure mode %q", s.ExternalPolicy.FailureMode))
+		}
+		if s.ExternalPolicy.IdempotencyKey == "" {
+			errs = append(errs, errors.New("external policy: idempotency key description is required"))
+		}
+		if s.ExternalPolicy.RetryPolicy == "" {
+			errs = append(errs, errors.New("external policy: retry policy is required"))
+		}
+	}
+
+	// --- Invariant validation ---
 	invSeen := make(map[string]bool)
 	for i, inv := range s.Invariants {
 		if inv.ID == "" {
@@ -167,13 +253,21 @@ func (s *OperationSpec) Validate() error {
 		if inv.Description == "" {
 			errs = append(errs, fmt.Errorf("invariant [%d]: description is required", i))
 		}
+		if inv.Kind == "" {
+			errs = append(errs, fmt.Errorf("invariant [%d]: kind is required", i))
+		} else if !validInvariantKinds[inv.Kind] {
+			errs = append(errs, fmt.Errorf("invariant [%d]: unknown kind %q", i, inv.Kind))
+		}
+		if inv.Kind == InvariantSecurity && !inv.FailClosed {
+			errs = append(errs, fmt.Errorf("invariant [%d]: security invariants must be fail-closed", i))
+		}
 		if invSeen[inv.ID] {
 			errs = append(errs, fmt.Errorf("invariant [%d]: duplicate ID %q", i, inv.ID))
 		}
 		invSeen[inv.ID] = true
 	}
 
-	// Denial code validation — codes must not be empty and not duplicate.
+	// --- Denial code validation ---
 	dcSeen := make(map[DenialCode]bool)
 	for i, dc := range s.DenialCodes {
 		if dc == "" {
@@ -185,9 +279,9 @@ func (s *OperationSpec) Validate() error {
 		dcSeen[dc] = true
 	}
 
-	// Test reference validation — at least one is required unless exempted.
-	if len(s.TestRefs) == 0 && !s.hasExemptionKind(ExemptionTestFixture) {
-		errs = append(errs, errors.New("at least one test reference is required"))
+	// --- Test reference validation ---
+	if len(s.TestRefs) == 0 && !s.waives(WaiveTestRefs) {
+		errs = append(errs, errors.New("at least one test reference is required (or waive test_refs)"))
 	}
 	trSeen := make(map[string]bool)
 	for i, tr := range s.TestRefs {
@@ -204,7 +298,59 @@ func (s *OperationSpec) Validate() error {
 		trSeen[trKey] = true
 	}
 
-	// Exemption validation.
+	// --- Exemption validation ---
+	errs = append(errs, s.validateExemptions()...)
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return &ValidationError{Errors: errs}
+}
+
+// validateID checks operation ID syntax and domain-prefix consistency.
+func (s *OperationSpec) validateID() []error {
+	var errs []error
+	if s.ID == "" {
+		errs = append(errs, errors.New("operation ID is required"))
+		return errs
+	}
+
+	id := string(s.ID)
+
+	// Check lowercase dot-separated segments: each segment starts with
+	// a letter and contains only lowercase letters and digits.
+	segments := strings.Split(id, ".")
+	if len(segments) < 2 {
+		errs = append(errs, fmt.Errorf("operation ID %q must have at least two dot-separated segments", id))
+	}
+	for si, seg := range segments {
+		if seg == "" {
+			errs = append(errs, fmt.Errorf("operation ID %q: empty segment at position %d", id, si))
+			continue
+		}
+		if seg[0] < 'a' || seg[0] > 'z' {
+			errs = append(errs, fmt.Errorf("operation ID %q: segment %q must start with a lowercase letter", id, seg))
+			continue
+		}
+		for _, ch := range seg {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+				errs = append(errs, fmt.Errorf("operation ID %q: invalid character %q (only lowercase letters and digits allowed)", id, string(ch)))
+				break
+			}
+		}
+	}
+
+	// Domain-prefix consistency.
+	if s.Domain != "" && !strings.HasPrefix(id, s.Domain+".") && id != s.Domain {
+		errs = append(errs, fmt.Errorf("operation ID %q must start with domain %q", id, s.Domain))
+	}
+
+	return errs
+}
+
+// validateExemptions validates exemption fields and waiver consistency.
+func (s *OperationSpec) validateExemptions() []error {
+	var errs []error
 	exSeen := make(map[string]bool)
 	for i, ex := range s.Exemptions {
 		if ex.Kind == "" {
@@ -218,27 +364,55 @@ func (s *OperationSpec) Validate() error {
 		if ex.Scope == "" {
 			errs = append(errs, fmt.Errorf("exemption [%d]: scope is required", i))
 		}
+		if len(ex.Waives) == 0 {
+			errs = append(errs, fmt.Errorf("exemption [%d]: at least one waived obligation is required", i))
+		}
+		wSeen := make(map[WaivedObligation]bool)
+		for j, w := range ex.Waives {
+			if !validWaivedObligations[w] {
+				errs = append(errs, fmt.Errorf("exemption [%d] waiver [%d]: unknown obligation %q", i, j, w))
+			}
+			if wSeen[w] {
+				errs = append(errs, fmt.Errorf("exemption [%d] waiver [%d]: duplicate waiver %q", i, j, w))
+			}
+			wSeen[w] = true
+		}
 		exKey := string(ex.Kind) + ":" + ex.Scope
 		if exSeen[exKey] {
 			errs = append(errs, fmt.Errorf("exemption [%d]: duplicate exemption kind %q with scope %q", i, ex.Kind, ex.Scope))
 		}
 		exSeen[exKey] = true
 	}
-
-	if len(errs) == 0 {
-		return nil
-	}
-	return &ValidationError{Errors: errs}
+	return errs
 }
 
-// hasExemptionKind reports whether the spec has an exemption of the given kind.
-func (s *OperationSpec) hasExemptionKind(kind ExemptionKind) bool {
+// waives reports whether any exemption waives the given obligation.
+func (s *OperationSpec) waives(obl WaivedObligation) bool {
 	for _, ex := range s.Exemptions {
-		if ex.Kind == kind {
-			return true
+		for _, w := range ex.Waives {
+			if w == obl {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// validateAuditFields checks that audit field lists contain no empty
+// or duplicate values.
+func validateAuditFields(category string, fields []string) []error {
+	var errs []error
+	seen := make(map[string]bool)
+	for i, f := range fields {
+		if f == "" {
+			errs = append(errs, fmt.Errorf("audit obligation: empty %s field at index %d", category, i))
+		}
+		if seen[f] {
+			errs = append(errs, fmt.Errorf("audit obligation: duplicate %s field %q", category, f))
+		}
+		seen[f] = true
+	}
+	return errs
 }
 
 // ValidationError collects all validation errors for an OperationSpec.
@@ -256,29 +430,25 @@ func (e *ValidationError) Error() string {
 }
 
 // ValidateSpecs validates a slice of OperationSpecs and checks for
-// duplicate IDs and entry points across all specs. It returns a non-nil
-// error if any spec is invalid or if duplicates are found.
+// duplicate IDs and entry points across all specs.
 func ValidateSpecs(specs []OperationSpec) error {
 	var errs []error
 
 	idSeen := make(map[OperationID]bool)
-	epSeen := make(map[string]OperationID) // entry-point key -> owning op ID
+	epSeen := make(map[string]OperationID)
 
 	for i := range specs {
 		spec := &specs[i]
 
-		// Per-spec validation.
 		if err := spec.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("spec %q: %w", spec.ID, err))
 		}
 
-		// Cross-spec duplicate ID check.
 		if idSeen[spec.ID] {
 			errs = append(errs, fmt.Errorf("duplicate operation ID %q", spec.ID))
 		}
 		idSeen[spec.ID] = true
 
-		// Cross-spec duplicate entry point check.
 		for _, ep := range spec.EntryPoints {
 			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
 			if owner, ok := epSeen[key]; ok {

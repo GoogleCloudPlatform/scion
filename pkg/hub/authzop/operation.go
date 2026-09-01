@@ -22,9 +22,10 @@ package authzop
 // Validation is deterministic and fail-closed: a spec that fails
 // Validate() must not be accepted into a catalog or enforcement path.
 type OperationSpec struct {
-	// ID is a stable, unique operation identifier. Format: domain.verb
-	// (e.g., "project.membership.add", "agent.create", "secret.read").
-	// Once assigned, an ID must not change or be reused.
+	// ID is a stable, unique operation identifier. Format:
+	// lowercase dot-separated segments (e.g., "project.membership.add").
+	// Must start with Domain as a prefix. Once assigned, an ID must not
+	// change or be reused.
 	ID OperationID
 
 	// Domain identifies the product domain that owns this operation
@@ -35,19 +36,21 @@ type OperationSpec struct {
 	Description string
 
 	// EntryPoints enumerates every externally reachable path that
-	// dispatches this operation: HTTP method+route, broker call,
-	// scheduler callback, CLI command, background job, or internal
-	// dispatcher.
+	// dispatches this operation.
 	EntryPoints []EntryPoint
 
-	// Principals lists the authenticated principal and credential kinds
-	// admitted to attempt this operation.
+	// Principals lists the authenticated principal kinds admitted to
+	// attempt this operation. Credentials are declared separately.
 	Principals []PrincipalKind
+
+	// Credentials lists the credential kinds admitted for this
+	// operation. Separated from Principals to express distinctions
+	// like "user via session_jwt but not scoped_uat".
+	Credentials []CredentialKind
 
 	// ResourceResolver names the authoritative resource and scope
 	// resolver for this operation (e.g., "project-from-url",
-	// "agent-owner-project"). The resolver determines which project
-	// or system scope the base permission is evaluated against.
+	// "agent-owner-project").
 	ResourceResolver string
 
 	// BasePermission is the canonical permission ID required for this
@@ -55,42 +58,52 @@ type OperationSpec struct {
 	BasePermission string
 
 	// Effects enumerates the typed security effects this operation may
-	// produce. Effects select additional checks and invariants beyond
-	// the base permission.
+	// produce. Effects select obligation requirements beyond the base
+	// permission.
 	Effects []SecurityEffect
 
-	// Delegation specifies delegation requirements for
-	// authority-increasing effects. Nil means no delegation check
-	// is required.
-	Delegation *DelegationPolicy
+	// DelegationKind specifies the delegation check required by this
+	// operation's effects. Validation enforces that the declared kind
+	// satisfies all effect requirements.
+	DelegationKind DelegationKind
 
-	// Governance specifies target-governance rules for peer/superior
-	// or protected-principal changes. Nil means no governance check
-	// is required.
+	// DelegationDescription explains the delegation semantics for
+	// reviewers. Required when DelegationKind is not "none".
+	DelegationDescription string
+
+	// Governance specifies target-governance rules. Required by effects
+	// that involve managing targets (revocation, boundary changes,
+	// credential effects). Nil means no governance check is required.
 	Governance *GovernancePolicy
 
+	// AuthorityEval specifies the authority-delta evaluation required
+	// by this operation. Effects like change-authority, ownership
+	// change, and boundary changes require before-and-after evaluation.
+	AuthorityEval AuthorityEvalKind
+
 	// Invariants lists post-state invariants that must hold after the
-	// operation commits. Each invariant is evaluated against the
-	// proposed post-state within the same transaction.
+	// operation commits.
 	Invariants []Invariant
 
-	// AuditObligation specifies the audit event type and required fields.
-	// Nil means no audit record is required (must be justified via an
-	// exemption).
+	// AuditObligation specifies audit requirements including before/after
+	// state fields and atomicity. Required by effects that require audit.
 	AuditObligation *AuditObligation
 
+	// ExternalPolicy specifies failure/retry semantics for operations
+	// with emit-external-effect. Required when the operation includes
+	// EffectEmitExternal.
+	ExternalPolicy *ExternalEffectPolicy
+
 	// DenialCodes lists the stable public denial codes this operation
-	// may return. These are product-level reasons, not internal evaluator
-	// details.
+	// may return. At least one is required unless explicitly waived.
 	DenialCodes []DenialCode
 
-	// TestRefs lists the executable tests that prove this contract. Each
-	// reference is a package path + test function name or pattern.
+	// TestRefs lists the executable tests that prove this contract.
 	TestRefs []TestRef
 
 	// Exemptions documents explicit exemptions from normal contract
-	// requirements, such as offline recovery, deterministic seeding,
-	// migrations, or test fixture construction.
+	// requirements. Each exemption must declare which specific
+	// obligations it waives.
 	Exemptions []Exemption
 }
 
@@ -117,6 +130,8 @@ type EntryPointKind string
 
 const (
 	EntryPointHTTPRoute        EntryPointKind = "http_route"
+	EntryPointWebSocket        EntryPointKind = "websocket"
+	EntryPointSSE              EntryPointKind = "sse"
 	EntryPointBrokerCall       EntryPointKind = "broker_call"
 	EntryPointSchedulerJob     EntryPointKind = "scheduler_job"
 	EntryPointCLICommand       EntryPointKind = "cli_command"
@@ -127,6 +142,8 @@ const (
 // validEntryPointKinds is the closed set of recognized entry point kinds.
 var validEntryPointKinds = map[EntryPointKind]bool{
 	EntryPointHTTPRoute:        true,
+	EntryPointWebSocket:        true,
+	EntryPointSSE:              true,
 	EntryPointBrokerCall:       true,
 	EntryPointSchedulerJob:     true,
 	EntryPointCLICommand:       true,
@@ -134,13 +151,20 @@ var validEntryPointKinds = map[EntryPointKind]bool{
 	EntryPointInternalDispatch: true,
 }
 
-// PrincipalKind identifies a class of authenticated principal or credential.
+// httpLikeEntryPoints are entry points that require an HTTP method.
+var httpLikeEntryPoints = map[EntryPointKind]bool{
+	EntryPointHTTPRoute: true,
+	EntryPointWebSocket: true,
+	EntryPointSSE:       true,
+}
+
+// PrincipalKind identifies a class of authenticated principal.
+// Credential types are declared separately via CredentialKind.
 type PrincipalKind string
 
 const (
 	PrincipalUser           PrincipalKind = "user"
 	PrincipalAgent          PrincipalKind = "agent"
-	PrincipalScopedUAT      PrincipalKind = "scoped_uat"
 	PrincipalBroker         PrincipalKind = "broker"
 	PrincipalServiceAccount PrincipalKind = "service_account"
 	PrincipalSystem         PrincipalKind = "system"
@@ -150,15 +174,40 @@ const (
 var validPrincipalKinds = map[PrincipalKind]bool{
 	PrincipalUser:           true,
 	PrincipalAgent:          true,
-	PrincipalScopedUAT:      true,
 	PrincipalBroker:         true,
 	PrincipalServiceAccount: true,
 	PrincipalSystem:         true,
 }
 
+// CredentialKind identifies a class of authentication credential
+// admitted for an operation. Separated from PrincipalKind to express
+// distinctions like "user via session JWT but not scoped UAT."
+type CredentialKind string
+
+const (
+	CredentialSessionJWT     CredentialKind = "session_jwt"
+	CredentialScopedUAT      CredentialKind = "scoped_uat"
+	CredentialAgentJWT       CredentialKind = "agent_jwt"
+	CredentialBrokerToken    CredentialKind = "broker_token"
+	CredentialServiceAccount CredentialKind = "service_account_key"
+	CredentialSystemInternal CredentialKind = "system_internal"
+	CredentialIdentityToken  CredentialKind = "identity_token"
+)
+
+// validCredentialKinds is the closed set of recognized credential kinds.
+var validCredentialKinds = map[CredentialKind]bool{
+	CredentialSessionJWT:     true,
+	CredentialScopedUAT:      true,
+	CredentialAgentJWT:       true,
+	CredentialBrokerToken:    true,
+	CredentialServiceAccount: true,
+	CredentialSystemInternal: true,
+	CredentialIdentityToken:  true,
+}
+
 // SecurityEffect classifies the security-meaningful consequence of an
-// operation. Effects do not replace permissions; they select additional
-// checks and invariants an otherwise authorized operation must satisfy.
+// operation. Effects select obligation requirements beyond the base
+// permission.
 type SecurityEffect string
 
 const (
@@ -202,19 +251,97 @@ var validSecurityEffects = map[SecurityEffect]bool{
 	EffectChangeOwnership:       true,
 }
 
-// authorityEffects are effects that require delegation checks.
-var authorityEffects = map[SecurityEffect]bool{
-	EffectGrantAuthority:  true,
-	EffectChangeAuthority: true,
-	EffectRevokeAuthority: true,
-	EffectChangeOwnership: true,
+// DelegationKind classifies delegation check requirements.
+type DelegationKind string
+
+const (
+	// DelegationNone means no delegation check is required.
+	DelegationNone DelegationKind = "none"
+
+	// DelegationNonAmplification means the actor must hold every
+	// permission being granted (CanDelegate / non-amplification).
+	DelegationNonAmplification DelegationKind = "non_amplification"
+
+	// DelegationConditionalIncrease means delegation is checked only
+	// when the proposed change increases authority (before/after
+	// comparison shows increased effective permissions).
+	DelegationConditionalIncrease DelegationKind = "conditional_on_increase"
+)
+
+// validDelegationKinds is the closed set of recognized delegation kinds.
+var validDelegationKinds = map[DelegationKind]bool{
+	DelegationNone:                true,
+	DelegationNonAmplification:    true,
+	DelegationConditionalIncrease: true,
 }
 
-// boundaryEffects are effects that require before/after effective-authority
-// calculation.
-var boundaryEffects = map[SecurityEffect]bool{
-	EffectRelaxBoundary:   true,
-	EffectTightenBoundary: true,
+// delegationStrength orders delegation kinds for subsumption checks.
+// A higher value satisfies all lower requirements.
+var delegationStrength = map[DelegationKind]int{
+	DelegationNone:                0,
+	DelegationNonAmplification:    1,
+	DelegationConditionalIncrease: 2,
+}
+
+// effectDelegationRequirements maps effects to their minimum required
+// delegation kind. Effects not in this map require DelegationNone.
+var effectDelegationRequirements = map[SecurityEffect]DelegationKind{
+	EffectGrantAuthority:  DelegationNonAmplification,
+	EffectChangeAuthority: DelegationConditionalIncrease,
+	EffectChangeOwnership: DelegationNonAmplification,
+}
+
+// effectGovernanceRequired maps effects that require a governance policy.
+var effectGovernanceRequired = map[SecurityEffect]bool{
+	EffectRevokeAuthority:  true,
+	EffectChangeOwnership:  true,
+	EffectRelaxBoundary:    true,
+	EffectTightenBoundary:  true,
+	EffectIssueCredential:  true,
+	EffectMintCredential:   true,
+	EffectAssignCredential: true,
+}
+
+// AuthorityEvalKind classifies authority-delta evaluation requirements.
+type AuthorityEvalKind string
+
+const (
+	// AuthorityEvalNone means no before/after evaluation is required.
+	AuthorityEvalNone AuthorityEvalKind = "none"
+
+	// AuthorityEvalProposedPost evaluates the proposed post-state
+	// authority to verify invariants (e.g., last-owner guard).
+	AuthorityEvalProposedPost AuthorityEvalKind = "proposed_post_state"
+
+	// AuthorityEvalBeforeAndAfter evaluates both before and after
+	// effective authority to detect increases, decreases, and boundary
+	// changes.
+	AuthorityEvalBeforeAndAfter AuthorityEvalKind = "before_and_after"
+)
+
+// validAuthorityEvalKinds is the closed set of recognized authority
+// evaluation kinds.
+var validAuthorityEvalKinds = map[AuthorityEvalKind]bool{
+	AuthorityEvalNone:           true,
+	AuthorityEvalProposedPost:   true,
+	AuthorityEvalBeforeAndAfter: true,
+}
+
+// authorityEvalStrength orders evaluation kinds for subsumption.
+var authorityEvalStrength = map[AuthorityEvalKind]int{
+	AuthorityEvalNone:           0,
+	AuthorityEvalProposedPost:   1,
+	AuthorityEvalBeforeAndAfter: 2,
+}
+
+// effectAuthorityEvalRequirements maps effects to their minimum
+// authority evaluation requirement. Effects not in this map require
+// AuthorityEvalNone.
+var effectAuthorityEvalRequirements = map[SecurityEffect]AuthorityEvalKind{
+	EffectChangeAuthority: AuthorityEvalBeforeAndAfter,
+	EffectChangeOwnership: AuthorityEvalBeforeAndAfter,
+	EffectRelaxBoundary:   AuthorityEvalBeforeAndAfter,
+	EffectTightenBoundary: AuthorityEvalBeforeAndAfter,
 }
 
 // auditRequiredEffects are effects that require audit records.
@@ -234,32 +361,50 @@ var auditRequiredEffects = map[SecurityEffect]bool{
 	EffectEmitExternal:          true,
 }
 
+// AuditFieldReq describes which audit state fields an effect requires.
+type AuditFieldReq struct {
+	NeedsBefore bool
+	NeedsAfter  bool
+}
+
+// effectAuditFieldRequirements maps audit-requiring effects to whether
+// they need before-state and/or after-state fields in the audit record.
+var effectAuditFieldRequirements = map[SecurityEffect]AuditFieldReq{
+	EffectGrantAuthority:        {NeedsBefore: false, NeedsAfter: true},
+	EffectChangeAuthority:       {NeedsBefore: true, NeedsAfter: true},
+	EffectRevokeAuthority:       {NeedsBefore: true, NeedsAfter: false},
+	EffectChangeOwnership:       {NeedsBefore: true, NeedsAfter: true},
+	EffectDeleteResource:        {NeedsBefore: true, NeedsAfter: false},
+	EffectRelaxBoundary:         {NeedsBefore: true, NeedsAfter: true},
+	EffectTightenBoundary:       {NeedsBefore: true, NeedsAfter: true},
+	EffectChangePrincipalStatus: {NeedsBefore: true, NeedsAfter: true},
+	EffectIssueCredential:       {NeedsBefore: false, NeedsAfter: true},
+	EffectMintCredential:        {NeedsBefore: false, NeedsAfter: true},
+	EffectAssignCredential:      {NeedsBefore: false, NeedsAfter: true},
+	EffectReadSecret:            {NeedsBefore: false, NeedsAfter: false},
+	EffectEmitExternal:          {NeedsBefore: false, NeedsAfter: true},
+}
+
 // IsAuthorityEffect reports whether the effect involves creating,
 // modifying, or revoking authority.
 func (e SecurityEffect) IsAuthorityEffect() bool {
-	return authorityEffects[e]
+	switch e {
+	case EffectGrantAuthority, EffectChangeAuthority,
+		EffectRevokeAuthority, EffectChangeOwnership:
+		return true
+	}
+	return false
 }
 
 // IsBoundaryEffect reports whether the effect involves boundary
 // relaxation or tightening.
 func (e SecurityEffect) IsBoundaryEffect() bool {
-	return boundaryEffects[e]
+	return e == EffectRelaxBoundary || e == EffectTightenBoundary
 }
 
 // RequiresAudit reports whether the effect requires an audit record.
 func (e SecurityEffect) RequiresAudit() bool {
 	return auditRequiredEffects[e]
-}
-
-// DelegationPolicy specifies how delegation is checked for
-// authority-increasing effects.
-type DelegationPolicy struct {
-	// RequireNonAmplification means the actor must hold every
-	// permission being granted (CanDelegate check).
-	RequireNonAmplification bool
-
-	// Description explains the delegation semantics for reviewers.
-	Description string
 }
 
 // GovernancePolicy specifies target-governance rules.
@@ -270,10 +415,8 @@ type GovernancePolicy struct {
 	// Description explains the governance semantics for reviewers.
 	Description string
 
-	// DomainCallback names the domain-specific governance function
-	// that evaluates target-governance rules. The callback receives
-	// actor and target context and returns an allow/deny decision.
-	// Format: "package.FunctionName" or a symbolic reference.
+	// DomainCallback names the domain-specific governance function.
+	// Required when Kind is GovernanceDomainSpecific.
 	DomainCallback string
 }
 
@@ -281,25 +424,12 @@ type GovernancePolicy struct {
 type GovernanceKind string
 
 const (
-	// GovernancePeerSuperior compares actor and target roles to
-	// determine whether the actor may manage the target.
-	GovernancePeerSuperior GovernanceKind = "peer_superior"
-
-	// GovernanceOwnershipAncestry evaluates ownership or ancestry
-	// relationships between actor and target.
-	GovernanceOwnershipAncestry GovernanceKind = "ownership_ancestry"
-
-	// GovernanceProtectedPrincipal identifies protected principal
-	// classes that require elevated authority to manage.
+	GovernancePeerSuperior       GovernanceKind = "peer_superior"
+	GovernanceOwnershipAncestry  GovernanceKind = "ownership_ancestry"
 	GovernanceProtectedPrincipal GovernanceKind = "protected_principal"
-
-	// GovernanceConstraintAdmin governs constraint administration
-	// and issuer/credential relationships.
-	GovernanceConstraintAdmin GovernanceKind = "constraint_admin"
-
-	// GovernanceDomainSpecific uses a domain callback for governance
-	// decisions that do not fit the above categories.
-	GovernanceDomainSpecific GovernanceKind = "domain_specific"
+	GovernanceConstraintAdmin    GovernanceKind = "constraint_admin"
+	GovernanceIssuerCredential   GovernanceKind = "issuer_credential"
+	GovernanceDomainSpecific     GovernanceKind = "domain_specific"
 )
 
 // validGovernanceKinds is the closed set of recognized governance kinds.
@@ -308,6 +438,7 @@ var validGovernanceKinds = map[GovernanceKind]bool{
 	GovernanceOwnershipAncestry:  true,
 	GovernanceProtectedPrincipal: true,
 	GovernanceConstraintAdmin:    true,
+	GovernanceIssuerCredential:   true,
 	GovernanceDomainSpecific:     true,
 }
 
@@ -320,10 +451,32 @@ type Invariant struct {
 	// Description explains the invariant for reviewers.
 	Description string
 
+	// Kind classifies the invariant severity.
+	Kind InvariantKind
+
 	// FailClosed specifies the behavior when the invariant cannot
 	// be evaluated (e.g., store error). Must be true for security
 	// invariants.
 	FailClosed bool
+}
+
+// InvariantKind classifies invariant severity.
+type InvariantKind string
+
+const (
+	// InvariantSecurity is a security invariant that must be
+	// fail-closed. Violations indicate a security defect.
+	InvariantSecurity InvariantKind = "security"
+
+	// InvariantBusiness is a business-logic invariant. May be
+	// fail-closed or fail-open depending on business requirements.
+	InvariantBusiness InvariantKind = "business"
+)
+
+// validInvariantKinds is the closed set of recognized invariant kinds.
+var validInvariantKinds = map[InvariantKind]bool{
+	InvariantSecurity: true,
+	InvariantBusiness: true,
 }
 
 // AuditObligation specifies audit requirements for an operation.
@@ -332,15 +485,89 @@ type AuditObligation struct {
 	// "constraint.relax").
 	EventType string
 
-	// RequiredFields lists the before/after fields that must be
-	// present in the audit record.
-	RequiredFields []string
+	// ContextFields lists context fields always required in the
+	// audit record (e.g., "actor_id", "project_id").
+	ContextFields []string
+
+	// BeforeFields lists pre-mutation state fields required in the
+	// audit record. Required by effects that destroy or change state.
+	BeforeFields []string
+
+	// AfterFields lists post-mutation state fields required in the
+	// audit record. Required by effects that create or change state.
+	AfterFields []string
+
+	// Atomic indicates the audit record is written in the same
+	// transaction as the mutation.
+	Atomic bool
+
+	// NonAtomicJustification is required when Atomic is false.
+	// Explains why atomic audit is not feasible and what mitigations
+	// are in place.
+	NonAtomicJustification string
+}
+
+// ExternalEffectPolicy documents the failure/retry contract for
+// operations that emit external effects.
+type ExternalEffectPolicy struct {
+	// DeliveryMode classifies the delivery guarantee.
+	DeliveryMode ExternalDeliveryMode
+
+	// FailureMode classifies how failures are handled.
+	FailureMode ExternalFailureMode
+
+	// IdempotencyKey describes how idempotency is ensured (e.g.,
+	// "dispatch ID", "event correlation ID").
+	IdempotencyKey string
+
+	// RetryPolicy describes retry semantics (e.g., "exponential
+	// backoff with 3 retries", "no retry").
+	RetryPolicy string
+
+	// Compensation describes rollback/compensation on failure.
+	Compensation string
+
+	// AuthBeforeEmit indicates authorization is checked before the
+	// external effect is emitted.
+	AuthBeforeEmit bool
+}
+
+// ExternalDeliveryMode classifies delivery guarantees.
+type ExternalDeliveryMode string
+
+const (
+	DeliveryFireAndForget ExternalDeliveryMode = "fire_and_forget"
+	DeliveryAtLeastOnce   ExternalDeliveryMode = "at_least_once"
+	DeliveryExactlyOnce   ExternalDeliveryMode = "exactly_once"
+)
+
+// validExternalDeliveryModes is the closed set of delivery modes.
+var validExternalDeliveryModes = map[ExternalDeliveryMode]bool{
+	DeliveryFireAndForget: true,
+	DeliveryAtLeastOnce:   true,
+	DeliveryExactlyOnce:   true,
+}
+
+// ExternalFailureMode classifies failure handling.
+type ExternalFailureMode string
+
+const (
+	FailureLogAndContinue ExternalFailureMode = "log_and_continue"
+	FailureFailOperation  ExternalFailureMode = "fail_operation"
+	FailureCompensate     ExternalFailureMode = "compensate"
+)
+
+// validExternalFailureModes is the closed set of failure modes.
+var validExternalFailureModes = map[ExternalFailureMode]bool{
+	FailureLogAndContinue: true,
+	FailureFailOperation:  true,
+	FailureCompensate:     true,
 }
 
 // DenialCode is a stable public denial code.
 type DenialCode string
 
-// Well-known denial codes. Domain appendices may define additional codes.
+// Well-known denial codes.
 const (
 	DenialForbidden               DenialCode = "forbidden"
 	DenialRoleAssignmentForbidden DenialCode = "role_assignment_forbidden"
@@ -364,7 +591,8 @@ type TestRef struct {
 }
 
 // Exemption documents an explicit exemption from normal contract
-// requirements.
+// requirements. Each exemption must declare which specific obligations
+// it waives via the Waives field.
 type Exemption struct {
 	// Kind classifies the exemption.
 	Kind ExemptionKind
@@ -375,6 +603,11 @@ type Exemption struct {
 	// Scope limits the exemption (e.g., "seeding only",
 	// "offline recovery only").
 	Scope string
+
+	// Waives lists the specific obligations this exemption waives.
+	// Validation only bypasses the named requirements; un-waived
+	// requirements are still enforced.
+	Waives []WaivedObligation
 }
 
 // ExemptionKind classifies exemption types.
@@ -399,4 +632,30 @@ var validExemptionKinds = map[ExemptionKind]bool{
 	ExemptionAuthenticationOnly: true,
 	ExemptionPublicEndpoint:     true,
 	ExemptionInternalOnly:       true,
+}
+
+// WaivedObligation identifies a specific requirement an exemption waives.
+type WaivedObligation string
+
+const (
+	WaiveEntryPoints      WaivedObligation = "entry_points"
+	WaivePrincipals       WaivedObligation = "principals"
+	WaiveCredentials      WaivedObligation = "credentials"
+	WaiveBasePermission   WaivedObligation = "base_permission"
+	WaiveResourceResolver WaivedObligation = "resource_resolver"
+	WaiveTestRefs         WaivedObligation = "test_refs"
+	WaiveDenialCodes      WaivedObligation = "denial_codes"
+	WaiveAuditObligation  WaivedObligation = "audit_obligation"
+)
+
+// validWaivedObligations is the closed set of waivable obligations.
+var validWaivedObligations = map[WaivedObligation]bool{
+	WaiveEntryPoints:      true,
+	WaivePrincipals:       true,
+	WaiveCredentials:      true,
+	WaiveBasePermission:   true,
+	WaiveResourceResolver: true,
+	WaiveTestRefs:         true,
+	WaiveDenialCodes:      true,
+	WaiveAuditObligation:  true,
 }

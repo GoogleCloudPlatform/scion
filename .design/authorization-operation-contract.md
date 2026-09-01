@@ -22,7 +22,7 @@ deterministically.
 
 ### 1.1 Operation ID
 
-Every operation has a stable, unique ID in `domain.verb` format:
+Every operation has a stable, unique ID in lowercase dot-separated format:
 
 ```
 project.membership.add
@@ -32,6 +32,13 @@ agent.create
 secret.read
 constraint.relax
 ```
+
+Validation enforces:
+- Lowercase letters, digits, dots, and underscores only.
+- At least two dot-separated segments (domain + verb).
+- No leading, trailing, or consecutive dots.
+- No empty segments.
+- The ID must start with the `Domain` prefix (domain-prefix consistency).
 
 Once assigned, an ID must not change or be reused. IDs are the join key between
 catalog entries, test references, audit records, and coverage gates.
@@ -50,33 +57,64 @@ Every externally reachable path that dispatches an operation must be enumerated:
 | Kind               | Example                                        |
 |--------------------|------------------------------------------------|
 | `http_route`       | `POST /api/v1/projects/{id}/members`           |
+| `websocket`        | `GET /api/v1/ws/agent/{id}`                    |
+| `sse`              | `GET /api/v1/events/{id}`                      |
 | `broker_call`      | `agent.lifecycle.start`                        |
 | `scheduler_job`    | `dispatch_agent`                               |
 | `cli_command`      | `scion server recover-authz`                   |
 | `background_job`   | `agent-heartbeat-timeout`                      |
 | `internal_dispatch`| `authorizeScheduledAgentCreate`                |
 
-HTTP routes require an explicit method. One entry point maps to exactly one
-operation or a documented exemption. Duplicate entry points across operations are
-a validation error.
+HTTP-like entry points (`http_route`, `websocket`, `sse`) require an explicit
+method. Non-HTTP entry points (`broker_call`, `scheduler_job`, `cli_command`,
+`background_job`, `internal_dispatch`) must not declare a method. `websocket`
+and `sse` are distinct from `http_route` because the audit plan identifies
+upgrade/stream semantics as separate protocol concerns.
+
+One entry point maps to exactly one operation or a documented exemption.
+Duplicate entry points across operations are a validation error.
 
 ## 3. Admitted Principals and Credentials
 
-Each operation declares which principal and credential kinds may attempt it:
+Each operation declares both the admitted principal kinds and the admitted
+credential kinds. These are separate closed vocabularies: a principal is the
+authenticated identity class; a credential is the authentication mechanism
+carrying that identity.
+
+### 3.1 Principal Kinds
 
 | Kind              | Description                                     |
 |-------------------|------------------------------------------------|
-| `user`            | Authenticated user (full session)               |
-| `agent`           | Agent with JWT credentials                      |
-| `scoped_uat`      | User Access Token (project-scoped)              |
+| `user`            | Authenticated user                              |
+| `agent`           | Agent identity                                  |
 | `broker`          | Runtime Broker identity                         |
 | `service_account` | GCP service account                             |
 | `system`          | System/internal caller (seeding, migration)     |
 
-The admitted set is a closed vocabulary. An operation that does not list a
-principal kind rejects that kind at the entry point. Exemptions
-(`authentication_only`, `public_endpoint`, `internal_only`) may justify an
-empty principal list for operations that do not perform authorization.
+### 3.2 Credential Kinds
+
+| Kind                   | Description                                      |
+|------------------------|--------------------------------------------------|
+| `session_jwt`          | Full session JWT (user login)                    |
+| `scoped_uat`           | User Access Token (project-scoped)               |
+| `agent_jwt`            | Agent JWT credential                             |
+| `broker_token`         | Runtime Broker authentication token              |
+| `service_account_key`  | GCP service account key/identity                 |
+| `system_internal`      | System/internal authentication                   |
+| `identity_token`       | Identity token (e.g., OIDC, federated identity)  |
+
+### 3.3 Validation Rules
+
+Both vocabularies are closed sets. An operation that does not list a principal
+kind rejects that kind at the entry point. An operation that does not list a
+credential kind rejects that credential. Principal and credential admission are
+validated independently: a user admitted via `session_jwt` but not `scoped_uat`
+is expressible, as is an agent admitted only by `agent_jwt`.
+
+At least one principal and one credential must be declared unless explicitly
+waived (`principals`, `credentials` waived obligations). Exemptions
+(`authentication_only`, `public_endpoint`, `internal_only`) may justify
+empty lists for operations that do not perform authorization.
 
 ## 4. Resource and Scope Resolution
 
@@ -133,30 +171,104 @@ document and the `authzop` package.
 
 ### 6.2 Effect Obligations
 
-| Effect class         | Required                                            |
-|----------------------|-----------------------------------------------------|
-| Authority effects    | Delegation policy (non-amplification check)         |
-| Boundary effects     | Governance policy (before/after authority calc)      |
-| Audit-requiring      | Audit obligation with event type and required fields |
-| All mutations        | At least one post-state invariant is recommended     |
+Each effect selects specific obligation requirements. The spec must declare
+obligations that meet or exceed the minimum required by its strongest effect
+(subsumption model). Validation enforces these rules deterministically.
 
-Read effects (`read-one`, `list-scoped`) do not require delegation, governance,
-or audit obligations.
+#### 6.2.1 Delegation Requirements
+
+| Effect              | Minimum delegation kind      | Rationale                          |
+|---------------------|------------------------------|------------------------------------|
+| `grant-authority`   | `non_amplification`          | Actor must hold all granted perms  |
+| `change-authority`  | `conditional_on_increase`    | Delegate only if authority grows   |
+| `change-ownership`  | `non_amplification`          | Ownership is full authority        |
+| All others          | `none`                       | No delegation check required       |
+
+Revocation (`revoke-authority`) does not require delegation: removing authority
+does not grant the actor any new permissions.
+
+#### 6.2.2 Governance Requirements
+
+| Effect                | Governance required | Rationale                              |
+|-----------------------|:-------------------:|----------------------------------------|
+| `revoke-authority`    | Yes                 | Actor/target relationship check        |
+| `change-ownership`    | Yes                 | Ownership governance                   |
+| `relax-boundary`      | Yes                 | Boundary relaxation governance         |
+| `tighten-boundary`    | Yes                 | Constraint administration governance   |
+| `issue-credential`    | Yes                 | Issuer governance                      |
+| `mint-credential`     | Yes                 | Credential authority governance        |
+| `assign-credential`   | Yes                 | Assignment governance                  |
+
+Authority grant/change effects do not intrinsically require governance;
+governance is a target-relationship check that must be declared explicitly
+when the domain requires it.
+
+#### 6.2.3 Authority Evaluation Requirements
+
+| Effect              | Minimum evaluation kind    | Rationale                           |
+|---------------------|----------------------------|-------------------------------------|
+| `change-authority`  | `before_and_after`         | Detects authority increase/decrease |
+| `change-ownership`  | `before_and_after`         | Ownership mutation evaluation       |
+| `relax-boundary`    | `before_and_after`         | Boundary relaxation evaluation      |
+| `tighten-boundary`  | `before_and_after`         | Boundary change evaluation          |
+| All others          | `none`                     | No delta evaluation required        |
+
+#### 6.2.4 Audit Requirements
+
+Effects that require audit records, with before/after field requirements:
+
+| Effect                    | Audit required | Before fields | After fields |
+|---------------------------|:--------------:|:-------------:|:------------:|
+| `grant-authority`         | Yes            | —             | Required     |
+| `change-authority`        | Yes            | Required      | Required     |
+| `revoke-authority`        | Yes            | Required      | —            |
+| `change-ownership`        | Yes            | Required      | Required     |
+| `delete-resource`         | Yes            | Required      | —            |
+| `relax-boundary`          | Yes            | Required      | Required     |
+| `tighten-boundary`        | Yes            | Required      | Required     |
+| `change-principal-status` | Yes            | Required      | Required     |
+| `issue-credential`        | Yes            | —             | Required     |
+| `mint-credential`         | Yes            | —             | Required     |
+| `assign-credential`       | Yes            | —             | Required     |
+| `read-secret`             | Yes            | —             | —            |
+| `emit-external-effect`    | Yes            | —             | Required     |
+
+Read effects (`read-one`, `list-scoped`), create, and update effects do not
+require delegation, governance, authority evaluation, or audit obligations.
+
+#### 6.2.5 External Effect Policy
+
+The `emit-external-effect` effect requires an `ExternalEffectPolicy` declaring
+delivery mode, failure mode, idempotency, and retry/compensation semantics.
+See section 10.2.
 
 ## 7. Delegation
 
-Delegation policies specify how authority-increasing effects are checked.
+Delegation is specified by a typed `DelegationKind` with an ordered strength
+model. The spec declares its delegation kind; validation enforces that the
+declared kind meets or exceeds the minimum required by the spec's strongest
+effect (subsumption).
 
-```go
-type DelegationPolicy struct {
-    RequireNonAmplification bool
-    Description             string
-}
-```
+### 7.1 Delegation Kinds
 
-When `RequireNonAmplification` is true, the actor must hold every permission
-being granted (the existing `CanDelegate` check). Delegation is a secondary
-check: passing it never bypasses target-governance rules.
+| Kind                     | Strength | Semantics                                 |
+|--------------------------|:--------:|-------------------------------------------|
+| `none`                   | 0        | No delegation check required              |
+| `non_amplification`      | 1        | Actor must hold all granted permissions   |
+| `conditional_on_increase`| 2        | Delegate only when before/after shows increase |
+
+A `DelegationDescription` is required when the kind is not `none`, explaining
+the delegation semantics for reviewers.
+
+### 7.2 Strength Subsumption
+
+`conditional_on_increase` (strength 2) subsumes `non_amplification` (strength 1):
+an operation with both `grant-authority` (requires `non_amplification`) and
+`change-authority` (requires `conditional_on_increase`) may declare
+`conditional_on_increase` and satisfy both requirements.
+
+Delegation is a secondary check: passing it never bypasses target-governance
+rules.
 
 ## 8. Target Governance
 
@@ -172,11 +284,13 @@ or ownership.
 | `ownership_ancestry`    | Ownership or ancestry relationship checks           |
 | `protected_principal`   | Protected principal classes needing elevated access  |
 | `constraint_admin`      | Constraint administration and issuer relationships   |
+| `issuer_credential`     | Issuer/authority governance for credential effects   |
 | `domain_specific`       | Domain callback for operations that don't fit above |
 
 Governance does not assume a total role hierarchy. Different domains use
 different governance models. A domain callback (`DomainCallback`) names the
-domain-specific governance function that evaluates rules.
+domain-specific governance function that evaluates rules. The callback is
+required when `Kind` is `domain_specific`.
 
 ### 8.2 Governance vs Delegation
 
@@ -189,6 +303,25 @@ domain-specific governance function that evaluates rules.
 
 Both checks must pass for authority-affecting operations.
 
+### 8.3 Authority Evaluation
+
+Authority evaluation specifies whether the operation requires before/after
+effective-authority calculation. This is separate from delegation and governance:
+delegation checks whether the actor holds the required permissions; governance
+checks whether the actor may manage the target; authority evaluation detects
+whether the proposed change increases, decreases, or shifts authority boundaries.
+
+| Kind                | Strength | Semantics                                    |
+|---------------------|:--------:|----------------------------------------------|
+| `none`              | 0        | No authority-delta evaluation needed         |
+| `proposed_post_state`| 1       | Evaluate proposed post-state invariants      |
+| `before_and_after`  | 2        | Compare before/after effective authority     |
+
+Strength is ordered for subsumption: `before_and_after` satisfies
+`proposed_post_state`. Effects that change authority, ownership, or boundaries
+require `before_and_after`; effects that only need post-state invariant
+evaluation (e.g., last-owner guard) may use `proposed_post_state`.
+
 ## 9. Post-State Invariants
 
 Invariants are evaluated against the proposed post-state within the same
@@ -196,30 +329,83 @@ transaction. Each invariant specifies:
 
 - A stable ID for tracing.
 - A human-readable description.
-- Whether it is fail-closed (must be `true` for security invariants).
+- A typed severity classification (`Kind`).
+- Whether it is fail-closed (`FailClosed`).
 
-Example invariants:
+### 9.1 Invariant Kinds
 
-| ID                          | Description                                       |
-|-----------------------------|---------------------------------------------------|
-| `last-owner-guard`          | At least one active direct user project-owner must remain |
-| `constraint-admin-lockout`  | At least one active direct user retains constraint admin  |
-| `binding-scope-match`       | Role scope type matches binding scope type        |
+| Kind       | Fail-closed enforcement                                |
+|------------|--------------------------------------------------------|
+| `security` | Must be fail-closed. Validation rejects `FailClosed: false`. |
+| `business` | May be fail-closed or fail-open depending on requirements. |
+
+Security invariants protect authorization guarantees (e.g., last-owner guard).
+Business invariants protect data integrity rules that do not directly affect
+authorization (e.g., binding scope match).
+
+### 9.2 Example Invariants
+
+| ID                          | Kind     | Description                                  |
+|-----------------------------|----------|----------------------------------------------|
+| `last-owner-guard`          | security | At least one active direct user project-owner must remain |
+| `constraint-admin-lockout`  | security | At least one active direct user retains constraint admin  |
+| `binding-scope-match`       | business | Role scope type matches binding scope type   |
 
 Invariants that cannot be evaluated (e.g., store error) must fail closed when
 `FailClosed` is true. This prevents a store failure from silently permitting a
-security-violating mutation.
+security-violating mutation. The `Kind` field is required; omitting it is a
+validation error.
 
 ## 10. Audit Obligations
 
-Operations with audit-requiring effects must declare:
+Operations with audit-requiring effects must declare structured audit
+obligations with typed field categories and atomicity semantics.
 
-- An event type (e.g., `membership.add`, `constraint.relax`).
-- Required before/after fields that must be present in the audit record.
+### 10.1 Audit Record Structure
 
-The audit record is emitted within the same transaction as the mutation.
-Operations that produce external effects must document the failure/retry
-contract when the external effect and the audit record cannot be atomic.
+Each audit obligation specifies:
+
+- **Event type:** stable audit event identifier (e.g., `membership.add`).
+- **Context fields:** always-required fields (e.g., `actor_id`, `project_id`).
+- **Before fields:** pre-mutation state required by destructive/change effects.
+- **After fields:** post-mutation state required by create/change effects.
+- **Atomic:** whether the audit record is written in the same transaction as
+  the mutation.
+- **Non-atomic justification:** required when `Atomic` is false, explaining
+  why atomic audit is not feasible and what mitigations are in place.
+
+Validation enforces:
+
+- At least one context field when an audit obligation is present.
+- Before fields required by effects that destroy or change state (revocations,
+  deletions, authority/boundary changes, status transitions).
+- After fields required by effects that create or change state (grants,
+  credential operations, authority/boundary changes, status transitions,
+  external effects).
+- No empty or duplicate field values within any category.
+- Non-atomic justification required when `Atomic` is false.
+
+See section 6.2.4 for the per-effect before/after requirements.
+
+### 10.2 External Effect Policy
+
+Operations with `emit-external-effect` must declare an `ExternalEffectPolicy`
+specifying the failure/retry contract for effects beyond local database
+mutation.
+
+| Field              | Description                                           |
+|--------------------|-------------------------------------------------------|
+| `DeliveryMode`     | `fire_and_forget`, `at_least_once`, or `exactly_once` |
+| `FailureMode`      | `log_and_continue`, `fail_operation`, or `compensate` |
+| `IdempotencyKey`   | How idempotency is ensured (e.g., "dispatch ID")      |
+| `RetryPolicy`      | Retry semantics (e.g., "exponential backoff, 3 max")  |
+| `Compensation`     | Rollback/compensation on failure (optional)           |
+| `AuthBeforeEmit`   | Whether authorization is checked before emitting      |
+
+All fields except `Compensation` and `AuthBeforeEmit` are required. Validation
+rejects missing delivery mode, failure mode, idempotency key, or retry policy.
+When `FailureMode` is `compensate`, a non-empty `Compensation` description is
+required.
 
 ## 11. Stable Public Denial Codes
 
@@ -240,6 +426,10 @@ product-level reasons, not internal evaluator details.
 | `credential_insufficient`     | Credential lacks required scope/caveat              |
 | `user_suspended`              | Principal is suspended                              |
 | `not_found`                   | Target resource not found                           |
+
+At least one denial code is required per operation unless explicitly waived
+(`denial_codes` waived obligation). This ensures every operation declares its
+public failure contract.
 
 ### 11.2 Casing Convention
 
@@ -280,9 +470,34 @@ Exemptions document explicit departures from normal contract requirements:
 | `public_endpoint`     | Unauthenticated public endpoints (health, metrics)  |
 | `internal_only`       | Internal dispatchers with no external entry point   |
 
-Every exemption requires a non-empty reason and scope. Exemptions are
-searchable and must not be removed without the corresponding contract
-decision.
+Every exemption requires:
+
+- A non-empty **reason** explaining the departure.
+- A non-empty **scope** limiting the exemption's applicability.
+- A non-empty **waives** list declaring the specific obligations bypassed.
+
+### 13.1 Waivable Obligations
+
+| Waived obligation    | What it bypasses                                    |
+|----------------------|-----------------------------------------------------|
+| `entry_points`       | Requirement for at least one entry point            |
+| `principals`         | Requirement for at least one principal kind         |
+| `credentials`        | Requirement for at least one credential kind        |
+| `base_permission`    | Requirement for a base permission                   |
+| `resource_resolver`  | Requirement for a resource resolver                 |
+| `test_refs`          | Requirement for at least one test reference         |
+| `denial_codes`       | Requirement for at least one denial code            |
+| `audit_obligation`   | Requirement for audit record                        |
+
+Validation enforces:
+- Each waived obligation must be from the closed vocabulary above.
+- No duplicate waives within a single exemption.
+- At least one waived obligation per exemption.
+- Only the named requirements are bypassed; un-waived requirements are still
+  enforced.
+
+Exemptions are searchable and must not be removed without the corresponding
+contract decision.
 
 ## 14. Fail-Closed Semantics
 

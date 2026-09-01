@@ -32,7 +32,13 @@ exists.
 
 **Why this archetype:** Contains all three authority effects (grant, change,
 revoke) in one API family, has existing containment and governance rules, and
-exercises delegation, governance, and invariant checks simultaneously.
+exercises delegation (with distinct kinds per effect: `non_amplification` for
+grant, `conditional_on_increase` for change, `none` for revoke), governance,
+authority evaluation (`before_and_after` for change), and invariant checks
+(security kind, fail-closed last-owner-guard) simultaneously. Demonstrates
+separate principal/credential admission (`user` principal with `session_jwt`
+and `scoped_uat` credentials) and structured audit with effect-specific
+before/after field requirements.
 
 ### 2. Cross-Scope Read/List
 
@@ -80,7 +86,9 @@ obligations for destructive operations.
 
 **Why this archetype:** Exercises credential minting, scope validation, issuer
 identity, and the requirement that minted credentials cannot exceed the
-issuer's authority.
+issuer's authority. Demonstrates `issuer_credential` governance kind, separate
+credential kinds (`session_jwt` for authenticated user issuing a `scoped_uat`),
+and after-state audit fields for credential issuance effects.
 
 ### 5. Boundary Relaxation
 
@@ -95,10 +103,11 @@ issuer's authority.
 | Permission            | `access_constraint.update`                         |
 | Protected admin       | Constraint modification requires elevated authority|
 
-**Why this archetype:** Exercises boundary relaxation semantics: before/after
-effective-authority calculation, protected constraint administration, lockout
-prevention invariant, and the requirement that relaxing a boundary is an
-authority-increasing operation.
+**Why this archetype:** Exercises boundary relaxation semantics: `before_and_after`
+authority evaluation, `constraint_admin` governance kind, lockout prevention
+invariant (security kind, fail-closed), and the requirement that relaxing a
+boundary is an authority-increasing operation. Demonstrates both before and
+after audit fields required by boundary effects.
 
 ### 6. External Effect
 
@@ -114,7 +123,9 @@ authority-increasing operation.
 
 **Why this archetype:** The meaningful effect (starting a container, executing
 code, consuming resources) occurs beyond a simple local row mutation. Exercises
-the requirement that external effects have an explicit failure/retry contract
+the `ExternalEffectPolicy` requirement: delivery mode, failure mode, idempotency
+key, and retry/compensation semantics. Demonstrates that external effects have
+a typed failure/retry contract, after-state audit fields for external emission,
 and that authorization is checked even for scheduler-dispatched operations.
 
 ## Validation

@@ -66,75 +66,88 @@ and must not be relaxed without:
 
 ### 3.1 project.membership.add
 
-| Field             | Value                                                     |
-|-------------------|-----------------------------------------------------------|
-| **ID**            | `project.membership.add`                                  |
-| **Domain**        | `project.membership`                                      |
-| **Entry points**  | `POST /api/v1/projects/{id}/members`                      |
-| **Principals**    | `user`, `scoped_uat`                                      |
-| **Resolver**      | `project-from-url`                                        |
-| **Base permission**| `project.manage`                                         |
-| **Effects**       | `grant-authority`                                         |
-| **Delegation**    | Non-amplification: actor must hold all target role perms  |
-| **Governance**    | `peer_superior`: see matrix above                         |
-| **Invariants**    | Binding scope matches role scope type                     |
-| **Audit**         | `membership.add` — target principal, role, project        |
-| **Denial codes**  | `role_assignment_forbidden`, `target_role_protected`, `principal_ineligible` |
-| **Tests**         | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
+| Field               | Value                                                     |
+|---------------------|-----------------------------------------------------------|
+| **ID**              | `project.membership.add`                                  |
+| **Domain**          | `project.membership`                                      |
+| **Entry points**    | `POST /api/v1/projects/{id}/members`                      |
+| **Principals**      | `user`                                                    |
+| **Credentials**     | `session_jwt`, `scoped_uat`                               |
+| **Resolver**        | `project-from-url`                                        |
+| **Base permission** | `project.manage`                                          |
+| **Effects**         | `grant-authority`                                         |
+| **Delegation**      | `non_amplification`: actor must hold all target role perms|
+| **Authority eval**  | `none`                                                    |
+| **Governance**      | `peer_superior`: see matrix above                         |
+| **Invariants**      | Binding scope matches role scope type (business)          |
+| **Audit**           | `membership.add` — context: actor_id, project_id; after: target_principal, role; atomic |
+| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `principal_ineligible` |
+| **Tests**           | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
 
 ### 3.2 project.membership.update
 
-| Field             | Value                                                     |
-|-------------------|-----------------------------------------------------------|
-| **ID**            | `project.membership.update`                               |
-| **Domain**        | `project.membership`                                      |
-| **Entry points**  | `PATCH /api/v1/projects/{id}/members/{bindingID}`         |
-| **Principals**    | `user`, `scoped_uat`                                      |
-| **Resolver**      | `project-from-url`                                        |
-| **Base permission**| `project.manage`                                         |
-| **Effects**       | `change-authority`                                        |
-| **Delegation**    | Non-amplification: actor must hold all new role perms     |
-| **Governance**    | `peer_superior`: see matrix; both old and new role checked|
-| **Invariants**    | `last-owner-guard` (if demoting an owner)                 |
-| **Audit**         | `membership.update` — old role, new role, target principal|
-| **Denial codes**  | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
-| **Tests**         | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
+| Field               | Value                                                     |
+|---------------------|-----------------------------------------------------------|
+| **ID**              | `project.membership.update`                               |
+| **Domain**          | `project.membership`                                      |
+| **Entry points**    | `PATCH /api/v1/projects/{id}/members/{bindingID}`         |
+| **Principals**      | `user`                                                    |
+| **Credentials**     | `session_jwt`, `scoped_uat`                               |
+| **Resolver**        | `project-from-url`                                        |
+| **Base permission** | `project.manage`                                          |
+| **Effects**         | `change-authority`                                        |
+| **Delegation**      | `conditional_on_increase`: delegate only when authority grows |
+| **Authority eval**  | `before_and_after`: compare old/new effective authority    |
+| **Governance**      | `peer_superior`: see matrix; both old and new role checked|
+| **Invariants**      | `last-owner-guard` (security, fail-closed)                |
+| **Audit**           | `membership.update` — context: actor_id, project_id; before: old_role; after: new_role, target_principal; atomic |
+| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
+| **Tests**           | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
 
 ### 3.3 project.membership.remove
 
-| Field             | Value                                                     |
-|-------------------|-----------------------------------------------------------|
-| **ID**            | `project.membership.remove`                               |
-| **Domain**        | `project.membership`                                      |
-| **Entry points**  | `DELETE /api/v1/projects/{id}/members/{bindingID}`        |
-| **Principals**    | `user`, `scoped_uat`                                      |
-| **Resolver**      | `project-from-url`                                        |
-| **Base permission**| `project.manage`                                         |
-| **Effects**       | `revoke-authority`                                        |
-| **Delegation**    | Non-amplification: actor must hold all revoked role perms |
-| **Governance**    | `peer_superior`: see matrix; revoked role checked         |
-| **Invariants**    | `last-owner-guard`                                        |
-| **Audit**         | `membership.remove` — removed role, target principal      |
-| **Denial codes**  | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
-| **Tests**         | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
+| Field               | Value                                                     |
+|---------------------|-----------------------------------------------------------|
+| **ID**              | `project.membership.remove`                               |
+| **Domain**          | `project.membership`                                      |
+| **Entry points**    | `DELETE /api/v1/projects/{id}/members/{bindingID}`        |
+| **Principals**      | `user`                                                    |
+| **Credentials**     | `session_jwt`, `scoped_uat`                               |
+| **Resolver**        | `project-from-url`                                        |
+| **Base permission** | `project.manage`                                          |
+| **Effects**         | `revoke-authority`                                        |
+| **Delegation**      | `none`: revocation does not grant permissions             |
+| **Authority eval**  | `none`                                                    |
+| **Governance**      | `peer_superior`: see matrix; revoked role checked         |
+| **Invariants**      | `last-owner-guard` (security, fail-closed)                |
+| **Audit**           | `membership.remove` — context: actor_id, project_id; before: removed_role, target_principal; atomic |
+| **Denial codes**    | `role_assignment_forbidden`, `target_role_protected`, `LAST_OWNER` |
+| **Tests**           | `pkg/hub:TestProjectMembership_*`, `pkg/hub:TestC0_*`    |
+
+**Note on revocation delegation:** The previous contract claimed non-amplification
+was required for revocation (actor must hold all revoked role perms). This is
+incorrect: removing authority does not grant the actor any new permissions.
+Revocation requires governance (actor/target relationship) but not delegation.
 
 ### 3.4 project.membership.list
 
-| Field             | Value                                                     |
-|-------------------|-----------------------------------------------------------|
-| **ID**            | `project.membership.list`                                 |
-| **Domain**        | `project.membership`                                      |
-| **Entry points**  | `GET /api/v1/projects/{id}/members`                       |
-| **Principals**    | `user`, `agent`, `scoped_uat`                             |
-| **Resolver**      | `project-from-url`                                        |
-| **Base permission**| `project.read`                                           |
-| **Effects**       | `list-scoped`                                             |
-| **Delegation**    | None                                                      |
-| **Governance**    | None                                                      |
-| **Invariants**    | None                                                      |
-| **Audit**         | None (read-only)                                          |
-| **Denial codes**  | `forbidden`                                               |
-| **Tests**         | `pkg/hub:TestProjectMembership_*`                         |
+| Field               | Value                                                     |
+|---------------------|-----------------------------------------------------------|
+| **ID**              | `project.membership.list`                                 |
+| **Domain**          | `project.membership`                                      |
+| **Entry points**    | `GET /api/v1/projects/{id}/members`                       |
+| **Principals**      | `user`, `agent`                                           |
+| **Credentials**     | `session_jwt`, `scoped_uat`, `agent_jwt`                  |
+| **Resolver**        | `project-from-url`                                        |
+| **Base permission** | `project.read`                                            |
+| **Effects**         | `list-scoped`                                             |
+| **Delegation**      | `none`                                                    |
+| **Authority eval**  | `none`                                                    |
+| **Governance**      | None                                                      |
+| **Invariants**      | None                                                      |
+| **Audit**           | None (read-only)                                          |
+| **Denial codes**    | `forbidden`                                               |
+| **Tests**           | `pkg/hub:TestProjectMembership_*`                         |
 
 ## 4. Proposed Semantics
 

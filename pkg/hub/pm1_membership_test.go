@@ -214,6 +214,151 @@ func TestPM1_LastOwnerProtection_CanDeleteNonLastOwner(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+// TestPM1_LastOwnerCount_ExcludesExpiredBindings verifies that
+// countDirectOwnerBindings does not count expired owner bindings. This is
+// a regression test for G8: the count must use the same activation semantics
+// as isProjectOwner to prevent removing the last active owner while expired
+// bindings remain.
+func TestPM1_LastOwnerCount_ExcludesExpiredBindings(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("g8-exp-count-u"), Email: "g8-exp-count@test.com",
+		DisplayName: "G8 Exp Count", Role: store.UserRoleAdmin, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+
+	project := &store.Project{
+		ID: tid("g8-exp-count-p"), Name: "G8 Exp Count Proj", Slug: "g8-exp-count",
+		OwnerID: owner.ID, CreatedBy: owner.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create one active and one expired owner binding.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID))
+
+	expiredUser := &store.User{
+		ID: tid("g8-exp-count-e"), Email: "g8-exp-count-e@test.com",
+		DisplayName: "G8 Expired Owner", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, expiredUser))
+
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	expired := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      expiredUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+		ExpiresAt:        &expired,
+	})
+	require.NoError(t, err)
+
+	// Count must be 1 (only the active binding), not 2.
+	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count,
+		"G8: countDirectOwnerBindings must exclude expired bindings")
+}
+
+// TestPM1_LastOwnerCount_ExcludesFutureBindings verifies that
+// countDirectOwnerBindings does not count not-yet-active owner bindings.
+func TestPM1_LastOwnerCount_ExcludesFutureBindings(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("g8-fut-count-u"), Email: "g8-fut-count@test.com",
+		DisplayName: "G8 Fut Count", Role: store.UserRoleAdmin, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+
+	project := &store.Project{
+		ID: tid("g8-fut-count-p"), Name: "G8 Fut Count Proj", Slug: "g8-fut-count",
+		OwnerID: owner.ID, CreatedBy: owner.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create one active and one future owner binding.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID))
+
+	futureUser := &store.User{
+		ID: tid("g8-fut-count-f"), Email: "g8-fut-count-f@test.com",
+		DisplayName: "G8 Future Owner", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, futureUser))
+
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	future := time.Now().Add(1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      futureUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "system",
+		NotBefore:        &future,
+	})
+	require.NoError(t, err)
+
+	// Count must be 1 (only the active binding), not 2.
+	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count,
+		"G8: countDirectOwnerBindings must exclude not-yet-active bindings")
+}
+
+// TestPM1_LastOwnerCount_OnlyExpiredMeansZero verifies that if all owner
+// bindings are expired, the count is zero — not the raw binding count.
+// This is the core G8 regression: without activation filtering, a caller
+// could remove the last active owner while expired owners inflate the count.
+func TestPM1_LastOwnerCount_OnlyExpiredMeansZero(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: tid("g8-allexp-p"), Name: "G8 AllExp Proj", Slug: "g8-allexp",
+		OwnerID: tid("g8-allexp-other"), CreatedBy: tid("g8-allexp-other"),
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create two expired owner bindings.
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	for _, suffix := range []string{"a", "b"} {
+		u := &store.User{
+			ID: tid("g8-allexp-" + suffix), Email: "g8-allexp-" + suffix + "@test.com",
+			DisplayName: "G8 Expired " + suffix, Role: store.UserRoleMember, Status: "active",
+		}
+		require.NoError(t, s.CreateUser(ctx, u))
+		expired := time.Now().Add(-1 * time.Hour)
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: ownerRoleDef.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          project.ID,
+			CreatedBy:        "system",
+			ExpiresAt:        &expired,
+		})
+		require.NoError(t, err)
+	}
+
+	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count,
+		"G8: all-expired owner bindings must produce count 0")
+}
+
 // TestPM1_MembershipViaRoleBinding verifies that project membership is
 // determined by role bindings, not group membership.
 func TestPM1_MembershipViaRoleBinding(t *testing.T) {

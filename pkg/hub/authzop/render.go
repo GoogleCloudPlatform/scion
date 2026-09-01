@@ -22,13 +22,6 @@ import (
 // RenderMarkdown produces a reviewer-facing Markdown view of the operation
 // catalog. The output is deterministic for a given input: operations are
 // rendered in the order they appear in the slice.
-//
-// The renderer reads only from OperationSpec values. It does not query the
-// database, file system, or any other source. The generated output is not a
-// source of truth; the Go specs are.
-//
-// AF1 will populate the catalog and call this renderer to produce the
-// human-reviewable Markdown. CT1 defines the renderer contract.
 func RenderMarkdown(specs []OperationSpec) string {
 	var b strings.Builder
 
@@ -82,6 +75,17 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 		b.WriteString("\n\n")
 	}
 
+	// Credentials.
+	if len(s.Credentials) > 0 {
+		b.WriteString("**Credentials:** ")
+		creds := make([]string, len(s.Credentials))
+		for i, c := range s.Credentials {
+			creds[i] = "`" + string(c) + "`"
+		}
+		b.WriteString(strings.Join(creds, ", "))
+		b.WriteString("\n\n")
+	}
+
 	// Base permission and resolver.
 	if s.BasePermission != "" {
 		b.WriteString(fmt.Sprintf("**Base Permission:** `%s`  \n", s.BasePermission))
@@ -102,15 +106,18 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	}
 
 	// Delegation.
-	if s.Delegation != nil {
+	if s.DelegationKind != DelegationNone {
 		b.WriteString("### Delegation\n\n")
-		if s.Delegation.RequireNonAmplification {
-			b.WriteString("- **Non-amplification required:** actor must hold all permissions being granted\n")
-		}
-		if s.Delegation.Description != "" {
-			b.WriteString(fmt.Sprintf("- %s\n", s.Delegation.Description))
+		b.WriteString(fmt.Sprintf("- **Kind:** `%s`\n", s.DelegationKind))
+		if s.DelegationDescription != "" {
+			b.WriteString(fmt.Sprintf("- %s\n", s.DelegationDescription))
 		}
 		b.WriteString("\n")
+	}
+
+	// Authority evaluation.
+	if s.AuthorityEval != AuthorityEvalNone {
+		b.WriteString(fmt.Sprintf("**Authority Evaluation:** `%s`\n\n", s.AuthorityEval))
 	}
 
 	// Governance.
@@ -129,14 +136,16 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	// Invariants.
 	if len(s.Invariants) > 0 {
 		b.WriteString("### Invariants\n\n")
-		b.WriteString("| ID | Description | Fail-Closed |\n")
-		b.WriteString("|----|-------------|-------------|\n")
+		b.WriteString("| ID | Kind | Description | Fail-Closed |\n")
+		b.WriteString("|----|------|-------------|-------------|\n")
 		for _, inv := range s.Invariants {
 			fc := "No"
 			if inv.FailClosed {
 				fc = "Yes"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", escapeTableCell(inv.ID), escapeTableCell(inv.Description), fc))
+			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+				escapeTableCell(inv.ID), escapeTableCell(string(inv.Kind)),
+				escapeTableCell(inv.Description), fc))
 		}
 		b.WriteString("\n")
 	}
@@ -145,8 +154,38 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	if s.AuditObligation != nil {
 		b.WriteString("### Audit\n\n")
 		b.WriteString(fmt.Sprintf("- **Event Type:** `%s`\n", s.AuditObligation.EventType))
-		if len(s.AuditObligation.RequiredFields) > 0 {
-			b.WriteString(fmt.Sprintf("- **Required Fields:** %s\n", strings.Join(s.AuditObligation.RequiredFields, ", ")))
+		if len(s.AuditObligation.ContextFields) > 0 {
+			b.WriteString(fmt.Sprintf("- **Context Fields:** %s\n", strings.Join(s.AuditObligation.ContextFields, ", ")))
+		}
+		if len(s.AuditObligation.BeforeFields) > 0 {
+			b.WriteString(fmt.Sprintf("- **Before Fields:** %s\n", strings.Join(s.AuditObligation.BeforeFields, ", ")))
+		}
+		if len(s.AuditObligation.AfterFields) > 0 {
+			b.WriteString(fmt.Sprintf("- **After Fields:** %s\n", strings.Join(s.AuditObligation.AfterFields, ", ")))
+		}
+		if s.AuditObligation.Atomic {
+			b.WriteString("- **Atomic:** Yes\n")
+		} else {
+			b.WriteString("- **Atomic:** No\n")
+			if s.AuditObligation.NonAtomicJustification != "" {
+				b.WriteString(fmt.Sprintf("- **Non-Atomic Justification:** %s\n", s.AuditObligation.NonAtomicJustification))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// External effect policy.
+	if s.ExternalPolicy != nil {
+		b.WriteString("### External Effect Policy\n\n")
+		b.WriteString(fmt.Sprintf("- **Delivery:** `%s`\n", s.ExternalPolicy.DeliveryMode))
+		b.WriteString(fmt.Sprintf("- **Failure Mode:** `%s`\n", s.ExternalPolicy.FailureMode))
+		b.WriteString(fmt.Sprintf("- **Idempotency:** %s\n", s.ExternalPolicy.IdempotencyKey))
+		b.WriteString(fmt.Sprintf("- **Retry:** %s\n", s.ExternalPolicy.RetryPolicy))
+		if s.ExternalPolicy.Compensation != "" {
+			b.WriteString(fmt.Sprintf("- **Compensation:** %s\n", s.ExternalPolicy.Compensation))
+		}
+		if s.ExternalPolicy.AuthBeforeEmit {
+			b.WriteString("- **Auth Before Emit:** Yes\n")
 		}
 		b.WriteString("\n")
 	}
@@ -178,6 +217,13 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 			b.WriteString(fmt.Sprintf("- **%s:** %s", ex.Kind, ex.Reason))
 			if ex.Scope != "" {
 				b.WriteString(fmt.Sprintf(" (scope: %s)", ex.Scope))
+			}
+			if len(ex.Waives) > 0 {
+				waives := make([]string, len(ex.Waives))
+				for i, w := range ex.Waives {
+					waives[i] = "`" + string(w) + "`"
+				}
+				b.WriteString(fmt.Sprintf(" — waives: %s", strings.Join(waives, ", ")))
 			}
 			b.WriteString("\n")
 		}

@@ -761,15 +761,12 @@ func (s *Server) ensureHubMembersProjectVisibility(ctx context.Context, project 
 	}
 }
 
-// countDirectOwnerBindings returns the number of direct-user project-owner
-// role bindings for a project.
-//
-// Known limitation (O3): This count includes all matching bindings regardless
-// of activation conditions (NotBefore, ExpiresAt). An expired or not-yet-active
-// binding still counts toward the minimum owner threshold. Currently moot
-// because owner bindings are created unconditionally without time bounds, but
-// this will need to filter by activation state if time-bounded ownership
-// bindings are introduced.
+// countDirectOwnerBindings returns the number of active direct-user
+// project-owner role bindings for a project. "Active" means the binding's
+// activation lifecycle is currently in effect: NotBefore <= now (or nil)
+// and ExpiresAt > now (or nil). This matches the isProjectOwner activation
+// semantics in AuthzService, ensuring the last-owner invariant cannot be
+// bypassed by expired or not-yet-active bindings.
 func (s *Server) countDirectOwnerBindings(ctx context.Context, projectID string) (int, error) {
 	bindings, err := s.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
@@ -779,11 +776,20 @@ func (s *Server) countDirectOwnerBindings(ctx context.Context, projectID string)
 	if err != nil {
 		return 0, err
 	}
+	now := time.Now()
 	count := 0
 	for _, b := range bindings {
-		if b.PrincipalType == store.RoleBindingPrincipalUser && b.RoleDefinitionID == ownerRoleDef.ID {
-			count++
+		if b.PrincipalType != store.RoleBindingPrincipalUser || b.RoleDefinitionID != ownerRoleDef.ID {
+			continue
 		}
+		// Activation lifecycle: binding must be currently active.
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		count++
 	}
 	return count, nil
 }
