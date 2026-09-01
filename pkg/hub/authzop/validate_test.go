@@ -142,12 +142,12 @@ func TestValidate_ExemptionsBypassEntryPointAndPrincipalRequirements(t *testing.
 	s.BasePermission = ""
 	s.ResourceResolver = ""
 	s.Exemptions = []Exemption{
-		{Kind: ExemptionInternalOnly, Reason: "Internal-only operation"},
+		{Kind: ExemptionInternalOnly, Reason: "Internal-only operation", Scope: "all paths"},
 	}
 	// Still need effects and test refs (test fixture exempts tests)
 	s.TestRefs = nil
 	s.Exemptions = append(s.Exemptions, Exemption{
-		Kind: ExemptionTestFixture, Reason: "Test-only operation",
+		Kind: ExemptionTestFixture, Reason: "Test-only operation", Scope: "test only",
 	})
 
 	if err := s.Validate(); err != nil {
@@ -172,7 +172,7 @@ func TestValidate_ResourceResolverExemptionBehavior(t *testing.T) {
 		s := validSpec()
 		s.ResourceResolver = ""
 		s.Exemptions = []Exemption{
-			{Kind: ExemptionPublicEndpoint, Reason: "No resource scope needed for public endpoint"},
+			{Kind: ExemptionPublicEndpoint, Reason: "No resource scope needed for public endpoint", Scope: "public routes"},
 		}
 		if err := s.Validate(); err != nil {
 			t.Errorf("expected exemption to bypass resource resolver requirement, got: %v", err)
@@ -424,7 +424,7 @@ func TestValidate_TestRefRequiresPackageAndFunction(t *testing.T) {
 	}
 }
 
-func TestValidate_ExemptionRequiresKindAndReason(t *testing.T) {
+func TestValidate_ExemptionRequiresKindReasonAndScope(t *testing.T) {
 	s := validSpec()
 	s.Exemptions = []Exemption{{}}
 	err := s.Validate()
@@ -437,12 +437,15 @@ func TestValidate_ExemptionRequiresKindAndReason(t *testing.T) {
 	if !strings.Contains(err.Error(), "reason is required") {
 		t.Errorf("expected reason required error, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "scope is required") {
+		t.Errorf("expected scope required error, got: %v", err)
+	}
 }
 
 func TestValidate_UnknownExemptionKind(t *testing.T) {
 	s := validSpec()
 	s.Exemptions = []Exemption{
-		{Kind: "wishful_thinking", Reason: "Because"},
+		{Kind: "wishful_thinking", Reason: "Because", Scope: "all"},
 	}
 	err := s.Validate()
 	if err == nil {
@@ -655,7 +658,11 @@ func TestValidate_AllValidGovernanceKinds(t *testing.T) {
 		s := validSpec()
 		s.Effects = []SecurityEffect{EffectRelaxBoundary}
 		s.AuditObligation = &AuditObligation{EventType: "test"}
-		s.Governance = &GovernancePolicy{Kind: k, Description: "Test"}
+		gov := &GovernancePolicy{Kind: k, Description: "Test"}
+		if k == GovernanceDomainSpecific {
+			gov.DomainCallback = "pkg.TestCallback"
+		}
+		s.Governance = gov
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid governance kind %q caused error: %v", k, err)
 		}
@@ -671,7 +678,7 @@ func TestValidate_AllValidExemptionKinds(t *testing.T) {
 	}
 	for _, k := range kinds {
 		s := validSpec()
-		s.Exemptions = []Exemption{{Kind: k, Reason: "Test reason"}}
+		s.Exemptions = []Exemption{{Kind: k, Reason: "Test reason", Scope: "test only"}}
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid exemption kind %q caused error: %v", k, err)
 		}
@@ -812,5 +819,117 @@ func TestRenderMarkdown_PipeEscaping(t *testing.T) {
 	}
 	if !strings.Contains(out, `pipe\|test`) {
 		t.Error("expected escaped pipe in invariant ID")
+	}
+}
+
+// --- O1: Exemption.Scope validation tests ---
+
+func TestValidate_ExemptionMissingScopeFails(t *testing.T) {
+	s := validSpec()
+	s.Exemptions = []Exemption{
+		{Kind: ExemptionTestFixture, Reason: "Test fixture", Scope: ""},
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for exemption without scope")
+	}
+	if !strings.Contains(err.Error(), "scope is required") {
+		t.Errorf("expected scope required error, got: %v", err)
+	}
+}
+
+func TestValidate_ExemptionWithScopePasses(t *testing.T) {
+	s := validSpec()
+	s.Exemptions = []Exemption{
+		{Kind: ExemptionTestFixture, Reason: "Test fixture", Scope: "test only"},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected exemption with scope to pass, got: %v", err)
+	}
+}
+
+// --- O2: Duplicate exemption detection tests ---
+
+func TestValidate_DuplicateExemptions(t *testing.T) {
+	s := validSpec()
+	s.Exemptions = []Exemption{
+		{Kind: ExemptionTestFixture, Reason: "First", Scope: "test only"},
+		{Kind: ExemptionTestFixture, Reason: "Second", Scope: "test only"},
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate exemptions")
+	}
+	if !strings.Contains(err.Error(), `duplicate exemption kind "test_fixture"`) {
+		t.Errorf("expected duplicate exemption error, got: %v", err)
+	}
+}
+
+func TestValidate_DistinctExemptionsPasses(t *testing.T) {
+	s := validSpec()
+	s.Exemptions = []Exemption{
+		{Kind: ExemptionTestFixture, Reason: "Test fixture", Scope: "test only"},
+		{Kind: ExemptionInternalOnly, Reason: "Internal operation", Scope: "all paths"},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected distinct exemptions to pass, got: %v", err)
+	}
+}
+
+func TestValidate_SameKindDifferentScopePasses(t *testing.T) {
+	s := validSpec()
+	s.Exemptions = []Exemption{
+		{Kind: ExemptionTestFixture, Reason: "Unit tests", Scope: "unit tests"},
+		{Kind: ExemptionTestFixture, Reason: "Integration tests", Scope: "integration tests"},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected same kind with different scopes to pass, got: %v", err)
+	}
+}
+
+// --- O3: GovernanceDomainSpecific requires DomainCallback ---
+
+func TestValidate_DomainSpecificGovernanceRequiresCallback(t *testing.T) {
+	s := validSpec()
+	s.Effects = []SecurityEffect{EffectRelaxBoundary}
+	s.AuditObligation = &AuditObligation{EventType: "test"}
+	s.Governance = &GovernancePolicy{
+		Kind:        GovernanceDomainSpecific,
+		Description: "Custom governance",
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for domain_specific governance without callback")
+	}
+	if !strings.Contains(err.Error(), "domain_specific kind requires a non-empty domain callback") {
+		t.Errorf("expected domain callback error, got: %v", err)
+	}
+}
+
+func TestValidate_DomainSpecificGovernanceWithCallbackPasses(t *testing.T) {
+	s := validSpec()
+	s.Effects = []SecurityEffect{EffectRelaxBoundary}
+	s.AuditObligation = &AuditObligation{EventType: "test"}
+	s.Governance = &GovernancePolicy{
+		Kind:           GovernanceDomainSpecific,
+		Description:    "Custom governance",
+		DomainCallback: "authz.CheckCustomGovernance",
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected domain_specific with callback to pass, got: %v", err)
+	}
+}
+
+func TestValidate_NonDomainSpecificGovernanceIgnoresCallback(t *testing.T) {
+	// peer_superior governance should pass without a DomainCallback
+	s := validSpec()
+	s.Effects = []SecurityEffect{EffectRelaxBoundary}
+	s.AuditObligation = &AuditObligation{EventType: "test"}
+	s.Governance = &GovernancePolicy{
+		Kind:        GovernancePeerSuperior,
+		Description: "Peer/superior check",
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected non-domain-specific governance to pass without callback, got: %v", err)
 	}
 }

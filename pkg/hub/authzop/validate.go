@@ -141,6 +141,9 @@ func (s *OperationSpec) Validate() error {
 		if s.Governance.Description == "" {
 			errs = append(errs, errors.New("governance policy: description is required"))
 		}
+		if s.Governance.Kind == GovernanceDomainSpecific && s.Governance.DomainCallback == "" {
+			errs = append(errs, errors.New("governance policy: domain_specific kind requires a non-empty domain callback"))
+		}
 	}
 
 	// Audit-requiring effects need an audit obligation or exemption.
@@ -202,6 +205,7 @@ func (s *OperationSpec) Validate() error {
 	}
 
 	// Exemption validation.
+	exSeen := make(map[string]bool)
 	for i, ex := range s.Exemptions {
 		if ex.Kind == "" {
 			errs = append(errs, fmt.Errorf("exemption [%d]: kind is required", i))
@@ -211,6 +215,14 @@ func (s *OperationSpec) Validate() error {
 		if ex.Reason == "" {
 			errs = append(errs, fmt.Errorf("exemption [%d]: reason is required", i))
 		}
+		if ex.Scope == "" {
+			errs = append(errs, fmt.Errorf("exemption [%d]: scope is required", i))
+		}
+		exKey := string(ex.Kind) + ":" + ex.Scope
+		if exSeen[exKey] {
+			errs = append(errs, fmt.Errorf("exemption [%d]: duplicate exemption kind %q with scope %q", i, ex.Kind, ex.Scope))
+		}
+		exSeen[exKey] = true
 	}
 
 	if len(errs) == 0 {
