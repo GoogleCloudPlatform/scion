@@ -22,6 +22,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 import { classMap } from 'lit/directives/class-map.js';
 
@@ -67,210 +68,201 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
     if (this.blurTimeoutId) clearTimeout(this.blurTimeoutId);
   }
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .scope-selector {
-      display: flex;
-      flex-direction: column;
-      gap: 1.5rem;
-    }
+      .scope-selector {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
 
-    .scope-options {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
+      .scope-options {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
 
-    .scope-card {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      padding: 0.875rem 1rem;
-      min-height: 44px;
-      border: 2px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      cursor: pointer;
-      transition:
-        border-color 0.15s ease,
-        background-color 0.15s ease;
-      background: var(--scion-surface, #ffffff);
-    }
-
-    .scope-card:hover {
-      border-color: var(--sl-color-primary-300, #93c5fd);
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .scope-card:focus-visible {
-      outline: 2px solid var(--sl-color-primary-600, #2563eb);
-      outline-offset: 2px;
-    }
-
-    .scope-card.selected {
-      border-color: var(--sl-color-primary-600, #2563eb);
-      background: var(--sl-color-primary-50, #eff6ff);
-    }
-
-    .scope-icon {
-      flex-shrink: 0;
-      font-size: 1.125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.0625rem;
-    }
-
-    .scope-card.selected .scope-icon {
-      color: var(--sl-color-primary-600, #2563eb);
-    }
-
-    .scope-content {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .scope-label {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .scope-description {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.125rem;
-    }
-
-    .project-search {
-      position: relative;
-    }
-
-    .search-dropdown {
-      position: absolute;
-      top: 100%;
-      left: 0;
-      right: 0;
-      z-index: 1000;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-      max-height: 200px;
-      overflow-y: auto;
-      margin-top: 0.25rem;
-    }
-
-    .search-option {
-      display: flex;
-      flex-direction: column;
-      padding: 0.5rem 0.75rem;
-      min-height: 44px;
-      justify-content: center;
-      cursor: pointer;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .search-option:focus-visible {
-      outline: 2px solid var(--sl-color-primary-600, #2563eb);
-      outline-offset: -2px;
-    }
-
-    .search-option.active-descendant {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .search-option:last-child {
-      border-bottom: none;
-    }
-
-    .search-option:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .search-option .project-name {
-      font-weight: 500;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .search-option .project-slug {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .search-empty,
-    .search-loading {
-      padding: 0.75rem;
-      text-align: center;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .summary {
-      padding: 0.75rem 1rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    @media (max-width: 768px) {
       .scope-card {
-        width: 100%;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.75rem;
+        padding: 0.875rem 1rem;
+        min-height: 44px;
+        border: 2px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        cursor: pointer;
+        transition:
+          border-color 0.15s ease,
+          background-color 0.15s ease;
+        background: var(--scion-surface, #ffffff);
       }
 
-      .project-search {
-        width: 100%;
-      }
-
-      .search-dropdown {
-        max-height: 180px;
-      }
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .scope-card {
-        border: 2px solid ButtonText;
-      }
-
-      .scope-card.selected {
-        border-color: Highlight;
-        background: none;
+      .scope-card:hover {
+        border-color: var(--sl-color-primary-300, #93c5fd);
+        background: var(--scion-bg-subtle, #f1f5f9);
       }
 
       .scope-card:focus-visible {
-        outline: 2px solid Highlight;
+        outline: 2px solid var(--sl-color-primary-600, #2563eb);
+        outline-offset: 2px;
+      }
+
+      .scope-card.selected {
+        border-color: var(--sl-color-primary-600, #2563eb);
+        background: var(--sl-color-primary-50, #eff6ff);
+      }
+
+      .scope-icon {
+        flex-shrink: 0;
+        font-size: 1.125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.0625rem;
+      }
+
+      .scope-card.selected .scope-icon {
+        color: var(--sl-color-primary-600, #2563eb);
+      }
+
+      .scope-content {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .scope-label {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .scope-description {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.125rem;
+      }
+
+      .project-search {
+        position: relative;
       }
 
       .search-dropdown {
-        border: 2px solid ButtonText;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        z-index: 1000;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        max-height: 200px;
+        overflow-y: auto;
+        margin-top: 0.25rem;
       }
 
-      .search-option:hover,
+      .search-option {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0.75rem;
+        min-height: 44px;
+        justify-content: center;
+        cursor: pointer;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .search-option:focus-visible {
+        outline: 2px solid var(--sl-color-primary-600, #2563eb);
+        outline-offset: -2px;
+      }
+
       .search-option.active-descendant {
-        outline: 2px solid Highlight;
+        background: var(--scion-bg-subtle, #f1f5f9);
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      .scope-card {
-        transition: none;
+      .search-option:last-child {
+        border-bottom: none;
       }
-    }
-  `;
+
+      .search-option:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .search-option .project-name {
+        font-weight: 500;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .search-option .project-slug {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .search-empty,
+      .search-loading {
+        padding: 0.75rem;
+        text-align: center;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .summary {
+        padding: 0.75rem 1rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      @media (max-width: 768px) {
+        .scope-card {
+          width: 100%;
+        }
+
+        .project-search {
+          width: 100%;
+        }
+
+        .search-dropdown {
+          max-height: 180px;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .scope-card {
+          border: 2px solid ButtonText;
+        }
+
+        .scope-card.selected {
+          border-color: Highlight;
+          background: none;
+        }
+
+        .scope-card:focus-visible {
+          outline: 2px solid Highlight;
+        }
+
+        .search-dropdown {
+          border: 2px solid ButtonText;
+        }
+
+        .search-option:hover,
+        .search-option.active-descendant {
+          outline: 2px solid Highlight;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .scope-card {
+          transition: none;
+        }
+      }
+    `,
+  ];
 
   private handleScopeSelect(type: 'system' | 'project'): void {
     if (type !== this.scopeType) {

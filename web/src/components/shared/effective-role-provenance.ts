@@ -35,6 +35,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -148,337 +149,328 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   /** Whether explain layers have been successfully loaded at least once. */
   @state() private _explainLoaded = false;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .section {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
-    }
+      .section {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+      }
 
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 1rem;
-    }
+      .section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+      }
 
-    .section-header h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
+      .section-header h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
 
-    .role-count {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 400;
-      margin-left: 0.5rem;
-    }
+      .role-count {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 400;
+        margin-left: 0.5rem;
+      }
 
-    .standalone-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 1rem;
-    }
+      .standalone-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+      }
 
-    .standalone-header h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
+      .standalone-header h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
 
-    /* Role cards list */
-    .role-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    .role-card {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      padding: 0.75rem 1rem;
-      background: var(--scion-bg-subtle, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      gap: 1rem;
-    }
-
-    .role-card:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .role-card-left {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      min-width: 0;
-      flex: 1;
-    }
-
-    .role-name {
-      font-weight: 600;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .role-scope {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .scope-tag {
-      display: inline-flex;
-      align-items: center;
-      padding: 0.0625rem 0.375rem;
-      border-radius: 9999px;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    /* Provenance badge */
-    .provenance {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.75rem;
-    }
-
-    .provenance.direct {
-      color: var(--sl-color-primary-600, #2563eb);
-    }
-
-    .provenance.group {
-      color: var(--sl-color-warning-600, #d97706);
-    }
-
-    .provenance sl-icon {
-      font-size: 0.75rem;
-    }
-
-    /* Lifecycle status badge */
-    .role-card-right {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 0.25rem;
-      flex-shrink: 0;
-    }
-
-    .status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      font-size: 0.6875rem;
-      font-weight: 500;
-    }
-
-    .status-badge.active {
-      background: var(--sl-color-success-100, #dcfce7);
-      color: var(--sl-color-success-700, #15803d);
-    }
-
-    .status-badge.expired {
-      background: var(--sl-color-danger-100, #fee2e2);
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-
-    .status-badge.pending {
-      background: var(--sl-color-warning-100, #fef3c7);
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    .lifecycle-info {
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    /* Empty state */
-    .empty-state {
-      text-align: center;
-      padding: 2rem 1.5rem;
-    }
-
-    .empty-state sl-icon {
-      font-size: 2.5rem;
-      color: var(--scion-text-muted, #64748b);
-      opacity: 0.4;
-      margin-bottom: 0.75rem;
-    }
-
-    .empty-state h3 {
-      font-size: 1rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.25rem 0;
-    }
-
-    .empty-state p {
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-      margin: 0;
-    }
-
-    /* Loading / Error */
-    .loading-state {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 2rem;
-      color: var(--scion-text-muted, #64748b);
-      gap: 0.75rem;
-      font-size: 0.875rem;
-    }
-
-    .error-state {
-      color: var(--sl-color-danger-600, #dc2626);
-      font-size: 0.875rem;
-      padding: 0.75rem 1rem;
-      background: var(--sl-color-danger-50, #fef2f2);
-      border-radius: var(--scion-radius, 0.5rem);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.5rem;
-    }
-
-    /* Layers section */
-    .layers-toggle {
-      margin-top: 1rem;
-      padding-top: 0.75rem;
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .layers-toggle-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      cursor: pointer;
-      user-select: none;
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--sl-color-primary-600, #2563eb);
-      padding: 0.25rem 0;
-    }
-
-    .layers-toggle-header:hover {
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .layers-toggle-header sl-icon {
-      font-size: 0.75rem;
-      transition: transform 0.2s ease;
-    }
-
-    .layers-toggle-header sl-icon.open {
-      transform: rotate(90deg);
-    }
-
-    .layers-content {
-      margin-top: 0.75rem;
-    }
-
-    .explain-error {
-      font-size: 0.8125rem;
-      color: var(--sl-color-danger-600, #dc2626);
-      padding: 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .explain-loading {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem;
-    }
-
-    .redaction-notice {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      font-style: italic;
-      padding: 0.375rem 0;
-    }
-
-    @media (max-width: 768px) {
-      .role-card {
+      /* Role cards list */
+      .role-list {
+        display: flex;
         flex-direction: column;
         gap: 0.5rem;
       }
 
-      .role-card-right {
-        align-items: flex-start;
-      }
-    }
-
-    .role-name {
-      overflow-wrap: anywhere;
-    }
-
-    .scope-tag {
-      overflow-wrap: anywhere;
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .section {
-        border-color: ButtonText;
-      }
-
       .role-card {
-        border-color: ButtonText;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        padding: 0.75rem 1rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        gap: 1rem;
+      }
+
+      .role-card:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .role-card-left {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        min-width: 0;
+        flex: 1;
+      }
+
+      .role-name {
+        font-weight: 600;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .role-scope {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .scope-tag {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 500;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Provenance badge */
+      .provenance {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.75rem;
+      }
+
+      .provenance.direct {
+        color: var(--sl-color-primary-600, #2563eb);
+      }
+
+      .provenance.group {
+        color: var(--sl-color-warning-600, #d97706);
+      }
+
+      .provenance sl-icon {
+        font-size: 0.75rem;
+      }
+
+      /* Lifecycle status badge */
+      .role-card-right {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.25rem;
+        flex-shrink: 0;
       }
 
       .status-badge {
-        border: 1px solid ButtonText;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 500;
+      }
+
+      .status-badge.active {
+        background: var(--sl-color-success-100, #dcfce7);
+        color: var(--sl-color-success-700, #15803d);
+      }
+
+      .status-badge.expired {
+        background: var(--sl-color-danger-100, #fee2e2);
+        color: var(--sl-color-danger-700, #b91c1c);
+      }
+
+      .status-badge.pending {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      .lifecycle-info {
+        font-size: 0.6875rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Empty state */
+      .empty-state {
+        text-align: center;
+        padding: 2rem 1.5rem;
+      }
+
+      .empty-state sl-icon {
+        font-size: 2.5rem;
+        color: var(--scion-text-muted, #64748b);
+        opacity: 0.4;
+        margin-bottom: 0.75rem;
+      }
+
+      .empty-state h3 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.25rem 0;
+      }
+
+      .empty-state p {
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+        margin: 0;
+      }
+
+      /* Loading / Error */
+      .loading-state {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        color: var(--scion-text-muted, #64748b);
+        gap: 0.75rem;
+        font-size: 0.875rem;
       }
 
       .error-state {
-        border: 1px solid ButtonText;
+        color: var(--sl-color-danger-600, #dc2626);
+        font-size: 0.875rem;
+        padding: 0.75rem 1rem;
+        background: var(--sl-color-danger-50, #fef2f2);
+        border-radius: var(--scion-radius, 0.5rem);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
       }
 
+      /* Layers section */
       .layers-toggle {
-        border-top-color: ButtonText;
+        margin-top: 1rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      .layers-toggle-header sl-icon {
-        transition: none;
+      .layers-toggle-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+        user-select: none;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--sl-color-primary-600, #2563eb);
+        padding: 0.25rem 0;
       }
-    }
-  `;
+
+      .layers-toggle-header:hover {
+        color: var(--sl-color-primary-700, #1d4ed8);
+      }
+
+      .layers-toggle-header sl-icon {
+        font-size: 0.75rem;
+        transition: transform 0.2s ease;
+      }
+
+      .layers-toggle-header sl-icon.open {
+        transform: rotate(90deg);
+      }
+
+      .layers-content {
+        margin-top: 0.75rem;
+      }
+
+      .explain-error {
+        font-size: 0.8125rem;
+        color: var(--sl-color-danger-600, #dc2626);
+        padding: 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .explain-loading {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem;
+      }
+
+      .redaction-notice {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        font-style: italic;
+        padding: 0.375rem 0;
+      }
+
+      @media (max-width: 768px) {
+        .role-card {
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+
+        .role-card-right {
+          align-items: flex-start;
+        }
+      }
+
+      .role-name {
+        overflow-wrap: anywhere;
+      }
+
+      .scope-tag {
+        overflow-wrap: anywhere;
+      }
+
+      @media (forced-colors: active) {
+        .section {
+          border-color: ButtonText;
+        }
+
+        .role-card {
+          border-color: ButtonText;
+        }
+
+        .status-badge {
+          border: 1px solid ButtonText;
+        }
+
+        .error-state {
+          border: 1px solid ButtonText;
+        }
+
+        .layers-toggle {
+          border-top-color: ButtonText;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .layers-toggle-header sl-icon {
+          transition: none;
+        }
+      }
+    `,
+  ];
 
   /** Guard to prevent double-fetch when connectedCallback and updated both fire. */
   private _initialLoadDone = false;

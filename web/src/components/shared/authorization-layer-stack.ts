@@ -38,6 +38,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PermissionId, RedactionNotice } from '../../shared/access-boundaries.js';
@@ -107,369 +108,360 @@ export class ScionAuthorizationLayerStack extends LitElement {
   /** Which layers are expanded. */
   @state() private expandedLayers: Set<string> = new Set();
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .layer-stack {
-      position: relative;
-      padding-left: 1.5rem;
-    }
-
-    /* Vertical connector line */
-    .layer-stack::before {
-      content: '';
-      position: absolute;
-      left: 0.6875rem;
-      top: 1.5rem;
-      bottom: 1.5rem;
-      width: 2px;
-      background: var(--scion-border, #e2e8f0);
-    }
-
-    .layer {
-      position: relative;
-      margin-bottom: 0.5rem;
-    }
-
-    /* Dot on the vertical line */
-    .layer::before {
-      content: '';
-      position: absolute;
-      left: -0.9375rem;
-      top: 0.875rem;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--scion-border, #e2e8f0);
-      border: 2px solid var(--scion-surface, #ffffff);
-    }
-
-    .layer.potential::before {
-      background: var(--sl-color-primary-500, #3b82f6);
-    }
-
-    .layer.boundaries::before {
-      background: var(--sl-color-warning-500, #f59e0b);
-    }
-
-    .layer.restrictions::before {
-      background: var(--sl-color-neutral-500, #6b7280);
-    }
-
-    .layer.effective::before {
-      background: var(--sl-color-success-500, #22c55e);
-    }
-
-    .layer-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      min-height: 44px;
-      background: var(--scion-bg-subtle, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      cursor: pointer;
-      user-select: none;
-      transition: background 0.15s ease;
-    }
-
-    .layer-header:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .layer-header.not-expandable {
-      cursor: default;
-    }
-
-    .layer-label {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      flex: 1;
-    }
-
-    .layer-count {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-    }
-
-    .layer-count.potential {
-      color: var(--sl-color-primary-600, #2563eb);
-    }
-
-    .layer-count.effective {
-      color: var(--sl-color-success-600, #16a34a);
-    }
-
-    .layer-count.removes {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .expand-icon {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      transition: transform 0.2s ease;
-    }
-
-    .expand-icon.open {
-      transform: rotate(90deg);
-    }
-
-    /* Expanded detail area */
-    .layer-detail {
-      margin-top: 0.25rem;
-      margin-left: 0.75rem;
-      padding: 0.5rem 0.75rem;
-      border-left: 2px solid var(--scion-border, #e2e8f0);
-      font-size: 0.8125rem;
-    }
-
-    .boundary-row,
-    .restriction-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.375rem 0;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .boundary-row + .boundary-row,
-    .restriction-row + .restriction-row {
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .boundary-name {
-      flex: 1;
-      font-weight: 500;
-      overflow-wrap: anywhere;
-    }
-
-    .boundary-link {
-      color: var(--sl-color-primary-600, #2563eb);
-      text-decoration: none;
-      cursor: pointer;
-    }
-
-    .boundary-link:hover {
-      text-decoration: underline;
-    }
-
-    .boundary-redacted {
-      color: var(--scion-text-muted, #64748b);
-      font-style: italic;
-    }
-
-    .removal-count {
-      font-size: 0.75rem;
-      font-weight: 500;
-      color: var(--sl-color-danger-600, #dc2626);
-      white-space: nowrap;
-    }
-
-    .overlap-note {
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .restriction-kind {
-      flex: 1;
-      font-weight: 500;
-    }
-
-    .status-dot {
-      display: inline-block;
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-
-    .status-dot.active {
-      background: var(--sl-color-success-500, #22c55e);
-    }
-
-    .status-dot.scheduled {
-      background: var(--sl-color-warning-500, #f59e0b);
-    }
-
-    .status-dot.expired {
-      background: var(--sl-color-danger-500, #ef4444);
-    }
-
-    /* Denied permissions detail */
-    .denied-list {
-      margin-top: 0.5rem;
-    }
-
-    .denied-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-      padding: 0.25rem 0;
-      font-size: 0.75rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .denied-item + .denied-item {
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .denied-permission-id {
-      font-family: var(--sl-font-mono, monospace);
-      font-weight: 500;
-      flex: 1;
-      overflow-wrap: anywhere;
-    }
-
-    .denied-reason {
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-      text-align: right;
-      max-width: 60%;
-    }
-
-    .denied-reason .reason-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.0625rem 0.375rem;
-      border-radius: 9999px;
-      font-size: 0.625rem;
-      font-weight: 500;
-    }
-
-    .reason-tag.never-granted {
-      background: var(--sl-color-neutral-100, #f1f5f9);
-      color: var(--sl-color-neutral-600, #475569);
-    }
-
-    .reason-tag.inactive {
-      background: var(--sl-color-warning-100, #fef3c7);
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    .reason-tag.boundary {
-      background: var(--sl-color-danger-100, #fee2e2);
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-
-    .reason-tag.restriction {
-      background: var(--sl-color-neutral-100, #f1f5f9);
-      color: var(--sl-color-neutral-700, #334155);
-    }
-
-    .reason-tag.failed {
-      background: var(--sl-color-danger-100, #fee2e2);
-      color: var(--sl-color-danger-800, #991b1b);
-    }
-
-    .empty-layer {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      padding: 0.25rem 0;
-      font-style: italic;
-    }
-
-    .layer-label,
-    .restriction-kind {
-      overflow-wrap: anywhere;
-    }
-
-    .denied-permission-id {
-      overflow-wrap: anywhere;
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (max-width: 768px) {
       .layer-stack {
-        padding-left: 1rem;
+        position: relative;
+        padding-left: 1.5rem;
+      }
+
+      /* Vertical connector line */
+      .layer-stack::before {
+        content: '';
+        position: absolute;
+        left: 0.6875rem;
+        top: 1.5rem;
+        bottom: 1.5rem;
+        width: 2px;
+        background: var(--scion-border, #e2e8f0);
+      }
+
+      .layer {
+        position: relative;
+        margin-bottom: 0.5rem;
+      }
+
+      /* Dot on the vertical line */
+      .layer::before {
+        content: '';
+        position: absolute;
+        left: -0.9375rem;
+        top: 0.875rem;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--scion-border, #e2e8f0);
+        border: 2px solid var(--scion-surface, #ffffff);
+      }
+
+      .layer.potential::before {
+        background: var(--sl-color-primary-500, #3b82f6);
+      }
+
+      .layer.boundaries::before {
+        background: var(--sl-color-warning-500, #f59e0b);
+      }
+
+      .layer.restrictions::before {
+        background: var(--sl-color-neutral-500, #6b7280);
+      }
+
+      .layer.effective::before {
+        background: var(--sl-color-success-500, #22c55e);
       }
 
       .layer-header {
-        padding: 0.625rem 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
         min-height: 44px;
-        gap: 0.375rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.15s ease;
       }
 
+      .layer-header:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .layer-header.not-expandable {
+        cursor: default;
+      }
+
+      .layer-label {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        flex: 1;
+      }
+
+      .layer-count {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text-muted, #64748b);
+        white-space: nowrap;
+      }
+
+      .layer-count.potential {
+        color: var(--sl-color-primary-600, #2563eb);
+      }
+
+      .layer-count.effective {
+        color: var(--sl-color-success-600, #16a34a);
+      }
+
+      .layer-count.removes {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .expand-icon {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        transition: transform 0.2s ease;
+      }
+
+      .expand-icon.open {
+        transform: rotate(90deg);
+      }
+
+      /* Expanded detail area */
       .layer-detail {
-        padding: 0.375rem 0.5rem;
+        margin-top: 0.25rem;
+        margin-left: 0.75rem;
+        padding: 0.5rem 0.75rem;
+        border-left: 2px solid var(--scion-border, #e2e8f0);
+        font-size: 0.8125rem;
       }
 
       .boundary-row,
       .restriction-row {
-        flex-wrap: wrap;
-        min-height: 44px;
-      }
-
-      .denied-item {
-        flex-direction: column;
-        gap: 0.25rem;
-      }
-
-      .denied-reason {
-        text-align: left;
-        max-width: 100%;
-      }
-    }
-
-    @media (forced-colors: active) {
-      .layer-stack::before {
-        background: ButtonText;
-      }
-
-      .layer::before {
-        border-color: Canvas;
-        forced-color-adjust: none;
-      }
-
-      .layer-header {
-        border-color: ButtonText;
-      }
-
-      .layer-detail {
-        border-left-color: ButtonText;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.375rem 0;
+        color: var(--scion-text, #1e293b);
       }
 
       .boundary-row + .boundary-row,
-      .restriction-row + .restriction-row,
-      .denied-item + .denied-item {
-        border-top-color: ButtonText;
+      .restriction-row + .restriction-row {
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .boundary-name {
+        flex: 1;
+        font-weight: 500;
+        overflow-wrap: anywhere;
+      }
+
+      .boundary-link {
+        color: var(--sl-color-primary-600, #2563eb);
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .boundary-link:hover {
+        text-decoration: underline;
+      }
+
+      .boundary-redacted {
+        color: var(--scion-text-muted, #64748b);
+        font-style: italic;
+      }
+
+      .removal-count {
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: var(--sl-color-danger-600, #dc2626);
+        white-space: nowrap;
+      }
+
+      .overlap-note {
+        font-size: 0.6875rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .restriction-kind {
+        flex: 1;
+        font-weight: 500;
       }
 
       .status-dot {
-        forced-color-adjust: none;
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        flex-shrink: 0;
       }
 
-      .reason-tag {
-        border: 1px solid ButtonText;
+      .status-dot.active {
+        background: var(--sl-color-success-500, #22c55e);
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      .expand-icon {
-        transition: none;
+      .status-dot.scheduled {
+        background: var(--sl-color-warning-500, #f59e0b);
       }
-      .layer-header {
-        transition: none;
+
+      .status-dot.expired {
+        background: var(--sl-color-danger-500, #ef4444);
       }
-    }
-  `;
+
+      /* Denied permissions detail */
+      .denied-list {
+        margin-top: 0.5rem;
+      }
+
+      .denied-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        padding: 0.25rem 0;
+        font-size: 0.75rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .denied-item + .denied-item {
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .denied-permission-id {
+        font-family: var(--sl-font-mono, monospace);
+        font-weight: 500;
+        flex: 1;
+        overflow-wrap: anywhere;
+      }
+
+      .denied-reason {
+        font-size: 0.6875rem;
+        color: var(--scion-text-muted, #64748b);
+        text-align: right;
+        max-width: 60%;
+      }
+
+      .denied-reason .reason-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        font-size: 0.625rem;
+        font-weight: 500;
+      }
+
+      .reason-tag.never-granted {
+        background: var(--sl-color-neutral-100, #f1f5f9);
+        color: var(--sl-color-neutral-600, #475569);
+      }
+
+      .reason-tag.inactive {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      .reason-tag.boundary {
+        background: var(--sl-color-danger-100, #fee2e2);
+        color: var(--sl-color-danger-700, #b91c1c);
+      }
+
+      .reason-tag.restriction {
+        background: var(--sl-color-neutral-100, #f1f5f9);
+        color: var(--sl-color-neutral-700, #334155);
+      }
+
+      .reason-tag.failed {
+        background: var(--sl-color-danger-100, #fee2e2);
+        color: var(--sl-color-danger-800, #991b1b);
+      }
+
+      .empty-layer {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        padding: 0.25rem 0;
+        font-style: italic;
+      }
+
+      .layer-label,
+      .restriction-kind {
+        overflow-wrap: anywhere;
+      }
+
+      .denied-permission-id {
+        overflow-wrap: anywhere;
+      }
+
+      @media (max-width: 768px) {
+        .layer-stack {
+          padding-left: 1rem;
+        }
+
+        .layer-header {
+          padding: 0.625rem 0.5rem;
+          min-height: 44px;
+          gap: 0.375rem;
+        }
+
+        .layer-detail {
+          padding: 0.375rem 0.5rem;
+        }
+
+        .boundary-row,
+        .restriction-row {
+          flex-wrap: wrap;
+          min-height: 44px;
+        }
+
+        .denied-item {
+          flex-direction: column;
+          gap: 0.25rem;
+        }
+
+        .denied-reason {
+          text-align: left;
+          max-width: 100%;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .layer-stack::before {
+          background: ButtonText;
+        }
+
+        .layer::before {
+          border-color: Canvas;
+          forced-color-adjust: none;
+        }
+
+        .layer-header {
+          border-color: ButtonText;
+        }
+
+        .layer-detail {
+          border-left-color: ButtonText;
+        }
+
+        .boundary-row + .boundary-row,
+        .restriction-row + .restriction-row,
+        .denied-item + .denied-item {
+          border-top-color: ButtonText;
+        }
+
+        .status-dot {
+          forced-color-adjust: none;
+        }
+
+        .reason-tag {
+          border: 1px solid ButtonText;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .expand-icon {
+          transition: none;
+        }
+        .layer-header {
+          transition: none;
+        }
+      }
+    `,
+  ];
 
   // ---------------------------------------------------------------------------
   // Actions

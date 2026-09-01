@@ -32,6 +32,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 /* -------------------------------------------------------------------------- */
@@ -97,259 +98,243 @@ export class ScionSecurityReviewDialog extends LitElement {
   /** The element that had focus before the dialog opened. */
   private _previouslyFocusedElement: HTMLElement | null = null;
 
-  static override styles = css`
-    :host {
-      display: contents;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: contents;
+      }
 
-    .review-header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1rem;
-    }
+      .review-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+      }
 
-    .review-header sl-icon {
-      font-size: 1.5rem;
-      color: var(--sl-color-warning-600, #d97706);
-    }
+      .review-header sl-icon {
+        font-size: 1.5rem;
+        color: var(--sl-color-warning-600, #d97706);
+      }
 
-    .review-header h3 {
-      margin: 0;
-      font-size: 1rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .review-description {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      line-height: 1.5;
-      margin-bottom: 1rem;
-    }
-
-    .boundary-list {
-      list-style: none;
-      padding: 0;
-      margin: 0 0 1rem 0;
-    }
-
-    .boundary-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-      padding: 0.625rem 0.75rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      margin-bottom: 0.5rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .boundary-item sl-icon {
-      flex-shrink: 0;
-      color: var(--sl-color-warning-600, #d97706);
-      margin-top: 0.125rem;
-    }
-
-    .boundary-item-text {
-      flex: 1;
-      font-size: 0.8125rem;
-      color: var(--scion-text, #1e293b);
-      line-height: 1.4;
-    }
-
-    .boundary-name {
-      font-weight: 600;
-    }
-
-    .review-note {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      line-height: 1.5;
-      padding: 0.75rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      border-left: 3px solid var(--sl-color-warning-500, #eab308);
-      margin-bottom: 1rem;
-    }
-
-    .contact-admin {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      padding: 0.75rem;
-      background: var(--sl-color-neutral-100, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      margin-bottom: 1rem;
-    }
-
-    .contact-admin strong {
-      display: block;
-      margin-bottom: 0.25rem;
-    }
-
-    /* Lockout conflict display */
-    .lockout-section {
-      margin-bottom: 1rem;
-    }
-
-    .lockout-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--sl-color-danger-700, #b91c1c);
-      margin-bottom: 0.5rem;
-    }
-
-    .lockout-header sl-icon {
-      font-size: 1.125rem;
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .lockout-detail {
-      font-size: 0.8125rem;
-      color: var(--scion-text, #1e293b);
-      line-height: 1.5;
-      margin-bottom: 0.5rem;
-    }
-
-    .lockout-scope {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-      background: var(--sl-color-danger-50, #fef2f2);
-      padding: 0.25rem 0.5rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      display: inline-block;
-      margin-bottom: 0.5rem;
-    }
-
-    .lockout-admins {
-      list-style: none;
-      padding: 0;
-      margin: 0.5rem 0;
-    }
-
-    .lockout-admins li {
-      font-size: 0.8125rem;
-      padding: 0.25rem 0;
-      color: var(--scion-text, #1e293b);
-      font-family: var(--scion-font-mono, monospace);
-    }
-
-    .lockout-admins li::before {
-      content: '• ';
-      color: var(--sl-color-danger-500, #ef4444);
-    }
-
-    .lockout-suggestions {
-      list-style: none;
-      padding: 0;
-      margin: 0.5rem 0;
-    }
-
-    .lockout-suggestions li {
-      font-size: 0.8125rem;
-      padding: 0.375rem 0.625rem;
-      margin-bottom: 0.25rem;
-      color: var(--scion-text, #1e293b);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-
-    .lockout-suggestions li sl-icon {
-      font-size: 0.75rem;
-      margin-right: 0.25rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .lockout-recovery-note {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      font-style: italic;
-      margin-top: 0.5rem;
-    }
-
-    /* Zoom / touch targets */
-    sl-button {
-      min-height: 44px;
-    }
-
-    .boundary-item-text,
-    .lockout-detail,
-    .review-description {
-      overflow-wrap: anywhere;
-    }
-
-    /* Utility: screen-reader-only */
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    /* Responsive: full-width dialog on mobile */
-    @media (max-width: 768px) {
-      sl-dialog::part(panel) {
-        width: 100vw;
-        max-width: 100vw;
+      .review-header h3 {
         margin: 0;
-        border-radius: 0;
-        max-height: 100vh;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
       }
 
-      sl-dialog::part(body) {
-        overflow-y: auto;
-        max-height: calc(100vh - 8rem);
+      .review-description {
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        line-height: 1.5;
+        margin-bottom: 1rem;
       }
 
-      sl-dialog::part(footer) {
-        position: sticky;
-        bottom: 0;
-        background: var(--scion-surface, #ffffff);
-        border-top: 1px solid var(--scion-border, #e2e8f0);
-        padding: 0.75rem;
+      .boundary-list {
+        list-style: none;
+        padding: 0;
+        margin: 0 0 1rem 0;
       }
-    }
 
-    /* High contrast mode */
-    @media (forced-colors: active) {
       .boundary-item {
-        border: 1px solid ButtonText;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        padding: 0.625rem 0.75rem;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        margin-bottom: 0.5rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .boundary-item sl-icon {
+        flex-shrink: 0;
+        color: var(--sl-color-warning-600, #d97706);
+        margin-top: 0.125rem;
+      }
+
+      .boundary-item-text {
+        flex: 1;
+        font-size: 0.8125rem;
+        color: var(--scion-text, #1e293b);
+        line-height: 1.4;
+      }
+
+      .boundary-name {
+        font-weight: 600;
       }
 
       .review-note {
-        border-left: 3px solid ButtonText;
-      }
-
-      .lockout-scope {
-        border: 1px solid ButtonText;
-      }
-
-      sl-button::part(base) {
-        border: 1px solid ButtonText;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        line-height: 1.5;
+        padding: 0.75rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        border-left: 3px solid var(--sl-color-warning-500, #eab308);
+        margin-bottom: 1rem;
       }
 
       .contact-admin {
-        border: 1px solid ButtonText;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        padding: 0.75rem;
+        background: var(--sl-color-neutral-100, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        margin-bottom: 1rem;
       }
-    }
 
-    /* Reduced motion */
-    @media (prefers-reduced-motion: reduce) {
-      * {
-        transition: none !important;
-        animation: none !important;
+      .contact-admin strong {
+        display: block;
+        margin-bottom: 0.25rem;
       }
-    }
-  `;
+
+      /* Lockout conflict display */
+      .lockout-section {
+        margin-bottom: 1rem;
+      }
+
+      .lockout-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--sl-color-danger-700, #b91c1c);
+        margin-bottom: 0.5rem;
+      }
+
+      .lockout-header sl-icon {
+        font-size: 1.125rem;
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .lockout-detail {
+        font-size: 0.8125rem;
+        color: var(--scion-text, #1e293b);
+        line-height: 1.5;
+        margin-bottom: 0.5rem;
+      }
+
+      .lockout-scope {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        background: var(--sl-color-danger-50, #fef2f2);
+        padding: 0.25rem 0.5rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        display: inline-block;
+        margin-bottom: 0.5rem;
+      }
+
+      .lockout-admins {
+        list-style: none;
+        padding: 0;
+        margin: 0.5rem 0;
+      }
+
+      .lockout-admins li {
+        font-size: 0.8125rem;
+        padding: 0.25rem 0;
+        color: var(--scion-text, #1e293b);
+        font-family: var(--scion-font-mono, monospace);
+      }
+
+      .lockout-admins li::before {
+        content: '• ';
+        color: var(--sl-color-danger-500, #ef4444);
+      }
+
+      .lockout-suggestions {
+        list-style: none;
+        padding: 0;
+        margin: 0.5rem 0;
+      }
+
+      .lockout-suggestions li {
+        font-size: 0.8125rem;
+        padding: 0.375rem 0.625rem;
+        margin-bottom: 0.25rem;
+        color: var(--scion-text, #1e293b);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+      }
+
+      .lockout-suggestions li sl-icon {
+        font-size: 0.75rem;
+        margin-right: 0.25rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .lockout-recovery-note {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        font-style: italic;
+        margin-top: 0.5rem;
+      }
+
+      /* Zoom / touch targets */
+      sl-button {
+        min-height: 44px;
+      }
+
+      .boundary-item-text,
+      .lockout-detail,
+      .review-description {
+        overflow-wrap: anywhere;
+      }
+
+      /* Utility: screen-reader-only */
+
+      /* Responsive: full-width dialog on mobile */
+      @media (max-width: 768px) {
+        sl-dialog::part(panel) {
+          width: 100vw;
+          max-width: 100vw;
+          margin: 0;
+          border-radius: 0;
+          max-height: 100vh;
+        }
+
+        sl-dialog::part(body) {
+          overflow-y: auto;
+          max-height: calc(100vh - 8rem);
+        }
+
+        sl-dialog::part(footer) {
+          position: sticky;
+          bottom: 0;
+          background: var(--scion-surface, #ffffff);
+          border-top: 1px solid var(--scion-border, #e2e8f0);
+          padding: 0.75rem;
+        }
+      }
+
+      /* High contrast mode */
+      @media (forced-colors: active) {
+        .boundary-item {
+          border: 1px solid ButtonText;
+        }
+
+        .review-note {
+          border-left: 3px solid ButtonText;
+        }
+
+        .lockout-scope {
+          border: 1px solid ButtonText;
+        }
+
+        sl-button::part(base) {
+          border: 1px solid ButtonText;
+        }
+
+        .contact-admin {
+          border: 1px solid ButtonText;
+        }
+      }
+    `,
+  ];
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('open')) {

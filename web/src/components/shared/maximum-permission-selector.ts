@@ -33,6 +33,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 import { classMap } from 'lit/directives/class-map.js';
 
@@ -74,380 +75,371 @@ export class ScionMaximumPermissionSelector extends LitElement {
     void this.loadRegistry();
   }
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .permission-selector {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-    }
-
-    .controls {
-      display: flex;
-      gap: 0.75rem;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    .search-input {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .filter-tabs {
-      display: flex;
-      gap: 0.25rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      padding: 0.125rem;
-    }
-
-    .filter-tab {
-      padding: 0.375rem 0.75rem;
-      min-height: 44px;
-      font-size: 0.8125rem;
-      font-weight: 500;
-      border: none;
-      background: none;
-      border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem);
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-      transition: all 0.15s ease;
-      font-family: inherit;
-      white-space: nowrap;
-    }
-
-    .filter-tab:hover {
-      color: var(--scion-text, #1e293b);
-    }
-
-    .filter-tab.active {
-      background: var(--scion-surface, #ffffff);
-      color: var(--scion-text, #1e293b);
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    }
-
-    .sticky-summary {
-      position: sticky;
-      top: 0;
-      z-index: 10;
-      display: flex;
-      gap: 1rem;
-      align-items: center;
-      flex-wrap: wrap;
-      padding: 0.75rem 1rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-    }
-
-    .summary-item {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
-
-    .summary-label {
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .summary-value {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .summary-value.retained {
-      color: var(--sl-color-success-600, #16a34a);
-    }
-
-    .summary-value.removed {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .summary-value.new-since {
-      color: var(--sl-color-warning-600, #ca8a04);
-    }
-
-    .permission-groups {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-
-    .permission-group {
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow: hidden;
-    }
-
-    .group-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0.625rem 1rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .group-header:hover {
-      background: var(--sl-color-neutral-100, #e7edf3);
-    }
-
-    .group-header-left {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .group-chevron {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      transition: transform 0.15s ease;
-    }
-
-    .group-chevron.collapsed {
-      transform: rotate(-90deg);
-    }
-
-    .group-name {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .group-count {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 400;
-    }
-
-    .group-actions {
-      display: flex;
-      gap: 0.25rem;
-    }
-
-    .group-action-btn {
-      font-size: 0.75rem;
-      padding: 0.125rem 0.5rem;
-      min-height: 44px;
-      min-width: 44px;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      background: var(--scion-surface, #ffffff);
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-      font-family: inherit;
-      transition: all 0.15s ease;
-    }
-
-    .group-action-btn:hover {
-      border-color: var(--sl-color-primary-300, #93c5fd);
-      color: var(--sl-color-primary-600, #2563eb);
-    }
-
-    .group-permissions {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .permission-row {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 1rem;
-      min-height: 44px;
-      border-bottom: 1px solid var(--scion-border-light, #f1f5f9);
-      transition: background-color 0.1s ease;
-    }
-
-    .permission-row:last-child {
-      border-bottom: none;
-    }
-
-    .permission-row:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .permission-row:focus-visible {
-      outline: 2px solid var(--sl-color-primary-600, #2563eb);
-      outline-offset: -2px;
-    }
-
-    .permission-toggle {
-      flex-shrink: 0;
-    }
-
-    .permission-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .permission-id-row {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
-
-    .permission-id {
-      font-size: 0.8125rem;
-      font-weight: 500;
-      color: var(--scion-text, #1e293b);
-      font-family: var(--sl-font-mono, monospace);
-      word-break: break-all;
-      overflow-wrap: anywhere;
-    }
-
-    .permission-new-badge {
-      flex-shrink: 0;
-    }
-
-    .permission-copy-btn {
-      flex-shrink: 0;
-      opacity: 0;
-      transition: opacity 0.15s ease;
-    }
-
-    .permission-row:hover .permission-copy-btn {
-      opacity: 1;
-    }
-
-    .permission-description {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.125rem;
-      line-height: 1.4;
-    }
-
-    .permission-status {
-      flex-shrink: 0;
-      font-size: 0.75rem;
-      font-weight: 500;
-    }
-
-    .permission-status.retained {
-      color: var(--sl-color-success-600, #16a34a);
-    }
-
-    .permission-status.removed {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .loading-state,
-    .error-state,
-    .empty-state {
-      text-align: center;
-      padding: 3rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .error-state {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    @media (max-width: 768px) {
-      .controls {
+      .permission-selector {
+        display: flex;
         flex-direction: column;
-        align-items: stretch;
+        gap: 1rem;
+      }
+
+      .controls {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        flex-wrap: wrap;
       }
 
       .search-input {
-        min-width: 0;
-        width: 100%;
+        flex: 1;
+        min-width: 200px;
       }
 
       .filter-tabs {
-        justify-content: center;
+        display: flex;
+        gap: 0.25rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        padding: 0.125rem;
+      }
+
+      .filter-tab {
+        padding: 0.375rem 0.75rem;
+        min-height: 44px;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        border: none;
+        background: none;
+        border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem);
+        cursor: pointer;
+        color: var(--scion-text-muted, #64748b);
+        transition: all 0.15s ease;
+        font-family: inherit;
+        white-space: nowrap;
+      }
+
+      .filter-tab:hover {
+        color: var(--scion-text, #1e293b);
+      }
+
+      .filter-tab.active {
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #1e293b);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
       }
 
       .sticky-summary {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 0.75rem 1rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+      }
+
+      .summary-item {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .summary-label {
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .summary-value {
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .summary-value.retained {
+        color: var(--sl-color-success-600, #16a34a);
+      }
+
+      .summary-value.removed {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .summary-value.new-since {
+        color: var(--sl-color-warning-600, #ca8a04);
+      }
+
+      .permission-groups {
+        display: flex;
         flex-direction: column;
-        gap: 0.5rem;
-        align-items: flex-start;
-      }
-
-      .permission-row {
-        flex-wrap: wrap;
-      }
-
-      .permission-info {
-        flex-basis: 100%;
-        order: 2;
-        padding-left: 2rem;
-      }
-
-      .group-header {
-        flex-wrap: wrap;
-        gap: 0.5rem;
-      }
-
-      .group-actions {
-        width: 100%;
-        justify-content: flex-end;
-      }
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .filter-tab.active {
-        border: 2px solid Highlight;
+        gap: 0.75rem;
       }
 
       .permission-group {
-        border: 2px solid ButtonText;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        overflow: hidden;
       }
 
       .group-header {
-        border-bottom: 2px solid ButtonText;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.625rem 1rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        cursor: pointer;
+        user-select: none;
       }
 
-      .permission-row:focus-visible {
-        outline: 2px solid Highlight;
+      .group-header:hover {
+        background: var(--sl-color-neutral-100, #e7edf3);
+      }
+
+      .group-header-left {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .group-chevron {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        transition: transform 0.15s ease;
+      }
+
+      .group-chevron.collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .group-name {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .group-count {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 400;
+      }
+
+      .group-actions {
+        display: flex;
+        gap: 0.25rem;
       }
 
       .group-action-btn {
-        border: 1px solid ButtonText;
+        font-size: 0.75rem;
+        padding: 0.125rem 0.5rem;
+        min-height: 44px;
+        min-width: 44px;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        background: var(--scion-surface, #ffffff);
+        cursor: pointer;
+        color: var(--scion-text-muted, #64748b);
+        font-family: inherit;
+        transition: all 0.15s ease;
       }
 
       .group-action-btn:hover {
-        border-color: Highlight;
+        border-color: var(--sl-color-primary-300, #93c5fd);
+        color: var(--sl-color-primary-600, #2563eb);
+      }
+
+      .group-permissions {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .permission-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 1rem;
+        min-height: 44px;
+        border-bottom: 1px solid var(--scion-border-light, #f1f5f9);
+        transition: background-color 0.1s ease;
+      }
+
+      .permission-row:last-child {
+        border-bottom: none;
+      }
+
+      .permission-row:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .permission-row:focus-visible {
+        outline: 2px solid var(--sl-color-primary-600, #2563eb);
+        outline-offset: -2px;
+      }
+
+      .permission-toggle {
+        flex-shrink: 0;
+      }
+
+      .permission-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .permission-id-row {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .permission-id {
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+        font-family: var(--sl-font-mono, monospace);
+        word-break: break-all;
+        overflow-wrap: anywhere;
+      }
+
+      .permission-new-badge {
+        flex-shrink: 0;
+      }
+
+      .permission-copy-btn {
+        flex-shrink: 0;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .permission-row:hover .permission-copy-btn {
+        opacity: 1;
+      }
+
+      .permission-description {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.125rem;
+        line-height: 1.4;
+      }
+
+      .permission-status {
+        flex-shrink: 0;
+        font-size: 0.75rem;
+        font-weight: 500;
       }
 
       .permission-status.retained {
-        color: ButtonText;
+        color: var(--sl-color-success-600, #16a34a);
       }
 
       .permission-status.removed {
-        color: ButtonText;
+        color: var(--sl-color-danger-600, #dc2626);
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      .filter-tab,
-      .group-action-btn,
-      .permission-row,
-      .permission-copy-btn,
-      .group-chevron {
-        transition: none;
+      .loading-state,
+      .error-state,
+      .empty-state {
+        text-align: center;
+        padding: 3rem 2rem;
+        color: var(--scion-text-muted, #64748b);
       }
-    }
-  `;
+
+      .error-state {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      @media (max-width: 768px) {
+        .controls {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .search-input {
+          min-width: 0;
+          width: 100%;
+        }
+
+        .filter-tabs {
+          justify-content: center;
+        }
+
+        .sticky-summary {
+          flex-direction: column;
+          gap: 0.5rem;
+          align-items: flex-start;
+        }
+
+        .permission-row {
+          flex-wrap: wrap;
+        }
+
+        .permission-info {
+          flex-basis: 100%;
+          order: 2;
+          padding-left: 2rem;
+        }
+
+        .group-header {
+          flex-wrap: wrap;
+          gap: 0.5rem;
+        }
+
+        .group-actions {
+          width: 100%;
+          justify-content: flex-end;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .filter-tab.active {
+          border: 2px solid Highlight;
+        }
+
+        .permission-group {
+          border: 2px solid ButtonText;
+        }
+
+        .group-header {
+          border-bottom: 2px solid ButtonText;
+        }
+
+        .permission-row:focus-visible {
+          outline: 2px solid Highlight;
+        }
+
+        .group-action-btn {
+          border: 1px solid ButtonText;
+        }
+
+        .group-action-btn:hover {
+          border-color: Highlight;
+        }
+
+        .permission-status.retained {
+          color: ButtonText;
+        }
+
+        .permission-status.removed {
+          color: ButtonText;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .filter-tab,
+        .group-action-btn,
+        .permission-row,
+        .permission-copy-btn,
+        .group-chevron {
+          transition: none;
+        }
+      }
+    `,
+  ];
 
   private async loadRegistry(): Promise<void> {
     this.loading = true;
@@ -627,10 +619,12 @@ export class ScionMaximumPermissionSelector extends LitElement {
             ${(['all', 'retained', 'removed'] as FilterView[]).map(
               (view) => html`
                 <button
+                  id="perm-tab-${view}"
                   class=${classMap({ 'filter-tab': true, active: this.filterView === view })}
                   role="tab"
                   tabindex=${this.filterView === view ? '0' : '-1'}
                   aria-selected=${this.filterView === view ? 'true' : 'false'}
+                  aria-controls="perm-filter-panel"
                   @click=${() => {
                     this.filterView = view;
                   }}
@@ -663,105 +657,109 @@ export class ScionMaximumPermissionSelector extends LitElement {
           </div>
         </div>
 
-        <div class="sticky-summary">
-          <div class="summary-item">
-            <span class="summary-label">Registry:</span>
-            <span class="summary-value">${totalCount}</span>
+        <div id="perm-filter-panel" role="tabpanel" aria-labelledby="perm-tab-${this.filterView}">
+          <div class="sticky-summary">
+            <div class="summary-item">
+              <span class="summary-label">Registry:</span>
+              <span class="summary-value">${totalCount}</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Retained:</span>
+              <span class="summary-value retained">${retainedCount}</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Removed:</span>
+              <span class="summary-value removed">${removedCount}</span>
+            </div>
+            ${newSinceCount > 0
+              ? html`
+                  <div class="summary-item">
+                    <sl-tooltip
+                      content="Permissions registered since last revision — removed by default"
+                    >
+                      <span class="summary-label">New since last edit:</span>
+                      <span class="summary-value new-since">${newSinceCount}</span>
+                    </sl-tooltip>
+                  </div>
+                `
+              : nothing}
           </div>
-          <div class="summary-item">
-            <span class="summary-label">Retained:</span>
-            <span class="summary-value retained">${retainedCount}</span>
-          </div>
-          <div class="summary-item">
-            <span class="summary-label">Removed:</span>
-            <span class="summary-value removed">${removedCount}</span>
-          </div>
-          ${newSinceCount > 0
-            ? html`
-                <div class="summary-item">
-                  <sl-tooltip
-                    content="Permissions registered since last revision — removed by default"
+
+          <div class="permission-groups">
+            ${[...groups.entries()].map(([groupName, groupPermissions]) => {
+              const filteredPermissions = this.applyFiltersToPermissions(groupPermissions);
+              const isCollapsed = this.collapsedGroups.has(groupName);
+
+              if (filteredPermissions.length === 0 && this.searchQuery) {
+                return nothing;
+              }
+
+              const groupRetainedCount = groupPermissions.filter((p) =>
+                this.isRetained(p.id)
+              ).length;
+
+              return html`
+                <div class="permission-group">
+                  <div
+                    class="group-header"
+                    @click=${() => this.toggleGroupCollapse(groupName)}
+                    @keydown=${(e: KeyboardEvent) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        this.toggleGroupCollapse(groupName);
+                      }
+                    }}
+                    tabindex="0"
+                    role="button"
+                    aria-expanded=${!isCollapsed ? 'true' : 'false'}
                   >
-                    <span class="summary-label">New since last edit:</span>
-                    <span class="summary-value new-since">${newSinceCount}</span>
-                  </sl-tooltip>
-                </div>
-              `
-            : nothing}
-        </div>
-
-        <div class="permission-groups">
-          ${[...groups.entries()].map(([groupName, groupPermissions]) => {
-            const filteredPermissions = this.applyFiltersToPermissions(groupPermissions);
-            const isCollapsed = this.collapsedGroups.has(groupName);
-
-            if (filteredPermissions.length === 0 && this.searchQuery) {
-              return nothing;
-            }
-
-            const groupRetainedCount = groupPermissions.filter((p) => this.isRetained(p.id)).length;
-
-            return html`
-              <div class="permission-group">
-                <div
-                  class="group-header"
-                  @click=${() => this.toggleGroupCollapse(groupName)}
-                  @keydown=${(e: KeyboardEvent) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      this.toggleGroupCollapse(groupName);
-                    }
-                  }}
-                  tabindex="0"
-                  role="button"
-                  aria-expanded=${!isCollapsed ? 'true' : 'false'}
-                >
-                  <div class="group-header-left">
-                    <sl-icon
-                      class=${classMap({ 'group-chevron': true, collapsed: isCollapsed })}
-                      name="chevron-down"
-                    ></sl-icon>
-                    <span class="group-name">${groupName}</span>
-                    <span class="group-count">
-                      (${groupRetainedCount}/${groupPermissions.length} retained)
-                    </span>
+                    <div class="group-header-left">
+                      <sl-icon
+                        class=${classMap({ 'group-chevron': true, collapsed: isCollapsed })}
+                        name="chevron-down"
+                      ></sl-icon>
+                      <span class="group-name">${groupName}</span>
+                      <span class="group-count">
+                        (${groupRetainedCount}/${groupPermissions.length} retained)
+                      </span>
+                    </div>
+                    <div class="group-actions" @click=${(e: Event) => e.stopPropagation()}>
+                      <button
+                        class="group-action-btn"
+                        @click=${() => this.selectGroupVisible(groupPermissions)}
+                        title="Select visible permissions in this group"
+                      >
+                        Select visible
+                      </button>
+                      <button
+                        class="group-action-btn"
+                        @click=${() => this.clearGroup(groupPermissions)}
+                        title="Clear all permissions in this group"
+                      >
+                        Clear group
+                      </button>
+                    </div>
                   </div>
-                  <div class="group-actions" @click=${(e: Event) => e.stopPropagation()}>
-                    <button
-                      class="group-action-btn"
-                      @click=${() => this.selectGroupVisible(groupPermissions)}
-                      title="Select visible permissions in this group"
-                    >
-                      Select visible
-                    </button>
-                    <button
-                      class="group-action-btn"
-                      @click=${() => this.clearGroup(groupPermissions)}
-                      title="Clear all permissions in this group"
-                    >
-                      Clear group
-                    </button>
-                  </div>
+                  ${!isCollapsed
+                    ? html`
+                        <div class="group-permissions">
+                          ${filteredPermissions.length === 0
+                            ? html`
+                                <div
+                                  class="permission-row"
+                                  style="justify-content: center; color: var(--scion-text-muted)"
+                                >
+                                  No permissions match the current filter
+                                </div>
+                              `
+                            : filteredPermissions.map((perm) => this.renderPermissionRow(perm))}
+                        </div>
+                      `
+                    : nothing}
                 </div>
-                ${!isCollapsed
-                  ? html`
-                      <div class="group-permissions">
-                        ${filteredPermissions.length === 0
-                          ? html`
-                              <div
-                                class="permission-row"
-                                style="justify-content: center; color: var(--scion-text-muted)"
-                              >
-                                No permissions match the current filter
-                              </div>
-                            `
-                          : filteredPermissions.map((perm) => this.renderPermissionRow(perm))}
-                      </div>
-                    `
-                  : nothing}
-              </div>
-            `;
-          })}
+              `;
+            })}
+          </div>
         </div>
       </div>
     `;

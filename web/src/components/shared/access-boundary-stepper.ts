@@ -25,6 +25,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property } from 'lit/decorators.js';
 import { classMap } from 'lit/directives/class-map.js';
 
@@ -51,183 +52,174 @@ export class ScionAccessBoundaryStepper extends LitElement {
   /** Set of completed step indices (1-based). */
   @property({ type: Array }) completedSteps: number[] = [];
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .stepper {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0;
-      padding: 1rem 0;
-      list-style: none;
-      margin: 0;
-    }
-
-    .step {
-      display: flex;
-      align-items: center;
-      gap: 0;
-    }
-
-    .step-button {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      min-height: 44px;
-      min-width: 44px;
-      border: none;
-      background: none;
-      cursor: default;
-      border-radius: var(--scion-radius, 0.5rem);
-      transition: background-color 0.15s ease;
-      font-family: inherit;
-      white-space: nowrap;
-    }
-
-    .step-button.clickable {
-      cursor: pointer;
-    }
-
-    .step-button.clickable:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .step-button.clickable:focus-visible {
-      outline: 2px solid var(--sl-color-primary-600, #2563eb);
-      outline-offset: 2px;
-    }
-
-    .step-number {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 1.75rem;
-      height: 1.75rem;
-      border-radius: 50%;
-      font-size: 0.75rem;
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-
-    .step-number.future {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .step-number.current {
-      background: var(--sl-color-primary-600, #2563eb);
-      color: var(--sl-color-neutral-0, #ffffff);
-    }
-
-    .step-number.completed {
-      background: var(--sl-color-success-600, #16a34a);
-      color: var(--sl-color-neutral-0, #ffffff);
-    }
-
-    .step-label {
-      font-size: 0.8125rem;
-      font-weight: 500;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .step-button.active .step-label {
-      color: var(--scion-text, #1e293b);
-      font-weight: 600;
-    }
-
-    .step-button.done .step-label {
-      color: var(--scion-text, #1e293b);
-    }
-
-    .step-connector {
-      width: 2rem;
-      height: 2px;
-      background: var(--scion-border, #e2e8f0);
-      flex-shrink: 0;
-    }
-
-    .step-connector.completed {
-      background: var(--sl-color-success-600, #16a34a);
-    }
-
-    @media (max-width: 768px) {
       .stepper {
-        flex-direction: column;
-        align-items: stretch;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         gap: 0;
+        padding: 1rem 0;
+        list-style: none;
+        margin: 0;
       }
 
       .step {
-        flex-direction: row;
+        display: flex;
         align-items: center;
-      }
-
-      .step-connector {
-        width: 2px;
-        height: 1.5rem;
-        align-self: center;
+        gap: 0;
       }
 
       .step-button {
-        padding: 0.5rem;
-        width: 100%;
-        justify-content: flex-start;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        min-height: 44px;
+        min-width: 44px;
+        border: none;
+        background: none;
+        cursor: default;
+        border-radius: var(--scion-radius, 0.5rem);
+        transition: background-color 0.15s ease;
+        font-family: inherit;
+        white-space: nowrap;
       }
 
-      .step-label {
-        display: inline;
-      }
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .step-number {
-        border: 2px solid ButtonText;
+      .step-button.clickable {
+        cursor: pointer;
       }
 
-      .step-number.current {
-        border-color: Highlight;
-      }
-
-      .step-number.completed {
-        border-color: ButtonText;
-      }
-
-      .step-connector {
-        background: ButtonText;
+      .step-button.clickable:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
       }
 
       .step-button.clickable:focus-visible {
-        outline: 2px solid Highlight;
-      }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .step-button {
-        transition: none;
+        outline: 2px solid var(--sl-color-primary-600, #2563eb);
+        outline-offset: 2px;
       }
 
-      .group-chevron {
-        transition: none;
+      .step-number {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.75rem;
+        height: 1.75rem;
+        border-radius: 50%;
+        font-size: 0.75rem;
+        font-weight: 600;
+        flex-shrink: 0;
       }
-    }
-  `;
+
+      .step-number.future {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+        border: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .step-number.current {
+        background: var(--sl-color-primary-600, #2563eb);
+        color: var(--sl-color-neutral-0, #ffffff);
+      }
+
+      .step-number.completed {
+        background: var(--sl-color-success-600, #16a34a);
+        color: var(--sl-color-neutral-0, #ffffff);
+      }
+
+      .step-label {
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .step-button.active .step-label {
+        color: var(--scion-text, #1e293b);
+        font-weight: 600;
+      }
+
+      .step-button.done .step-label {
+        color: var(--scion-text, #1e293b);
+      }
+
+      .step-connector {
+        width: 2rem;
+        height: 2px;
+        background: var(--scion-border, #e2e8f0);
+        flex-shrink: 0;
+      }
+
+      .step-connector.completed {
+        background: var(--sl-color-success-600, #16a34a);
+      }
+
+      @media (max-width: 768px) {
+        .stepper {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0;
+        }
+
+        .step {
+          flex-direction: row;
+          align-items: center;
+        }
+
+        .step-connector {
+          width: 2px;
+          height: 1.5rem;
+          align-self: center;
+        }
+
+        .step-button {
+          padding: 0.5rem;
+          width: 100%;
+          justify-content: flex-start;
+        }
+
+        .step-label {
+          display: inline;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .step-number {
+          border: 2px solid ButtonText;
+        }
+
+        .step-number.current {
+          border-color: Highlight;
+        }
+
+        .step-number.completed {
+          border-color: ButtonText;
+        }
+
+        .step-connector {
+          background: ButtonText;
+        }
+
+        .step-button.clickable:focus-visible {
+          outline: 2px solid Highlight;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .step-button {
+          transition: none;
+        }
+
+        .group-chevron {
+          transition: none;
+        }
+      }
+    `,
+  ];
 
   private handleStepClick(stepIndex: number): void {
     if (this.isClickable(stepIndex)) {

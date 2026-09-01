@@ -33,6 +33,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
@@ -104,395 +105,379 @@ export class ScionAccessBoundaryPreview extends LitElement {
   private abortController: AbortController | null = null;
   private expiryTimer: ReturnType<typeof setInterval> | null = null;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .preview-container {
-      display: flex;
-      flex-direction: column;
-      gap: 1.25rem;
-    }
+      .preview-container {
+        display: flex;
+        flex-direction: column;
+        gap: 1.25rem;
+      }
 
-    /* Header */
-    .preview-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-    }
-
-    .preview-title {
-      font-size: 1rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .expiry-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      font-size: 0.6875rem;
-      font-weight: 500;
-    }
-
-    .expiry-badge.valid {
-      background: var(--sl-color-success-50, #f0fdf4);
-      color: var(--sl-color-success-700, #15803d);
-      border: 1px solid var(--sl-color-success-200, #bbf7d0);
-    }
-
-    .expiry-badge.expiring {
-      background: var(--sl-color-warning-50, #fffbeb);
-      color: var(--sl-color-warning-700, #b45309);
-      border: 1px solid var(--sl-color-warning-200, #fde68a);
-    }
-
-    .expiry-badge.expired {
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-700, #b91c1c);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-    }
-
-    /* Sections */
-    .preview-section {
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow: hidden;
-    }
-
-    .section-title {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      padding: 0.625rem 1rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .section-body {
-      padding: 0.75rem 1rem;
-    }
-
-    /* Warnings */
-    .warnings {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    .warning-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-    }
-
-    .warning-item sl-icon {
-      flex-shrink: 0;
-      margin-top: 0.125rem;
-    }
-
-    .warning-item.info {
-      background: var(--sl-color-primary-50, #eff6ff);
-      color: var(--sl-color-primary-700, #1d4ed8);
-      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
-    }
-
-    .warning-item.warning {
-      background: var(--sl-color-warning-50, #fffbeb);
-      color: var(--sl-color-warning-700, #b45309);
-      border: 1px solid var(--sl-color-warning-200, #fde68a);
-    }
-
-    .warning-item.error {
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-700, #b91c1c);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-    }
-
-    /* Definition summary */
-    .definition-grid {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 0.25rem 1rem;
-      font-size: 0.8125rem;
-    }
-
-    .def-label {
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 500;
-      white-space: nowrap;
-    }
-
-    .def-value {
-      color: var(--scion-text, #1e293b);
-    }
-
-    /* Intersecting boundaries */
-    .intersecting-list {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-    }
-
-    .intersecting-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-      padding: 0.375rem 0;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      font-size: 0.8125rem;
-    }
-
-    .intersecting-item:last-child {
-      border-bottom: none;
-    }
-
-    .intersecting-name {
-      font-weight: 500;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .intersecting-note {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .intersecting-relationship {
-      font-size: 0.6875rem;
-      padding: 0.0625rem 0.375rem;
-      border-radius: 9999px;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 500;
-      white-space: nowrap;
-    }
-
-    /* Temporal states */
-    .temporal-states {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    .temporal-state {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.375rem 0.5rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .temporal-label {
-      font-weight: 500;
-      color: var(--scion-text, #1e293b);
-      min-width: 80px;
-    }
-
-    .temporal-time {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    /* Commit blocked message */
-    .commit-blocked {
-      padding: 0.625rem 0.75rem;
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-700, #b91c1c);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .commit-blocked sl-icon {
-      flex-shrink: 0;
-    }
-
-    /* Commit error */
-    .commit-error {
-      padding: 0.625rem 0.75rem;
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-700, #b91c1c);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-    }
-
-    /* Actions */
-    .preview-actions {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding-top: 1rem;
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    /* Loading state */
-    .loading-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 3rem 2rem;
-      text-align: center;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .loading-state sl-spinner {
-      font-size: 2rem;
-    }
-
-    .loading-state .progress-info {
-      font-size: 0.8125rem;
-    }
-
-    /* Error state */
-    .error-state {
-      text-align: center;
-      padding: 2rem;
-    }
-
-    .error-state sl-icon {
-      font-size: 2rem;
-      color: var(--sl-color-danger-500, #ef4444);
-      margin-bottom: 0.5rem;
-    }
-
-    .error-state p {
-      color: var(--sl-color-danger-700, #b91c1c);
-      margin: 0 0 1rem;
-    }
-
-    .error-actions {
-      display: flex;
-      gap: 0.5rem;
-      justify-content: center;
-    }
-
-    .def-value {
-      overflow-wrap: anywhere;
-    }
-
-    .intersecting-name {
-      overflow-wrap: anywhere;
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (max-width: 768px) {
+      /* Header */
       .preview-header {
-        flex-direction: column;
-        align-items: flex-start;
-      }
-
-      .preview-actions {
-        flex-direction: column;
-        gap: 0.75rem;
-      }
-
-      .preview-actions sl-button {
-        width: 100%;
-      }
-
-      .definition-grid {
-        grid-template-columns: 1fr;
-        gap: 0.125rem;
-      }
-
-      .def-label {
-        font-weight: 600;
-        margin-top: 0.375rem;
-      }
-
-      .section-body {
-        padding: 0.5rem 0.75rem;
-      }
-
-      .temporal-state {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         flex-wrap: wrap;
-        gap: 0.375rem;
+        gap: 0.5rem;
       }
 
-      .intersecting-item {
-        flex-direction: column;
-        gap: 0.25rem;
-      }
-
-      .warning-item {
-        font-size: 0.75rem;
-      }
-
-      .commit-blocked {
-        font-size: 0.75rem;
-      }
-    }
-
-    @media (forced-colors: active) {
-      .preview-section {
-        border-color: ButtonText;
-      }
-
-      .section-title {
-        border-bottom-color: ButtonText;
+      .preview-title {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
       }
 
       .expiry-badge {
-        border: 1px solid ButtonText;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 500;
+      }
+
+      .expiry-badge.valid {
+        background: var(--sl-color-success-50, #f0fdf4);
+        color: var(--sl-color-success-700, #15803d);
+        border: 1px solid var(--sl-color-success-200, #bbf7d0);
+      }
+
+      .expiry-badge.expiring {
+        background: var(--sl-color-warning-50, #fffbeb);
+        color: var(--sl-color-warning-700, #b45309);
+        border: 1px solid var(--sl-color-warning-200, #fde68a);
+      }
+
+      .expiry-badge.expired {
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-700, #b91c1c);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+      }
+
+      /* Sections */
+      .preview-section {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        overflow: hidden;
+      }
+
+      .section-title {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        padding: 0.625rem 1rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .section-body {
+        padding: 0.75rem 1rem;
+      }
+
+      /* Warnings */
+      .warnings {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
       }
 
       .warning-item {
-        border: 1px solid ButtonText;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
       }
 
-      .commit-blocked {
-        border: 1px solid ButtonText;
+      .warning-item sl-icon {
+        flex-shrink: 0;
+        margin-top: 0.125rem;
       }
 
-      .commit-error {
-        border: 1px solid ButtonText;
+      .warning-item.info {
+        background: var(--sl-color-primary-50, #eff6ff);
+        color: var(--sl-color-primary-700, #1d4ed8);
+        border: 1px solid var(--sl-color-primary-200, #bfdbfe);
       }
 
-      .preview-actions {
-        border-top-color: ButtonText;
+      .warning-item.warning {
+        background: var(--sl-color-warning-50, #fffbeb);
+        color: var(--sl-color-warning-700, #b45309);
+        border: 1px solid var(--sl-color-warning-200, #fde68a);
+      }
+
+      .warning-item.error {
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-700, #b91c1c);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+      }
+
+      /* Definition summary */
+      .definition-grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.25rem 1rem;
+        font-size: 0.8125rem;
+      }
+
+      .def-label {
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .def-value {
+        color: var(--scion-text, #1e293b);
+      }
+
+      /* Intersecting boundaries */
+      .intersecting-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+
+      .intersecting-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        padding: 0.375rem 0;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        font-size: 0.8125rem;
+      }
+
+      .intersecting-item:last-child {
+        border-bottom: none;
+      }
+
+      .intersecting-name {
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .intersecting-note {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .intersecting-relationship {
+        font-size: 0.6875rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      /* Temporal states */
+      .temporal-states {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
       }
 
       .temporal-state {
-        border: 1px solid ButtonText;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.375rem 0.5rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      * {
-        transition: none !important;
-        animation: none !important;
+      .temporal-label {
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+        min-width: 80px;
       }
-    }
-  `;
+
+      .temporal-time {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Commit blocked message */
+      .commit-blocked {
+        padding: 0.625rem 0.75rem;
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-700, #b91c1c);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .commit-blocked sl-icon {
+        flex-shrink: 0;
+      }
+
+      /* Commit error */
+      .commit-error {
+        padding: 0.625rem 0.75rem;
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-700, #b91c1c);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+      }
+
+      /* Actions */
+      .preview-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-top: 1rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      /* Loading state */
+      .loading-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 3rem 2rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .loading-state sl-spinner {
+        font-size: 2rem;
+      }
+
+      .loading-state .progress-info {
+        font-size: 0.8125rem;
+      }
+
+      /* Error state */
+      .error-state {
+        text-align: center;
+        padding: 2rem;
+      }
+
+      .error-state sl-icon {
+        font-size: 2rem;
+        color: var(--sl-color-danger-500, #ef4444);
+        margin-bottom: 0.5rem;
+      }
+
+      .error-state p {
+        color: var(--sl-color-danger-700, #b91c1c);
+        margin: 0 0 1rem;
+      }
+
+      .error-actions {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+      }
+
+      .def-value {
+        overflow-wrap: anywhere;
+      }
+
+      .intersecting-name {
+        overflow-wrap: anywhere;
+      }
+
+      @media (max-width: 768px) {
+        .preview-header {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .preview-actions {
+          flex-direction: column;
+          gap: 0.75rem;
+        }
+
+        .preview-actions sl-button {
+          width: 100%;
+        }
+
+        .definition-grid {
+          grid-template-columns: 1fr;
+          gap: 0.125rem;
+        }
+
+        .def-label {
+          font-weight: 600;
+          margin-top: 0.375rem;
+        }
+
+        .section-body {
+          padding: 0.5rem 0.75rem;
+        }
+
+        .temporal-state {
+          flex-wrap: wrap;
+          gap: 0.375rem;
+        }
+
+        .intersecting-item {
+          flex-direction: column;
+          gap: 0.25rem;
+        }
+
+        .warning-item {
+          font-size: 0.75rem;
+        }
+
+        .commit-blocked {
+          font-size: 0.75rem;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .preview-section {
+          border-color: ButtonText;
+        }
+
+        .section-title {
+          border-bottom-color: ButtonText;
+        }
+
+        .expiry-badge {
+          border: 1px solid ButtonText;
+        }
+
+        .warning-item {
+          border: 1px solid ButtonText;
+        }
+
+        .commit-blocked {
+          border: 1px solid ButtonText;
+        }
+
+        .commit-error {
+          border: 1px solid ButtonText;
+        }
+
+        .preview-actions {
+          border-top-color: ButtonText;
+        }
+
+        .temporal-state {
+          border: 1px solid ButtonText;
+        }
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();

@@ -23,6 +23,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property } from 'lit/decorators.js';
 
 import type {
@@ -45,134 +46,125 @@ export class ScionAccessBoundaryStatus extends LitElement {
   /** Size variant. */
   @property() size: 'small' | 'default' = 'default';
 
-  static override styles = css`
-    :host {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      flex-wrap: wrap;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      font-weight: 500;
-      white-space: nowrap;
-    }
-
-    .badge sl-icon {
-      font-size: 0.75rem;
-    }
-
-    /* Size variants */
-    :host([size='small']) .badge {
-      font-size: 0.6875rem;
-      padding: 0.0625rem 0.375rem;
-    }
-
-    :host([size='small']) .badge sl-icon {
-      font-size: 0.625rem;
-    }
-
-    .badge:not([class*='small']) {
-      font-size: 0.75rem;
-    }
-
-    /* Status colors */
-    .status-active {
-      background: var(--sl-color-success-100, #dcfce7);
-      color: var(--sl-color-success-700, #15803d);
-    }
-
-    .status-scheduled {
-      background: var(--sl-color-primary-100, #dbeafe);
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .status-expired {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .status-recovery_disabled {
-      background: var(--sl-color-danger-100, #fee2e2);
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-
-    .status-invalid_degraded {
-      background: var(--sl-color-warning-100, #fef3c7);
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    /* Classification colors */
-    .classification-tighten {
-      background: var(--sl-color-warning-100, #fef3c7);
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    .classification-relax {
-      background: var(--sl-color-primary-100, #dbeafe);
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .classification-mixed {
-      background: var(--sl-color-warning-50, #fffbeb);
-      color: var(--sl-color-warning-700, #b45309);
-      border: 1px solid var(--sl-color-warning-200, #fde68a);
-    }
-
-    .classification-no_effect {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    /* Risk colors */
-    .risk-tightening {
-      background: var(--sl-color-warning-50, #fffbeb);
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    .risk-relaxation_scheduled {
-      background: var(--sl-color-primary-50, #eff6ff);
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .risk-mixed {
-      background: var(--sl-color-warning-100, #fef3c7);
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    .risk-lockout_sensitive {
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-
-    .risk-degraded {
-      background: var(--sl-color-warning-50, #fffbeb);
-      color: var(--sl-color-warning-600, #d97706);
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .badge {
-        border: 1px solid ButtonText;
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+        flex-wrap: wrap;
       }
-    }
-  `;
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .badge sl-icon {
+        font-size: 0.75rem;
+      }
+
+      /* Size variants */
+      :host([size='small']) .badge {
+        font-size: 0.6875rem;
+        padding: 0.0625rem 0.375rem;
+      }
+
+      :host([size='small']) .badge sl-icon {
+        font-size: 0.625rem;
+      }
+
+      .badge:not([class*='small']) {
+        font-size: 0.75rem;
+      }
+
+      /* Status colors */
+      .status-active {
+        background: var(--sl-color-success-100, #dcfce7);
+        color: var(--sl-color-success-700, #15803d);
+      }
+
+      .status-scheduled {
+        background: var(--sl-color-primary-100, #dbeafe);
+        color: var(--sl-color-primary-700, #1d4ed8);
+      }
+
+      .status-expired {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .status-recovery_disabled {
+        background: var(--sl-color-danger-100, #fee2e2);
+        color: var(--sl-color-danger-700, #b91c1c);
+      }
+
+      .status-invalid_degraded {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      /* Classification colors */
+      .classification-tighten {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      .classification-relax {
+        background: var(--sl-color-primary-100, #dbeafe);
+        color: var(--sl-color-primary-700, #1d4ed8);
+      }
+
+      .classification-mixed {
+        background: var(--sl-color-warning-50, #fffbeb);
+        color: var(--sl-color-warning-700, #b45309);
+        border: 1px solid var(--sl-color-warning-200, #fde68a);
+      }
+
+      .classification-no_effect {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Risk colors */
+      .risk-tightening {
+        background: var(--sl-color-warning-50, #fffbeb);
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      .risk-relaxation_scheduled {
+        background: var(--sl-color-primary-50, #eff6ff);
+        color: var(--sl-color-primary-700, #1d4ed8);
+      }
+
+      .risk-mixed {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      .risk-lockout_sensitive {
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-700, #b91c1c);
+      }
+
+      .risk-degraded {
+        background: var(--sl-color-warning-50, #fffbeb);
+        color: var(--sl-color-warning-600, #d97706);
+      }
+
+      @media (forced-colors: active) {
+        .badge {
+          border: 1px solid ButtonText;
+        }
+      }
+    `,
+  ];
 
   private statusIcon(status: AccessBoundaryStatus): string {
     switch (status) {

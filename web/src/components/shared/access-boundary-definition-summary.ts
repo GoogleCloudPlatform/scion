@@ -23,6 +23,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property } from 'lit/decorators.js';
 
 import type {
@@ -63,220 +64,205 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
     expiresAt: undefined,
   };
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .summary {
-      display: flex;
-      flex-direction: column;
-      gap: 1.25rem;
-    }
-
-    .summary-section {
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow: hidden;
-    }
-
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0.625rem 1rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .section-title {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .section-step {
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 400;
-    }
-
-    .edit-link {
-      font-size: 0.75rem;
-      cursor: pointer;
-      color: var(--sl-color-primary-600, #2563eb);
-      text-decoration: none;
-      border: none;
-      background: none;
-      font-family: inherit;
-      padding: 0.25rem 0.5rem;
-      min-height: 44px;
-      min-width: 44px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-
-    .edit-link:hover {
-      text-decoration: underline;
-    }
-
-    .section-body {
-      padding: 0.75rem 1rem;
-    }
-
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 0.125rem;
-    }
-
-    .field + .field {
-      margin-top: 0.75rem;
-    }
-
-    .field-label {
-      font-size: 0.75rem;
-      font-weight: 600;
-      color: var(--scion-text-muted, #64748b);
-      text-transform: uppercase;
-      letter-spacing: 0.025em;
-    }
-
-    .field-value {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      overflow-wrap: anywhere;
-    }
-
-    .field-value.purpose {
-      white-space: pre-wrap;
-      line-height: 1.5;
-      overflow-wrap: anywhere;
-    }
-
-    .field-value.mono {
-      font-family: var(--sl-font-mono, monospace);
-      font-size: 0.8125rem;
-      overflow-wrap: anywhere;
-    }
-
-    .permission-stats {
-      display: flex;
-      gap: 1.5rem;
-      flex-wrap: wrap;
-    }
-
-    .stat {
-      display: flex;
-      flex-direction: column;
-      gap: 0.125rem;
-    }
-
-    .stat-value {
-      font-size: 1.25rem;
-      font-weight: 700;
-    }
-
-    .stat-value.retained {
-      color: var(--sl-color-success-600, #16a34a);
-    }
-
-    .stat-value.removed {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .stat-label {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .missing-value {
-      color: var(--sl-color-warning-600, #ca8a04);
-      font-style: italic;
-    }
-
-    .preview-placeholder {
-      padding: 1.5rem;
-      text-align: center;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-      border: 1px dashed var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
-
-    @media (max-width: 768px) {
-      .section-header {
+      .summary {
+        display: flex;
         flex-direction: column;
-        align-items: flex-start;
-        gap: 0.5rem;
+        gap: 1.25rem;
       }
 
-      .permission-stats {
-        flex-direction: column;
-        gap: 0.75rem;
-      }
-
-      .stat {
-        flex-direction: row;
-        gap: 0.5rem;
-        align-items: baseline;
-      }
-
-      .stat-value {
-        font-size: 1rem;
-      }
-
-      .field-value {
-        word-break: break-word;
-      }
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
       .summary-section {
-        border: 2px solid ButtonText;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        overflow: hidden;
       }
 
       .section-header {
-        border-bottom: 2px solid ButtonText;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.625rem 1rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .section-title {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .section-step {
+        font-size: 0.6875rem;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 400;
       }
 
       .edit-link {
-        color: LinkText;
+        font-size: 0.75rem;
+        cursor: pointer;
+        color: var(--sl-color-primary-600, #2563eb);
+        text-decoration: none;
+        border: none;
+        background: none;
+        font-family: inherit;
+        padding: 0.25rem 0.5rem;
+        min-height: 44px;
+        min-width: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--scion-radius, 0.5rem);
       }
 
-      .edit-link:focus-visible {
-        outline: 2px solid Highlight;
+      .edit-link:hover {
+        text-decoration: underline;
       }
 
-      .stat-value.retained,
+      .section-body {
+        padding: 0.75rem 1rem;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.125rem;
+      }
+
+      .field + .field {
+        margin-top: 0.75rem;
+      }
+
+      .field-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--scion-text-muted, #64748b);
+        text-transform: uppercase;
+        letter-spacing: 0.025em;
+      }
+
+      .field-value {
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        overflow-wrap: anywhere;
+      }
+
+      .field-value.purpose {
+        white-space: pre-wrap;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+
+      .field-value.mono {
+        font-family: var(--sl-font-mono, monospace);
+        font-size: 0.8125rem;
+        overflow-wrap: anywhere;
+      }
+
+      .permission-stats {
+        display: flex;
+        gap: 1.5rem;
+        flex-wrap: wrap;
+      }
+
+      .stat {
+        display: flex;
+        flex-direction: column;
+        gap: 0.125rem;
+      }
+
+      .stat-value {
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+
+      .stat-value.retained {
+        color: var(--sl-color-success-600, #16a34a);
+      }
+
       .stat-value.removed {
-        color: ButtonText;
+        color: var(--sl-color-danger-600, #dc2626);
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      * {
-        transition: none !important;
+      .stat-label {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
       }
-    }
-  `;
+
+      .missing-value {
+        color: var(--sl-color-warning-600, #ca8a04);
+        font-style: italic;
+      }
+
+      .preview-placeholder {
+        padding: 1.5rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+        border: 1px dashed var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
+
+      @media (max-width: 768px) {
+        .section-header {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0.5rem;
+        }
+
+        .permission-stats {
+          flex-direction: column;
+          gap: 0.75rem;
+        }
+
+        .stat {
+          flex-direction: row;
+          gap: 0.5rem;
+          align-items: baseline;
+        }
+
+        .stat-value {
+          font-size: 1rem;
+        }
+
+        .field-value {
+          word-break: break-word;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .summary-section {
+          border: 2px solid ButtonText;
+        }
+
+        .section-header {
+          border-bottom: 2px solid ButtonText;
+        }
+
+        .edit-link {
+          color: LinkText;
+        }
+
+        .edit-link:focus-visible {
+          outline: 2px solid Highlight;
+        }
+
+        .stat-value.retained,
+        .stat-value.removed {
+          color: ButtonText;
+        }
+      }
+    `,
+  ];
 
   private emitNavigateToStep(step: number): void {
     this.dispatchEvent(

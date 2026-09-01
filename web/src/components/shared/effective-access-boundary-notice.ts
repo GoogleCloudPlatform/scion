@@ -32,6 +32,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
@@ -69,108 +70,92 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
   @state() private loading = true;
   @state() private loaded = false;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
-
-    .notice {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      background: var(--sl-color-neutral-50, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .notice.inline {
-      background: transparent;
-      border: none;
-      padding: 0.25rem 0;
-      font-size: 0.75rem;
-    }
-
-    .notice sl-icon {
-      font-size: 0.875rem;
-      color: var(--sl-color-warning-500, #f59e0b);
-      flex-shrink: 0;
-    }
-
-    .notice-text {
-      flex: 1;
-    }
-
-    .notice-link {
-      color: var(--sl-color-primary-600, #2563eb);
-      text-decoration: none;
-      font-weight: 500;
-      white-space: nowrap;
-    }
-
-    .notice-link:hover {
-      text-decoration: underline;
-    }
-
-    /* Zoom / touch targets */
-    .notice-link {
-      min-height: 44px;
-      display: inline-flex;
-      align-items: center;
-    }
-
-    .notice-text {
-      overflow-wrap: anywhere;
-    }
-
-    /* Utility: screen-reader-only */
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    /* Responsive: mobile full-width */
-    @media (max-width: 768px) {
-      .notice {
-        border-radius: 0;
-        margin-left: -0.75rem;
-        margin-right: -0.75rem;
-        padding: 0.625rem 0.75rem;
-      }
-    }
-
-    /* High contrast mode */
-    @media (forced-colors: active) {
-      .notice {
-        border: 1px solid ButtonText;
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
       }
 
-      .notice-link {
-        color: LinkText;
+      .notice {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        background: var(--sl-color-neutral-50, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .notice.inline {
+        background: transparent;
+        border: none;
+        padding: 0.25rem 0;
+        font-size: 0.75rem;
       }
 
       .notice sl-icon {
-        color: ButtonText;
+        font-size: 0.875rem;
+        color: var(--sl-color-warning-500, #f59e0b);
+        flex-shrink: 0;
       }
-    }
 
-    /* Reduced motion */
-    @media (prefers-reduced-motion: reduce) {
-      * {
-        transition: none !important;
-        animation: none !important;
+      .notice-text {
+        flex: 1;
       }
-    }
-  `;
+
+      .notice-link {
+        color: var(--sl-color-primary-600, #2563eb);
+        text-decoration: none;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .notice-link:hover {
+        text-decoration: underline;
+      }
+
+      /* Zoom / touch targets */
+      .notice-link {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .notice-text {
+        overflow-wrap: anywhere;
+      }
+
+      /* Utility: screen-reader-only */
+
+      /* Responsive: mobile full-width */
+      @media (max-width: 768px) {
+        .notice {
+          border-radius: 0;
+          margin-left: -0.75rem;
+          margin-right: -0.75rem;
+          padding: 0.625rem 0.75rem;
+        }
+      }
+
+      /* High contrast mode */
+      @media (forced-colors: active) {
+        .notice {
+          border: 1px solid ButtonText;
+        }
+
+        .notice-link {
+          color: LinkText;
+        }
+
+        .notice sl-icon {
+          color: ButtonText;
+        }
+      }
+    `,
+  ];
 
   private _initialLoadDone = false;
 

@@ -24,6 +24,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Iso8601 } from '../../shared/access-boundaries.js';
@@ -68,129 +69,114 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
     }
   }
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
-
-    .schedule-editor {
-      display: flex;
-      flex-direction: column;
-      gap: 1.5rem;
-    }
-
-    .schedule-toggle {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-
-    .schedule-toggle-label {
-      font-size: 0.875rem;
-      font-weight: 500;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .schedule-toggle-description {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.25rem;
-    }
-
-    .datetime-fields {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1.5rem;
-    }
-
-    @media (max-width: 640px) {
-      .datetime-fields {
-        grid-template-columns: 1fr;
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
       }
-    }
 
-    .datetime-field {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-    }
+      .schedule-editor {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
 
-    .field-label {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
+      .schedule-toggle {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
 
-    .field-help {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
+      .schedule-toggle-label {
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+      }
 
-    .utc-preview {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      font-family: var(--sl-font-mono, monospace);
-      margin-top: 0.25rem;
-    }
+      .schedule-toggle-description {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+      }
 
-    .timezone-label {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
+      .datetime-fields {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.5rem;
+      }
 
-    .clear-section {
-      display: flex;
-      justify-content: flex-start;
-    }
+      @media (max-width: 640px) {
+        .datetime-fields {
+          grid-template-columns: 1fr;
+        }
+      }
 
-    .validation-warning {
-      margin-top: 0;
-    }
+      .datetime-field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
 
-    .no-schedule-info {
-      padding: 1rem;
-      text-align: center;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-    }
+      .field-label {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
 
-    fieldset {
-      border: none;
-      margin: 0;
-      padding: 0;
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .validation-warning {
-        border: 2px solid Mark;
+      .field-help {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
       }
 
       .utc-preview {
-        color: ButtonText;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        font-family: var(--sl-font-mono, monospace);
+        margin-top: 0.25rem;
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      * {
-        transition: none !important;
+      .timezone-label {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
       }
-    }
-  `;
+
+      .clear-section {
+        display: flex;
+        justify-content: flex-start;
+      }
+
+      .validation-warning {
+        margin-top: 0;
+      }
+
+      .no-schedule-info {
+        padding: 1rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+      }
+
+      fieldset {
+        border: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      @media (forced-colors: active) {
+        .validation-warning {
+          border: 2px solid Mark;
+        }
+
+        .utc-preview {
+          color: ButtonText;
+        }
+      }
+    `,
+  ];
 
   private isoToLocalDatetime(iso: Iso8601): string {
     try {

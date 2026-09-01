@@ -30,6 +30,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { srOnlyStyles } from './styles.js';
 import { customElement, property } from 'lit/decorators.js';
 import { classMap } from 'lit/directives/class-map.js';
 
@@ -110,159 +111,150 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
   /** Whether the scope is system-wide (for showing "all principals" warning). */
   @property({ type: Boolean }) isSystemScope = false;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .subject-selector {
-      display: flex;
-      flex-direction: column;
-      gap: 1.5rem;
-    }
-
-    .option-cards {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    .option-card {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      padding: 0.875rem 1rem;
-      min-height: 44px;
-      border: 2px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      cursor: pointer;
-      transition:
-        border-color 0.15s ease,
-        background-color 0.15s ease;
-      background: var(--scion-surface, #ffffff);
-    }
-
-    .option-card:hover {
-      border-color: var(--sl-color-primary-300, #93c5fd);
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .option-card:focus-visible {
-      outline: 2px solid var(--sl-color-primary-600, #2563eb);
-      outline-offset: 2px;
-    }
-
-    .option-card.selected {
-      border-color: var(--sl-color-primary-600, #2563eb);
-      background: var(--sl-color-primary-50, #eff6ff);
-    }
-
-    .option-radio {
-      flex-shrink: 0;
-      margin-top: 0.125rem;
-    }
-
-    .option-icon {
-      flex-shrink: 0;
-      font-size: 1.125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.0625rem;
-    }
-
-    .option-card.selected .option-icon {
-      color: var(--sl-color-primary-600, #2563eb);
-    }
-
-    .option-content {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .option-label {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .option-description {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.125rem;
-    }
-
-    .search-section {
-      padding: 0 0.25rem;
-    }
-
-    .summary {
-      padding: 0.75rem 1rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .summary strong {
-      font-weight: 600;
-    }
-
-    .warning {
-      margin-top: 0;
-    }
-
-    fieldset {
-      border: none;
-      margin: 0;
-      padding: 0;
-    }
-
-    @media (max-width: 768px) {
-      .option-cards {
+      .subject-selector {
+        display: flex;
         flex-direction: column;
+        gap: 1.5rem;
+      }
+
+      .option-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
       }
 
       .option-card {
-        width: 100%;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.75rem;
+        padding: 0.875rem 1rem;
+        min-height: 44px;
+        border: 2px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        cursor: pointer;
+        transition:
+          border-color 0.15s ease,
+          background-color 0.15s ease;
+        background: var(--scion-surface, #ffffff);
       }
 
-      .search-section {
-        padding: 0;
-      }
-    }
-
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    @media (forced-colors: active) {
-      .option-card {
-        border: 2px solid ButtonText;
-      }
-
-      .option-card.selected {
-        border-color: Highlight;
-        background: none;
+      .option-card:hover {
+        border-color: var(--sl-color-primary-300, #93c5fd);
+        background: var(--scion-bg-subtle, #f1f5f9);
       }
 
       .option-card:focus-visible {
-        outline: 2px solid Highlight;
+        outline: 2px solid var(--sl-color-primary-600, #2563eb);
+        outline-offset: 2px;
       }
-    }
 
-    @media (prefers-reduced-motion: reduce) {
-      .option-card {
-        transition: none;
+      .option-card.selected {
+        border-color: var(--sl-color-primary-600, #2563eb);
+        background: var(--sl-color-primary-50, #eff6ff);
       }
-    }
-  `;
+
+      .option-radio {
+        flex-shrink: 0;
+        margin-top: 0.125rem;
+      }
+
+      .option-icon {
+        flex-shrink: 0;
+        font-size: 1.125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.0625rem;
+      }
+
+      .option-card.selected .option-icon {
+        color: var(--sl-color-primary-600, #2563eb);
+      }
+
+      .option-content {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .option-label {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .option-description {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.125rem;
+      }
+
+      .search-section {
+        padding: 0 0.25rem;
+      }
+
+      .summary {
+        padding: 0.75rem 1rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .summary strong {
+        font-weight: 600;
+      }
+
+      .warning {
+        margin-top: 0;
+      }
+
+      fieldset {
+        border: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      @media (max-width: 768px) {
+        .option-cards {
+          flex-direction: column;
+        }
+
+        .option-card {
+          width: 100%;
+        }
+
+        .search-section {
+          padding: 0;
+        }
+      }
+
+      @media (forced-colors: active) {
+        .option-card {
+          border: 2px solid ButtonText;
+        }
+
+        .option-card.selected {
+          border-color: Highlight;
+          background: none;
+        }
+
+        .option-card:focus-visible {
+          outline: 2px solid Highlight;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .option-card {
+          transition: none;
+        }
+      }
+    `,
+  ];
 
   private handleOptionSelect(value: SubjectSelection): void {
     if (value !== this.selection) {
