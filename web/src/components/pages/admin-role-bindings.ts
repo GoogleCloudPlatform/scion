@@ -37,6 +37,7 @@ import {
   formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
+import '../shared/effective-access-boundary-notice.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,6 +90,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
   // Role scope type lookup
   @state() private roleScopeMap: Record<string, string> = {};
 
+  // Access boundary notice
+  @state() private activeBoundaryCount = 0;
+
   // Dialog state
   @state() private showCreateDialog = false;
   @state() private showDeleteDialog = false;
@@ -108,8 +112,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
   // Action state
   @state() private actionInProgress = false;
-  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
-    null;
+  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
 
   // Validation warning (e.g. group assigned to direct-user-only role)
   @state() private formValidationWarning = '';
@@ -486,7 +489,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
         font-size: 1.25rem;
       }
 
-      th, td {
+      th,
+      td {
         padding: 0.5rem 0.75rem;
       }
     }
@@ -495,6 +499,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
+    void this.loadBoundaryCount();
   }
 
   // ---------------------------------------------------------------------------
@@ -543,6 +548,22 @@ export class ScionPageAdminRoleBindings extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load role bindings';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /**
+   * Fetch active access boundary count. Non-critical — failure is silently
+   * ignored and the notice simply does not appear.
+   */
+  private async loadBoundaryCount(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/access-constraints?status=active&pageSize=0');
+      if (res.ok) {
+        const data = (await res.json()) as { totalCount?: number };
+        this.activeBoundaryCount = data.totalCount ?? 0;
+      }
+    } catch {
+      // Silently ignore — boundary notice is non-critical
     }
   }
 
@@ -630,9 +651,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     // Groups cannot be assigned to direct-user-only roles
     if (this.formPrincipalType === 'group') {
-      filtered = filtered.filter(
-        (r) => !SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name)
-      );
+      filtered = filtered.filter((r) => !SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name));
     }
 
     return filtered;
@@ -805,6 +824,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
         </div>
       </div>
 
+      ${this.renderBoundaryNotice()}
       ${this.loading
         ? this.renderLoading()
         : this.error
@@ -834,6 +854,30 @@ export class ScionPageAdminRoleBindings extends LitElement {
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
+      </div>
+    `;
+  }
+
+  private renderBoundaryNotice() {
+    if (this.activeBoundaryCount <= 0) return nothing;
+
+    return html`
+      <div
+        style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; background: var(--sl-color-neutral-50, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem); font-size: 0.8125rem; color: var(--scion-text-muted, #64748b); margin-bottom: 1rem;"
+      >
+        <sl-icon
+          name="shield-exclamation"
+          style="font-size: 0.875rem; color: var(--sl-color-warning-500, #f59e0b); flex-shrink: 0;"
+        ></sl-icon>
+        <span style="flex: 1;">
+          Effective access may be reduced by ${this.activeBoundaryCount} access
+          ${this.activeBoundaryCount === 1 ? 'boundary' : 'boundaries'}
+        </span>
+        <a
+          href="/admin/access-boundaries"
+          style="color: var(--sl-color-primary-600, #2563eb); text-decoration: none; font-weight: 500; white-space: nowrap;"
+          >View boundaries</a
+        >
       </div>
     `;
   }
@@ -883,7 +927,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
               <sl-icon name="${getPrincipalIcon(binding.principalType)}"></sl-icon>
             </div>
             <div class="principal-details">
-              <span class="principal-name">${binding.principalDisplayName || binding.principalId}</span>
+              <span class="principal-name"
+                >${binding.principalDisplayName || binding.principalId}</span
+              >
               <span class="principal-type-label">${binding.principalType}</span>
             </div>
           </div>
@@ -892,7 +938,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <td>
           <span class="scope-badge">${binding.scopeType}</span>
           ${binding.scopeId
-            ? html`<br /><span class="scope-id">${binding.scopeDisplayName || binding.scopeId}</span>`
+            ? html`<br /><span class="scope-id"
+                  >${binding.scopeDisplayName || binding.scopeId}</span
+                >`
             : ''}
         </td>
         <td class="hide-mobile">
@@ -1064,10 +1112,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
             @sl-change=${(e: Event) => {
               this.formScopeType = (e.target as HTMLSelectElement).value;
               // Re-filter roles when scope type changes
-              if (
-                this.formRoleId &&
-                this.roleScopeMap[this.formRoleId] !== this.formScopeType
-              ) {
+              if (this.formRoleId && this.roleScopeMap[this.formRoleId] !== this.formScopeType) {
                 this.formRoleId = '';
               }
               this.updateValidation();
@@ -1148,7 +1193,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
                         return html`
                           <div class="validation-warning">
                             <sl-icon name="exclamation-triangle"></sl-icon>
-                            This expiration date is in the past. The binding will be created already expired.
+                            This expiration date is in the past. The binding will be created already
+                            expired.
                           </div>
                         `;
                       }
@@ -1213,7 +1259,10 @@ export class ScionPageAdminRoleBindings extends LitElement {
           Are you sure you want to remove the
           <strong>${this.getRoleName(this.deletingBinding.roleDefinitionId)}</strong>
           role from
-          <strong>${this.deletingBinding.principalDisplayName || this.deletingBinding.principalId}</strong>?
+          <strong
+            >${this.deletingBinding.principalDisplayName ||
+            this.deletingBinding.principalId}</strong
+          >?
         </p>
         <p class="delete-warning">This action cannot be undone.</p>
         <sl-button

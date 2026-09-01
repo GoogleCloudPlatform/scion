@@ -15,21 +15,40 @@
  */
 
 /**
- * Effective Role Provenance Display
+ * Effective Role Provenance & Access Composition Display
  *
- * Shows a principal's effective roles with provenance:
- * - Direct: assigned directly to this user/agent
- * - Via group: inherited through group membership
+ * Shows a principal's effective roles with provenance and layered
+ * effective-access composition:
  *
- * Displays lifecycle status (active/expired/scheduled) and scope.
- * Used on user and agent detail pages.
+ * 1. Assigned roles / Potential permissions: direct/group provenance,
+ *    active/scheduled/expired assignment state, union of permissions
+ *    from active grants.
+ * 2. Access boundaries: named active/scheduled boundaries with membership
+ *    paths and their impact.
+ * 3. Intrinsic restrictions: credential scope, principal status, delegation
+ *    ceiling.
+ * 4. Effective permissions: final set after all layers applied.
+ *
+ * TERMINOLOGY: layers are descriptive, not an override order. Overlapping
+ * removal is "removed by both," not "won by." Never use "priority",
+ * "override", or "winner."
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { getLifecycleStatus, formatDateTime } from './role-binding-utils.js';
+
+import type { RedactionNotice } from '../../shared/access-boundaries.js';
+
+import type {
+  BoundaryLayer,
+  IntrinsicRestriction,
+  DeniedPermission,
+  PermissionDenialReason,
+} from './authorization-layer-stack.js';
+import './authorization-layer-stack.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +73,46 @@ interface EffectiveRoleBinding {
   sourceGroupName?: string;
 }
 
+/** Shape of the access-explain API response. */
+interface AccessExplainResponse {
+  principalType?: string;
+  principalId?: string;
+  potentialPermissionCount?: number;
+  effectivePermissionCount?: number;
+  boundaries?: AccessExplainBoundary[];
+  restrictions?: AccessExplainRestriction[];
+  deniedPermissions?: AccessExplainDeniedPermission[];
+  redacted?: RedactionNotice;
+}
+
+interface AccessExplainBoundary {
+  id: string;
+  name?: string | null;
+  status?: string;
+  removedCount?: number;
+  overlapCount?: number;
+  membershipSummary?: string;
+  redacted?: RedactionNotice;
+}
+
+interface AccessExplainRestriction {
+  kind?: string;
+  label?: string;
+  removedCount?: number;
+  detail?: string;
+}
+
+interface AccessExplainDeniedPermission {
+  permissionId?: string;
+  reasons?: Array<{
+    type?: string;
+    grantStatus?: string;
+    boundaryNames?: (string | null)[];
+    restrictionLabel?: string;
+    correlationId?: string;
+  }>;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -75,6 +134,17 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   @state() private loading = true;
   @state() private bindings: EffectiveRoleBinding[] = [];
   @state() private error: string | null = null;
+
+  // Explain layer state
+  @state() private explainLoading = false;
+  @state() private explainError: string | null = null;
+  @state() private potentialCount = 0;
+  @state() private effectiveCount = 0;
+  @state() private boundaries: BoundaryLayer[] = [];
+  @state() private restrictions: IntrinsicRestriction[] = [];
+  @state() private deniedPermissions: DeniedPermission[] = [];
+  @state() private explainRedacted?: RedactionNotice;
+  @state() private showLayers = false;
 
   static override styles = css`
     :host {
@@ -287,6 +357,67 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       gap: 0.5rem;
     }
 
+    /* Layers section */
+    .layers-toggle {
+      margin-top: 1rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .layers-toggle-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--sl-color-primary-600, #2563eb);
+      padding: 0.25rem 0;
+    }
+
+    .layers-toggle-header:hover {
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
+    .layers-toggle-header sl-icon {
+      font-size: 0.75rem;
+      transition: transform 0.2s ease;
+    }
+
+    .layers-toggle-header sl-icon.open {
+      transform: rotate(90deg);
+    }
+
+    .layers-content {
+      margin-top: 0.75rem;
+    }
+
+    .explain-error {
+      font-size: 0.8125rem;
+      color: var(--sl-color-danger-600, #dc2626);
+      padding: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .explain-loading {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem;
+    }
+
+    .redaction-notice {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      font-style: italic;
+      padding: 0.375rem 0;
+    }
+
     @media (max-width: 768px) {
       .role-card {
         flex-direction: column;
@@ -295,6 +426,12 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
       .role-card-right {
         align-items: flex-start;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .layers-toggle-header sl-icon {
+        transition: none;
       }
     }
   `;
@@ -311,10 +448,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (
-      (changed.has('principalId') || changed.has('principalType')) &&
-      this.principalId
-    ) {
+    if ((changed.has('principalId') || changed.has('principalType')) && this.principalId) {
       // Skip if connectedCallback already triggered the initial load.
       if (!this._initialLoadDone) {
         void this.loadEffectiveRoles();
@@ -345,9 +479,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         const fallbackRes = await apiFetch(fallbackUrl);
 
         if (!fallbackRes.ok) {
-          throw new Error(
-            await extractApiError(fallbackRes, `HTTP ${fallbackRes.status}`)
-          );
+          throw new Error(await extractApiError(fallbackRes, `HTTP ${fallbackRes.status}`));
         }
 
         const data = (await fallbackRes.json()) as {
@@ -368,14 +500,92 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load effective roles:', err);
-      this.error =
-        err instanceof Error ? err.message : 'Failed to load effective roles';
+      this.error = err instanceof Error ? err.message : 'Failed to load effective roles';
     } finally {
       this.loading = false;
     }
   }
 
-  // getLifecycleStatus and formatDateTime are imported from ./role-binding-utils.js
+  private async loadExplainLayers(): Promise<void> {
+    if (!this.principalId) return;
+
+    this.explainLoading = true;
+    this.explainError = null;
+
+    try {
+      const url = `/api/v1/admin/access-explain?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
+      const res = await apiFetch(url);
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+
+      const data = (await res.json()) as AccessExplainResponse;
+
+      this.potentialCount = data.potentialPermissionCount ?? 0;
+      this.effectiveCount = data.effectivePermissionCount ?? 0;
+
+      // Map boundaries — preserve redaction
+      this.boundaries = (data.boundaries ?? []).map((b): BoundaryLayer => {
+        const layer: BoundaryLayer = {
+          id: b.id,
+          name: b.redacted ? null : (b.name ?? null),
+          status: b.status ?? 'active',
+          removedCount: b.removedCount ?? 0,
+          overlapCount: b.overlapCount ?? 0,
+        };
+        if (b.membershipSummary !== undefined) layer.membershipSummary = b.membershipSummary;
+        if (b.redacted !== undefined) layer.redacted = b.redacted;
+        return layer;
+      });
+
+      // Map restrictions
+      this.restrictions = (data.restrictions ?? []).map((r): IntrinsicRestriction => {
+        const restriction: IntrinsicRestriction = {
+          kind: r.kind ?? 'unknown',
+          label: r.label ?? r.kind ?? 'Unknown restriction',
+          removedCount: r.removedCount ?? 0,
+        };
+        if (r.detail !== undefined) restriction.detail = r.detail;
+        return restriction;
+      });
+
+      // Map denied permissions with reasons
+      this.deniedPermissions = (data.deniedPermissions ?? []).map(
+        (dp): DeniedPermission => ({
+          permissionId: dp.permissionId ?? '',
+          reasons: (dp.reasons ?? []).map((r): PermissionDenialReason => {
+            switch (r.type) {
+              case 'never_granted':
+                return { type: 'never_granted' };
+              case 'inactive_grant':
+                return { type: 'inactive_grant', grantStatus: r.grantStatus ?? 'inactive' };
+              case 'removed_by_boundaries':
+                return { type: 'removed_by_boundaries', boundaryNames: r.boundaryNames ?? [] };
+              case 'removed_by_restriction':
+                return {
+                  type: 'removed_by_restriction',
+                  restrictionLabel: r.restrictionLabel ?? '',
+                };
+              case 'evaluation_failed':
+                return { type: 'evaluation_failed', correlationId: r.correlationId ?? '' };
+              default:
+                return { type: 'never_granted' };
+            }
+          }),
+        })
+      );
+
+      if (data.redacted !== undefined) {
+        this.explainRedacted = data.redacted;
+      }
+    } catch (err) {
+      console.error('Failed to load access explain:', err);
+      this.explainError = err instanceof Error ? err.message : 'Failed to load access layers';
+    } finally {
+      this.explainLoading = false;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Render
@@ -417,9 +627,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   private renderContent() {
     if (this.loading) {
       return html`
-        <div class="loading-state">
-          <sl-spinner></sl-spinner> Loading effective roles...
-        </div>
+        <div class="loading-state"><sl-spinner></sl-spinner> Loading effective roles...</div>
       `;
     }
 
@@ -427,9 +635,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       return html`
         <div class="error-state">
           <span>${this.error}</span>
-          <sl-button size="small" @click=${() => this.loadEffectiveRoles()}>
-            Retry
-          </sl-button>
+          <sl-button size="small" @click=${() => this.loadEffectiveRoles()}> Retry </sl-button>
         </div>
       `;
     }
@@ -439,17 +645,14 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         <div class="empty-state">
           <sl-icon name="shield"></sl-icon>
           <h3>No Roles Assigned</h3>
-          <p>
-            This ${this.principalType} does not have any role assignments.
-          </p>
+          <p>This ${this.principalType} does not have any role assignments.</p>
         </div>
       `;
     }
 
     return html`
-      <div class="role-list">
-        ${this.bindings.map((binding) => this.renderRoleCard(binding))}
-      </div>
+      <div class="role-list">${this.bindings.map((binding) => this.renderRoleCard(binding))}</div>
+      ${this.renderLayersSection()}
     `;
   }
 
@@ -469,7 +672,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           <div class="provenance ${binding.source === 'direct' ? 'direct' : 'group'}">
             ${binding.source === 'direct'
               ? html`<sl-icon name="person-check"></sl-icon> Direct`
-              : html`<sl-icon name="diagram-3"></sl-icon> Via group: ${binding.sourceGroupName || binding.source}`}
+              : html`<sl-icon name="diagram-3"></sl-icon> Via group:
+                  ${binding.sourceGroupName || binding.source}`}
           </div>
         </div>
         <div class="role-card-right">
@@ -481,11 +685,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
                   ? 'x-circle'
                   : 'clock'}
             ></sl-icon>
-            ${status === 'active'
-              ? 'Active'
-              : status === 'expired'
-                ? 'Expired'
-                : 'Scheduled'}
+            ${status === 'active' ? 'Active' : status === 'expired' ? 'Expired' : 'Scheduled'}
           </span>
           ${binding.expiresAt && status !== 'expired'
             ? html`<span class="lifecycle-info">
@@ -498,6 +698,83 @@ export class ScionEffectiveRoleProvenance extends LitElement {
               </span>`
             : ''}
         </div>
+      </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Layers section — effective-access composition
+  // ---------------------------------------------------------------------------
+
+  private renderLayersSection() {
+    return html`
+      <div class="layers-toggle">
+        <div
+          class="layers-toggle-header"
+          @click=${() => this.handleLayersToggle()}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              this.handleLayersToggle();
+            }
+          }}
+          tabindex="0"
+          role="button"
+          aria-expanded=${this.showLayers}
+        >
+          <sl-icon name="chevron-right" class=${this.showLayers ? 'open' : ''}></sl-icon>
+          Effective access composition
+        </div>
+        ${this.showLayers ? this.renderLayersContent() : nothing}
+      </div>
+    `;
+  }
+
+  private handleLayersToggle(): void {
+    this.showLayers = !this.showLayers;
+    if (
+      this.showLayers &&
+      !this.explainLoading &&
+      this.potentialCount === 0 &&
+      !this.explainError
+    ) {
+      void this.loadExplainLayers();
+    }
+  }
+
+  private renderLayersContent() {
+    if (this.explainLoading) {
+      return html`
+        <div class="layers-content">
+          <div class="explain-loading"><sl-spinner></sl-spinner> Loading access layers...</div>
+        </div>
+      `;
+    }
+
+    if (this.explainError) {
+      return html`
+        <div class="layers-content">
+          <div class="explain-error">
+            <sl-icon name="exclamation-triangle"></sl-icon>
+            ${this.explainError}
+            <sl-button size="small" @click=${() => this.loadExplainLayers()}> Retry </sl-button>
+          </div>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="layers-content">
+        ${this.explainRedacted
+          ? html`<div class="redaction-notice">${this.explainRedacted.message}</div>`
+          : nothing}
+        <scion-authorization-layer-stack
+          .potentialCount=${this.potentialCount}
+          .boundaries=${this.boundaries}
+          .restrictions=${this.restrictions}
+          .effectiveCount=${this.effectiveCount}
+          .deniedPermissions=${this.deniedPermissions}
+        ></scion-authorization-layer-stack>
       </div>
     `;
   }

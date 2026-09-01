@@ -27,6 +27,7 @@ import { customElement, state } from 'lit/decorators.js';
 import type { AdminUser, UserRole } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/effective-role-provenance.js';
+import '../shared/effective-access-boundary-notice.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
@@ -1510,7 +1511,11 @@ export class ScionPageAdminUsers extends LitElement {
           <sl-icon name="three-dots-vertical"></sl-icon>
         </sl-button>
         <sl-menu>
-          <sl-menu-item @click=${() => { this.viewRolesUser = user; }}>
+          <sl-menu-item
+            @click=${() => {
+              this.viewRolesUser = user;
+            }}
+          >
             <sl-icon slot="prefix" name="shield"></sl-icon>
             View Roles
           </sl-menu-item>
@@ -1914,6 +1919,10 @@ export class ScionPageAdminUsers extends LitElement {
           principalId=${user.id}
           sectionTitle="Effective Roles"
         ></scion-effective-role-provenance>
+        <scion-effective-access-boundary-notice
+          contextType="user"
+          contextId=${user.id}
+        ></scion-effective-access-boundary-notice>
         <sl-button
           slot="footer"
           variant="default"
