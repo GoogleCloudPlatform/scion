@@ -1,7 +1,7 @@
 # Phase 3 Reference Archetype Selections
 
-**Status:** Phase 1 (CT1) — approved and frozen  
-**Date:** 2026-09-01  
+**Status:** Phase 1 (CT1) — approved and frozen
+**Date:** 2026-09-01
 **Parent contract:** `authorization-operation-contract.md`
 
 ## Purpose

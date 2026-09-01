@@ -188,6 +188,12 @@ func (m *mockProjectStore) NextAvailableSlug(_ context.Context, baseSlug string)
 func (m *mockProjectStore) ListProjects(context.Context, store.ProjectFilter, store.ListOptions) (*store.ListResult[store.Project], error) {
 	return nil, nil
 }
+func (m *mockProjectStore) LockProjectForMembership(_ context.Context, id string) error {
+	if _, ok := m.projects[id]; !ok {
+		return store.ErrNotFound
+	}
+	return nil
+}
 
 func newTestUATService() (*UserAccessTokenService, *mockUATStore, *mockUserStore) {
 	tokenStore := newMockUATStore()

@@ -1,9 +1,9 @@
 # Authorization Operation Contract
 
-**Status:** Phase 1 (CT1) — frozen contract vocabulary  
-**Date:** 2026-09-01  
-**Companion plan:** `authz-audit-implementation-plan.md` (scratchpad)  
-**Predecessor:** C0 containment on `scion/authz-audit`  
+**Status:** Phase 1 (CT1) — frozen contract vocabulary
+**Date:** 2026-09-01
+**Companion plan:** `authz-audit-implementation-plan.md` (scratchpad)
+**Predecessor:** C0 containment on `scion/authz-audit`
 **Implementation:** `pkg/hub/authzop`
 
 ## Purpose

@@ -125,7 +125,7 @@ var Registry = []Permission{
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
 	{ID: "project.update", Resource: ResourceProject, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "project:update", Description: "Update projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
 	{ID: "project.delete", Resource: ResourceProject, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
-	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
+	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},

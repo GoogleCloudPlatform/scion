@@ -1,11 +1,11 @@
 # Domain Governance Appendix: Project Membership
 
-**Status:** Phase 1 (CT1) — approved and frozen  
-**Decision authority:** `ptone@google.com`  
-**Approval date:** 2026-09-01  
-**Parent contract:** `authorization-operation-contract.md`  
-**Implementation plan:** `authz-audit-implementation-plan.md` (scratchpad)  
-**C0 containment:** `authz-audit-findings.md`  
+**Status:** Phase 1 (CT1) — approved and frozen
+**Decision authority:** `ptone@google.com`
+**Approval date:** 2026-09-01
+**Parent contract:** `authorization-operation-contract.md`
+**Implementation plan:** `authz-audit-implementation-plan.md` (scratchpad)
+**C0 containment:** `authz-audit-findings.md`
 **Decision record:** CT1 decision packet (D1–D8)
 
 ## Purpose
@@ -48,7 +48,7 @@ to RS1 typed governance.
 
 †D8: Members may view direct and effective project access under `project.read`,
 subject to group-domain privacy boundaries. Mutation capabilities are governed
-separately by the typed governance matrix.  
+separately by the typed governance matrix.
 ‡Subject to last-owner invariant: at least one active direct owner must remain.
 
 ### Current C0 containment

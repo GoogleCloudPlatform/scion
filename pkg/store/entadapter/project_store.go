@@ -209,6 +209,40 @@ func (s *ProjectStore) GetProject(ctx context.Context, id string) (*store.Projec
 	return sp, nil
 }
 
+// LockProjectForMembership acquires a project-scoped serialization lock
+// for membership mutations. On PostgreSQL this runs
+//
+//	SELECT id FROM projects WHERE id = $1 FOR UPDATE
+//
+// which takes a row-level write lock on the project row, serializing
+// concurrent membership transactions for the same project under READ
+// COMMITTED. On SQLite all writes are already database-serialized, so we
+// issue a plain read instead (ForUpdate is a no-op in the SQLite driver).
+func (s *ProjectStore) LockProjectForMembership(ctx context.Context, projectID string) error {
+	uid, err := parseGetID(projectID)
+	if err != nil {
+		return err
+	}
+
+	q := s.client.Project.Query().Where(project.IDEQ(uid))
+
+	// ForUpdate is only meaningful on PostgreSQL; the SQLite driver silently
+	// ignores the clause and the database-level write lock provides the same
+	// ordering guarantee.
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock project for membership: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // GetProjectBySlug retrieves a project by its exact (case-sensitive) slug.
 func (s *ProjectStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
 	p, err := s.client.Project.Query().Where(project.SlugEQ(slug)).Only(ctx)

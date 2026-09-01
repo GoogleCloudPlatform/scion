@@ -398,6 +398,16 @@ type ProjectStore interface {
 
 	// ListProjects returns projects matching the filter criteria.
 	ListProjects(ctx context.Context, filter ProjectFilter, opts ListOptions) (*ListResult[Project], error)
+
+	// LockProjectForMembership acquires a project-scoped serialization lock
+	// for membership mutations. On PostgreSQL this executes SELECT ... FOR
+	// UPDATE on the project row, serializing concurrent membership
+	// transactions for the same project. On SQLite this is a plain read
+	// (SQLite already serializes writes at the database level).
+	//
+	// Must be called inside a transaction (WithTx) before any membership
+	// reads or writes. Returns ErrNotFound if the project does not exist.
+	LockProjectForMembership(ctx context.Context, projectID string) error
 }
 
 // ProjectFilter defines criteria for filtering projects.

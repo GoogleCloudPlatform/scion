@@ -394,22 +394,92 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
-	// One-binding invariant (D4): check if the principal already has a direct
-	// binding in this project. If so, atomically replace it.
-	existingBindings, err := svc.findExistingDirectBindings(ctx, req.PrincipalType, req.PrincipalID, req.ProjectID)
-	if err != nil {
-		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "cannot check existing bindings: " + err.Error(), HTTPStatus: 500}
-	}
-	if len(existingBindings) > 0 {
-		// Atomic replacement: change role via update path.
-		return svc.atomicReplaceBinding(ctx, req, existingBindings, roleDef)
-	}
+	// Pre-compute actor's effective role and direct-owner status before the
+	// transaction. These read-only checks against the actor's own bindings
+	// cannot be done inside the SQLite write-locked transaction without
+	// deadlocking — and the actor's role is not being mutated by this tx.
+	actorRole := svc.projectEffectiveRole(ctx, req.Actor.ID(), req.ProjectID)
+	actorIsDirectOwner := svc.isActorDirectOwner(ctx, req.Actor.ID(), req.ProjectID)
 
-	// Create the new binding and audit record inside a transaction.
-	var created *store.RoleBinding
+	// R3-1 + O-1: acquire project lock and check existing bindings inside the
+	// same transaction. The lock serializes concurrent membership mutations
+	// for this project (FOR UPDATE on PostgreSQL; no-op on SQLite). The D4
+	// existing-binding check inside the locked tx prevents two concurrent
+	// AddMember requests from both seeing zero bindings and both creating.
+	var result *MembershipResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
-		var err error
-		created, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
+		// Acquire project-scoped membership lock.
+		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project: %w", err)
+		}
+
+		// One-binding invariant (D4): re-check under lock.
+		existingBindings, err := svc.findExistingDirectBindingsFromStore(ctx, tx, req.PrincipalType, req.PrincipalID, req.ProjectID)
+		if err != nil {
+			return fmt.Errorf("check existing bindings: %w", err)
+		}
+		if len(existingBindings) > 0 {
+			// Atomic replacement inline (D4): replace existing binding(s) with
+			// the new role inside this locked transaction.
+			primary := svc.highestAuthorityBindingFromStore(ctx, tx, existingBindings)
+			if primary == nil {
+				primary = existingBindings[0]
+			}
+			oldRoleDef, rdErr := tx.GetRoleDefinition(ctx, primary.RoleDefinitionID)
+			if rdErr != nil {
+				return fmt.Errorf("resolve existing role: %w", rdErr)
+			}
+			// Idempotent: same role and single binding → return existing.
+			if oldRoleDef.Name == roleDef.Name && len(existingBindings) == 1 {
+				result = &MembershipResult{Binding: primary, NewRole: roleDef.Name, Op: MembershipOpAdd, Replaced: false}
+				return nil
+			}
+			// Governance check for the old role (since we're replacing it).
+			// Use pre-computed actor role to avoid svc.store reads inside the
+			// SQLite write-locked transaction.
+			if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
+				reason := fmt.Sprintf("actor role %q cannot %s target role %q", actorRole, req.Op, oldRoleDef.Name)
+				if isProtectedRole(oldRoleDef.Name) {
+					reason = "target role is protected: " + reason
+				}
+				return fmt.Errorf("governance:%d:%s", 403, reason)
+			}
+			if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
+				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles")
+			}
+			// Last-owner guard for demotions.
+			if oldRoleDef.Name == store.ProjectRoleOwner && roleDef.Name != store.ProjectRoleOwner {
+				if primary.PrincipalType == store.RoleBindingPrincipalUser {
+					if err := svc.enforceLastOwnerTx(ctx, tx, req.ProjectID); err != nil {
+						return err
+					}
+				}
+			}
+			replaced, rErr := svc.replaceBindingTx(ctx, tx, existingBindings, roleDef.ID, req.Actor.ID())
+			if rErr != nil {
+				return rErr
+			}
+			if aErr := svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
+				MutationType: "project_member_role_change",
+				TargetType:   "project_membership",
+				TargetID:     req.ProjectID,
+				BeforeSummary: marshalAuditJSON(map[string]string{
+					"principalId": primary.PrincipalID,
+					"role":        oldRoleDef.Name,
+				}),
+				AfterSummary: marshalAuditJSON(map[string]string{
+					"principalId": primary.PrincipalID,
+					"role":        roleDef.Name,
+				}),
+			}); aErr != nil {
+				return aErr
+			}
+			result = &MembershipResult{Binding: replaced, OldRole: oldRoleDef.Name, NewRole: roleDef.Name, Op: MembershipOpAdd, Replaced: true}
+			return nil
+		}
+
+		// Create the new binding and audit record.
+		created, cErr := tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: req.RoleDefID,
 			PrincipalType:    req.PrincipalType,
 			PrincipalID:      req.PrincipalID,
@@ -419,10 +489,10 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			ExpiresAt:        req.ExpiresAt,
 			CreatedBy:        req.Actor.ID(),
 		})
-		if err != nil {
-			return err
+		if cErr != nil {
+			return cErr
 		}
-		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
+		if aErr := svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_member_add",
 			TargetType:   "project_membership",
 			TargetID:     req.ProjectID,
@@ -431,21 +501,28 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 				"principalId":   req.PrincipalID,
 				"role":          roleDef.Name,
 			}),
-		})
+		}); aErr != nil {
+			return aErr
+		}
+		result = &MembershipResult{Binding: created, NewRole: roleDef.Name, Op: MembershipOpAdd}
+		return nil
 	})
 	if txErr != nil {
 		if txErr == store.ErrAlreadyExists {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: "this member already has this role in this project", HTTPStatus: 409}
 		}
+		if isLastOwnerError(txErr) {
+			return nil, lastOwnerDenial()
+		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "failed to create binding: " + txErr.Error(), HTTPStatus: 500}
 	}
 
 	svc.logger.Info("project member added via service",
-		"project_id", req.ProjectID, "binding_id", created.ID,
+		"project_id", req.ProjectID, "binding_id", result.Binding.ID,
 		"role", roleDef.Name, "principal", req.PrincipalType+":"+req.PrincipalID,
 		"actor", req.Actor.Email())
 
-	return &MembershipResult{Binding: created, NewRole: roleDef.Name, Op: MembershipOpAdd}, nil
+	return result, nil
 }
 
 // UpdateMemberRole changes a member's role with governance, delegation,
@@ -523,10 +600,15 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 
 	// Atomic replacement inside a transaction: create new binding, delete old
 	// binding, enforce last-owner guard, and write audit record.
-	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU
-	// races where concurrent demotions both read count=2 and both commit.
+	// R3-1: acquire project lock to prevent write-skew under PostgreSQL.
+	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Acquire project-scoped membership lock.
+		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project: %w", err)
+		}
+
 		// Last-owner guard (inside tx for serialization).
 		if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
 			if existing.PrincipalType == store.RoleBindingPrincipalUser {
@@ -536,6 +618,11 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			}
 		}
 
+		// Delete old binding before creating replacement to satisfy the D4
+		// partial unique index (one binding per principal per project).
+		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
+			return fmt.Errorf("delete old binding: %w", err)
+		}
 		var err error
 		created, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: req.NewRoleDefID,
@@ -549,9 +636,6 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		})
 		if err != nil {
 			return fmt.Errorf("create replacement binding: %w", err)
-		}
-		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
-			return fmt.Errorf("delete old binding: %w", err)
 		}
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_member_role_change",
@@ -615,9 +699,14 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	}
 
 	// Delete the binding, enforce last-owner guard, and write audit inside a
-	// transaction. R2-R1: the last-owner check MUST be inside the transaction
-	// to prevent TOCTOU races where concurrent demotions both succeed.
+	// transaction. R3-1: acquire project lock to prevent write-skew.
+	// R2-R1: the last-owner check MUST be inside the transaction.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Acquire project-scoped membership lock.
+		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project: %w", err)
+		}
+
 		// Last-owner guard (inside tx for serialization).
 		if roleDef.Name == store.ProjectRoleOwner && binding.PrincipalType == store.RoleBindingPrincipalUser {
 			if err := svc.enforceLastOwnerTx(ctx, tx, req.ProjectID); err != nil {
@@ -708,6 +797,11 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 	// transaction. If anything fails, the entire transfer is rolled back.
 	var newOwnerBinding, oldActorBinding *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// R3-1: acquire project-scoped membership lock.
+		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project: %w", err)
+		}
+
 		// Step 1: Give the new owner a project-owner binding (or replace existing).
 		existingNewOwnerBindings, findErr := svc.findExistingDirectBindingsFromStore(ctx, tx, store.RoleBindingPrincipalUser, req.NewOwnerID, req.ProjectID)
 		if findErr != nil {
@@ -896,9 +990,15 @@ func (svc *ProjectMembershipService) atomicReplaceBinding(ctx context.Context, r
 	}
 
 	// All mutations, last-owner guard, and audit inside one transaction.
+	// R3-1: acquire project lock to prevent write-skew under PostgreSQL.
 	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU.
 	var replaced *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Acquire project-scoped membership lock.
+		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project: %w", err)
+		}
+
 		// Last-owner guard if demoting from owner (inside tx for serialization).
 		if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
 			if primary.PrincipalType == store.RoleBindingPrincipalUser {
@@ -965,10 +1065,20 @@ func (svc *ProjectMembershipService) replaceBindingTx(ctx context.Context, tx st
 		return nil, fmt.Errorf("replaceBindingTx: no bindings to replace")
 	}
 	// Use the highest-authority binding's metadata for the replacement.
-	primary := svc.highestAuthorityBinding(ctx, old)
+	// Must use tx (not svc.store) to avoid SQLite deadlock inside a transaction.
+	primary := svc.highestAuthorityBindingFromStore(ctx, tx, old)
 	if primary == nil {
 		primary = old[0]
 	}
+	// Delete all old bindings first to satisfy the D4 partial unique index
+	// (one binding per principal per project). Must delete before creating
+	// the replacement to avoid a constraint violation.
+	for _, b := range old {
+		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+			return nil, fmt.Errorf("delete old binding %s: %w", b.ID, err)
+		}
+	}
+
 	created, err := tx.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: newRoleDefID,
 		PrincipalType:    primary.PrincipalType,
@@ -983,19 +1093,20 @@ func (svc *ProjectMembershipService) replaceBindingTx(ctx context.Context, tx st
 		return nil, fmt.Errorf("create replacement: %w", err)
 	}
 
-	// Delete all old bindings (including any duplicates from legacy data).
-	for _, b := range old {
-		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
-			return nil, fmt.Errorf("delete old binding %s: %w", b.ID, err)
-		}
-	}
-
 	return created, nil
 }
 
 // highestAuthorityBinding returns the binding with the highest-authority role
 // from the provided list. Uses the role definition cache to resolve role names.
 func (svc *ProjectMembershipService) highestAuthorityBinding(ctx context.Context, bindings []*store.RoleBinding) *store.RoleBinding {
+	return svc.highestAuthorityBindingFromStore(ctx, svc.store, bindings)
+}
+
+// highestAuthorityBindingFromStore is like highestAuthorityBinding but reads
+// role definitions from the provided store (which may be a transactional
+// store). This variant must be used when called from inside a WithTx
+// callback to avoid SQLite deadlocks.
+func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx context.Context, s store.Store, bindings []*store.RoleBinding) *store.RoleBinding {
 	if len(bindings) <= 1 {
 		if len(bindings) == 1 {
 			return bindings[0]
@@ -1005,7 +1116,7 @@ func (svc *ProjectMembershipService) highestAuthorityBinding(ctx context.Context
 	var best *store.RoleBinding
 	bestLevel := -1
 	for _, b := range bindings {
-		rd, err := svc.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		rd, err := s.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue
 		}

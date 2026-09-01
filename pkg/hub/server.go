@@ -3761,6 +3761,27 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 	} else {
 		log.Debug("membership migration: no duplicates found")
 	}
+
+	// O-2: After migration cleans up legacy duplicates, install a partial
+	// unique index that enforces D4 (one binding per principal per project)
+	// at the database level. This prevents future duplicates from any code
+	// path, including direct store.CreateRoleBinding bypasses.
+	// Uses IF NOT EXISTS so it's idempotent across restarts.
+	if dbProvider, ok := s.store.(interface{ DB() *sql.DB }); ok {
+		if db := dbProvider.DB(); db != nil {
+			const indexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS ` +
+				`idx_rolebinding_one_per_principal_per_project ` +
+				`ON role_bindings (principal_type, principal_id, scope_type, scope_id) ` +
+				`WHERE scope_type = 'project'`
+			if _, err := db.ExecContext(ctx, indexDDL); err != nil {
+				log.Warn("could not create D4 partial unique index — duplicates still prevented by application logic",
+					"error", err)
+			} else {
+				log.Info("D4 partial unique index installed on role_bindings")
+			}
+		}
+	}
+
 	return nil
 }
 
