@@ -602,8 +602,12 @@ export class ScionAccessBoundaryPreview extends LitElement {
         })
       );
     } catch (err) {
-      // Check if unknown outcome — refetch
-      if (err instanceof Error && err.message.includes('network')) {
+      // Check if unknown outcome (no HTTP response received) — refetch.
+      // All browsers throw TypeError for fetch network failures. If the error
+      // has no httpStatus, no HTTP response was received (unknown outcome).
+      const isNetworkError =
+        err instanceof TypeError || (err instanceof Error && !('httpStatus' in err));
+      if (isNetworkError) {
         try {
           if (this.constraintId) {
             const refetchResult = await accessBoundariesApi.refetchAfterUnknownOutcome(
@@ -657,12 +661,15 @@ export class ScionAccessBoundaryPreview extends LitElement {
   private async handleLoadMorePrincipals(e: CustomEvent<PageRequestDetail>): Promise<void> {
     if (!this.preview || this.loadingMorePrincipals) return;
 
+    // In preview mode there is no preview-specific pagination endpoint.
+    // Fetching from listAffected() would return committed-state data, silently
+    // mixing two snapshots. Guard against this by returning early.
+    if (this.preview.previewToken) {
+      return;
+    }
+
     this.loadingMorePrincipals = true;
     try {
-      // For preview, principals come from the preview's principalsPage.
-      // Additional pages would be fetched if there's a constraintId.
-      // Since preview results are stateless, we just acknowledge the pagination.
-      // In practice, the server should supply all pages inline or via a separate endpoint.
       if (this.constraintId) {
         const page = await accessBoundariesApi.listAffected(this.constraintId, {
           pageToken: e.detail.pageToken,
@@ -917,7 +924,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
           <div class="section-body">
             <scion-affected-principals-table
               .principals=${this.allPrincipals}
-              .nextPageToken=${this.principalsNextToken}
+              .nextPageToken=${undefined}
               .totalCount=${this.principalsTotalCount}
               .totalCountExact=${this.principalsTotalCountExact}
               .loading=${this.loadingMorePrincipals}
@@ -925,6 +932,17 @@ export class ScionAccessBoundaryPreview extends LitElement {
               @page-request=${(e: CustomEvent<PageRequestDetail>) =>
                 void this.handleLoadMorePrincipals(e)}
             ></scion-affected-principals-table>
+            ${this.principalsNextToken || this.principalsTotalCount > this.allPrincipals.length
+              ? html`<p
+                  style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b); margin: 0.5rem 0 0; text-align: center;"
+                >
+                  Showing first ${this.allPrincipals.length} of
+                  ${this.principalsTotalCountExact
+                    ? this.principalsTotalCount
+                    : `${this.principalsTotalCount}+`}
+                  affected principals.
+                </p>`
+              : nothing}
           </div>
         </div>
 
