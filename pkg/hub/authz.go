@@ -295,12 +295,12 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
-				Permission: permissionID,
-				Errors:     resolutionErrors,
-				DenyReasons: []string{"principal resolution error (fail-closed)"},
-				Grants:     []GrantDetail{},
-				InactiveGrants: []GrantDetail{},
-				Restrictions:   []RestrictionProvenance{},
+				Permission:      permissionID,
+				Errors:          resolutionErrors,
+				DenyReasons:     []string{"principal resolution error (fail-closed)"},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
@@ -850,7 +850,7 @@ func grantProvenanceToDetail(gp GrantProvenance) GrantDetail {
 		PrincipalID:       gp.PrincipalID,
 		ContainsRequested: gp.ContainsRequested,
 		MembershipPath:    gp.MembershipPath,
-		Permissions:        gp.Permissions,
+		Permissions:       gp.Permissions,
 		RejectReasons:     gp.RejectReasons,
 	}
 }

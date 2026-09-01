@@ -144,14 +144,15 @@ func (cs *CapabilitiesService) computeRestrictions(ctx context.Context, actor Pr
 	}
 
 	// Add group memberships to the closure.
-	if principalType == "user" {
+	switch principalType {
+	case "user":
 		groups, err := cs.store.GetEffectiveGroups(ctx, actor.ID)
 		if err == nil {
 			for _, gid := range groups {
 				typedClosure["group:"+gid] = struct{}{}
 			}
 		}
-	} else if principalType == "agent" {
+	case "agent":
 		groups, err := cs.store.GetEffectiveGroupsForAgent(ctx, actor.ID)
 		if err == nil {
 			for _, gid := range groups {

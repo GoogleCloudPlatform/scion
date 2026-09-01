@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -1353,11 +1352,11 @@ func TestPreview_LockoutAssessment_Unsafe_ZeroAdmins(t *testing.T) {
 
 	// No admin bindings at all — but we need someone to be the actor.
 	draft := &store.AccessConstraint{
-		Name:                 "lockout-zero-test",
-		SubjectKind:          store.ConstraintSubjectAllPrincipals,
-		ScopeType:            store.RoleScopeSystem,
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "lockout zero admins",
+		Name:               "lockout-zero-test",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "lockout zero admins",
 	}
 
 	result, err := ps.GeneratePreview(ctx, PreviewRequest{
@@ -2449,14 +2448,6 @@ func TestPreview_MultipleConstraintsInteraction(t *testing.T) {
 			break
 		}
 	}
-}
-
-// ---------------------------------------------------------------------------
-// 31. Unused format: ensure the unused import is resolved
-// ---------------------------------------------------------------------------
-
-func TestPreview_FormatVerification(t *testing.T) {
-	_ = fmt.Sprintf("test")
 }
 
 // ---------------------------------------------------------------------------

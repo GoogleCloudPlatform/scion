@@ -46,18 +46,18 @@ type InvalidationEvent struct {
 
 // Invalidation event type constants.
 const (
-	EventBoundaryCreated          = "boundary.created"
-	EventBoundaryUpdated          = "boundary.updated"
-	EventBoundaryDeleted          = "boundary.deleted"
-	EventRoleBindingCreated       = "rolebinding.created"
-	EventRoleBindingUpdated       = "rolebinding.updated"
-	EventRoleBindingDeleted       = "rolebinding.deleted"
-	EventMembershipChanged        = "membership.changed"
-	EventPrincipalStatusChanged   = "principal.status_changed"
+	EventBoundaryCreated           = "boundary.created"
+	EventBoundaryUpdated           = "boundary.updated"
+	EventBoundaryDeleted           = "boundary.deleted"
+	EventRoleBindingCreated        = "rolebinding.created"
+	EventRoleBindingUpdated        = "rolebinding.updated"
+	EventRoleBindingDeleted        = "rolebinding.deleted"
+	EventMembershipChanged         = "membership.changed"
+	EventPrincipalStatusChanged    = "principal.status_changed"
 	EventPermissionRegistryChanged = "permission_registry.changed"
-	EventProjectLifecycleChanged  = "project.lifecycle_changed"
-	EventRecoveryStarted          = "recovery.started"
-	EventRecoveryCompleted        = "recovery.completed"
+	EventProjectLifecycleChanged   = "project.lifecycle_changed"
+	EventRecoveryStarted           = "recovery.started"
+	EventRecoveryCompleted         = "recovery.completed"
 )
 
 // ---------------------------------------------------------------------------
@@ -199,4 +199,3 @@ func eventTypeMatches(eventType string, filterTypes []string) bool {
 	}
 	return false
 }
-

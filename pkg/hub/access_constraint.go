@@ -526,10 +526,10 @@ type IncompletenessReason struct {
 
 // Incompleteness reason codes.
 const (
-	IncompletenessCodeMembershipFailed  = "MEMBERSHIP_RESOLUTION_FAILED"
-	IncompletenessCodeSubjectTooLarge   = "SUBJECT_SET_TOO_LARGE"
-	IncompletenessCodePermissionFailed  = "PERMISSION_RESOLUTION_FAILED"
-	IncompletenessCodeTimeBudget        = "TIME_BUDGET_EXCEEDED"
+	IncompletenessCodeMembershipFailed = "MEMBERSHIP_RESOLUTION_FAILED"
+	IncompletenessCodeSubjectTooLarge  = "SUBJECT_SET_TOO_LARGE"
+	IncompletenessCodePermissionFailed = "PERMISSION_RESOLUTION_FAILED"
+	IncompletenessCodeTimeBudget       = "TIME_BUDGET_EXCEEDED"
 )
 
 // ---------------------------------------------------------------------------
@@ -693,12 +693,12 @@ type PreviewWarning struct {
 
 // Warning codes.
 const (
-	WarningCodeLargeBlastRadius          = "LARGE_BLAST_RADIUS"
-	WarningCodeRelaxationIncluded        = "RELAXATION_INCLUDED"
-	WarningCodeRelaxationMasked          = "RELAXATION_MASKED_BY_INTERSECTION"
-	WarningCodeDestructivePermRestored   = "DESTRUCTIVE_PERMISSION_RESTORED"
-	WarningCodePreviewDegraded           = "PREVIEW_DEGRADED"
-	WarningCodeScheduledActivation       = "SCHEDULED_ACTIVATION"
+	WarningCodeLargeBlastRadius        = "LARGE_BLAST_RADIUS"
+	WarningCodeRelaxationIncluded      = "RELAXATION_INCLUDED"
+	WarningCodeRelaxationMasked        = "RELAXATION_MASKED_BY_INTERSECTION"
+	WarningCodeDestructivePermRestored = "DESTRUCTIVE_PERMISSION_RESTORED"
+	WarningCodePreviewDegraded         = "PREVIEW_DEGRADED"
+	WarningCodeScheduledActivation     = "SCHEDULED_ACTIVATION"
 )
 
 // ---------------------------------------------------------------------------

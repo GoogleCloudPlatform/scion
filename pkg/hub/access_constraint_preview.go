@@ -486,7 +486,8 @@ func (ps *PreviewService) resolveSinglePrincipal(
 	p.displayName = ps.resolveDisplayName(ctx, sel.PrincipalType, sel.PrincipalID)
 
 	// Resolve group membership for constraint filtering.
-	if sel.PrincipalType == "user" {
+	switch sel.PrincipalType {
+	case "user":
 		groups, err := ps.store.GetEffectiveGroups(ctx, sel.PrincipalID)
 		if err != nil {
 			ps.logger.Warn("failed to resolve groups for principal",
@@ -494,7 +495,7 @@ func (ps *PreviewService) resolveSinglePrincipal(
 		} else {
 			p.groupIDs = groups
 		}
-	} else if sel.PrincipalType == "agent" {
+	case "agent":
 		groups, err := ps.store.GetEffectiveGroupsForAgent(ctx, sel.PrincipalID)
 		if err != nil {
 			ps.logger.Warn("failed to resolve groups for agent",
@@ -843,16 +844,16 @@ func (ps *PreviewService) computePrincipalImpact(
 	}
 
 	ip := ImpactedPrincipal{
-		PrincipalType:          principal.principalType,
-		PrincipalID:            principal.principalID,
-		DisplayName:            principal.displayName,
-		ChangeKind:             changeKind,
-		MembershipPaths:        principal.membershipPaths,
-		CurrentPermissionCount: len(currentPerms),
+		PrincipalType:           principal.principalType,
+		PrincipalID:             principal.principalID,
+		DisplayName:             principal.displayName,
+		ChangeKind:              changeKind,
+		MembershipPaths:         principal.membershipPaths,
+		CurrentPermissionCount:  len(currentPerms),
 		ProposedPermissionCount: len(proposedPerms),
-		RemovedPermissions:     removed,
-		RegainedPermissions:    regained,
-		RemovedPermissionCount: len(removed),
+		RemovedPermissions:      removed,
+		RegainedPermissions:     regained,
+		RemovedPermissionCount:  len(removed),
 	}
 
 	return ip, nil
@@ -2150,7 +2151,7 @@ func (ps *PreviewService) computeStateFingerprint(
 	// Include constraint count.
 	count, err := ps.store.CountAccessConstraints(ctx)
 	if err == nil {
-		fmt.Fprintf(h, "cc:%d;", count)
+		_, _ = fmt.Fprintf(h, "cc:%d;", count)
 	}
 
 	// Include draft scope's constraint list hash.
@@ -2170,7 +2171,7 @@ func (ps *PreviewService) computeStateFingerprint(
 	constraints, err := ps.store.ListConstraintsForScope(ctx, scopeType, scopeID)
 	if err == nil {
 		for _, c := range constraints {
-			fmt.Fprintf(h, "c:%s:%d:%s;", c.ID, c.Revision, c.UpdatedAt.UTC().Format(time.RFC3339Nano))
+			_, _ = fmt.Fprintf(h, "c:%s:%d:%s;", c.ID, c.Revision, c.UpdatedAt.UTC().Format(time.RFC3339Nano))
 		}
 	}
 

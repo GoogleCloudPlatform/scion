@@ -508,7 +508,7 @@ func TestB7_ErrorCodes_Defined(t *testing.T) {
 		"scope_not_found":                              ErrCodeScopeNotFound,
 		"scope_mismatch":                               ErrCodeScopeMismatch,
 		"permission_registry_changed":                  ErrCodePermissionRegistryChanged,
-		"insufficient_constraint_relaxation_authority":  ErrCodeInsufficientRelaxationAuthority,
+		"insufficient_constraint_relaxation_authority": ErrCodeInsufficientRelaxationAuthority,
 		"mutation_permission_lost":                     ErrCodeMutationPermissionLost,
 		"revision_conflict":                            ErrCodeRevisionConflict,
 		"recovery_disabled_immutable":                  ErrCodeRecoveryDisabledImmutable,
@@ -687,7 +687,7 @@ func TestB7_ParseIfMatchRevision(t *testing.T) {
 		{`"1"`, 1, false},
 		{`"42"`, 42, false},
 		{"5", 5, false},
-		{`"0"`, 0, true},  // Must be positive.
+		{`"0"`, 0, true}, // Must be positive.
 		{`"*"`, 0, true},
 		{"", 0, true},
 		{"abc", 0, true},
@@ -878,7 +878,7 @@ func TestB7_PreviewTokenReplay(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, firstResp.Code, "first create should succeed: %s", firstResp.Body.String())
 
 	// Second attempt with same token should fail.
-	createBody.Name = "replay-boundary-2"       // Different name to avoid duplicate name error.
+	createBody.Name = "replay-boundary-2"        // Different name to avoid duplicate name error.
 	createBody.Purpose = "Test replay attempt 2" // Keep purpose non-empty.
 	secondResp := doRequest(t, srv, http.MethodPost,
 		"/api/v1/admin/access-constraints", createBody)

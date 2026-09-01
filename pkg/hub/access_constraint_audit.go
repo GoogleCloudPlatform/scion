@@ -363,16 +363,16 @@ func (m *BoundaryMetrics) RecordSecurityReviewTrigger() {
 // Snapshot returns a point-in-time copy of the metrics.
 func (m *BoundaryMetrics) Snapshot() map[string]int64 {
 	return map[string]int64{
-		"tighten_count":               m.TightenCount.Load(),
-		"relax_count":                 m.RelaxCount.Load(),
-		"mixed_count":                 m.MixedCount.Load(),
-		"last_preview_latency_ms":     m.LastPreviewLatencyMs.Load(),
-		"last_mutation_latency_ms":    m.LastMutationLatencyMs.Load(),
-		"lockout_check_count":         m.LockoutCheckCount.Load(),
-		"lockout_block_count":         m.LockoutBlockCount.Load(),
+		"tighten_count":                 m.TightenCount.Load(),
+		"relax_count":                   m.RelaxCount.Load(),
+		"mixed_count":                   m.MixedCount.Load(),
+		"last_preview_latency_ms":       m.LastPreviewLatencyMs.Load(),
+		"last_mutation_latency_ms":      m.LastMutationLatencyMs.Load(),
+		"lockout_check_count":           m.LockoutCheckCount.Load(),
+		"lockout_block_count":           m.LockoutBlockCount.Load(),
 		"security_review_trigger_count": m.SecurityReviewTriggerCount.Load(),
-		"recovery_disable_count":      m.RecoveryDisableCount.Load(),
-		"recovery_enable_count":       m.RecoveryEnableCount.Load(),
+		"recovery_disable_count":        m.RecoveryDisableCount.Load(),
+		"recovery_enable_count":         m.RecoveryEnableCount.Load(),
 	}
 }
 
@@ -383,4 +383,3 @@ func safeRate(numerator, denominator int64) float64 {
 	}
 	return float64(numerator) / float64(denominator)
 }
-

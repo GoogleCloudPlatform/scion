@@ -206,11 +206,11 @@ func TestExplainAPI_JSONErrors(t *testing.T) {
 	srv, _ := testServer(t)
 
 	tests := []struct {
-		name       string
-		method     string
-		body       interface{}
-		wantCode   int
-		wantField  string // Expected field in the JSON error.
+		name      string
+		method    string
+		body      interface{}
+		wantCode  int
+		wantField string // Expected field in the JSON error.
 	}{
 		{
 			name:      "wrong method",
@@ -499,10 +499,10 @@ func TestExplainAPI_ComparePrincipalID_AdminAllowed(t *testing.T) {
 			"id":        project.ID,
 			"projectId": project.ID,
 		},
-		"action":                "read",
-		"mode":                  "effective_permissions",
-		"comparePrincipalId":    targetID,
-		"comparePrincipalKind":  "user",
+		"action":               "read",
+		"mode":                 "effective_permissions",
+		"comparePrincipalId":   targetID,
+		"comparePrincipalKind": "user",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/authz/explain", body)

@@ -225,26 +225,26 @@ type appliesWhenResponse struct {
 // accessBoundarySummary is a list row with resolved references and capabilities.
 // Field shapes conform to the frozen WP0 contract (type-shapes.ts §8).
 type accessBoundarySummary struct {
-	ID                    string               `json:"id"`
-	Name                  string               `json:"name"`
-	Purpose               string               `json:"purpose"`
-	Subject               resolvedSubject      `json:"subject"`
-	SubjectDisplay        subjectDisplayResp   `json:"subjectDisplay"`
-	Scope                 resolvedScope        `json:"scope"`
-	ScopeDisplay          scopeDisplayResp     `json:"scopeDisplay"`
-	MaxPermissionCount    int                  `json:"maximumPermissionCount"`
-	AffectedPrincipalCnt  int                  `json:"affectedPrincipalCount"`
+	ID                     string              `json:"id"`
+	Name                   string              `json:"name"`
+	Purpose                string              `json:"purpose"`
+	Subject                resolvedSubject     `json:"subject"`
+	SubjectDisplay         subjectDisplayResp  `json:"subjectDisplay"`
+	Scope                  resolvedScope       `json:"scope"`
+	ScopeDisplay           scopeDisplayResp    `json:"scopeDisplay"`
+	MaxPermissionCount     int                 `json:"maximumPermissionCount"`
+	AffectedPrincipalCnt   int                 `json:"affectedPrincipalCount"`
 	AffectedPrincipalExact bool                `json:"affectedPrincipalCountExact"`
-	Status                string               `json:"status"`
-	Risk                  []string             `json:"risk"`
-	Health                wpResolutionHealth   `json:"health"`
-	AppliesWhen           appliesWhenResponse  `json:"appliesWhen"`
-	Revision              string               `json:"revision"`
-	CreatedBy             *principalRef        `json:"createdBy"`
-	CreatedAt             time.Time            `json:"createdAt"`
-	UpdatedBy             *principalRef        `json:"updatedBy"`
-	UpdatedAt             time.Time            `json:"updatedAt"`
-	Capabilities          *wpCapabilities      `json:"_capabilities"`
+	Status                 string              `json:"status"`
+	Risk                   []string            `json:"risk"`
+	Health                 wpResolutionHealth  `json:"health"`
+	AppliesWhen            appliesWhenResponse `json:"appliesWhen"`
+	Revision               string              `json:"revision"`
+	CreatedBy              *principalRef       `json:"createdBy"`
+	CreatedAt              time.Time           `json:"createdAt"`
+	UpdatedBy              *principalRef       `json:"updatedBy"`
+	UpdatedAt              time.Time           `json:"updatedAt"`
+	Capabilities           *wpCapabilities     `json:"_capabilities"`
 }
 
 // accessBoundaryDetail is the full record with temporal impact, lockout, provenance.
@@ -1264,107 +1264,6 @@ func (s *Server) requireConstraintAdminPermission(w http.ResponseWriter, r *http
 // Governance: lockout prevention (retained for legacy callers)
 // ---------------------------------------------------------------------------
 
-// checkConstraintLockout verifies that after applying the proposed constraint,
-// at least one active direct user retains constraint-admin permission at the
-// relevant scope.
-//
-// The algorithm:
-//  1. Resolve all direct users who currently hold access_constraint.admin at
-//     this scope via role bindings (including group-expanded bindings).
-//  2. Load all constraints at this scope, merge in the proposed change.
-//  3. For each admin user, simulate the full constraint set against that
-//     user's principal closure. If any constraint (in its most-restrictive
-//     time state) would remove access_constraint.admin, the user is blocked.
-//  4. If at least one admin user survives unconstrained, the operation is
-//     allowed. If none survive, reject.
-func (s *Server) checkConstraintLockout(r *http.Request, proposed *store.AccessConstraint) error {
-	ctx := r.Context()
-
-	// Fast path: if the proposed constraint allows constraint-admin, it
-	// cannot cause a lockout by itself. We still need to check combined
-	// state though — another existing constraint might already be blocking
-	// admin, and this change could close the last remaining gap.
-	// However, if the proposed constraint allows admin AND is a new creation
-	// (ID is empty), it strictly cannot make things worse. Skip.
-	if proposed.ID == "" && constraintAllowsPermission(proposed, PermissionConstraintAdmin) {
-		return nil
-	}
-
-	// Step 1: Find all direct users with constraint-admin at this scope.
-	adminUsers, err := s.resolveConstraintAdminUsers(ctx, proposed.ScopeType, proposed.ScopeID)
-	if err != nil {
-		slog.Warn("lockout check: failed to resolve admin users", "error", err)
-		return errors.New("failed to resolve constraint admin users for lockout check")
-	}
-
-	if len(adminUsers) == 0 {
-		// No admin users found — this is already a degraded state.
-		// Allow the operation rather than blocking everything.
-		slog.Warn("lockout check: no constraint admin users found at scope",
-			"scopeType", proposed.ScopeType, "scopeID", proposed.ScopeID)
-		return nil
-	}
-
-	// Step 2: Load all constraints at this scope and merge proposed change.
-	constraints, err := s.store.ListConstraintsForScope(ctx, proposed.ScopeType, proposed.ScopeID)
-	if err != nil {
-		return errors.New("failed to load existing constraints for lockout check")
-	}
-
-	// Add or update the proposed constraint in the list.
-	found := false
-	for i, c := range constraints {
-		if c.ID == proposed.ID {
-			constraints[i] = proposed
-			found = true
-			break
-		}
-	}
-	if !found {
-		constraints = append(constraints, proposed)
-	}
-
-	// Filter to constraints that would be active in most-restrictive state
-	// and that remove constraint-admin.
-	now := time.Now()
-	var restrictingConstraints []*store.AccessConstraint
-	for _, c := range constraints {
-		if c.Disabled {
-			continue
-		}
-		condition := ConstraintCondition{}
-		if c.NotBefore != nil {
-			condition.NotBefore = *c.NotBefore
-		}
-		if c.ExpiresAt != nil {
-			condition.ExpiresAt = *c.ExpiresAt
-		}
-		if !condition.IsActiveInMostRestrictiveState(now) {
-			continue
-		}
-		if constraintAllowsPermission(c, PermissionConstraintAdmin) {
-			continue // This constraint does not restrict admin.
-		}
-		restrictingConstraints = append(restrictingConstraints, c)
-	}
-
-	// If no constraints restrict admin, no lockout is possible.
-	if len(restrictingConstraints) == 0 {
-		return nil
-	}
-
-	// Step 3: For each admin user, check if any restricting constraint
-	// applies to them. If ALL admin users are blocked, reject.
-	for _, au := range adminUsers {
-		if !s.userBlockedByConstraints(ctx, au, restrictingConstraints) {
-			return nil // At least one admin user survives.
-		}
-	}
-
-	// Step 4: All admin users are blocked.
-	return errors.New("constraint would remove constraint-admin permission from all users who currently hold it at this scope; at least one direct user must retain it")
-}
-
 // adminUserInfo holds identity data for a user with constraint-admin.
 type adminUserInfo struct {
 	userID   string
@@ -1672,19 +1571,19 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 	updatedByRef := s.resolvePrincipalRef(ctx, sc.UpdatedBy)
 
 	summary := accessBoundarySummary{
-		ID:                    sc.ID,
-		Name:                  sc.Name,
-		Purpose:               sc.Purpose,
-		Subject:               resolvedSubjectFromStore(sc),
-		SubjectDisplay:        subjectDisp,
-		Scope:                 resolvedScopeFromStore(sc),
-		ScopeDisplay:          scopeDisp,
-		MaxPermissionCount:    len(sc.MaximumPermissions),
-		AffectedPrincipalCnt:  0, // R4.5: populated from cached count; TODO: compute from preview cache.
+		ID:                     sc.ID,
+		Name:                   sc.Name,
+		Purpose:                sc.Purpose,
+		Subject:                resolvedSubjectFromStore(sc),
+		SubjectDisplay:         subjectDisp,
+		Scope:                  resolvedScopeFromStore(sc),
+		ScopeDisplay:           scopeDisp,
+		MaxPermissionCount:     len(sc.MaximumPermissions),
+		AffectedPrincipalCnt:   0, // R4.5: populated from cached count; TODO: compute from preview cache.
 		AffectedPrincipalExact: false,
-		Status:                status,
-		Risk:                  []string{}, // R4.4: empty array; risk assessment not yet implemented.
-		Health:                health,
+		Status:                 status,
+		Risk:                   []string{}, // R4.4: empty array; risk assessment not yet implemented.
+		Health:                 health,
 		AppliesWhen: appliesWhenResponse{
 			NotBefore: sc.NotBefore,
 			ExpiresAt: sc.ExpiresAt,

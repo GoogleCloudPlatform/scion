@@ -65,14 +65,14 @@ func TestAudit_CommitProducesAuditID(t *testing.T) {
 	// Create a constraint via preview+commit.
 	pType := "user"
 	draft := &store.AccessConstraint{
-		Name:               "audit-test-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "audit-test-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("audit-target-user")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test audit logging",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("audit-target-user")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test audit logging",
+		CreatedBy:            adminID,
 	}
 
 	// Seed the target user so the preview can resolve them.
@@ -122,14 +122,14 @@ func TestAudit_WriteFailureReturnsError(t *testing.T) {
 	pType := "user"
 	pvSeedUser(t, s, "audit-fail-target")
 	draft := &store.AccessConstraint{
-		Name:               "audit-fail-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "audit-fail-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("audit-fail-target")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test audit failure",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("audit-fail-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test audit failure",
+		CreatedBy:            adminID,
 	}
 
 	result, err := ps.GeneratePreview(ctx, PreviewRequest{
@@ -292,14 +292,14 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	pvSeedUser(t, s, "redact-target")
 	pType := "user"
 	draft := &store.AccessConstraint{
-		Name:               "redact-test-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "redact-test-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("redact-target")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test redaction",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("redact-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test redaction",
+		CreatedBy:            adminID,
 	}
 
 	result, err := ps.GeneratePreview(ctx, PreviewRequest{
@@ -383,14 +383,14 @@ func TestRecovery_DisableAllWithAudit(t *testing.T) {
 		pvSeedUser(t, s, name+"-user")
 		pType := "user"
 		draft := &store.AccessConstraint{
-			Name:               name,
-			SubjectKind:        store.ConstraintSubjectPrincipal,
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
 			SubjectPrincipalType: &pType,
-			SubjectPrincipalID: strPtr(tid(name + "-user")),
-			ScopeType:          "system",
-			MaximumPermissions: []string{"agent.read", "agent.create"},
-			Purpose:            "test recovery",
-			CreatedBy:          adminID,
+			SubjectPrincipalID:   strPtr(tid(name + "-user")),
+			ScopeType:            "system",
+			MaximumPermissions:   []string{"agent.read", "agent.create"},
+			Purpose:              "test recovery",
+			CreatedBy:            adminID,
 		}
 		_ = i
 		govCreateAndCommit(t, gs, ps, draft, actor)
@@ -435,14 +435,14 @@ func TestRecovery_AuditFailureRollsBackDisable(t *testing.T) {
 	pvSeedUser(t, s, "recovery-fail-user")
 	pType := "user"
 	created, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:               "recovery-fail-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "recovery-fail-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("recovery-fail-user")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test recovery audit failure",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("recovery-fail-user")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test recovery audit failure",
+		CreatedBy:            adminID,
 	})
 	require.NoError(t, err)
 
@@ -729,14 +729,14 @@ func TestEvents_PublishedOnCommit(t *testing.T) {
 	pvSeedUser(t, s, "event-commit-target")
 	pType := "user"
 	draft := &store.AccessConstraint{
-		Name:               "event-test-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "event-test-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("event-commit-target")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test events on commit",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("event-commit-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test events on commit",
+		CreatedBy:            adminID,
 	}
 
 	result, err := ps.GeneratePreview(ctx, PreviewRequest{
@@ -819,14 +819,14 @@ func TestCapabilities_DisabledConstraintBlocksMutation(t *testing.T) {
 	pType := "user"
 	pvSeedUser(t, s, "caps-disabled-target")
 	created, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:               "caps-disabled-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "caps-disabled-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("caps-disabled-target")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test disabled caps",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("caps-disabled-target")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test disabled caps",
+		CreatedBy:            adminID,
 	})
 	require.NoError(t, err)
 
@@ -987,14 +987,14 @@ func TestRecovery_ListRecoveryDisabled(t *testing.T) {
 	pType := "user"
 	pvSeedUser(t, s, "list-disabled-user")
 	created, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:               "list-disabled-boundary",
-		SubjectKind:        store.ConstraintSubjectPrincipal,
+		Name:                 "list-disabled-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
-		SubjectPrincipalID: strPtr(tid("list-disabled-user")),
-		ScopeType:          "system",
-		MaximumPermissions: []string{"agent.read"},
-		Purpose:            "test list disabled",
-		CreatedBy:          adminID,
+		SubjectPrincipalID:   strPtr(tid("list-disabled-user")),
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test list disabled",
+		CreatedBy:            adminID,
 	})
 	require.NoError(t, err)
 
@@ -1059,4 +1059,3 @@ func TestAudit_GetEntriesForConstraint(t *testing.T) {
 	c3Entries := aw.GetEntriesForConstraint("c3")
 	assert.Len(t, c3Entries, 0)
 }
-

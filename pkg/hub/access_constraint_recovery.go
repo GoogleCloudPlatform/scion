@@ -402,9 +402,9 @@ func (rs *RecoveryService) listAllConstraints(ctx context.Context) ([]*store.Acc
 // (pg_advisory_lock) or similar mechanism. The interface is the same either
 // way.
 type RecoveryLock struct {
-	mu      sync.Mutex
-	held    bool
-	holder  string
+	mu     sync.Mutex
+	held   bool
+	holder string
 }
 
 // NewRecoveryLock creates a new RecoveryLock.

@@ -252,13 +252,13 @@ func TestGovernance_ScheduledLockout_Prevented(t *testing.T) {
 	// lock out the admin.
 	futureTime := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	draft := &store.AccessConstraint{
-		Name:                 "scheduled-lockout",
-		SubjectKind:          store.ConstraintSubjectAllPrincipals,
-		ScopeType:            store.RoleScopeSystem,
-		MaximumPermissions:   []string{"agent.read"}, // Does NOT include access_constraint.admin
-		NotBefore:            &futureTime,
-		Purpose:              "scheduled lockout test",
-		CreatedBy:            adminID,
+		Name:               "scheduled-lockout",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"}, // Does NOT include access_constraint.admin
+		NotBefore:          &futureTime,
+		Purpose:            "scheduled lockout test",
+		CreatedBy:          adminID,
 	}
 
 	result, err := ps.GeneratePreview(ctx, PreviewRequest{
