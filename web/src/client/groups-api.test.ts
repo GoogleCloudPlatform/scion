@@ -445,7 +445,7 @@ describe('deleteGroup()', () => {
 });
 
 describe('listMyGroups()', () => {
-  it('fetches the current user groups', async () => {
+  it('fetches the current user groups from /api/v1/users/me/groups', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ groups: [loadFixture('group-with-capabilities.json')] })
     );
@@ -453,6 +453,9 @@ describe('listMyGroups()', () => {
     const result = await listMyGroups();
     expect(result).toHaveLength(1);
     expect(result[0].slug).toBe('platform-engineers');
+
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toBe('/api/v1/users/me/groups');
   });
 });
 

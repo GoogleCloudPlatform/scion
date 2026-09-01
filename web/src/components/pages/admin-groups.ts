@@ -39,6 +39,7 @@ import type {
 } from '../../shared/groups.js';
 import { canGroup } from '../../shared/groups.js';
 import { showToast } from '../../utils/toast.js';
+import { formatRelativeTime } from '../../utils/time.js';
 
 // Import shared form dialog
 import '../shared/group-form-dialog.js';
@@ -808,24 +809,7 @@ export class ScionPageAdminGroups extends LitElement {
   // ---------------------------------------------------------------------------
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
+    return formatRelativeTime(dateString);
   }
 
   private get canCreate(): boolean {

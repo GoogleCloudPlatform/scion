@@ -43,11 +43,11 @@ import type { ScionGroupFormDialog } from '../shared/group-form-dialog.js';
 import type { ScionGroupDeleteDialog } from '../shared/group-delete-dialog.js';
 import type { GroupUpdatedDetail } from '../shared/group-form-dialog.js';
 import type { GroupDeletedDetail } from '../shared/group-delete-dialog.js';
-import { extractApiError } from '../../client/api.js';
 import { apiFetch } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo } from '../../client/main.js';
-import { listMembers } from '../../client/groups-api.js';
+import { getGroup, listMembers, GroupsApiError } from '../../client/groups-api.js';
+import { formatRelativeTime } from '../../utils/time.js';
 
 @customElement('scion-page-admin-group-detail')
 export class ScionPageAdminGroupDetail extends LitElement {
@@ -328,24 +328,18 @@ export class ScionPageAdminGroupDetail extends LitElement {
     this.error = null;
 
     try {
-      const response = await fetch(`/api/v1/groups/${encodeURIComponent(this.groupId)}`, {
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      this.group = (await response.json()) as AdminGroup;
+      this.group = await getGroup(this.groupId);
       dispatchPageTitle(this, this.group.name || this.groupId, 'Groups');
       void this.loadBoundaries();
       void this.resolveOwnerName();
       void this.loadMemberCount();
     } catch (err) {
       console.error('Failed to load group:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load group';
+      if (err instanceof GroupsApiError) {
+        this.error = err.message;
+      } else {
+        this.error = err instanceof Error ? err.message : 'Failed to load group';
+      }
     } finally {
       this.loading = false;
     }
@@ -431,29 +425,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    return formatRelativeTime(dateString);
   }
 
   override render() {

@@ -38,8 +38,9 @@ import type { Capabilities } from '../../shared/groups.js';
 import type { PrincipalChangeDetail } from './principal-picker.js';
 import type { SecurityReviewDetail } from './security-review-dialog.js';
 import { parseSecurityReviewResponse, parseLockoutResponse } from './security-review-dialog.js';
-import { listMembers, addMember, GroupsApiError } from '../../client/groups-api.js';
+import { listMembers, addMember, removeMember, GroupsApiError } from '../../client/groups-api.js';
 import { showToast } from '../../utils/toast.js';
+import { formatRelativeTime } from '../../utils/time.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
 import './security-review-dialog.js';
@@ -598,58 +599,42 @@ export class ScionGroupMemberEditor extends LitElement {
     this.removingMember = memberKey;
 
     try {
-      // Use raw fetch (not apiFetch) to bypass the global 403 toast.
-      // The remove flow has purpose-built constraint/lockout UX.
-      const response = await fetch(
-        `/api/v1/groups/${encodeURIComponent(this.groupId)}/members/${encodeURIComponent(member.memberType)}/${encodeURIComponent(member.memberId)}`,
-        { method: 'DELETE', credentials: 'include' }
-      );
+      const result = await removeMember(this.groupId, member.memberType, member.memberId);
 
-      if (response.status === 204) {
+      if (result.outcome === 'ok') {
         await this.loadMembers();
-        return;
-      }
-
-      if (!response.ok) {
-        // Check for security review or lockout responses
-        const errorBody = (await response.json().catch(() => null)) as Record<
-          string,
-          unknown
-        > | null;
-        if (errorBody) {
-          const lockout = parseLockoutResponse(errorBody);
-          if (lockout) {
-            this.securityReviewDetail = {
-              entityLabel: displayName,
-              contextLabel: `group ${this.groupId}`,
-              boundaries: [],
-              canCommit: false,
-              lockout,
-            };
-            this.showSecurityReview = true;
-            return;
-          }
-
-          const reviewDetail = parseSecurityReviewResponse(
-            errorBody,
-            displayName,
-            `group ${this.groupId}`
-          );
-          if (reviewDetail) {
-            this.securityReviewDetail = reviewDetail;
-            this.showSecurityReview = true;
-            return;
-          }
-
-          // Not a structured error we handle — fall through
-          const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
-          throw new Error(msg ?? `Failed to remove member (HTTP ${response.status})`);
+      } else if (result.outcome === 'lockout') {
+        const lockout = parseLockoutResponse(result.rawBody);
+        const detail: SecurityReviewDetail = {
+          entityLabel: displayName,
+          contextLabel: `group ${this.groupId}`,
+          boundaries: [],
+          canCommit: false,
+        };
+        if (lockout) {
+          detail.lockout = lockout;
         }
-
-        throw new Error(`Failed to remove member (HTTP ${response.status})`);
+        this.securityReviewDetail = detail;
+        this.showSecurityReview = true;
+      } else if (result.outcome === 'security_review') {
+        const reviewDetail = parseSecurityReviewResponse(
+          result.rawBody,
+          displayName,
+          `group ${this.groupId}`
+        );
+        if (reviewDetail) {
+          this.securityReviewDetail = reviewDetail;
+        } else {
+          // Fallback: the adapter identified security_review but parsing failed
+          this.securityReviewDetail = {
+            entityLabel: displayName,
+            contextLabel: `group ${this.groupId}`,
+            boundaries: [],
+            canCommit: false,
+          };
+        }
+        this.showSecurityReview = true;
       }
-
-      await this.loadMembers();
     } catch (err) {
       console.error('Failed to remove member:', err);
       showToast(err instanceof Error ? err.message : 'Failed to remove member');
@@ -663,29 +648,7 @@ export class ScionGroupMemberEditor extends LitElement {
   /* ------------------------------------------------------------------ */
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    return formatRelativeTime(dateString);
   }
 
   private getMemberIcon(memberType: string): string {
@@ -734,7 +697,7 @@ export class ScionGroupMemberEditor extends LitElement {
         </h2>
         ${this.canAdd
           ? html`
-              <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
+              <sl-button variant="primary" size="small" @click=${() => this.openAddDialog()}>
                 <sl-icon slot="prefix" name="person-plus" aria-hidden="true"></sl-icon>
                 Add Member
               </sl-button>
@@ -765,7 +728,7 @@ export class ScionGroupMemberEditor extends LitElement {
           </div>
           ${this.canAdd
             ? html`
-                <sl-button size="small" variant="default" @click=${this.openAddDialog}>
+                <sl-button size="small" variant="default" @click=${() => this.openAddDialog()}>
                   <sl-icon slot="prefix" name="person-plus" aria-hidden="true"></sl-icon>
                   Add Member
                 </sl-button>
@@ -876,7 +839,7 @@ export class ScionGroupMemberEditor extends LitElement {
         <p>This group doesn't have any members yet.</p>
         ${this.canAdd
           ? html`
-              <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
+              <sl-button variant="primary" size="small" @click=${() => this.openAddDialog()}>
                 <sl-icon slot="prefix" name="person-plus" aria-hidden="true"></sl-icon>
                 Add Member
               </sl-button>
@@ -908,7 +871,7 @@ export class ScionGroupMemberEditor extends LitElement {
           this.closeAddDialog();
         }}
       >
-        <form class="dialog-form" @submit=${this.handleAddMember}>
+        <form class="dialog-form" @submit=${(e: Event) => this.handleAddMember(e)}>
           <sl-select
             label="Member Type"
             value=${this.addMemberType}
@@ -937,7 +900,8 @@ export class ScionGroupMemberEditor extends LitElement {
                 <scion-principal-picker
                   principalType="group"
                   label=${inputLabel}
-                  @principal-change=${this.handlePrincipalChange}
+                  @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) =>
+                    this.handlePrincipalChange(e)}
                 ></scion-principal-picker>
               `
             : this.addMemberType === 'user'
@@ -945,7 +909,8 @@ export class ScionGroupMemberEditor extends LitElement {
                   <scion-principal-picker
                     principalType="user"
                     label=${inputLabel}
-                    @principal-change=${this.handlePrincipalChange}
+                    @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) =>
+                      this.handlePrincipalChange(e)}
                   ></scion-principal-picker>
                 `
               : html`
@@ -990,7 +955,7 @@ export class ScionGroupMemberEditor extends LitElement {
         <sl-button
           slot="footer"
           variant="default"
-          @click=${this.closeAddDialog}
+          @click=${() => this.closeAddDialog()}
           ?disabled=${this.addMemberLoading}
         >
           Cancel
@@ -1000,7 +965,7 @@ export class ScionGroupMemberEditor extends LitElement {
           variant="primary"
           ?loading=${this.addMemberLoading}
           ?disabled=${this.addMemberLoading}
-          @click=${this.handleAddMember}
+          @click=${(e: Event) => this.handleAddMember(e)}
         >
           Add Member
         </sl-button>
