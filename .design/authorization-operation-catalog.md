@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 27
+**Operations:** 89
 
 ## Table of Contents
 
@@ -33,6 +33,68 @@
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
 - [user.admin.suspend](#useradminsuspend) — Suspend a user account
+- [secret.read](#secretread) — Read project secrets or environment variables containing secrets
+- [secret.write](#secretwrite) — Create or update project secrets
+- [user.admin.invite](#useradmininvite) — Invite a user to the platform
+- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level
+- [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
+- [hub.config.read](#hubconfigread) — Read server configuration and schema
+- [hub.config.update](#hubconfigupdate) — Update server configuration sections
+- [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
+- [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
+- [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
+- [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
+- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs and messaging divergence data
+- [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
+- [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
+- [hub.lifecyclehooks.read](#hublifecyclehooksread) — Read lifecycle hook definitions
+- [hub.validate.execute](#hubvalidateexecute) — Validate resource definitions against schema
+- [hub.integrations.read](#hubintegrationsread) — Read integration configurations
+- [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
+- [hub.metrics.read](#hubmetricsread) — Read metrics dashboard data
+- [agent.read](#agentread) — Read agent metadata or list agents in a project
+- [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.attach](#agentattach) — Attach to an agent session via WebSocket
+- [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
+- [agent.stopall](#agentstopall) — Stop all running agents in a project
+- [agent.setmessagemode](#agentsetmessagemode) — Change an agent's message mode
+- [project.read](#projectread) — Read project metadata or list projects
+- [project.update](#projectupdate) — Update project settings and metadata
+- [project.register](#projectregister) — Register a project or grove from an external source
+- [skill.read](#skillread) — Read skill definitions or list/discover skills
+- [skill.create](#skillcreate) — Create a new skill definition
+- [skill.update](#skillupdate) — Update an existing skill definition
+- [skill.delete](#skilldelete) — Delete a skill definition
+- [skill.register](#skillregister) — Register skills in a skill registry
+- [template.read](#templateread) — Read template definitions or discover available templates
+- [template.create](#templatecreate) — Create a new template or import resources
+- [template.update](#templateupdate) — Update an existing template definition
+- [template.delete](#templatedelete) — Delete a template definition
+- [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs
+- [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration
+- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration
+- [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration
+- [group.read](#groupread) — Read group details or list groups
+- [group.create](#groupcreate) — Create a new group
+- [group.update](#groupupdate) — Update group metadata
+- [user.read](#userread) — Read user profile or list users
+- [user.update](#userupdate) — Update user profile or settings
+- [broker.read](#brokerread) — Read runtime broker status or list brokers
+- [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
+- [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
+- [role.read](#roleread) — Read role definitions and permission registry
+- [role.binding.read](#rolebindingread) — Read role binding assignments
+- [access.constraint.read](#accessconstraintread) — Read access constraint definitions
+- [quota.read](#quotaread) — Read limit definitions, entitlements, and usage
+- [quota.create](#quotacreate) — Create limit definitions and entitlement bindings
+- [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
+- [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
+- [schedule.event.read](#scheduleeventread) — Read scheduled events or list events in a project
+- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule
+- [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
+- [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
+- [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
+- [env.read](#envread) — Read project environment variables
 
 ---
 
@@ -1089,6 +1151,1918 @@
 - **Before Fields:** target_user_id, old_status
 - **After Fields:** new_status
 - **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## secret.read
+
+**Domain:** secret  
+**Description:** Read project secrets or environment variables containing secrets
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secrets` |
+| http_route | GET | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `project.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id, project_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## secret.write
+
+**Domain:** secret  
+**Description:** Create or update project secrets
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/secrets` |
+| http_route | PUT | `/api/v1/secrets/{key}` |
+| http_route | DELETE | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `project.update`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `secret.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.admin.invite
+
+**Domain:** user.admin  
+**Description:** Invite a user to the platform
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/users/invite` |
+| http_route | POST | `/api/v1/admin/users/invite/bulk` |
+| http_route | GET | `/api/v1/admin/invites` |
+| http_route | GET | `/api/v1/admin/invites/{id}` |
+| http_route | DELETE | `/api/v1/admin/invites/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `user.invite`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `issue-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Invitation issues a credential granting platform access
+
+### Audit
+
+- **Event Type:** `user.admin.invite`
+- **Context Fields:** actor_id
+- **After Fields:** invite_email, invite_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.admin.promote
+
+**Domain:** user.admin  
+**Description:** Promote or demote a user's administrative level
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/{id}/promote` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `user.promote`  
+**Resource Resolver:** user-from-url
+
+**Effects:** `change-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Promotion delegation checked only when effective authority increases
+
+**Authority Evaluation:** `before_and_after`
+
+### Audit
+
+- **Event Type:** `user.admin.promote`
+- **Context Fields:** actor_id
+- **Before Fields:** target_user_id, old_level
+- **After Fields:** new_level
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.authreset
+
+**Domain:** hub  
+**Description:** Reset all agent authentication credentials (emergency action)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/agents/reset-auth-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.auth_reset.execute`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** peer_superior
+- Mass auth reset is a drastic authority revocation requiring hub admin governance
+
+### Audit
+
+- **Event Type:** `hub.authreset`
+- **Context Fields:** actor_id
+- **Before Fields:** agent_count
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.config.read
+
+**Domain:** hub  
+**Description:** Read server configuration and schema
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/server-config` |
+| http_route | GET | `/api/v1/admin/server-config/schema` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.config.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.config.update
+
+**Domain:** hub  
+**Description:** Update server configuration sections
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/server-config/sections/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.config.update`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.maintenance.execute
+
+**Domain:** hub  
+**Description:** Execute maintenance operations including migrations and restarts
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/maintenance/operations` |
+| http_route | GET | `/api/v1/admin/maintenance/operations` |
+| http_route | GET | `/api/v1/admin/maintenance/operations/{id}` |
+| http_route | POST | `/api/v1/admin/maintenance/restart` |
+| http_route | POST | `/api/v1/admin/maintenance/check-updates` |
+| http_route | POST | `/api/v1/admin/maintenance/migrations/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.maintenance.execute`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.adminmode.update
+
+**Domain:** hub  
+**Description:** Toggle admin/maintenance mode
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/maintenance` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.admin_mode.update`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.allowlist.update
+
+**Domain:** hub  
+**Description:** Manage the platform email allow list
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/allow-list` |
+| http_route | PUT | `/api/v1/admin/allow-list` |
+| http_route | PUT | `/api/v1/admin/allow-list/{email}` |
+| http_route | DELETE | `/api/v1/admin/allow-list/{email}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.allow_list.update`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.health.read
+
+**Domain:** hub  
+**Description:** Read platform health summary and GCP quota status
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/health/summary` |
+| http_route | GET | `/api/v1/admin/gcp-quota` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.health.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.diagnostics.read
+
+**Domain:** hub  
+**Description:** Read diagnostic logs and messaging divergence data
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/diagnostics/logs` |
+| http_route | GET | `/api/v1/admin/diagnostics/logs/stream` |
+| http_route | GET | `/api/v1/admin/messaging/divergence` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.diagnostics.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.scheduler.read
+
+**Domain:** hub  
+**Description:** Read scheduler status and configuration
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/scheduler` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.scheduler.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.projectdefaults.read
+
+**Domain:** hub  
+**Description:** Read project default settings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/project-defaults` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.project_defaults.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.lifecyclehooks.read
+
+**Domain:** hub  
+**Description:** Read lifecycle hook definitions
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/lifecycle-hooks` |
+| http_route | GET | `/api/v1/admin/lifecycle-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.lifecycle_hooks.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.validate.execute
+
+**Domain:** hub  
+**Description:** Validate resource definitions against schema
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/validate-resources` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.validate.execute`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.integrations.read
+
+**Domain:** hub  
+**Description:** Read integration configurations
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/integrations` |
+| http_route | GET | `/api/v1/admin/integrations/{name}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.integrations.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.teamsmanifest.read
+
+**Domain:** hub  
+**Description:** Read Teams integration manifest
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/integrations/teams/manifest` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.teams_manifest.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.metrics.read
+
+**Domain:** hub  
+**Description:** Read metrics dashboard data
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/metrics/{name}` |
+| http_route | GET | `/api/v1/admin/metrics-dashboard` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.metrics.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.read
+
+**Domain:** agent  
+**Description:** Read agent metadata or list agents in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents` |
+| http_route | GET | `/api/v1/agents/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.update
+
+**Domain:** agent  
+**Description:** Update agent configuration or metadata
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/agents/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `agent.update`  
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.attach
+
+**Domain:** agent  
+**Description:** Attach to an agent session via WebSocket
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| websocket | GET | `/api/v1/agents/{id}/attach` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`  
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.portaccess
+
+**Domain:** agent  
+**Description:** Access forwarded ports on an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/ports` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `agent.port_access`  
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.stopall
+
+**Domain:** agent  
+**Description:** Stop all running agents in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/stop-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `agent.stop_all`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.setmessagemode
+
+**Domain:** agent  
+**Description:** Change an agent's message mode
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/agents/{id}/message-mode` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `agent.set_message_mode`  
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.read
+
+**Domain:** project  
+**Description:** Read project metadata or list projects
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects` |
+| http_route | GET | `/api/v1/projects/{id}` |
+| http_route | GET | `/api/v1/groves` |
+| http_route | GET | `/api/v1/groves/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `project.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.update
+
+**Domain:** project  
+**Description:** Update project settings and metadata
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}` |
+| http_route | PUT | `/api/v1/groves/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `project.update`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.register
+
+**Domain:** project  
+**Description:** Register a project or grove from an external source
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/register` |
+| http_route | POST | `/api/v1/groves/register` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `project.register`  
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## skill.read
+
+**Domain:** skill  
+**Description:** Read skill definitions or list/discover skills
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/skills` |
+| http_route | GET | `/api/v1/skills/{id}` |
+| http_route | GET | `/api/v1/skills/discover-directory` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `skill.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## skill.create
+
+**Domain:** skill  
+**Description:** Create a new skill definition
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `skill.create`  
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## skill.update
+
+**Domain:** skill  
+**Description:** Update an existing skill definition
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/skills/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `skill.update`  
+**Resource Resolver:** skill-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## skill.delete
+
+**Domain:** skill  
+**Description:** Delete a skill definition
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/skills/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `skill.delete`  
+**Resource Resolver:** skill-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `skill.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** skill_id, skill_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## skill.register
+
+**Domain:** skill  
+**Description:** Register skills in a skill registry
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skill-registries` |
+| http_route | GET | `/api/v1/skill-registries` |
+| http_route | GET | `/api/v1/skill-registries/{id}` |
+| http_route | PUT | `/api/v1/skill-registries/{id}` |
+| http_route | DELETE | `/api/v1/skill-registries/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `skill.register`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `skill.register`
+- **Context Fields:** actor_id
+- **Before Fields:** registry_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## template.read
+
+**Domain:** template  
+**Description:** Read template definitions or discover available templates
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/templates` |
+| http_route | GET | `/api/v1/templates/{id}` |
+| http_route | GET | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `template.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## template.create
+
+**Domain:** template  
+**Description:** Create a new template or import resources
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates` |
+| http_route | POST | `/api/v1/resources/import` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `template.create`  
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## template.update
+
+**Domain:** template  
+**Description:** Update an existing template definition
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `template.update`  
+**Resource Resolver:** template-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## template.delete
+
+**Domain:** template  
+**Description:** Delete a template definition
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `template.delete`  
+**Resource Resolver:** template-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `template.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** template_id, template_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## harnessconfig.read
+
+**Domain:** harnessconfig  
+**Description:** Read harness configurations or list available configs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/harness-configs` |
+| http_route | GET | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `harness_config.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## harnessconfig.create
+
+**Domain:** harnessconfig  
+**Description:** Create a new harness configuration
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `harness_config.create`  
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## harnessconfig.update
+
+**Domain:** harnessconfig  
+**Description:** Update a harness configuration
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `harness_config.update`  
+**Resource Resolver:** harnessconfig-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## harnessconfig.delete
+
+**Domain:** harnessconfig  
+**Description:** Delete a harness configuration
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `harness_config.delete`  
+**Resource Resolver:** harnessconfig-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `harnessconfig.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** config_id, config_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## group.read
+
+**Domain:** group  
+**Description:** Read group details or list groups
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/groups` |
+| http_route | GET | `/api/v1/groups/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `group.read`  
+**Resource Resolver:** group-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## group.create
+
+**Domain:** group  
+**Description:** Create a new group
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/groups` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `group.create`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## group.update
+
+**Domain:** group  
+**Description:** Update group metadata
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/groups/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `group.update`  
+**Resource Resolver:** group-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.read
+
+**Domain:** user  
+**Description:** Read user profile or list users
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users` |
+| http_route | GET | `/api/v1/users/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `user.read`  
+**Resource Resolver:** user-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.update
+
+**Domain:** user  
+**Description:** Update user profile or settings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/users/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `user.update`  
+**Resource Resolver:** user-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## broker.read
+
+**Domain:** broker  
+**Description:** Read runtime broker status or list brokers
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/runtime-brokers` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `broker.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## gcp.identity.read
+
+**Domain:** gcp.identity  
+**Description:** Read GCP service account details or list accounts
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/gcp-service-accounts` |
+| http_route | GET | `/api/v1/gcp-service-accounts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `gcp_service_account.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## gcp.identity.verify
+
+**Domain:** gcp.identity  
+**Description:** Verify a GCP service account's IAM configuration
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/gcp-service-accounts/{id}/verify` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `gcp_service_account.verify`  
+**Resource Resolver:** gcp-identity-from-url
+
+**Effects:** `assign-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Verification may re-bind IAM credentials
+
+### Audit
+
+- **Event Type:** `gcp.identity.verify`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** service_account_id, verification_status
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## role.read
+
+**Domain:** role  
+**Description:** Read role definitions and permission registry
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/roles` |
+| http_route | GET | `/api/v1/admin/roles/{id}` |
+| http_route | GET | `/api/v1/admin/permissions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `role.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## role.binding.read
+
+**Domain:** role.binding  
+**Description:** Read role binding assignments
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/role-bindings` |
+| http_route | GET | `/api/v1/admin/role-bindings/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `role_binding.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## access.constraint.read
+
+**Domain:** access.constraint  
+**Description:** Read access constraint definitions
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/access-constraints` |
+| http_route | GET | `/api/v1/admin/access-constraints/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `access_constraint.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## quota.read
+
+**Domain:** quota  
+**Description:** Read limit definitions, entitlements, and usage
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/limits` |
+| http_route | GET | `/api/v1/admin/limits/{id}` |
+| http_route | GET | `/api/v1/admin/entitlements/{id}` |
+| http_route | GET | `/api/v1/admin/usage` |
+| http_route | GET | `/api/v1/admin/usage/{limit}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `quota.read`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## quota.create
+
+**Domain:** quota  
+**Description:** Create limit definitions and entitlement bindings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/limits` |
+| http_route | POST | `/api/v1/admin/entitlements/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `quota.create`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## quota.update
+
+**Domain:** quota  
+**Description:** Update limit definitions and entitlement bindings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/limits/{id}` |
+| http_route | PUT | `/api/v1/admin/entitlements/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `quota.update`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## quota.delete
+
+**Domain:** quota  
+**Description:** Delete limit definitions and entitlement bindings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/admin/limits/{id}` |
+| http_route | DELETE | `/api/v1/admin/entitlements/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `quota.delete`  
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `quota.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** limit_id, limit_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## schedule.event.read
+
+**Domain:** schedule  
+**Description:** Read scheduled events or list events in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events` |
+| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/schedules` |
+| http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `scheduled_event.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## schedule.event.create
+
+**Domain:** schedule  
+**Description:** Create a scheduled event or recurring schedule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/scheduled-events` |
+| http_route | POST | `/api/v1/projects/{projectId}/schedules` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `scheduled_event.create`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## schedule.event.update
+
+**Domain:** schedule  
+**Description:** Update a recurring schedule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{projectId}/schedules/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `scheduled_event.update`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## schedule.event.delete
+
+**Domain:** schedule  
+**Description:** Cancel a scheduled event or delete a recurring schedule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
+| http_route | DELETE | `/api/v1/projects/{projectId}/schedules/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `scheduled_event.delete`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `schedule.event.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** event_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## chat.access
+
+**Domain:** chat  
+**Description:** Access chat threads, spaces, topics, and messages within a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/prefs` |
+| http_route | PUT | `/api/v1/chat/prefs` |
+| http_route | GET | `/api/v1/chat/threads` |
+| http_route | GET | `/api/v1/chat/threads/{id}` |
+| http_route | GET | `/api/v1/chat/spaces` |
+| http_route | GET | `/api/v1/chat/spaces/{id}` |
+| http_route | GET | `/api/v1/chat/conversations/{id}` |
+| http_route | GET | `/api/v1/chat/topics/{id}` |
+| http_route | GET | `/api/v1/chat/dms` |
+| http_route | GET | `/api/v1/chat/search` |
+| http_route | GET | `/api/v1/chat/attachments` |
+| http_route | GET | `/api/v1/chat/attachments/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `project.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## env.read
+
+**Domain:** env  
+**Description:** Read project environment variables
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env` |
+| http_route | GET | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `project.read`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
 
 **Denial Codes:** `forbidden`
 

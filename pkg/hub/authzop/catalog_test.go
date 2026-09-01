@@ -15,7 +15,6 @@
 package authzop
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -231,109 +230,53 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 	registryIDs := permissionRegistryIDs(t)
 	catalogPerms := CatalogBasePermissions()
 
-	// Permissions that are consumed by catalog operations indirectly or are
-	// explicitly reserved/deferred for later phases.
+	// Permissions not directly consumed as a BasePermission by any catalog
+	// operation. Permissions already consumed are excluded from this map.
 	reservedOrDeferred := map[string]string{
-		// Read/list operations that are route-guarded but not individually
-		// cataloged as high-risk operations in AF1 (cataloged as a class).
-		"agent.read":                 "Route-guarded read; full operation catalog in AH3",
-		"agent.list":                 "Route-guarded list; full operation catalog in AH3",
-		"agent.update":               "Route-guarded update; full operation catalog in AH5",
-		"agent.attach":               "Route-guarded attach; full operation catalog in AH2",
-		"agent.port_access":          "Route-guarded port access; full operation catalog in AH4",
-		"agent.stop_all":             "Route-guarded admin action; full operation catalog in AH2",
-		"agent.message":              "Cataloged via agent.message.send operation",
-		"agent.set_message_mode":     "Route-guarded admin action; full operation catalog in AH5",
-		"project.read":               "Route-guarded read; full operation catalog in AH3",
-		"project.update":             "Route-guarded update; full operation catalog in AH5",
-		"project.register":           "Route-guarded register; full operation catalog in AH5",
-		"skill.create":               "Route-guarded CRUD; full operation catalog in AH5",
-		"skill.read":                 "Route-guarded read; full operation catalog in AH5",
-		"skill.update":               "Route-guarded update; full operation catalog in AH5",
-		"skill.delete":               "Route-guarded delete; full operation catalog in AH2",
-		"skill.list":                 "Route-guarded list; full operation catalog in AH5",
-		"template.create":            "Route-guarded CRUD; full operation catalog in AH5",
-		"template.read":              "Route-guarded read; full operation catalog in AH5",
-		"template.update":            "Route-guarded update; full operation catalog in AH5",
-		"template.delete":            "Route-guarded delete; full operation catalog in AH2",
-		"template.list":              "Route-guarded list; full operation catalog in AH5",
-		"harness_config.create":      "Route-guarded CRUD; full operation catalog in AH5",
-		"harness_config.read":        "Route-guarded read; full operation catalog in AH5",
-		"harness_config.update":      "Route-guarded update; full operation catalog in AH5",
-		"harness_config.delete":      "Route-guarded delete; full operation catalog in AH2",
-		"harness_config.list":        "Route-guarded list; full operation catalog in AH5",
-		"group.create":               "Route-guarded CRUD; full operation catalog in AH5",
-		"group.read":                 "Route-guarded read; full operation catalog in AH3",
-		"group.update":               "Route-guarded update; full operation catalog in AH5",
-		"group.list":                 "Route-guarded list; full operation catalog in AH3",
-		"user.read":                  "Route-guarded read; full operation catalog in AH3",
-		"user.update":                "Route-guarded update; full operation catalog in AH5",
-		"policy.create":              "Deprecated (CO1 cutover, 410 Gone)",
-		"policy.read":                "Deprecated (CO1 cutover, 410 Gone)",
-		"policy.update":              "Deprecated (CO1 cutover, 410 Gone)",
-		"policy.delete":              "Deprecated (CO1 cutover, 410 Gone)",
-		"policy.list":                "Deprecated (CO1 cutover, 410 Gone)",
-		"broker.create":              "Route-guarded CRUD; full operation catalog in AH5",
-		"broker.read":                "Route-guarded read; full operation catalog in AH5",
-		"broker.update":              "Route-guarded update; full operation catalog in AH5",
-		"broker.delete":              "Route-guarded delete; full operation catalog in AH2",
-		"broker.list":                "Route-guarded list; full operation catalog in AH5",
-		"broker.dispatch":            "Route-guarded dispatch; full operation catalog in AH4",
-		"gcp_service_account.read":   "Route-guarded read; full operation catalog in AH3",
-		"gcp_service_account.list":   "Route-guarded list; full operation catalog in AH3",
-		"gcp_service_account.verify": "Route-guarded verify; full operation catalog in AH4",
-		"role.read":                  "Route-guarded read; full operation catalog in AH3",
-		"role_binding.read":          "Route-guarded read; full operation catalog in AH3",
-		"access_constraint.read":     "Route-guarded read; full operation catalog in AH3",
-		"scheduled_event.read":       "Route-guarded read; full operation catalog in AH5",
-		"scheduled_event.list":       "Route-guarded list; full operation catalog in AH5",
-		"scheduled_event.create":     "Route-guarded create; full operation catalog in AH5",
-		"scheduled_event.delete":     "Route-guarded delete; full operation catalog in AH5",
-		"scheduled_event.update":     "Route-guarded update; full operation catalog in AH5",
-		"quota.read":                 "Route-guarded read; full operation catalog in AH5",
-		"quota.create":               "Route-guarded create; full operation catalog in AH5",
-		"quota.update":               "Route-guarded update; full operation catalog in AH5",
-		"quota.delete":               "Route-guarded delete; full operation catalog in AH5",
-		"skill.register":             "Route-guarded register; full operation catalog in AH5",
+		// List permissions covered by the corresponding read operation
+		// but registered as distinct permission IDs in the registry.
+		"agent.list":              "List subset of agent.read operation",
+		"skill.list":              "List subset of skill.read operation",
+		"template.list":           "List subset of template.read operation",
+		"harness_config.list":     "List subset of harnessconfig.read operation",
+		"group.list":              "List subset of group.read operation",
+		"gcp_service_account.list": "List subset of gcp.identity.read operation",
+		"scheduled_event.list":    "List subset of schedule.event.read operation",
+		"broker.list":             "List subset of broker.read operation",
 
-		// Hub admin operations — Phase 2 D4 route guard conversion
-		"hub.settings.read":           "Phase 2 D4 route guard conversion",
-		"hub.settings.update":         "Phase 2 D4 route guard conversion",
-		"hub.config.read":             "Phase 2 D4 route guard conversion",
-		"hub.config.update":           "Phase 2 D4 route guard conversion",
-		"hub.maintenance.execute":     "Phase 2 D4 route guard conversion",
-		"hub.diagnostics.read":        "Phase 2 D4 route guard conversion",
-		"hub.health.read":             "Phase 2 D4 route guard conversion",
-		"hub.admin_mode.read":         "Phase 2 D4 route guard conversion",
-		"hub.admin_mode.update":       "Phase 2 D4 route guard conversion",
-		"hub.integrations.read":       "Phase 2 D4 route guard conversion",
-		"hub.integrations.update":     "Phase 2 D4 route guard conversion",
-		"hub.lifecycle_hooks.read":    "Phase 2 D4 route guard conversion",
-		"hub.lifecycle_hooks.update":  "Phase 2 D4 route guard conversion",
-		"hub.allow_list.read":         "Phase 2 D4 route guard conversion",
-		"hub.allow_list.update":       "Phase 2 D4 route guard conversion",
-		"hub.project_defaults.read":   "Phase 2 D4 route guard conversion",
-		"hub.project_defaults.update": "Phase 2 D4 route guard conversion",
-		"hub.auth_reset.execute":      "Phase 2 D4 route guard conversion",
-		"hub.scheduler.read":          "Phase 2 D4 route guard conversion",
-		"hub.scheduler.update":        "Phase 2 D4 route guard conversion",
-		"hub.federation.read":         "Phase 2 D4 route guard conversion",
-		"hub.federation.update":       "Phase 2 D4 route guard conversion",
-		"hub.teams_manifest.read":     "Phase 2 D4 route guard conversion",
-		"hub.teams_manifest.update":   "Phase 2 D4 route guard conversion",
-		"hub.validate.execute":        "Phase 2 D4 route guard conversion",
-		"hub.github_app.read":         "Phase 2 D4 route guard conversion",
-		"hub.github_app.update":       "Phase 2 D4 route guard conversion",
-		"hub.metrics.read":            "Phase 2 D4 route guard conversion",
-		"hub.audit.read":              "Super-admin audit explain; full operation catalog in AH4",
+		// Deprecated policy permissions (CO1 cutover, 410 Gone)
+		"policy.create": "Deprecated (CO1 cutover, 410 Gone)",
+		"policy.read":   "Deprecated (CO1 cutover, 410 Gone)",
+		"policy.update": "Deprecated (CO1 cutover, 410 Gone)",
+		"policy.delete": "Deprecated (CO1 cutover, 410 Gone)",
+		"policy.list":   "Deprecated (CO1 cutover, 410 Gone)",
 
-		// User management operations — deferred
-		"user.invite":   "Phase 2 D4 route guard conversion",
-		"user.suspend":  "Cataloged via user.admin.suspend operation",
-		"user.promote":  "Phase 2 D4 route guard conversion",
-		"user.list":     "Phase 2 D4 route guard conversion",
-		"project.clone": "Phase 2 D4 route guard conversion",
-		"project.list":  "Phase 2 D4 route guard conversion",
+		// Broker internal operations — broker-HMAC only, not user-facing
+		"broker.create":   "Broker-HMAC only, not user-facing",
+		"broker.update":   "Broker-HMAC only, not user-facing",
+		"broker.delete":   "Broker-HMAC only, not user-facing",
+		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
+
+		// Hub admin permissions — NonRouteUse only (no route declaration)
+		"hub.settings.read":           "NonRouteUse only, no route declaration",
+		"hub.settings.update":         "NonRouteUse only, no route declaration",
+		"hub.admin_mode.read":         "NonRouteUse only, no route declaration",
+		"hub.integrations.update":     "NonRouteUse only, no route declaration",
+		"hub.lifecycle_hooks.update":  "NonRouteUse only, no route declaration",
+		"hub.allow_list.read":         "NonRouteUse only, no route declaration",
+		"hub.project_defaults.update": "NonRouteUse only, no route declaration",
+		"hub.scheduler.update":        "NonRouteUse only, no route declaration",
+		"hub.federation.read":         "NonRouteUse only, no route declaration",
+		"hub.federation.update":       "NonRouteUse only, no route declaration",
+		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
+		"hub.github_app.read":         "NonRouteUse only, no route declaration",
+		"hub.github_app.update":       "NonRouteUse only, no route declaration",
+		"hub.audit.read":              "Super-admin audit explain, NonRouteUse only",
+
+		// User/project permissions — NonRouteUse only
+		"user.list":     "NonRouteUse only, no route declaration",
+		"project.clone": "NonRouteUse only, no route declaration",
+		"project.list":  "NonRouteUse only, no route declaration",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
@@ -556,35 +499,30 @@ func TestSecurityMutationScanProduction(t *testing.T) {
 
 	var sites []callSite
 
-	scanDirs := []string{
+	scanRoots := []string{
 		filepath.Join(repoRoot, "pkg/hub"),
 		filepath.Join(repoRoot, "pkg/store"),
 	}
 
 	fset := token.NewFileSet()
-	for _, dir := range scanDirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			t.Fatalf("cannot read %s: %v", dir, err)
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
-				continue
-			}
-			if strings.HasSuffix(entry.Name(), "_test.go") {
-				continue
-			}
-			filePath := filepath.Join(dir, entry.Name())
-			f, err := parser.ParseFile(fset, filePath, nil, 0)
+	for _, root := range scanRoots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				t.Errorf("parse error in %s: %v", filePath, err)
-				continue
+				return nil // skip inaccessible dirs
+			}
+			if info.IsDir() {
+				return nil // recurse
+			}
+			if !strings.HasSuffix(info.Name(), ".go") || strings.HasSuffix(info.Name(), "_test.go") {
+				return nil
+			}
+			f, parseErr := parser.ParseFile(fset, path, nil, 0)
+			if parseErr != nil {
+				t.Errorf("parse error in %s: %v", path, parseErr)
+				return nil
 			}
 
-			relPath, _ := filepath.Rel(repoRoot, filePath)
+			relPath, _ := filepath.Rel(repoRoot, path)
 
 			// Walk AST to find call sites
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -608,7 +546,6 @@ func TestSecurityMutationScanProduction(t *testing.T) {
 					return true
 				}
 
-				// Find enclosing function
 				enclosingFunc := findEnclosingFunc(fset, f, call.Pos())
 				sites = append(sites, callSite{
 					file:     relPath,
@@ -617,6 +554,10 @@ func TestSecurityMutationScanProduction(t *testing.T) {
 				})
 				return true
 			})
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("cannot walk %s: %v", root, err)
 		}
 	}
 
@@ -808,5 +749,3 @@ func TestSecurityMutationSymbolsValid(t *testing.T) {
 	}
 }
 
-// Placeholder: ensure fmt import is used
-var _ = fmt.Sprintf

@@ -621,6 +621,8 @@ const (
 	ExemptionAuthenticationOnly ExemptionKind = "authentication_only"
 	ExemptionPublicEndpoint     ExemptionKind = "public_endpoint"
 	ExemptionInternalOnly       ExemptionKind = "internal_only"
+	ExemptionHubAdmin           ExemptionKind = "hub_admin"
+	ExemptionRouteGuarded       ExemptionKind = "route_guarded"
 )
 
 // validExemptionKinds is the closed set of recognized exemption kinds.
@@ -632,6 +634,8 @@ var validExemptionKinds = map[ExemptionKind]bool{
 	ExemptionAuthenticationOnly: true,
 	ExemptionPublicEndpoint:     true,
 	ExemptionInternalOnly:       true,
+	ExemptionHubAdmin:           true,
+	ExemptionRouteGuarded:       true,
 }
 
 // WaivedObligation identifies a specific requirement an exemption waives.
