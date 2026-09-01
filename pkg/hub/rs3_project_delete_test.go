@@ -1280,6 +1280,52 @@ func TestRS3_ProjectDeleteConcurrentRoleRevoke(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// RS3.24a: Structural Lock Assertion — deletion and membership share the
+// same project-scoped serialization lock.
+//
+// This AST-based test proves that both ProjectDeletionService and
+// ProjectMembershipService call LockProjectForMembership inside their
+// WithTx callbacks, ensuring they serialize against each other.
+// SQLite's single-writer makes this redundant in the test environment, but
+// on PostgreSQL the advisory lock is the serialization mechanism. A full
+// PostgreSQL integration test is the proper venue to verify lock contention
+// under concurrent writes; this test proves the lock call exists in both
+// production code paths.
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteAndMembershipShareLock(t *testing.T) {
+	root := repoRoot(t)
+
+	// Verify deletion service calls LockProjectForMembership.
+	deletionCalls := findCallSitesInFile(t,
+		filepath.Join(root, "pkg/hub/project_deletion_service.go"),
+		"pkg/hub/project_deletion_service.go",
+		"LockProjectForMembership")
+	require.NotEmpty(t, deletionCalls,
+		"ProjectDeletionService must call LockProjectForMembership — "+
+			"deletion and membership must serialize on the same lock")
+
+	// Verify membership service calls LockProjectForMembership.
+	membershipCalls := findCallSitesInFile(t,
+		filepath.Join(root, "pkg/hub/project_membership_service.go"),
+		"pkg/hub/project_membership_service.go",
+		"LockProjectForMembership")
+	require.NotEmpty(t, membershipCalls,
+		"ProjectMembershipService must call LockProjectForMembership — "+
+			"membership mutations and deletion must serialize on the same lock")
+
+	// Both services call the same method name on the transactional store,
+	// proving they acquire the same project-scoped advisory lock.
+	t.Logf("deletion service lock sites: %d, membership service lock sites: %d",
+		len(deletionCalls), len(membershipCalls))
+	t.Logf("NOTE: SQLite single-writer serializes all writes in tests. " +
+		"On PostgreSQL, LockProjectForMembership acquires an advisory lock " +
+		"that serializes deletion against concurrent membership mutations. " +
+		"A PostgreSQL integration test should verify lock contention under " +
+		"concurrent writes.")
+}
+
+// ---------------------------------------------------------------------------
 // RS3.24: Frontend Capability — N/A
 //
 // Project deletion does not expose a frontend capability signal. The hub
@@ -1431,65 +1477,67 @@ func TestRS3_ProjectDeleteAuditAfterSummary(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RS3.27: UAT Cascade Failure Rollback
+// RS3.27: Table-Driven Cascade Failure Rollback
+//
+// Each cascade category must prove: transaction rollback, project survival,
+// no audit record, and non-success HTTP status on injected failure.
 // ---------------------------------------------------------------------------
 
-func TestRS3_ProjectDeleteUATCascadeFailureRollback(t *testing.T) {
-	_, s := testServer(t)
-	ctx := context.Background()
-
-	projectID := tid("rs3-uat-c-fail")
-	ownerID := tid("rs3-uat-cf-own")
-
-	createRS3Project(t, s, projectID, ownerID)
-
-	failStore := &rs3FailingStore{Store: s, failOn: "cascade_uats"}
-	failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
-
-	req := ProjectDeleteRequest{
-		ProjectID: projectID,
-		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+func TestRS3_ProjectDeleteCascadeFailureRollbackMatrix(t *testing.T) {
+	cases := []struct {
+		name   string
+		failOn string
+	}{
+		{"uats", "cascade_uats"},
+		{"schedules", "cascade_schedules"},
+		{"agent_credentials", "cascade_agent_credentials"},
+		{"lifecycle_hooks", "cascade_lifecycle_hooks"},
+		{"pre_start_hooks", "cascade_pre_start_hooks"},
+		{"project_providers", "cascade_project_providers"},
+		{"project_sync_states", "cascade_project_sync_states"},
 	}
-	ctx = setTestIdentity(ctx, req.Actor)
 
-	_, decision := failSvc.Delete(ctx, req)
-	require.NotNil(t, decision, "UAT cascade failure should not produce success")
-	assert.Equal(t, 500, decision.HTTPStatus)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, s := testServer(t)
+			ctx := context.Background()
 
-	// Verify project is NOT deleted — rollback.
-	_, err := s.GetProject(ctx, projectID)
-	assert.NoError(t, err, "project should survive UAT cascade failure (rollback)")
-}
+			projectID := tid("rs3-cfm-" + tt.name)
+			ownerID := tid("rs3-cfmo-" + tt.name)
 
-// ---------------------------------------------------------------------------
-// RS3.28: Schedule Cascade Failure Rollback
-// ---------------------------------------------------------------------------
+			createRS3Project(t, s, projectID, ownerID)
 
-func TestRS3_ProjectDeleteScheduleCascadeFailureRollback(t *testing.T) {
-	_, s := testServer(t)
-	ctx := context.Background()
+			failStore := &rs3FailingStore{Store: s, failOn: tt.failOn}
+			failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
 
-	projectID := tid("rs3-sch-c-fail")
-	ownerID := tid("rs3-sch-cf-own")
+			req := ProjectDeleteRequest{
+				ProjectID: projectID,
+				Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+			}
+			ctx = setTestIdentity(ctx, req.Actor)
 
-	createRS3Project(t, s, projectID, ownerID)
+			_, decision := failSvc.Delete(ctx, req)
 
-	failStore := &rs3FailingStore{Store: s, failOn: "cascade_schedules"}
-	failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
+			// Must produce non-success result.
+			require.NotNil(t, decision, "%s cascade failure should not produce success", tt.name)
+			assert.Equal(t, 500, decision.HTTPStatus,
+				"%s cascade failure should produce 500, not 204", tt.name)
 
-	req := ProjectDeleteRequest{
-		ProjectID: projectID,
-		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+			// Project must survive — transaction was rolled back.
+			_, err := s.GetProject(ctx, projectID)
+			assert.NoError(t, err,
+				"project should survive %s cascade failure (rollback)", tt.name)
+
+			// No audit record — audit is in the same tx, so rollback removes it.
+			audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+				MutationType: "project_delete",
+				TargetID:     projectID,
+			})
+			require.NoError(t, err)
+			assert.Len(t, audits, 0,
+				"no audit should exist after %s cascade failure (rolled back)", tt.name)
+		})
 	}
-	ctx = setTestIdentity(ctx, req.Actor)
-
-	_, decision := failSvc.Delete(ctx, req)
-	require.NotNil(t, decision, "schedule cascade failure should not produce success")
-	assert.Equal(t, 500, decision.HTTPStatus)
-
-	// Verify project is NOT deleted — rollback.
-	_, err := s.GetProject(ctx, projectID)
-	assert.NoError(t, err, "project should survive schedule cascade failure (rollback)")
 }
 
 // ---------------------------------------------------------------------------
@@ -1539,11 +1587,51 @@ func (f *rs3FailingStore) DeleteSchedulesByProject(ctx context.Context, projectI
 	return f.Store.DeleteSchedulesByProject(ctx, projectID)
 }
 
+func (f *rs3FailingStore) DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error) {
+	if f.failOn == "cascade_agent_credentials" {
+		return 0, fmt.Errorf("injected: cascade failure at agent credentials")
+	}
+	return f.Store.DeleteAgentCredentialsByProject(ctx, projectID)
+}
+
+func (f *rs3FailingStore) DeleteLifecycleHooksByScope(ctx context.Context, scopeType string, scopeID string) (int, error) {
+	if f.failOn == "cascade_lifecycle_hooks" {
+		return 0, fmt.Errorf("injected: cascade failure at lifecycle hooks")
+	}
+	return f.Store.DeleteLifecycleHooksByScope(ctx, scopeType, scopeID)
+}
+
+func (f *rs3FailingStore) DeletePreStartHooksByProject(ctx context.Context, projectID string) (int, error) {
+	if f.failOn == "cascade_pre_start_hooks" {
+		return 0, fmt.Errorf("injected: cascade failure at pre-start hooks")
+	}
+	return f.Store.DeletePreStartHooksByProject(ctx, projectID)
+}
+
+func (f *rs3FailingStore) DeleteProjectProvidersByProject(ctx context.Context, projectID string) (int, error) {
+	if f.failOn == "cascade_project_providers" {
+		return 0, fmt.Errorf("injected: cascade failure at project providers")
+	}
+	return f.Store.DeleteProjectProvidersByProject(ctx, projectID)
+}
+
+func (f *rs3FailingStore) DeleteProjectSyncStatesByProject(ctx context.Context, projectID string) (int, error) {
+	if f.failOn == "cascade_project_sync_states" {
+		return 0, fmt.Errorf("injected: cascade failure at project sync states")
+	}
+	return f.Store.DeleteProjectSyncStatesByProject(ctx, projectID)
+}
+
 // ---------------------------------------------------------------------------
 // RS3 Effect Spy — mock dispatcher
 // ---------------------------------------------------------------------------
 
 // rs3EffectSpy is a mock dispatcher that tracks whether agent dispatch was called.
+// Compile-time assertion: rs3EffectSpy must satisfy AgentDispatcher.
+// If AgentDispatcher grows new methods, this will fail to compile, surfacing
+// the change rather than silently letting the spy observe a subset.
+var _ AgentDispatcher = (*rs3EffectSpy)(nil)
+
 type rs3EffectSpy struct {
 	createAgentDispatcher
 	dispatchDeleteCalls int

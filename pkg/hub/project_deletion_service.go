@@ -590,6 +590,7 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | lifecycle_hooks        | Transactional: DeleteLifecycleHooksByScope (step 12)     | Job      |
 	// | pre_start_hooks        | Transactional: DeletePreStartHooksByProject (step 13)    | Job      |
 	// | project_providers      | Transactional: DeleteProjectProvidersByProject (step 14) | Data     |
+	// |   (DB: project_contributors — store layer uses "provider" vocabulary)              |          |
 	// | project_sync_state     | Transactional: DeleteProjectSyncStatesByProject (step 15)| Data     |
 	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 16)  | Runtime  |
 	// | notifications          | Explicit code in CompositeStore.DeleteProject            | Data     |
