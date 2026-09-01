@@ -38,8 +38,11 @@ import type {
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
+import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
+import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
@@ -272,6 +275,16 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private brokersError: string | null = null;
+
+  // Access boundary state
+  @state()
+  private boundaryGroups: BoundarySummaryGroup[] = [];
+
+  @state()
+  private boundaryLoading = false;
+
+  @state()
+  private boundaryError = '';
 
   private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -866,11 +879,41 @@ export class ScionPageProjectSettings extends LitElement {
       if (!skipGitHubCheck && this.project.gitRemote) {
         void this.checkGitHubAppConfigured();
       }
+      // Load access boundaries affecting this project
+      void this.loadBoundaries();
     } catch (err) {
       console.error('Failed to load project:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async loadBoundaries(): Promise<void> {
+    this.boundaryLoading = true;
+    this.boundaryError = '';
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`
+      );
+
+      const items: AccessBoundarySummary[] = res.ok
+        ? (((await res.json()) as { items: AccessBoundarySummary[] }).items ?? [])
+        : [];
+
+      this.boundaryGroups = [
+        {
+          label: 'Boundaries affecting this project',
+          items,
+          filterUrl: `/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`,
+        },
+      ];
+    } catch (err) {
+      console.error('Failed to load boundaries for project:', err);
+      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access boundaries';
+    } finally {
+      this.boundaryLoading = false;
     }
   }
 
@@ -1321,6 +1364,17 @@ export class ScionPageProjectSettings extends LitElement {
         contextType="project"
         contextId=${this.project.id}
       ></scion-effective-access-boundary-notice>
+
+      <scion-boundary-summary-notice
+        label="Access boundaries affecting this project"
+        .groups=${this.boundaryGroups}
+        ?loading=${this.boundaryLoading}
+        error=${this.boundaryError}
+        filterUrl="/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(
+          this.projectId
+        )}"
+      ></scion-boundary-summary-notice>
+
       ${this.renderResourcesSection()}
       ${this.pageData?.user
         ? html`

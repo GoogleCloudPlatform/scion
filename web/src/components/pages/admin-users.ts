@@ -25,9 +25,15 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type { AdminUser, UserRole } from '../../shared/types.js';
+import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
+import {
+  parseSecurityReviewResponse,
+  parseLockoutResponse,
+} from '../shared/security-review-dialog.js';
 import '../shared/status-badge.js';
 import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
+import '../shared/security-review-dialog.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
@@ -177,6 +183,13 @@ export class ScionPageAdminUsers extends LitElement {
   /** User for which we are showing the effective roles dialog. */
   @state()
   private viewRolesUser: AdminUser | null = null;
+
+  // Security review dialog state
+  @state()
+  private securityReviewDetail: SecurityReviewDetail | null = null;
+
+  @state()
+  private showSecurityReview = false;
 
   static override styles = css`
     :host {
@@ -797,7 +810,8 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async updateUser(
     userId: string,
-    updates: { role?: string; status?: string }
+    updates: { role?: string; status?: string },
+    userLabel?: string
   ): Promise<void> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'PATCH',
@@ -806,17 +820,72 @@ export class ScionPageAdminUsers extends LitElement {
       body: JSON.stringify(updates),
     });
     if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (errorBody) {
+        const action = updates.status === 'suspended' ? 'suspending' : 'updating';
+        const label = userLabel ?? userId;
+
+        const lockout = parseLockoutResponse(errorBody);
+        if (lockout) {
+          this.securityReviewDetail = {
+            entityLabel: label,
+            contextLabel: 'system',
+            boundaries: [],
+            canCommit: false,
+            lockout,
+          };
+          this.showSecurityReview = true;
+          throw new Error(`Lockout conflict while ${action} user`);
+        }
+
+        const reviewDetail = parseSecurityReviewResponse(errorBody, label, 'system');
+        if (reviewDetail) {
+          this.securityReviewDetail = reviewDetail;
+          this.showSecurityReview = true;
+          throw new Error(`Security review required for ${action} user`);
+        }
+
+        const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+        throw new Error(msg ?? `HTTP ${response.status}`);
+      }
+      throw new Error(`HTTP ${response.status}`);
     }
   }
 
-  private async deleteUser(userId: string): Promise<void> {
+  private async deleteUser(userId: string, userLabel?: string): Promise<void> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'DELETE',
       credentials: 'include',
     });
     if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (errorBody) {
+        const label = userLabel ?? userId;
+
+        const lockout = parseLockoutResponse(errorBody);
+        if (lockout) {
+          this.securityReviewDetail = {
+            entityLabel: label,
+            contextLabel: 'system',
+            boundaries: [],
+            canCommit: false,
+            lockout,
+          };
+          this.showSecurityReview = true;
+          throw new Error('Lockout conflict while deleting user');
+        }
+
+        const reviewDetail = parseSecurityReviewResponse(errorBody, label, 'system');
+        if (reviewDetail) {
+          this.securityReviewDetail = reviewDetail;
+          this.showSecurityReview = true;
+          throw new Error('Security review required for deleting user');
+        }
+
+        const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+        throw new Error(msg ?? `HTTP ${response.status}`);
+      }
+      throw new Error(`HTTP ${response.status}`);
     }
   }
 
@@ -851,7 +920,7 @@ export class ScionPageAdminUsers extends LitElement {
       user,
       action: async () => {
         const newStatus = suspending ? 'suspended' : 'active';
-        await this.updateUser(user.id, { status: newStatus });
+        await this.updateUser(user.id, { status: newStatus }, user.displayName || user.email);
         this.showFeedback(
           'success',
           `${user.displayName || user.email} has been ${suspending ? 'suspended' : 'reactivated'}.`
@@ -876,7 +945,7 @@ export class ScionPageAdminUsers extends LitElement {
       confirmLabel: user.status === 'invited' ? 'Remove' : 'Delete',
       user,
       action: async () => {
-        await this.deleteUser(user.id);
+        await this.deleteUser(user.id, user.displayName || user.email);
         this.showFeedback(
           'success',
           `${user.displayName || user.email} has been ${user.status === 'invited' ? 'removed' : 'deleted'}.`
@@ -1237,6 +1306,14 @@ export class ScionPageAdminUsers extends LitElement {
       ${this.renderConfirmDialog()} ${this.renderInviteUserDialog()} ${this.renderImportDialog()}
       ${this.renderCreateInviteDialog()} ${this.renderInviteRevealDialog()}
       ${this.renderViewRolesDialog()}
+      <scion-security-review-dialog
+        ?open=${this.showSecurityReview}
+        .detail=${this.securityReviewDetail}
+        @security-review-cancel=${() => {
+          this.showSecurityReview = false;
+          this.securityReviewDetail = null;
+        }}
+      ></scion-security-review-dialog>
     `;
   }
 

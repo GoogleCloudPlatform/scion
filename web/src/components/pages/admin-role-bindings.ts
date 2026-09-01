@@ -30,7 +30,13 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
+import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
+import {
+  parseSecurityReviewResponse,
+  parseLockoutResponse,
+} from '../shared/security-review-dialog.js';
 import '../shared/principal-picker.js';
+import '../shared/security-review-dialog.js';
 import {
   SYSTEM_DIRECT_USER_ONLY_ROLES,
   getLifecycleStatus,
@@ -116,6 +122,15 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
   // Validation warning (e.g. group assigned to direct-user-only role)
   @state() private formValidationWarning = '';
+
+  // Security review dialog state
+  @state() private securityReviewDetail: SecurityReviewDetail | null = null;
+  @state() private showSecurityReview = false;
+
+  // Atomic replace binding state
+  @state() private showReplaceDialog = false;
+  @state() private replacingBinding: RoleBinding | null = null;
+  @state() private replaceRoleId = '';
 
   static override styles = css`
     :host {
@@ -731,6 +746,49 @@ export class ScionPageAdminRoleBindings extends LitElement {
       });
 
       if (!res.ok) {
+        // Check for security review or lockout responses
+        const errorBody = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        if (errorBody) {
+          const binding = this.deletingBinding;
+          const principal = binding.principalDisplayName || binding.principalId;
+          const role = this.getRoleName(binding.roleDefinitionId);
+
+          const lockout = parseLockoutResponse(errorBody);
+          if (lockout) {
+            this.showDeleteDialog = false;
+            this.securityReviewDetail = {
+              entityLabel: `${role} binding for ${principal}`,
+              contextLabel:
+                binding.scopeType === 'project'
+                  ? `project ${binding.scopeDisplayName || binding.scopeId}`
+                  : 'system',
+              boundaries: [],
+              canCommit: false,
+              lockout,
+            };
+            this.showSecurityReview = true;
+            return;
+          }
+
+          const reviewDetail = parseSecurityReviewResponse(
+            errorBody,
+            `${role} binding for ${principal}`,
+            binding.scopeType === 'project'
+              ? `project ${binding.scopeDisplayName || binding.scopeId}`
+              : 'system'
+          );
+          if (reviewDetail) {
+            this.showDeleteDialog = false;
+            this.securityReviewDetail = reviewDetail;
+            this.showSecurityReview = true;
+            return;
+          }
+
+          const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+          this.actionFeedback = { message: msg ?? `HTTP ${res.status}`, variant: 'danger' };
+          return;
+        }
+
         const msg = await extractApiError(res, `HTTP ${res.status}`);
         this.actionFeedback = { message: msg, variant: 'danger' };
         return;
@@ -747,6 +805,165 @@ export class ScionPageAdminRoleBindings extends LitElement {
       };
     } finally {
       this.actionInProgress = false;
+    }
+  }
+
+  /**
+   * Open the replace binding dialog for atomic role replacement.
+   */
+  private openReplaceDialog(binding: RoleBinding): void {
+    this.replacingBinding = binding;
+    this.replaceRoleId = '';
+    this.showReplaceDialog = true;
+  }
+
+  /**
+   * Atomically replace one role binding with another using a single transaction.
+   * Uses the B5 atomic endpoint when available, falling back to create-then-delete.
+   */
+  private async replaceBinding(): Promise<void> {
+    if (!this.replacingBinding || !this.replaceRoleId) return;
+    this.actionInProgress = true;
+    this.actionFeedback = null;
+    try {
+      // Attempt atomic replacement via B5 endpoint
+      const body = {
+        existingBindingId: this.replacingBinding.id,
+        newRoleDefinitionId: this.replaceRoleId,
+        principalType: this.replacingBinding.principalType,
+        principalId: this.replacingBinding.principalId,
+        scopeType: this.replacingBinding.scopeType,
+        scopeId: this.replacingBinding.scopeId,
+      };
+
+      const res = await apiFetch('/api/v1/admin/role-bindings:replace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (res.status === 404 || res.status === 405) {
+        // Atomic endpoint not available — fall back to create-then-delete
+        await this.replaceBindingFallback();
+        return;
+      }
+
+      if (!res.ok) {
+        // Check for security review
+        const errorBody = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        if (errorBody) {
+          const binding = this.replacingBinding;
+          const principal = binding.principalDisplayName || binding.principalId;
+          const oldRole = this.getRoleName(binding.roleDefinitionId);
+          const newRole = this.getRoleName(this.replaceRoleId);
+
+          const lockout = parseLockoutResponse(errorBody);
+          if (lockout) {
+            this.showReplaceDialog = false;
+            this.securityReviewDetail = {
+              entityLabel: `${oldRole} → ${newRole} for ${principal}`,
+              contextLabel:
+                binding.scopeType === 'project'
+                  ? `project ${binding.scopeDisplayName || binding.scopeId}`
+                  : 'system',
+              boundaries: [],
+              canCommit: false,
+              lockout,
+            };
+            this.showSecurityReview = true;
+            return;
+          }
+
+          const reviewDetail = parseSecurityReviewResponse(
+            errorBody,
+            `${oldRole} → ${newRole} for ${principal}`,
+            binding.scopeType === 'project'
+              ? `project ${binding.scopeDisplayName || binding.scopeId}`
+              : 'system'
+          );
+          if (reviewDetail) {
+            this.showReplaceDialog = false;
+            this.securityReviewDetail = reviewDetail;
+            this.showSecurityReview = true;
+            return;
+          }
+
+          const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+          this.actionFeedback = { message: msg ?? `HTTP ${res.status}`, variant: 'danger' };
+          return;
+        }
+
+        const msg = await extractApiError(res, `HTTP ${res.status}`);
+        this.actionFeedback = { message: msg, variant: 'danger' };
+        return;
+      }
+
+      this.showReplaceDialog = false;
+      this.replacingBinding = null;
+      this.actionFeedback = { message: 'Role binding replaced', variant: 'success' };
+      void this.loadData();
+    } catch (err) {
+      this.actionFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to replace binding',
+        variant: 'danger',
+      };
+    } finally {
+      this.actionInProgress = false;
+    }
+  }
+
+  /**
+   * Fallback: create new binding then delete old one (non-atomic).
+   * Used when the atomic :replace endpoint is not available.
+   */
+  private async replaceBindingFallback(): Promise<void> {
+    if (!this.replacingBinding || !this.replaceRoleId) return;
+    try {
+      // Create the new binding
+      const createBody = {
+        roleDefinitionId: this.replaceRoleId,
+        principalType: this.replacingBinding.principalType,
+        principalId: this.replacingBinding.principalId,
+        scopeType: this.replacingBinding.scopeType,
+        scopeId: this.replacingBinding.scopeId,
+      };
+
+      const createRes = await apiFetch('/api/v1/admin/role-bindings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(createBody),
+      });
+
+      if (!createRes.ok) {
+        const msg = await extractApiError(createRes, `HTTP ${createRes.status}`);
+        this.actionFeedback = { message: msg, variant: 'danger' };
+        return;
+      }
+
+      // Delete the old binding
+      const deleteRes = await apiFetch(`/api/v1/admin/role-bindings/${this.replacingBinding.id}`, {
+        method: 'DELETE',
+      });
+
+      if (!deleteRes.ok) {
+        // Created new but failed to delete old — show warning
+        this.actionFeedback = {
+          message: 'New role assigned but failed to remove old binding. Please remove it manually.',
+          variant: 'danger',
+        };
+        void this.loadData();
+        return;
+      }
+
+      this.showReplaceDialog = false;
+      this.replacingBinding = null;
+      this.actionFeedback = { message: 'Role binding replaced', variant: 'success' };
+      void this.loadData();
+    } catch (err) {
+      this.actionFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to replace binding',
+        variant: 'danger',
+      };
     }
   }
 
@@ -830,7 +1047,15 @@ export class ScionPageAdminRoleBindings extends LitElement {
         : this.error
           ? this.renderError()
           : this.renderBindings()}
-      ${this.renderCreateDialog()} ${this.renderDeleteDialog()}
+      ${this.renderCreateDialog()} ${this.renderDeleteDialog()} ${this.renderReplaceDialog()}
+      <scion-security-review-dialog
+        ?open=${this.showSecurityReview}
+        .detail=${this.securityReviewDetail}
+        @security-review-cancel=${() => {
+          this.showSecurityReview = false;
+          this.securityReviewDetail = null;
+        }}
+      ></scion-security-review-dialog>
     `;
   }
 
@@ -979,6 +1204,11 @@ export class ScionPageAdminRoleBindings extends LitElement {
           <span class="meta-text">${this.formatRelativeTime(binding.createdAt)}</span>
         </td>
         <td>
+          <sl-icon-button
+            name="arrow-repeat"
+            label="Replace role"
+            @click=${() => this.openReplaceDialog(binding)}
+          ></sl-icon-button>
           <sl-icon-button
             name="trash"
             label="Delete binding"
@@ -1281,6 +1511,86 @@ export class ScionPageAdminRoleBindings extends LitElement {
           ?loading=${this.actionInProgress}
           @click=${() => this.deleteBinding()}
           >Remove Assignment</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Replace Dialog — atomic role replacement
+  // ---------------------------------------------------------------------------
+
+  private renderReplaceDialog() {
+    if (!this.showReplaceDialog || !this.replacingBinding) return nothing;
+
+    const binding = this.replacingBinding;
+    const scopeType = this.roleScopeMap[binding.roleDefinitionId] ?? binding.scopeType;
+    const availableRoles = this.roles.filter(
+      (r) =>
+        r.scopeType === scopeType &&
+        r.id !== binding.roleDefinitionId &&
+        !(binding.principalType === 'group' && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name))
+    );
+
+    return html`
+      <sl-dialog
+        label="Replace Role Assignment"
+        open
+        @sl-request-close=${() => {
+          if (!this.actionInProgress) {
+            this.showReplaceDialog = false;
+            this.replacingBinding = null;
+          }
+        }}
+      >
+        <p>
+          Replace the
+          <strong>${this.getRoleName(binding.roleDefinitionId)}</strong>
+          role for
+          <strong>${binding.principalDisplayName || binding.principalId}</strong>
+          with a different role. This will be performed as a single atomic operation.
+        </p>
+
+        <div class="form-group">
+          <sl-select
+            label="New Role"
+            .value=${this.replaceRoleId}
+            @sl-change=${(e: Event) => {
+              this.replaceRoleId = (e.target as HTMLSelectElement).value;
+            }}
+          >
+            ${availableRoles.length === 0
+              ? html`<sl-option value="" disabled>No other roles available</sl-option>`
+              : availableRoles.map(
+                  (role) => html`
+                    <sl-option value=${role.id}>
+                      ${role.name}
+                      <small style="color: var(--scion-text-muted, #64748b)">
+                        (${role.scopeType})
+                      </small>
+                    </sl-option>
+                  `
+                )}
+          </sl-select>
+        </div>
+
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.actionInProgress}
+          @click=${() => {
+            this.showReplaceDialog = false;
+            this.replacingBinding = null;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.actionInProgress}
+          ?disabled=${!this.replaceRoleId}
+          @click=${() => this.replaceBinding()}
+          >Replace Role</sl-button
         >
       </sl-dialog>
     `;
