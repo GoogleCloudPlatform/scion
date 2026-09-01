@@ -764,6 +764,10 @@ type ProjectProviderStore interface {
 
 	// UpdateProviderStatus updates a provider's status and last seen time.
 	UpdateProviderStatus(ctx context.Context, projectID, brokerID, status string) error
+
+	// DeleteProjectProvidersByProject removes all provider relationships for a project.
+	// Returns the number of providers deleted.
+	DeleteProjectProvidersByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // EnvVarStore defines environment variable persistence operations.
@@ -999,6 +1003,10 @@ type UserAccessTokenStore interface {
 
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
+
+	// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+	// Returns the number of tokens deleted.
+	DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // =============================================================================
@@ -1203,6 +1211,10 @@ type ScheduleStore interface {
 	// Returns ErrNotFound if the schedule doesn't exist.
 	DeleteSchedule(ctx context.Context, id string) error
 
+	// DeleteSchedulesByProject removes all schedules and their events for a project.
+	// Returns the number of schedules deleted.
+	DeleteSchedulesByProject(ctx context.Context, projectID string) (int, error)
+
 	// ListDueSchedules returns active schedules whose next_run_at has passed.
 	ListDueSchedules(ctx context.Context, now time.Time) ([]Schedule, error)
 }
@@ -1401,6 +1413,10 @@ type ProjectSyncStateStore interface {
 	// DeleteProjectSyncState removes sync state for a project and optional broker.
 	// Returns ErrNotFound if the state doesn't exist.
 	DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error
+
+	// DeleteProjectSyncStatesByProject removes all sync states for a project.
+	// Returns the number of states deleted.
+	DeleteProjectSyncStatesByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // =============================================================================
@@ -1442,6 +1458,10 @@ type LifecycleHookStore interface {
 	// Called on terminal phases (stopped/error) and agent deletion to prevent
 	// unbounded growth. No error is returned if the row does not exist.
 	DeleteHookPhase(ctx context.Context, agentID string) error
+
+	// DeleteLifecycleHooksByScope removes all lifecycle hooks for a scope.
+	// Returns the number of hooks deleted.
+	DeleteLifecycleHooksByScope(ctx context.Context, scopeType string, scopeID string) (int, error)
 }
 
 // LifecycleHookFilter defines criteria for filtering lifecycle hooks.
@@ -1839,6 +1859,10 @@ type AgentCredentialStore interface {
 	// PurgeExpiredAgentCredentials removes expired credentials older than cutoff.
 	// Returns the number of credentials purged.
 	PurgeExpiredAgentCredentials(ctx context.Context, cutoff time.Time) (int, error)
+
+	// DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
+	// Returns the number of credentials deleted.
+	DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // =============================================================================

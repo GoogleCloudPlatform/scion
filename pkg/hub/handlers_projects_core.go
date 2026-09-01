@@ -2916,9 +2916,6 @@ func (s *Server) preEnumerateDeletionEffects(ctx context.Context, projectID stri
 		inputs.providers = providers
 	}
 
-	// GCP SA warnings are log-only (non-destructive) — also pre-enumerate.
-	s.warnManagedGCPServiceAccounts(ctx, projectID)
-
 	return inputs
 }
 
@@ -2926,6 +2923,10 @@ func (s *Server) preEnumerateDeletionEffects(ctx context.Context, projectID stri
 // service has committed. All effects are best-effort: fire_and_forget
 // delivery with log_and_continue on failure.
 func (s *Server) executePostDeletionEffects(ctx context.Context, projectID string, project *store.Project, inputs deletionEffectInputs) {
+	// Effect 0: GCP SA warnings (log-only, post-auth to avoid leaking
+	// target-specific info for denied requests).
+	s.warnManagedGCPServiceAccounts(ctx, projectID)
+
 	// Effect 1: Dispatch agent deletions to runtime brokers.
 	s.dispatchAgentDeletions(ctx, inputs.agents)
 

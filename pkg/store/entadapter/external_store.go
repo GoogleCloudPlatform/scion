@@ -698,6 +698,21 @@ func (s *ExternalStore) CountUserAccessTokens(ctx context.Context, userID string
 		Count(ctx)
 }
 
+// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+func (s *ExternalStore) DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.UserAccessToken.Delete().
+		Where(useraccesstoken.ProjectIDEQ(uid)).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // Ensure ExternalStore satisfies the external-identity store sub-interfaces.
 var (
 	_ store.GCPServiceAccountStore  = (*ExternalStore)(nil)

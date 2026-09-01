@@ -132,6 +132,19 @@ func (m *mockUATStore) CountUserAccessTokens(_ context.Context, userID string) (
 	return count, nil
 }
 
+func (m *mockUATStore) DeleteUserAccessTokensByProject(_ context.Context, projectID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for id, t := range m.tokens {
+		if t.ProjectID == projectID {
+			delete(m.tokens, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
 // mockUserStore implements store.UserStore for testing (minimal).
 type mockUserStore struct {
 	users map[string]*store.User

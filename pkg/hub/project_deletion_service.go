@@ -91,14 +91,21 @@ type ProjectDeleteResult struct {
 
 // CascadeSummary records what was cascade-deleted in the transaction.
 type CascadeSummary struct {
-	RoleBindings    int `json:"role_bindings_deleted"`
-	Groups          int `json:"groups_deleted"`
-	Secrets         int `json:"secrets_deleted"`
-	EnvVars         int `json:"env_vars_deleted"`
-	SkillInjections int `json:"skill_injections_deleted"`
-	GCPServiceAccts int `json:"gcp_service_accounts_deleted"`
-	Templates       int `json:"templates_deleted"`
-	HarnessConfigs  int `json:"harness_configs_deleted"`
+	RoleBindings      int `json:"role_bindings_deleted"`
+	Groups            int `json:"groups_deleted"`
+	Secrets           int `json:"secrets_deleted"`
+	EnvVars           int `json:"env_vars_deleted"`
+	SkillInjections   int `json:"skill_injections_deleted"`
+	GCPServiceAccts   int `json:"gcp_service_accounts_deleted"`
+	Templates         int `json:"templates_deleted"`
+	HarnessConfigs    int `json:"harness_configs_deleted"`
+	UserAccessTokens  int `json:"user_access_tokens_deleted"`
+	Schedules         int `json:"schedules_deleted"`
+	AgentCredentials  int `json:"agent_credentials_deleted"`
+	LifecycleHooks    int `json:"lifecycle_hooks_deleted"`
+	PreStartHooks     int `json:"pre_start_hooks_deleted"`
+	ProjectProviders  int `json:"project_providers_deleted"`
+	ProjectSyncStates int `json:"project_sync_states_deleted"`
 }
 
 // ---------------------------------------------------------------------------
@@ -437,15 +444,21 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	}
 
 	// 2. Groups — project-scoped groups (which may carry role bindings).
-	if groups, err := tx.ListGroups(ctx, store.GroupFilter{ProjectID: projectID}, store.ListOptions{Limit: 1000}); err == nil {
+	// Paginate to ensure completeness for projects with many groups.
+	for {
+		groups, err := tx.ListGroups(ctx, store.GroupFilter{ProjectID: projectID}, store.ListOptions{Limit: 100})
+		if err != nil {
+			return cs, fmt.Errorf("list project groups: %w", err)
+		}
+		if len(groups.Items) == 0 {
+			break
+		}
 		for _, g := range groups.Items {
 			if err := tx.DeleteGroup(ctx, g.ID); err != nil {
 				return cs, fmt.Errorf("cascade group %s: %w", g.ID, err)
 			}
 			cs.Groups++
 		}
-	} else {
-		return cs, fmt.Errorf("list project groups: %w", err)
 	}
 
 	// 3. Secrets — project-scoped secrets.
@@ -498,26 +511,93 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		cs.HarnessConfigs = n
 	}
 
+	// 9. User access tokens — project-scoped UATs (security-relevant: live credentials).
+	// ValidateToken does NOT check project existence, so orphaned tokens would
+	// remain usable for API calls until expiry. Must delete transactionally.
+	if n, err := tx.DeleteUserAccessTokensByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade UATs: %w", err)
+	} else {
+		cs.UserAccessTokens = n
+	}
+
+	// 10. Schedules and scheduled events — project-scoped jobs.
+	// No FK cascade exists; orphaned schedules could continue firing.
+	// Runtime dispatch handler checks project existence (partial fail-closed),
+	// but transactional deletion is the authoritative cleanup.
+	if n, err := tx.DeleteSchedulesByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade schedules: %w", err)
+	} else {
+		cs.Schedules = n
+	}
+
+	// 11. Agent credentials — project-scoped agent auth tokens.
+	// No FK from credentials to agents. Parent agent records are deleted by
+	// CompositeStore.DeleteProject (step 9), but credential rows would survive
+	// as orphans. Delete transactionally before agent deletion.
+	if n, err := tx.DeleteAgentCredentialsByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade agent credentials: %w", err)
+	} else {
+		cs.AgentCredentials = n
+	}
+
+	// 12. Lifecycle hooks — project-scoped hooks capable of triggering execution.
+	// No FK to project; uses scope_type="project" + scope_id=projectID.
+	if n, err := tx.DeleteLifecycleHooksByScope(ctx, "project", projectID); err != nil {
+		return cs, fmt.Errorf("cascade lifecycle hooks: %w", err)
+	} else {
+		cs.LifecycleHooks = n
+	}
+
+	// 13. Pre-start hooks — project-scoped execution scripts.
+	if n, err := tx.DeletePreStartHooksByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade pre-start hooks: %w", err)
+	} else {
+		cs.PreStartHooks = n
+	}
+
+	// 14. Project providers — project ↔ broker relationships.
+	// No FK cascade; plain join table.
+	if n, err := tx.DeleteProjectProvidersByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade project providers: %w", err)
+	} else {
+		cs.ProjectProviders = n
+	}
+
+	// 15. Project sync state — workspace sync metadata.
+	// No FK cascade; plain data table.
+	if n, err := tx.DeleteProjectSyncStatesByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade project sync states: %w", err)
+	} else {
+		cs.ProjectSyncStates = n
+	}
+
 	// ---------------------------------------------------------------------------
-	// Cascade inventory disposition — project-linked tables NOT deleted here:
+	// Cascade inventory disposition — complete project-linked table audit
 	//
-	// | Table                  | Disposition                                           |
-	// |------------------------|-------------------------------------------------------|
-	// | agents                 | Deleted by CompositeStore.DeleteProject (Ent FK cascade)|
-	// | conversations          | Data orphan — retained for audit/history               |
-	// | messages               | Data orphan — retained for audit/history               |
-	// | schedules              | Ent FK cascade on project deletion; also validated at   |
-	// |                        | execution time against project existence                |
-	// | user_access_tokens     | Scoped UATs validated at use-time: token validation     |
-	// |                        | checks project existence, so orphaned tokens fail closed|
-	// | broker_dispatches      | Data orphan — historical dispatch log, no security role |
-	// | subscription_templates | Nullable project_id — not exclusively project-scoped    |
-	// | project_contributors   | Ent FK cascade on project deletion                     |
-	// | project_sync_state     | Ent FK cascade on project deletion                     |
-	// | lifecycle_hooks        | Ent FK cascade on project deletion                     |
-	// | agent_credentials      | Deleted transitively: agents FK-cascade → credentials  |
-	// |                        | cascade with agent deletion                             |
-	// | project_providers      | Ent FK cascade on project deletion                     |
+	// | Table                  | Mechanism                                              | Security |
+	// |------------------------|---------------------------------------------------------|----------|
+	// | role_bindings          | Transactional: DeleteRoleBindingsForScope (step 1)      | Auth     |
+	// | groups                 | Transactional: ListGroups + DeleteGroup (step 2)         | Auth     |
+	// | secrets                | Transactional: DeleteSecretsByScope (step 3)             | Cred     |
+	// | env_vars               | Transactional: DeleteEnvVarsByScope (step 4)             | Config   |
+	// | skill_injections       | Transactional: DeleteSkillInjectionsByScope (step 5)     | Config   |
+	// | gcp_service_accounts   | Transactional: List + DeleteGCPServiceAccount (step 6)   | Cred     |
+	// | templates              | Transactional: DeleteTemplatesByScope (step 7)           | Config   |
+	// | harness_configs        | Transactional: DeleteHarnessConfigsByScope (step 8)      | Config   |
+	// | user_access_tokens     | Transactional: DeleteUserAccessTokensByProject (step 9)  | Cred     |
+	// | schedules (+events)    | Transactional: DeleteSchedulesByProject (step 10)        | Job      |
+	// | agent_credentials      | Transactional: DeleteAgentCredentialsByProject (step 11) | Cred     |
+	// | lifecycle_hooks        | Transactional: DeleteLifecycleHooksByScope (step 12)     | Job      |
+	// | pre_start_hooks        | Transactional: DeletePreStartHooksByProject (step 13)    | Job      |
+	// | project_providers      | Transactional: DeleteProjectProvidersByProject (step 14) | Data     |
+	// | project_sync_state     | Transactional: DeleteProjectSyncStatesByProject (step 15)| Data     |
+	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 16)  | Runtime  |
+	// | notifications          | Explicit code in CompositeStore.DeleteProject            | Data     |
+	// | notification_subs      | Explicit code in CompositeStore.DeleteProject            | Data     |
+	// | conversations          | Retained — historical audit/chat data; no auth grants    | None     |
+	// | messages               | Retained — historical audit/chat data; no auth grants    | None     |
+	// | broker_dispatches      | Retained — historical dispatch log; no security role     | None     |
+	// | subscription_templates | Retained — nullable project_id; not exclusively scoped   | None     |
 	// ---------------------------------------------------------------------------
 
 	return cs, nil

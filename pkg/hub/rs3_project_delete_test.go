@@ -1291,6 +1291,208 @@ func TestRS3_ProjectDeleteConcurrentRoleRevoke(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// RS3.25: Extended Cascade — UATs, Schedules, Agent Credentials
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteCascadeUATsSchedulesCredentials(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-ext-cascade")
+	ownerID := tid("rs3-ext-casc-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	// Create a project-scoped UAT.
+	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID:        tid("rs3-ext-uat"),
+		UserID:    ownerID,
+		Name:      "test-uat",
+		Prefix:    "scion_uat_",
+		KeyHash:   "hash-" + tid("rs3-ext-uat"),
+		ProjectID: projectID,
+		Scopes:    []string{"agent:read"},
+	}))
+
+	// Create a schedule for the project.
+	require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{
+		ID:        tid("rs3-ext-sched"),
+		ProjectID: projectID,
+		Name:      "test-schedule",
+		CronExpr:  "0 * * * *",
+		EventType: "message",
+		Payload:   "{}",
+		Status:    store.ScheduleStatusActive,
+	}))
+
+	// Create an agent and agent credential.
+	agentID := tid("rs3-ext-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "ext-cascade-agent", Name: "ExtAgent",
+		ProjectID: projectID,
+	}))
+	require.NoError(t, s.CreateAgentCredential(ctx, &store.AgentCredential{
+		ID:           tid("rs3-ext-cred"),
+		AgentID:      agentID,
+		ProjectID:    projectID,
+		TokenJTIHash: "jti-hash-" + tid("rs3-ext-cred"),
+		IssuedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+	}))
+
+	// Delete the project.
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	result, decision := srv.deletionService.Delete(ctx, req)
+	require.Nil(t, decision)
+	require.NotNil(t, result)
+
+	// Verify UATs are cascade-deleted.
+	uats, err := s.ListUserAccessTokens(ctx, ownerID)
+	require.NoError(t, err)
+	for _, uat := range uats {
+		if uat.ProjectID == projectID {
+			t.Errorf("UAT should be cascade-deleted, found: %+v", uat)
+		}
+	}
+	assert.GreaterOrEqual(t, result.CascadeSummary.UserAccessTokens, 1,
+		"cascade summary should report at least 1 UAT deleted")
+
+	// Verify schedules are cascade-deleted.
+	schedules, err := s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, schedules.Items, 0, "project schedules should be cascade-deleted")
+	assert.GreaterOrEqual(t, result.CascadeSummary.Schedules, 1,
+		"cascade summary should report at least 1 schedule deleted")
+
+	// Verify agent credentials are cascade-deleted.
+	// Agent records are deleted by CompositeStore.DeleteProject, so we can't
+	// query by agent. Check cascade summary instead.
+	assert.GreaterOrEqual(t, result.CascadeSummary.AgentCredentials, 1,
+		"cascade summary should report at least 1 agent credential deleted")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.26: AfterSummary / CascadeSummary Contract Assertion
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteAuditAfterSummary(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-after-summ")
+	ownerID := tid("rs3-after-s-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	// Add some security state so the cascade summary has content.
+	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
+		ID: tid("rs3-as-secret"), Key: "after-summary-secret",
+		EncryptedValue: "encrypted", Scope: store.ScopeProject, ScopeID: projectID,
+	}))
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := srv.deletionService.Delete(ctx, req)
+	require.Nil(t, decision)
+
+	// Retrieve audit record and assert AfterSummary is populated.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: "project_delete",
+		TargetID:     projectID,
+	})
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+
+	audit := audits[0]
+	assert.NotEmpty(t, audit.AfterSummary, "AfterSummary should contain cascade summary JSON")
+
+	// Verify the AfterSummary JSON round-trips correctly.
+	var afterState map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(audit.AfterSummary), &afterState))
+	assert.Contains(t, afterState, "role_bindings_deleted",
+		"AfterSummary should contain role_bindings_deleted field")
+	assert.Contains(t, afterState, "secrets_deleted",
+		"AfterSummary should contain secrets_deleted field")
+	assert.Contains(t, afterState, "user_access_tokens_deleted",
+		"AfterSummary should contain user_access_tokens_deleted field")
+	assert.Contains(t, afterState, "schedules_deleted",
+		"AfterSummary should contain schedules_deleted field")
+	assert.Contains(t, afterState, "agent_credentials_deleted",
+		"AfterSummary should contain agent_credentials_deleted field")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.27: UAT Cascade Failure Rollback
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteUATCascadeFailureRollback(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-uat-c-fail")
+	ownerID := tid("rs3-uat-cf-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	failStore := &rs3FailingStore{Store: s, failOn: "cascade_uats"}
+	failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := failSvc.Delete(ctx, req)
+	require.NotNil(t, decision, "UAT cascade failure should not produce success")
+	assert.Equal(t, 500, decision.HTTPStatus)
+
+	// Verify project is NOT deleted — rollback.
+	_, err := s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should survive UAT cascade failure (rollback)")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.28: Schedule Cascade Failure Rollback
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteScheduleCascadeFailureRollback(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-sch-c-fail")
+	ownerID := tid("rs3-sch-cf-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	failStore := &rs3FailingStore{Store: s, failOn: "cascade_schedules"}
+	failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := failSvc.Delete(ctx, req)
+	require.NotNil(t, decision, "schedule cascade failure should not produce success")
+	assert.Equal(t, 500, decision.HTTPStatus)
+
+	// Verify project is NOT deleted — rollback.
+	_, err := s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should survive schedule cascade failure (rollback)")
+}
+
+// ---------------------------------------------------------------------------
 // RS3 Failure Injection — store wrapper
 // ---------------------------------------------------------------------------
 
@@ -1321,6 +1523,20 @@ func (f *rs3FailingStore) CreateMutationAudit(ctx context.Context, record *store
 		return fmt.Errorf("injected: audit write failure")
 	}
 	return f.Store.CreateMutationAudit(ctx, record)
+}
+
+func (f *rs3FailingStore) DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error) {
+	if f.failOn == "cascade_uats" {
+		return 0, fmt.Errorf("injected: cascade failure at UATs")
+	}
+	return f.Store.DeleteUserAccessTokensByProject(ctx, projectID)
+}
+
+func (f *rs3FailingStore) DeleteSchedulesByProject(ctx context.Context, projectID string) (int, error) {
+	if f.failOn == "cascade_schedules" {
+		return 0, fmt.Errorf("injected: cascade failure at schedules")
+	}
+	return f.Store.DeleteSchedulesByProject(ctx, projectID)
 }
 
 // ---------------------------------------------------------------------------

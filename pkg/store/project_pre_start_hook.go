@@ -130,4 +130,8 @@ type ProjectPreStartHookStore interface {
 	// hub-scoped hooks exist (activate another hook first). Deleting the last
 	// remaining hub hook is allowed so operators can fully clear the hub hook.
 	DeleteHubPreStartHook(ctx context.Context, hookID string) error
+
+	// DeletePreStartHooksByProject hard-deletes all project-scoped hooks
+	// for a given project. Returns the number of hooks deleted.
+	DeletePreStartHooksByProject(ctx context.Context, projectID string) (int, error)
 }

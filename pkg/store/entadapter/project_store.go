@@ -1445,6 +1445,36 @@ func (s *ProjectStore) ListProjectSyncStates(ctx context.Context, projectID stri
 	return states, nil
 }
 
+// DeleteProjectProvidersByProject removes all provider relationships for a project.
+func (s *ProjectStore) DeleteProjectProvidersByProject(ctx context.Context, projectID string) (int, error) {
+	projectUID, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.ProjectContributor.Delete().
+		Where(projectcontributor.ProjectIDEQ(projectUID)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// DeleteProjectSyncStatesByProject removes all sync states for a project.
+func (s *ProjectStore) DeleteProjectSyncStatesByProject(ctx context.Context, projectID string) (int, error) {
+	projectUID, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.ProjectSyncState.Delete().
+		Where(projectsyncstate.ProjectIDEQ(projectUID)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // DeleteProjectSyncState removes sync state for a project and optional broker.
 func (s *ProjectStore) DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error {
 	projectUID, err := parseUUID(projectID)

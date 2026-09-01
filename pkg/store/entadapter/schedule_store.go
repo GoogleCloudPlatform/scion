@@ -294,6 +294,28 @@ func (s *ScheduleStore) DeleteSchedule(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteSchedulesByProject removes all schedules and their scheduled events for a project.
+func (s *ScheduleStore) DeleteSchedulesByProject(ctx context.Context, projectID string) (int, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	// First delete all scheduled events for this project's schedules.
+	if _, err := s.client.ScheduledEvent.Delete().
+		Where(scheduledevent.ProjectIDEQ(uid)).
+		Exec(ctx); err != nil {
+		return 0, err
+	}
+	// Then delete the schedules themselves.
+	n, err := s.client.Schedule.Delete().
+		Where(schedule.ProjectIDEQ(uid)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ListDueSchedules returns active schedules whose next_run_at has passed.
 //
 // This is a JOB-CLAIM PATH (§2.A.3): multiple hub replicas poll it concurrently.

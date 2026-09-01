@@ -283,6 +283,19 @@ func (s *LifecycleHookStore) DeleteLifecycleHook(ctx context.Context, id string)
 	return nil
 }
 
+// DeleteLifecycleHooksByScope removes all lifecycle hooks for a scope.
+func (s *LifecycleHookStore) DeleteLifecycleHooksByScope(ctx context.Context, scopeType string, scopeID string) (int, error) {
+	n, err := s.client.LifecycleHook.Delete().
+		Where(
+			lifecyclehook.ScopeTypeEQ(lifecyclehook.ScopeType(scopeType)),
+			lifecyclehook.ScopeIDEQ(scopeID),
+		).Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // ListLifecycleHooks returns lifecycle hooks matching the filter criteria.
 func (s *LifecycleHookStore) ListLifecycleHooks(ctx context.Context, filter store.LifecycleHookFilter, opts store.ListOptions) (*store.ListResult[store.LifecycleHook], error) {
 	query := s.client.LifecycleHook.Query()
