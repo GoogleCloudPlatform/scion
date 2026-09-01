@@ -455,10 +455,7 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		sortField = accessconstraint.FieldCreated
 	}
 
-	sortDesc := false
-	if strings.EqualFold(opts.SortOrder, "desc") {
-		sortDesc = true
-	}
+	sortDesc := strings.EqualFold(opts.SortOrder, "desc")
 
 	// Count total matching records.
 	totalQuery := s.client.AccessConstraint.Query()
