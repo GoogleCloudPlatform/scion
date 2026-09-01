@@ -128,8 +128,8 @@ missing-eligibility-gate, information-leak, denial-quality.
 | **Security effect** | missing-eligibility-gate (test gap) |
 | **Severity** | Low |
 | **Description** | No dedicated test for the new 503 branch in JWT auth middleware. |
-| **Current state** | No test exists. Logic is straightforward. |
-| **Disposition** | `deferred-phase-1` — non-blocking, follow-up test recommended. |
+| **Current state** | Test added in CT1: `TestJWTAuth_StoreError_Returns503` in `pkg/hub/auth_jwt_suspension_test.go`. Covers store error (503), suspended user (403), active user (pass-through), deleted user (ErrNotFound pass-through), and nil UserStore (pass-through). |
+| **Disposition** | `fixed` — regression test added in CT1. |
 
 ## Findings from Authz-Audit Implementation Plan
 
@@ -230,8 +230,8 @@ missing-eligibility-gate, information-leak, denial-quality.
 | Critical | 3 | 0 | 3 | 0 | 0 |
 | High | 4 | 3 | 1 | 0 | 0 |
 | Medium | 5 | 1 | 3 | 1 | 0 |
-| Low | 3 | 1 | 1 | 1 | 0 |
-| **Total** | **15** | **5** | **8** | **2** | **0** |
+| Low | 3 | 2 | 1 | 0 | 0 |
+| **Total** | **15** | **6** | **8** | **1** | **0** |
 
 ## C0 Containment Changes
 
