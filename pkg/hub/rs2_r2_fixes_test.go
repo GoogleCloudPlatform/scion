@@ -180,14 +180,28 @@ func TestRS2_TransitiveGroupAccess(t *testing.T) {
 			}
 		}
 
-		// Prior agent cursor: cannot return data
-		// After revocation, scope is None → handler returns 200 empty without cursor check
-		recAgCursorReplay := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents", nil)
-		require.Equal(t, http.StatusOK, recAgCursorReplay.Code)
-		var agCursorResp ListAgentsResponse
-		require.NoError(t, json.NewDecoder(recAgCursorReplay.Body).Decode(&agCursorResp))
-		assert.Equal(t, 0, agCursorResp.TotalCount,
-			"agent list after transitive revocation must return zero results")
+		// Prior agent cursor replay: replay the actual captured cursor.
+		// After revocation, scope is None → handler returns 200 empty without
+		// reaching cursor validation (short-circuits). Either 400 rejection or
+		// 200 with zero results, empty array, and no next cursor are accepted.
+		agentCursorURL := "/api/v1/agents?limit=1"
+		if agentPage.NextCursor != "" {
+			agentCursorURL += "&cursor=" + agentPage.NextCursor
+		}
+		recAgCursorReplay := doRequestAsUser(t, srv, user, http.MethodGet, agentCursorURL, nil)
+		if recAgCursorReplay.Code == http.StatusOK {
+			var agCursorResp ListAgentsResponse
+			require.NoError(t, json.NewDecoder(recAgCursorReplay.Body).Decode(&agCursorResp))
+			assert.Equal(t, 0, agCursorResp.TotalCount,
+				"agent cursor replay after revocation must return zero total")
+			assert.Empty(t, agCursorResp.Agents,
+				"agent cursor replay after revocation must return empty array")
+			assert.Empty(t, agCursorResp.NextCursor,
+				"agent cursor replay after revocation must have no next cursor")
+		} else {
+			assert.Equal(t, http.StatusBadRequest, recAgCursorReplay.Code,
+				"agent cursor must be rejected after transitive group revocation")
+		}
 	})
 }
 
@@ -1083,7 +1097,7 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 	// Create unauthorized project C (same name as A, with same broker)
 	projC := &store.Project{
 		ID: tid("r2-fcm-pc"), Name: "FilterProjA", Slug: "r2-fcm-c",
-		OwnerID:                tid("r2-fcm-oth"), CreatedBy: tid("r2-fcm-oth"),
+		OwnerID: tid("r2-fcm-oth"), CreatedBy: tid("r2-fcm-oth"),
 		DefaultRuntimeBrokerID: brokerID,
 		Created:                time.Now().Add(-1 * time.Hour), Updated: time.Now(),
 	}
@@ -1155,7 +1169,7 @@ func TestRS2_FilterCompositionMatrix(t *testing.T) {
 	// Agent in unauthorized project (same labels and broker as authorized agents)
 	agentUnauth := &store.Agent{
 		ID: tid("r2-fcm-au"), Slug: "r2-fcm-au", Name: "unauth-agent",
-		ProjectID:       projC.ID, OwnerID: tid("r2-fcm-oth"), Phase: "running",
+		ProjectID: projC.ID, OwnerID: tid("r2-fcm-oth"), Phase: "running",
 		Labels:          map[string]string{"env": "prod", "tier": "frontend"},
 		RuntimeBrokerID: brokerID,
 		Created:         time.Now(), Updated: time.Now(),
