@@ -1306,6 +1306,16 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		logging.Subsystem("hub.membership"),
 	)
 
+	// RS1 R2-R2: Run one-binding migration before accepting traffic.
+	// Idempotent — safe to re-run on every startup. Consolidates legacy
+	// multi-role bindings (keeps highest authority) so the D4 one-binding
+	// invariant holds before constraint enforcement begins.
+	if err := srv.runMembershipMigration(ctx); err != nil {
+		// Fail closed: if migration fails, the server should not start with
+		// potentially inconsistent binding state.
+		return nil, fmt.Errorf("membership migration failed (fail-closed): %w", err)
+	}
+
 	// Wire the caller-permission checker for agent service-account assignment.
 	//
 	// GCP IAM check mode: read from config, default to "off" (Q1 ruling).
@@ -3709,6 +3719,49 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 // This is useful for testing without starting a listener.
 func (s *Server) Handler() http.Handler {
 	return s.applyMiddleware(s.mux)
+}
+
+// runMembershipMigration runs the RS1 one-binding migration at startup.
+// R2-R2: wired into production startup, runs before route registration.
+// Idempotent — safe to run on every startup. Fails closed on errors.
+func (s *Server) runMembershipMigration(ctx context.Context) error {
+	log := s.projectsLogger()
+	results, err := s.membershipService.MigrateMultiRoleBindings(ctx)
+	if err != nil {
+		return fmt.Errorf("multi-role binding migration: %w", err)
+	}
+
+	var fixed, migErrors, nonComparable int
+	for _, r := range results {
+		if r.Error != nil {
+			migErrors++
+			log.Error("membership migration error",
+				"project_id", r.ProjectID,
+				"principal_id", r.PrincipalID,
+				"error", r.Error)
+		} else if r.NonComparable {
+			nonComparable++
+		} else if r.DeletedCount > 0 {
+			fixed++
+		}
+	}
+
+	// Fail closed on any errors or non-comparable roles that prevent
+	// deterministic migration (R2-R2 requirement).
+	if migErrors > 0 {
+		return fmt.Errorf("membership migration had %d errors — resolve before accepting traffic", migErrors)
+	}
+	if nonComparable > 0 {
+		return fmt.Errorf("membership migration found %d principals with non-comparable custom roles — resolve manually before accepting traffic", nonComparable)
+	}
+
+	if fixed > 0 {
+		log.Info("membership migration complete",
+			"principals_fixed", fixed)
+	} else {
+		log.Debug("membership migration: no duplicates found")
+	}
+	return nil
 }
 
 // registerRoutes sets up all API routes.

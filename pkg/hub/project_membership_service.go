@@ -396,7 +396,10 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 
 	// One-binding invariant (D4): check if the principal already has a direct
 	// binding in this project. If so, atomically replace it.
-	existingBindings := svc.findExistingDirectBindings(ctx, req.PrincipalType, req.PrincipalID, req.ProjectID)
+	existingBindings, err := svc.findExistingDirectBindings(ctx, req.PrincipalType, req.PrincipalID, req.ProjectID)
+	if err != nil {
+		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "cannot check existing bindings: " + err.Error(), HTTPStatus: 500}
+	}
 	if len(existingBindings) > 0 {
 		// Atomic replacement: change role via update path.
 		return svc.atomicReplaceBinding(ctx, req, existingBindings, roleDef)
@@ -518,20 +521,21 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 	}
 
-	// Last-owner guard: if demoting away from owner, verify another active
-	// direct owner remains.
-	if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
-		if existing.PrincipalType == store.RoleBindingPrincipalUser {
-			if denied := svc.enforceLastOwner(ctx, req.ProjectID); denied != nil {
-				return nil, denied
-			}
-		}
-	}
-
 	// Atomic replacement inside a transaction: create new binding, delete old
-	// binding, and write audit record. Transaction ensures no partial state.
+	// binding, enforce last-owner guard, and write audit record.
+	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU
+	// races where concurrent demotions both read count=2 and both commit.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Last-owner guard (inside tx for serialization).
+		if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
+			if existing.PrincipalType == store.RoleBindingPrincipalUser {
+				if err := svc.enforceLastOwnerTx(ctx, tx, req.ProjectID); err != nil {
+					return err
+				}
+			}
+		}
+
 		var err error
 		created, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: req.NewRoleDefID,
@@ -564,6 +568,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		})
 	})
 	if txErr != nil {
+		if isLastOwnerError(txErr) {
+			return nil, lastOwnerDenial()
+		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
 
@@ -607,15 +614,17 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		return nil, &decision
 	}
 
-	// Last-owner guard.
-	if roleDef.Name == store.ProjectRoleOwner && binding.PrincipalType == store.RoleBindingPrincipalUser {
-		if denied := svc.enforceLastOwner(ctx, req.ProjectID); denied != nil {
-			return nil, denied
-		}
-	}
-
-	// Delete the binding and write audit inside a transaction.
+	// Delete the binding, enforce last-owner guard, and write audit inside a
+	// transaction. R2-R1: the last-owner check MUST be inside the transaction
+	// to prevent TOCTOU races where concurrent demotions both succeed.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Last-owner guard (inside tx for serialization).
+		if roleDef.Name == store.ProjectRoleOwner && binding.PrincipalType == store.RoleBindingPrincipalUser {
+			if err := svc.enforceLastOwnerTx(ctx, tx, req.ProjectID); err != nil {
+				return err
+			}
+		}
+
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
 			return err
 		}
@@ -630,6 +639,9 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		})
 	})
 	if txErr != nil {
+		if isLastOwnerError(txErr) {
+			return nil, lastOwnerDenial()
+		}
 		if txErr == store.ErrNotFound {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "binding not found", HTTPStatus: 404}
 		}
@@ -697,7 +709,10 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 	var newOwnerBinding, oldActorBinding *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Step 1: Give the new owner a project-owner binding (or replace existing).
-		existingNewOwnerBindings := svc.findExistingDirectBindingsFromStore(ctx, tx, store.RoleBindingPrincipalUser, req.NewOwnerID, req.ProjectID)
+		existingNewOwnerBindings, findErr := svc.findExistingDirectBindingsFromStore(ctx, tx, store.RoleBindingPrincipalUser, req.NewOwnerID, req.ProjectID)
+		if findErr != nil {
+			return fmt.Errorf("find new owner bindings: %w", findErr)
+		}
 		if len(existingNewOwnerBindings) > 0 {
 			// Replace existing binding(s) with owner role — delete all, create one.
 			var rErr error
@@ -721,7 +736,10 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		}
 
 		// Step 2: Downgrade the actor's owner binding to member.
-		actorBindings := svc.findExistingDirectBindingsFromStore(ctx, tx, store.RoleBindingPrincipalUser, req.Actor.ID(), req.ProjectID)
+		actorBindings, findErr := svc.findExistingDirectBindingsFromStore(ctx, tx, store.RoleBindingPrincipalUser, req.Actor.ID(), req.ProjectID)
+		if findErr != nil {
+			return fmt.Errorf("find actor bindings: %w", findErr)
+		}
 		if len(actorBindings) > 0 {
 			var rErr error
 			oldActorBinding, rErr = svc.replaceBindingTx(ctx, tx, actorBindings, memberRoleDef.ID, req.Actor.ID())
@@ -830,16 +848,17 @@ func (svc *ProjectMembershipService) ComputeCapabilities(ctx context.Context, us
 // findExistingDirectBindings finds all existing direct (not group-derived)
 // bindings for the principal in the project. Returns nil if none exist.
 // R-3: detects and returns ALL duplicates instead of silently taking the first.
-func (svc *ProjectMembershipService) findExistingDirectBindings(ctx context.Context, principalType, principalID, projectID string) []*store.RoleBinding {
+func (svc *ProjectMembershipService) findExistingDirectBindings(ctx context.Context, principalType, principalID, projectID string) ([]*store.RoleBinding, error) {
 	return svc.findExistingDirectBindingsFromStore(ctx, svc.store, principalType, principalID, projectID)
 }
 
 // findExistingDirectBindingsFromStore is like findExistingDirectBindings but
 // uses the provided store (which may be a transactional store).
-func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx context.Context, s store.Store, principalType, principalID, projectID string) []*store.RoleBinding {
+// O-1: errors are propagated, not silently swallowed.
+func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx context.Context, s store.Store, principalType, principalID, projectID string) ([]*store.RoleBinding, error) {
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list bindings for principal %s/%s: %w", principalType, principalID, err)
 	}
 	var result []*store.RoleBinding
 	for _, b := range bindings {
@@ -847,7 +866,7 @@ func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx con
 			result = append(result, b)
 		}
 	}
-	return result
+	return result, nil
 }
 
 // atomicReplaceBinding replaces existing binding(s) with a new one for a
@@ -876,18 +895,19 @@ func (svc *ProjectMembershipService) atomicReplaceBinding(ctx context.Context, r
 		return nil, &decision
 	}
 
-	// Last-owner guard if demoting from owner.
-	if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
-		if primary.PrincipalType == store.RoleBindingPrincipalUser {
-			if denied := svc.enforceLastOwner(ctx, req.ProjectID); denied != nil {
-				return nil, denied
-			}
-		}
-	}
-
-	// All mutations inside one transaction.
+	// All mutations, last-owner guard, and audit inside one transaction.
+	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU.
 	var replaced *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Last-owner guard if demoting from owner (inside tx for serialization).
+		if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
+			if primary.PrincipalType == store.RoleBindingPrincipalUser {
+				if err := svc.enforceLastOwnerTx(ctx, tx, req.ProjectID); err != nil {
+					return err
+				}
+			}
+		}
+
 		var rErr error
 		replaced, rErr = svc.replaceBindingTx(ctx, tx, existing, newRoleDef.ID, req.Actor.ID())
 		if rErr != nil {
@@ -908,6 +928,9 @@ func (svc *ProjectMembershipService) atomicReplaceBinding(ctx context.Context, r
 		})
 	})
 	if txErr != nil {
+		if isLastOwnerError(txErr) {
+			return nil, lastOwnerDenial()
+		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "failed to replace binding: " + txErr.Error(), HTTPStatus: 500}
 	}
 
@@ -935,12 +958,17 @@ func (svc *ProjectMembershipService) atomicReplaceBinding(ctx context.Context, r
 // replaceBindingTx creates a new binding with the given role and deletes all
 // old bindings inside the provided transactional store. All errors are
 // propagated — no silent swallowing (R-6).
+// O-2: uses the highest-authority binding's lifecycle metadata (NotBefore/ExpiresAt),
+// not an arbitrary old[0].
 func (svc *ProjectMembershipService) replaceBindingTx(ctx context.Context, tx store.Store, old []*store.RoleBinding, newRoleDefID, createdBy string) (*store.RoleBinding, error) {
 	if len(old) == 0 {
 		return nil, fmt.Errorf("replaceBindingTx: no bindings to replace")
 	}
-	// Use the first binding's metadata for the replacement.
-	primary := old[0]
+	// Use the highest-authority binding's metadata for the replacement.
+	primary := svc.highestAuthorityBinding(ctx, old)
+	if primary == nil {
+		primary = old[0]
+	}
 	created, err := tx.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: newRoleDefID,
 		PrincipalType:    primary.PrincipalType,
@@ -990,27 +1018,49 @@ func (svc *ProjectMembershipService) highestAuthorityBinding(ctx context.Context
 	return best
 }
 
-// enforceLastOwner checks that at least two active direct owners exist.
-// Returns a denial decision if the invariant would be violated.
-func (svc *ProjectMembershipService) enforceLastOwner(ctx context.Context, projectID string) *MembershipDecision {
-	count, err := svc.countActiveDirectOwners(ctx, projectID)
+// enforceLastOwnerTx checks that at least two active direct owners exist,
+// reading from the provided (transactional) store. Returns an error if the
+// invariant would be violated so the surrounding transaction rolls back.
+//
+// R2-R1: This MUST be called inside WithTx, not outside it. Reading owner
+// count outside a transaction creates a TOCTOU race where two concurrent
+// demotions both observe count=2 and both commit, leaving zero owners.
+func (svc *ProjectMembershipService) enforceLastOwnerTx(ctx context.Context, tx store.Store, projectID string) error {
+	count, err := svc.countActiveDirectOwnersFromStore(ctx, tx, projectID)
 	if err != nil {
-		return &MembershipDecision{
-			Allowed:    false,
-			DenialCode: ErrCodeLastOwner,
-			Reason:     "cannot verify owner count: " + err.Error(),
-			HTTPStatus: 500,
-		}
+		return fmt.Errorf("cannot verify owner count: %w", err)
 	}
 	if count <= 1 {
-		return &MembershipDecision{
-			Allowed:    false,
-			DenialCode: ErrCodeLastOwner,
-			Reason:     "cannot remove or demote the last project owner — at least one active direct user owner must remain",
-			HTTPStatus: 409,
-		}
+		return &lastOwnerError{projectID: projectID}
 	}
 	return nil
+}
+
+// lastOwnerError is returned by enforceLastOwnerTx when the last-owner
+// invariant would be violated. Callers can type-assert to produce the
+// appropriate denial response.
+type lastOwnerError struct {
+	projectID string
+}
+
+func (e *lastOwnerError) Error() string {
+	return "cannot remove or demote the last project owner — at least one active direct user owner must remain"
+}
+
+// isLastOwnerError returns true if the error is a last-owner invariant violation.
+func isLastOwnerError(err error) bool {
+	_, ok := err.(*lastOwnerError)
+	return ok
+}
+
+// lastOwnerDenial converts a lastOwnerError into a MembershipDecision.
+func lastOwnerDenial() *MembershipDecision {
+	return &MembershipDecision{
+		Allowed:    false,
+		DenialCode: ErrCodeLastOwner,
+		Reason:     "cannot remove or demote the last project owner — at least one active direct user owner must remain",
+		HTTPStatus: 409,
+	}
 }
 
 // countActiveDirectOwners counts active direct-user project-owner bindings.
@@ -1096,19 +1146,37 @@ type MultiRoleMigrationResult struct {
 // MigrateMultiRoleBindings scans all project-scoped bindings and consolidates
 // any principal with more than one direct binding per project. For built-in
 // roles, the highest-authority binding is kept (using projectRoleLevel). For
-// custom or non-comparable roles, the migration logs a warning and skips.
+// custom or non-comparable roles, the migration fails closed (returns error)
+// to prevent data loss on unexpected role configurations.
 //
 // This is idempotent: re-running on a clean database is a no-op.
+// R2-R2: paginates through all projects; no silent cap.
 func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Context) ([]MultiRoleMigrationResult, error) {
-	// Get all projects.
-	projectResult, err := svc.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		return nil, fmt.Errorf("listing projects: %w", err)
+	// Paginate through all projects (R2-R2: no silent 10k cap).
+	const pageSize = 500
+	var allProjects []store.Project
+	cursor := ""
+	for {
+		projectResult, err := svc.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:  pageSize,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing projects (cursor=%s): %w", cursor, err)
+		}
+		allProjects = append(allProjects, projectResult.Items...)
+		if projectResult.NextCursor == "" || len(projectResult.Items) < pageSize {
+			break
+		}
+		cursor = projectResult.NextCursor
 	}
+
+	svc.logger.Info("migration: scanning projects for multi-role bindings",
+		"project_count", len(allProjects))
 
 	var results []MultiRoleMigrationResult
 
-	for _, p := range projectResult.Items {
+	for _, p := range allProjects {
 		bindings, err := svc.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p.ID)
 		if err != nil {
 			results = append(results, MultiRoleMigrationResult{

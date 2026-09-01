@@ -17,12 +17,15 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,43 +94,67 @@ func TestRS1_AST_HandlersDoNotDirectlyMutateRoleBindings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// (b) Scoped UAT credential tests
+// (b) Scoped UAT credential tests — R2-R3: mint real UATs through production
+// token path and exercise actual cross-project denial.
 // ---------------------------------------------------------------------------
+
+// doRequestWithUAT makes an HTTP request authenticated with a real scoped UAT.
+func doRequestWithUAT(t *testing.T, srv *Server, uatKey, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+uatKey)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// mintScopedUAT mints a real scoped UAT through the production token service.
+func mintScopedUAT(t *testing.T, srv *Server, userID, projectID string, scopes []string) string {
+	t.Helper()
+	key, _, err := srv.uatService.CreateToken(
+		context.Background(), userID, "test-uat", projectID, scopes, nil,
+	)
+	require.NoError(t, err, "failed to mint scoped UAT")
+	return key
+}
 
 func TestRS1_ScopedUAT_SameProjectAllowed(t *testing.T) {
 	srv, s := testServer(t)
-	ctx := context.Background()
 
 	projectID := tid("rs1-uat-proj")
 	ownerID := tid("rs1-uat-owner")
-	targetID := tid("rs1-uat-target")
 
 	createRS1Project(t, s, projectID, ownerID)
 
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: targetID, Email: "uat-target@test.com",
-		DisplayName: "UAT Target", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, targetID)
+	// R2-R3: mint a real scoped UAT through the production token path.
+	// project:read is sufficient for listing members (the base permission
+	// for project.membership.list is project.read).
+	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"project:read"})
 
-	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
+	// Use the UAT to list members in the SAME project — should succeed.
+	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,
+		"/api/v1/projects/"+projectID+"/members", nil)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"RS1: scoped UAT should be able to list members in its scoped project (got %d: %s)", rec.Code, rec.Body.String())
 
-	// Create a scoped UAT for the owner, scoped to the same project.
-	owner := &store.User{
-		ID:    ownerID,
-		Email: "uat-owner@test.com",
-	}
-
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		"/api/v1/projects/"+projectID+"/members",
-		addProjectMemberRequest{
-			RoleDefinitionID: memberRD.ID,
-			PrincipalType:    "user",
-			PrincipalID:      targetID,
-		})
-	assert.Equal(t, http.StatusCreated, rec.Code,
-		"RS1: owner via session JWT should be able to add member to own project")
+	// Verify the response contains the owner as a member.
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	members, ok := body["items"].([]interface{})
+	require.True(t, ok, "response should contain items array")
+	assert.GreaterOrEqual(t, len(members), 1, "should have at least the owner")
 }
 
 func TestRS1_ScopedUAT_CrossProjectDenied(t *testing.T) {
@@ -138,13 +165,14 @@ func TestRS1_ScopedUAT_CrossProjectDenied(t *testing.T) {
 	projectB := tid("rs1-uat-projB")
 	ownerID := tid("rs1-uat-owner2")
 	ownerB := tid("rs1-uat-ownerB")
-	targetID := tid("rs1-uat-target2")
 
 	createRS1Project(t, s, projectA, ownerID)
 	createRS1Project(t, s, projectB, ownerB)
-	// Give ownerID access to projectB too.
-	ownerRD, _ := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	_, _ = s.CreateRoleBinding(ctx, &store.RoleBinding{
+	// Give ownerID access to projectB too (so we know denial is scope-based,
+	// not permission-based).
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: ownerRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      ownerID,
@@ -152,38 +180,18 @@ func TestRS1_ScopedUAT_CrossProjectDenied(t *testing.T) {
 		ScopeID:          projectB,
 		CreatedBy:        ownerB,
 	})
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: targetID, Email: "uat-target2@test.com",
-		DisplayName: "UAT Target2", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, targetID)
-
-	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Use a scoped identity: owner has permissions in projectA, but the request
-	// targets projectB. The authorize check should deny.
-	owner := &store.User{
-		ID:    ownerID,
-		Email: "uat-owner2@test.com",
-	}
+	// R2-R3: mint a UAT scoped to project A with project:read scope.
+	uatKey := mintScopedUAT(t, srv, ownerID, projectA, []string{"project:read"})
 
-	// Owner has bindings in both projects (from createRS1Project), so session JWT works.
-	// But a scoped UAT would restrict to one project.
-	// We verify the authorization model works at the API level.
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		"/api/v1/projects/"+projectB+"/members",
-		addProjectMemberRequest{
-			RoleDefinitionID: memberRD.ID,
-			PrincipalType:    "user",
-			PrincipalID:      targetID,
-		})
-	// With full session JWT, the owner has access to both projects, so this succeeds.
-	// The cross-project denial is enforced at the UAT scope level, which restricts
-	// the credential's project scope. This test verifies the happy path works.
-	assert.Equal(t, http.StatusCreated, rec.Code,
-		"RS1: owner with full session should access both projects")
+	// Use the UAT to list members in project B — MUST be denied by UAT
+	// project-scope enforcement. The user has owner permissions in B via
+	// session, but the UAT is scoped to A only.
+	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,
+		"/api/v1/projects/"+projectB+"/members", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"RS1: scoped UAT for project A must be denied when accessing project B (got %d: %s)", rec.Code, rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -288,15 +296,81 @@ func TestRS1_InvalidActorDenied(t *testing.T) {
 // (d) Failure injection — store error propagation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// failingStore — configurable store wrapper for failure injection.
+//
+// Wraps a real store.Store and returns injected errors on specific operations.
+// The injection config is preserved across WithTx boundaries: when WithTx is
+// called, the inner tx store is also wrapped in a failingStore with the same
+// configuration, so failures inside transactional callbacks behave identically
+// to failures on the outer store.
+// ---------------------------------------------------------------------------
+
+type failingStore struct {
+	store.Store // embed to satisfy interface — all non-overridden methods delegate
+
+	// Configurable failure points. When non-nil, the corresponding method
+	// returns this error instead of delegating to the wrapped store.
+	createRoleBindingErr   error
+	deleteRoleBindingErr   error
+	createMutationAuditErr error
+	// commitErr causes WithTx to return this error after fn succeeds but before
+	// the real commit occurs. The deferred rollback in the real store's WithTx
+	// implementation reverses any changes made inside fn.
+	commitErr error
+}
+
+func (f *failingStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	if f.createRoleBindingErr != nil {
+		return nil, f.createRoleBindingErr
+	}
+	return f.Store.CreateRoleBinding(ctx, rb)
+}
+
+func (f *failingStore) DeleteRoleBinding(ctx context.Context, id string) error {
+	if f.deleteRoleBindingErr != nil {
+		return f.deleteRoleBindingErr
+	}
+	return f.Store.DeleteRoleBinding(ctx, id)
+}
+
+func (f *failingStore) CreateMutationAudit(ctx context.Context, record *store.MutationAuditRecord) error {
+	if f.createMutationAuditErr != nil {
+		return f.createMutationAuditErr
+	}
+	return f.Store.CreateMutationAudit(ctx, record)
+}
+
+func (f *failingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		// Wrap the inner tx so that injection config is preserved inside
+		// the transactional callback — this is the critical requirement
+		// from R2-R4.
+		wrappedTx := &failingStore{
+			Store:                  tx,
+			createRoleBindingErr:   f.createRoleBindingErr,
+			deleteRoleBindingErr:   f.deleteRoleBindingErr,
+			createMutationAuditErr: f.createMutationAuditErr,
+			// commitErr is not copied to inner tx; it's handled at this level.
+		}
+		if err := fn(wrappedTx); err != nil {
+			return err
+		}
+		// If commitErr is set, return it after fn succeeds. The real
+		// WithTx sees a non-nil error from fn and runs its deferred
+		// rollback, undoing everything fn did.
+		if f.commitErr != nil {
+			return f.commitErr
+		}
+		return nil
+	})
+}
+
 func TestRS1_TransactionRollbackOnAuditFailure(t *testing.T) {
-	// This test verifies that if the audit record fails to write, the entire
-	// transaction rolls back and the binding is NOT created.
-	// We test this indirectly by checking that the service uses transactions:
-	// if the create succeeds but audit fails, the binding should not persist.
-	//
-	// Since our test store is SQLite with real transactions, we can't easily
-	// inject failures into the audit write. Instead, we verify the contract:
-	// the service creates bindings and audit records in the same transaction.
+	// R2-R4: Inject a failure into CreateMutationAudit. The service calls
+	// CreateRoleBinding then CreateMutationAudit inside the same WithTx.
+	// When the audit write fails the transaction must roll back, leaving
+	// zero new bindings in the store.
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -312,10 +386,23 @@ func TestRS1_TransactionRollbackOnAuditFailure(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, targetID)
 
+	// Count bindings before the attempt.
+	bindingsBefore, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	require.NoError(t, err)
+	countBefore := countProjectBindings(bindingsBefore, projectID)
+
+	// Swap the service's store with a failingStore that rejects audit writes.
+	fs := &failingStore{
+		Store:                  s,
+		createMutationAuditErr: errors.New("injected: audit write failure"),
+	}
+	srv.membershipService.store = fs
+	defer func() { srv.membershipService.store = s }()
+
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Add a member — should succeed and create an audit record.
+	// Attempt to add a member — should fail (500) because audit write fails.
 	owner := &store.User{ID: ownerID, Email: "tx-owner@test.com"}
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
 		"/api/v1/projects/"+projectID+"/members",
@@ -324,29 +411,22 @@ func TestRS1_TransactionRollbackOnAuditFailure(t *testing.T) {
 			PrincipalType:    "user",
 			PrincipalID:      targetID,
 		})
-	require.Equal(t, http.StatusCreated, rec.Code, "member add should succeed")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"RS1: audit failure must produce 500, not success")
 
-	// Verify an audit record was created.
-	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
-		TargetType: "project_membership",
-		TargetID:   projectID,
-	})
+	// Verify rollback: no new binding was persisted.
+	bindingsAfter, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
 	require.NoError(t, err)
-	found := false
-	for _, a := range audits {
-		if a.MutationType == "project_member_add" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "RS1: audit record must be created atomically with the binding")
+	countAfter := countProjectBindings(bindingsAfter, projectID)
+	assert.Equal(t, countBefore, countAfter,
+		"RS1: audit failure must roll back binding creation (before=%d after=%d)", countBefore, countAfter)
 }
 
 func TestRS1_DeleteFailurePropagation(t *testing.T) {
-	// Verify that when UpdateMemberRole is called and the old binding
-	// deletion would fail, the transaction rolls back (no partial state).
-	// We test this by verifying that after a successful update, only one
-	// binding exists (no dual-binding state).
+	// R2-R4: Inject a failure into DeleteRoleBinding. When UpdateMemberRole
+	// (which creates a new binding then deletes the old one) hits a delete
+	// failure, the entire transaction must roll back — no new binding should
+	// appear, and the old binding must remain unchanged.
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -367,7 +447,7 @@ func TestRS1_DeleteFailurePropagation(t *testing.T) {
 	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Add a member.
+	// Add a member (with real store — must succeed).
 	owner := &store.User{ID: ownerID, Email: "delfail-owner@test.com"}
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
 		"/api/v1/projects/"+projectID+"/members",
@@ -381,25 +461,103 @@ func TestRS1_DeleteFailurePropagation(t *testing.T) {
 	var addResp projectMemberInfo
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&addResp))
 
-	// Update role from member to admin.
+	// Swap to failing store — DeleteRoleBinding will fail.
+	fs := &failingStore{
+		Store:                s,
+		deleteRoleBindingErr: errors.New("injected: delete binding failure"),
+	}
+	srv.membershipService.store = fs
+	defer func() { srv.membershipService.store = s }()
+
+	// Attempt role update from member → admin. Should fail.
 	rec = doRequestAsUser(t, srv, owner, http.MethodPatch,
 		"/api/v1/projects/"+projectID+"/members/"+addResp.ID,
 		updateProjectMemberRequest{
 			RoleDefinitionID: adminRD.ID,
 		})
-	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"RS1: delete failure during role update must produce 500")
 
-	// Verify only one binding exists (no dual-binding state).
+	// Verify rollback: the original member binding still exists with the
+	// original role (member, not admin), and no duplicate appeared.
+	srv.membershipService.store = s // restore real store for verification
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
 	require.NoError(t, err)
 	projectBindings := 0
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
 			projectBindings++
+			assert.Equal(t, memberRD.ID, b.RoleDefinitionID,
+				"RS1: after failed role update, original role must be unchanged")
 		}
 	}
 	assert.Equal(t, 1, projectBindings,
-		"RS1: after role update, exactly one binding must exist (no dual-binding state)")
+		"RS1: after failed role update, exactly one binding must remain")
+}
+
+func TestRS1_CommitFailureProduces500(t *testing.T) {
+	// R2-R4: Inject a commit failure. Even if all store operations inside
+	// the transaction succeed, a commit failure must produce a 500 error
+	// (not success) and leave no persisted side effects.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-commit-proj")
+	ownerID := tid("rs1-commit-owner")
+	targetID := tid("rs1-commit-target")
+
+	createRS1Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: "commit-target@test.com",
+		DisplayName: "Commit Target", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	bindingsBefore, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	require.NoError(t, err)
+	countBefore := countProjectBindings(bindingsBefore, projectID)
+
+	// Swap to failing store — commit will fail after fn succeeds.
+	fs := &failingStore{
+		Store:     s,
+		commitErr: errors.New("injected: commit failure"),
+	}
+	srv.membershipService.store = fs
+	defer func() { srv.membershipService.store = s }()
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	owner := &store.User{ID: ownerID, Email: "commit-owner@test.com"}
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: memberRD.ID,
+			PrincipalType:    "user",
+			PrincipalID:      targetID,
+		})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"RS1: commit failure must produce 500, not success")
+
+	// Verify rollback: no binding was persisted.
+	srv.membershipService.store = s
+	bindingsAfter, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	require.NoError(t, err)
+	countAfter := countProjectBindings(bindingsAfter, projectID)
+	assert.Equal(t, countBefore, countAfter,
+		"RS1: commit failure must roll back all changes")
+}
+
+// countProjectBindings counts bindings scoped to the given project.
+func countProjectBindings(bindings []*store.RoleBinding, projectID string) int {
+	n := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
+			n++
+		}
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------
@@ -570,49 +728,27 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// Acceptable outcomes under different isolation levels:
-	//
-	// 1. Serializable (production PostgreSQL, SQLite WAL): at most one
-	//    succeeds because the second transaction sees the post-demotion state
-	//    and fires the last-owner guard.
-	// 2. SQLite serialized (test default): both may succeed sequentially if
-	//    each transaction independently sees ≥2 owners before committing.
-	//    Under SQLite, if both succeed the final owner count may be 0. That is
-	//    a known limitation of SQLite's lock-step serialization, NOT a code
-	//    bug. The important invariant (tested separately under each individual
-	//    demotion) is that the last-owner guard fires inside each transaction
-	//    when owner count would drop to zero.
-	//
-	// Assert: the weaker invariant — at most one of the two transactions may
-	// cause a 2→0 drop; under SQLite both may succeed so we only assert that
-	// the guard logic (tested by TestRS1_ConcurrentRemoveAndTransfer and the
-	// unit-level last-owner tests) is structurally sound.
-	bothSucceeded := code1 == http.StatusOK && code2 == http.StatusOK
-	bothFailed := code1 != http.StatusOK && code2 != http.StatusOK
-
+	// R2-R1 fix: enforceLastOwnerTx now runs INSIDE the transaction, so
+	// the owner count is read within the transactional snapshot. Under SQLite's
+	// serialized transactions, concurrent demotions execute sequentially and the
+	// second sees the post-demotion state. At most one should succeed.
 	t.Logf("concurrent demotion results: code1=%d code2=%d", code1, code2)
 
-	// Under any isolation level at least one request must complete without
-	// an internal server error.
-	assert.False(t, code1 >= 500 && code2 >= 500,
-		"RS1: neither concurrent demotion should cause a 500-level error")
+	// At most one should succeed. At least one must be denied by the
+	// last-owner guard (409) or encounter a conflict.
+	assert.True(t, code1 != http.StatusOK || code2 != http.StatusOK,
+		"RS1: concurrent demotions must not both succeed — last-owner guard must fire")
 
-	if !bothSucceeded {
-		// Strong isolation: at most one succeeded — the guard fired.
-		assert.False(t, bothFailed,
-			"RS1: at least one concurrent demotion should succeed when two owners exist")
+	// At least one must succeed (two owners exist — one demotion is valid).
+	assert.True(t, code1 == http.StatusOK || code2 == http.StatusOK,
+		"RS1: at least one concurrent demotion should succeed when two owners exist")
 
-		svc := srv.membershipService
-		count, err := svc.countActiveDirectOwners(ctx, projectID)
-		require.NoError(t, err)
-		assert.True(t, count >= 1,
-			"RS1: after concurrent demotions, at least one owner must remain (got %d)", count)
-	} else {
-		// Weak isolation (SQLite): both succeeded sequentially. This is
-		// acceptable for test purposes; production databases provide
-		// stronger guarantees. Log for CI visibility.
-		t.Log("RS1: both demotions succeeded under SQLite serialized isolation (expected in test environment)")
-	}
+	// Verify at least one owner remains — the invariant MUST hold.
+	svc := srv.membershipService
+	count, err := svc.countActiveDirectOwners(ctx, projectID)
+	require.NoError(t, err)
+	assert.True(t, count >= 1,
+		"RS1: after concurrent demotions, at least one owner must remain (got %d)", count)
 }
 
 // ---------------------------------------------------------------------------
