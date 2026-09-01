@@ -27,12 +27,12 @@ func RenderMarkdown(specs []OperationSpec) string {
 
 	b.WriteString("# Authorization Operation Catalog\n\n")
 	b.WriteString("*Generated from Go-native OperationSpec definitions. Do not edit manually.*\n\n")
-	b.WriteString(fmt.Sprintf("**Operations:** %d\n\n", len(specs)))
+	fmt.Fprintf(&b, "**Operations:** %d\n\n", len(specs))
 
 	// Table of contents.
 	b.WriteString("## Table of Contents\n\n")
 	for _, s := range specs {
-		b.WriteString(fmt.Sprintf("- [%s](#%s) — %s\n", s.ID, anchorID(s.ID), s.Description))
+		fmt.Fprintf(&b, "- [%s](#%s) — %s\n", s.ID, anchorID(s.ID), s.Description)
 	}
 	b.WriteString("\n---\n\n")
 
@@ -45,9 +45,9 @@ func RenderMarkdown(specs []OperationSpec) string {
 }
 
 func renderSpec(b *strings.Builder, s *OperationSpec) {
-	b.WriteString(fmt.Sprintf("## %s\n\n", s.ID))
-	b.WriteString(fmt.Sprintf("**Domain:** %s\n\n", s.Domain))
-	b.WriteString(fmt.Sprintf("**Description:** %s\n\n", s.Description))
+	fmt.Fprintf(b, "## %s\n\n", s.ID)
+	fmt.Fprintf(b, "**Domain:** %s\n\n", s.Domain)
+	fmt.Fprintf(b, "**Description:** %s\n\n", s.Description)
 
 	// Entry points.
 	if len(s.EntryPoints) > 0 {
@@ -59,7 +59,7 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 			if method == "" {
 				method = "—"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | `%s` |\n", escapeTableCell(string(ep.Kind)), escapeTableCell(method), escapeTableCell(ep.Pattern)))
+			fmt.Fprintf(b, "| %s | %s | `%s` |\n", escapeTableCell(string(ep.Kind)), escapeTableCell(method), escapeTableCell(ep.Pattern))
 		}
 		b.WriteString("\n")
 	}
@@ -88,10 +88,10 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 
 	// Base permission and resolver.
 	if s.BasePermission != "" {
-		b.WriteString(fmt.Sprintf("**Base Permission:** `%s`\n\n", s.BasePermission))
+		fmt.Fprintf(b, "**Base Permission:** `%s`\n\n", s.BasePermission)
 	}
 	if s.ResourceResolver != "" {
-		b.WriteString(fmt.Sprintf("**Resource Resolver:** %s\n\n", s.ResourceResolver))
+		fmt.Fprintf(b, "**Resource Resolver:** %s\n\n", s.ResourceResolver)
 	}
 
 	// Effects.
@@ -108,27 +108,27 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	// Delegation.
 	if s.DelegationKind != DelegationNone {
 		b.WriteString("### Delegation\n\n")
-		b.WriteString(fmt.Sprintf("- **Kind:** `%s`\n", s.DelegationKind))
+		fmt.Fprintf(b, "- **Kind:** `%s`\n", s.DelegationKind)
 		if s.DelegationDescription != "" {
-			b.WriteString(fmt.Sprintf("- %s\n", s.DelegationDescription))
+			fmt.Fprintf(b, "- %s\n", s.DelegationDescription)
 		}
 		b.WriteString("\n")
 	}
 
 	// Authority evaluation.
 	if s.AuthorityEval != AuthorityEvalNone {
-		b.WriteString(fmt.Sprintf("**Authority Evaluation:** `%s`\n\n", s.AuthorityEval))
+		fmt.Fprintf(b, "**Authority Evaluation:** `%s`\n\n", s.AuthorityEval)
 	}
 
 	// Governance.
 	if s.Governance != nil {
 		b.WriteString("### Governance\n\n")
-		b.WriteString(fmt.Sprintf("- **Kind:** %s\n", s.Governance.Kind))
+		fmt.Fprintf(b, "- **Kind:** %s\n", s.Governance.Kind)
 		if s.Governance.Description != "" {
-			b.WriteString(fmt.Sprintf("- %s\n", s.Governance.Description))
+			fmt.Fprintf(b, "- %s\n", s.Governance.Description)
 		}
 		if s.Governance.DomainCallback != "" {
-			b.WriteString(fmt.Sprintf("- **Callback:** `%s`\n", s.Governance.DomainCallback))
+			fmt.Fprintf(b, "- **Callback:** `%s`\n", s.Governance.DomainCallback)
 		}
 		b.WriteString("\n")
 	}
@@ -143,9 +143,9 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 			if inv.FailClosed {
 				fc = "Yes"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+			fmt.Fprintf(b, "| %s | %s | %s | %s |\n",
 				escapeTableCell(inv.ID), escapeTableCell(string(inv.Kind)),
-				escapeTableCell(inv.Description), fc))
+				escapeTableCell(inv.Description), fc)
 		}
 		b.WriteString("\n")
 	}
@@ -153,22 +153,22 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	// Audit.
 	if s.AuditObligation != nil {
 		b.WriteString("### Audit\n\n")
-		b.WriteString(fmt.Sprintf("- **Event Type:** `%s`\n", s.AuditObligation.EventType))
+		fmt.Fprintf(b, "- **Event Type:** `%s`\n", s.AuditObligation.EventType)
 		if len(s.AuditObligation.ContextFields) > 0 {
-			b.WriteString(fmt.Sprintf("- **Context Fields:** %s\n", strings.Join(s.AuditObligation.ContextFields, ", ")))
+			fmt.Fprintf(b, "- **Context Fields:** %s\n", strings.Join(s.AuditObligation.ContextFields, ", "))
 		}
 		if len(s.AuditObligation.BeforeFields) > 0 {
-			b.WriteString(fmt.Sprintf("- **Before Fields:** %s\n", strings.Join(s.AuditObligation.BeforeFields, ", ")))
+			fmt.Fprintf(b, "- **Before Fields:** %s\n", strings.Join(s.AuditObligation.BeforeFields, ", "))
 		}
 		if len(s.AuditObligation.AfterFields) > 0 {
-			b.WriteString(fmt.Sprintf("- **After Fields:** %s\n", strings.Join(s.AuditObligation.AfterFields, ", ")))
+			fmt.Fprintf(b, "- **After Fields:** %s\n", strings.Join(s.AuditObligation.AfterFields, ", "))
 		}
 		if s.AuditObligation.Atomic {
 			b.WriteString("- **Atomic:** Yes\n")
 		} else {
 			b.WriteString("- **Atomic:** No\n")
 			if s.AuditObligation.NonAtomicJustification != "" {
-				b.WriteString(fmt.Sprintf("- **Non-Atomic Justification:** %s\n", s.AuditObligation.NonAtomicJustification))
+				fmt.Fprintf(b, "- **Non-Atomic Justification:** %s\n", s.AuditObligation.NonAtomicJustification)
 			}
 		}
 		b.WriteString("\n")
@@ -177,12 +177,12 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	// External effect policy.
 	if s.ExternalPolicy != nil {
 		b.WriteString("### External Effect Policy\n\n")
-		b.WriteString(fmt.Sprintf("- **Delivery:** `%s`\n", s.ExternalPolicy.DeliveryMode))
-		b.WriteString(fmt.Sprintf("- **Failure Mode:** `%s`\n", s.ExternalPolicy.FailureMode))
-		b.WriteString(fmt.Sprintf("- **Idempotency:** %s\n", s.ExternalPolicy.IdempotencyKey))
-		b.WriteString(fmt.Sprintf("- **Retry:** %s\n", s.ExternalPolicy.RetryPolicy))
+		fmt.Fprintf(b, "- **Delivery:** `%s`\n", s.ExternalPolicy.DeliveryMode)
+		fmt.Fprintf(b, "- **Failure Mode:** `%s`\n", s.ExternalPolicy.FailureMode)
+		fmt.Fprintf(b, "- **Idempotency:** %s\n", s.ExternalPolicy.IdempotencyKey)
+		fmt.Fprintf(b, "- **Retry:** %s\n", s.ExternalPolicy.RetryPolicy)
 		if s.ExternalPolicy.Compensation != "" {
-			b.WriteString(fmt.Sprintf("- **Compensation:** %s\n", s.ExternalPolicy.Compensation))
+			fmt.Fprintf(b, "- **Compensation:** %s\n", s.ExternalPolicy.Compensation)
 		}
 		if s.ExternalPolicy.AuthBeforeEmit {
 			b.WriteString("- **Auth Before Emit:** Yes\n")
@@ -205,7 +205,7 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	if len(s.TestRefs) > 0 {
 		b.WriteString("### Tests\n\n")
 		for _, tr := range s.TestRefs {
-			b.WriteString(fmt.Sprintf("- `%s:%s`\n", tr.Package, tr.Function))
+			fmt.Fprintf(b, "- `%s:%s`\n", tr.Package, tr.Function)
 		}
 		b.WriteString("\n")
 	}
@@ -214,16 +214,16 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 	if len(s.Exemptions) > 0 {
 		b.WriteString("### Exemptions\n\n")
 		for _, ex := range s.Exemptions {
-			b.WriteString(fmt.Sprintf("- **%s:** %s", ex.Kind, ex.Reason))
+			fmt.Fprintf(b, "- **%s:** %s", ex.Kind, ex.Reason)
 			if ex.Scope != "" {
-				b.WriteString(fmt.Sprintf(" (scope: %s)", ex.Scope))
+				fmt.Fprintf(b, " (scope: %s)", ex.Scope)
 			}
 			if len(ex.Waives) > 0 {
 				waives := make([]string, len(ex.Waives))
 				for i, w := range ex.Waives {
 					waives[i] = "`" + string(w) + "`"
 				}
-				b.WriteString(fmt.Sprintf(" — waives: %s", strings.Join(waives, ", ")))
+				fmt.Fprintf(b, " — waives: %s", strings.Join(waives, ", "))
 			}
 			b.WriteString("\n")
 		}

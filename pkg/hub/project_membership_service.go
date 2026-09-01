@@ -242,25 +242,27 @@ func (svc *ProjectMembershipService) isActorDirectOwner(ctx context.Context, use
 
 // projectEffectiveRoleFromStore is like projectEffectiveRole but reads from the
 // provided store (which should be the transactional store inside a locked tx).
-func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.Context, s store.Store, userID, projectID string) string {
+// R5 O-1: returns an error so callers can distinguish "no role" from "store
+// failure" and surface 500 instead of a misleading 403.
+func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.Context, s store.Store, userID, projectID string) (string, error) {
 	now := svc.nowFunc()
 
 	directBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("list direct bindings for actor %s: %w", userID, err)
 	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
-	getRoleDef := func(rdID string) *store.RoleDefinition {
+	getRoleDef := func(rdID string) (*store.RoleDefinition, error) {
 		if rd, ok := rdCache[rdID]; ok {
-			return rd
+			return rd, nil
 		}
 		rd, err := s.GetRoleDefinition(ctx, rdID)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("get role definition %s: %w", rdID, err)
 		}
 		rdCache[rdID] = rd
-		return rd
+		return rd, nil
 	}
 
 	bestRole := ""
@@ -271,63 +273,69 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 		if !isBindingActive(rb, now) {
 			continue
 		}
-		rd := getRoleDef(rb.RoleDefinitionID)
-		if rd == nil {
-			continue
+		rd, err := getRoleDef(rb.RoleDefinitionID)
+		if err != nil {
+			return "", err
 		}
 		bestRole = higherProjectRole(bestRole, rd.Name)
 	}
 
 	// Group-derived bindings (read from tx store).
 	groupIDs, err := s.GetEffectiveGroups(ctx, userID)
-	if err == nil && len(groupIDs) > 0 {
+	if err != nil {
+		return "", fmt.Errorf("get effective groups for actor %s: %w", userID, err)
+	}
+	if len(groupIDs) > 0 {
 		var principals []store.PrincipalRef
 		for _, gid := range groupIDs {
 			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
 		groupBindings, err := s.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
-		if err == nil {
-			for _, rb := range groupBindings {
-				if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
-					continue
-				}
-				if !isBindingActive(rb, now) {
-					continue
-				}
-				rd := getRoleDef(rb.RoleDefinitionID)
-				if rd == nil {
-					continue
-				}
-				if rd.Name == store.ProjectRoleOwner {
-					continue
-				}
-				bestRole = higherProjectRole(bestRole, rd.Name)
+		if err != nil {
+			return "", fmt.Errorf("list group bindings: %w", err)
+		}
+		for _, rb := range groupBindings {
+			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+				continue
 			}
+			if !isBindingActive(rb, now) {
+				continue
+			}
+			rd, err := getRoleDef(rb.RoleDefinitionID)
+			if err != nil {
+				return "", err
+			}
+			if rd.Name == store.ProjectRoleOwner {
+				continue
+			}
+			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
 	}
 
-	return bestRole
+	return bestRole, nil
 }
 
 // isActorDirectOwnerFromStore checks whether the actor has an active direct
 // project-owner binding using the provided (transactional) store.
-func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Context, s store.Store, userID, projectID string) bool {
+// R5 O-1: returns an error so callers can distinguish "not owner" from "store
+// failure" and surface 500 instead of a misleading 403.
+func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Context, s store.Store, userID, projectID string) (bool, error) {
 	now := svc.nowFunc()
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("list bindings for owner check %s: %w", userID, err)
 	}
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("get owner role definition: %w", err)
 	}
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID &&
 			b.RoleDefinitionID == ownerRD.ID && isBindingActive(b, now) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -514,8 +522,15 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 
 		// R4 O-1: re-evaluate actor authority under lock.
-		actorRole := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-		actorIsDirectOwner := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		// R5 O-1: propagate store errors as 500 instead of masking as 403.
+		actorRole, roleErr := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if roleErr != nil {
+			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
+		}
+		actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if ownerErr != nil {
+			return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+		}
 		if actorRole == "" {
 			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
 		}
@@ -726,8 +741,15 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 
 		// R4 O-1: re-evaluate actor authority under lock.
-		actorRole := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-		actorIsDirectOwner := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		// R5 O-1: propagate store errors as 500 instead of masking as 403.
+		actorRole, roleErr := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if roleErr != nil {
+			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
+		}
+		actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if ownerErr != nil {
+			return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+		}
 		if actorRole == "" {
 			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
 		}
@@ -864,7 +886,11 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		}
 
 		// R4 O-1: re-evaluate actor authority under lock.
-		actorRole := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		// R5 O-1: propagate store errors as 500 instead of masking as 403.
+		actorRole, roleErr := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if roleErr != nil {
+			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
+		}
 		if actorRole == "" {
 			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
 		}
@@ -888,7 +914,10 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 		}
 		if requiresDirectOwner(roleDef.Name) {
-			actorIsDirectOwner := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+			actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+			if ownerErr != nil {
+				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+			}
 			if !actorIsDirectOwner {
 				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
@@ -994,7 +1023,12 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		}
 
 		// R4 O-1: re-verify actor is still a direct owner under lock.
-		if !svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID) {
+		// R5 O-1: propagate store errors as 500 instead of masking as 403.
+		stillOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+		if ownerErr != nil {
+			return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+		}
+		if !stillOwner {
 			return fmt.Errorf("governance:%d:%s", 403, "actor is no longer a direct project owner (re-evaluated under lock)")
 		}
 
@@ -1138,13 +1172,6 @@ func (svc *ProjectMembershipService) ComputeCapabilities(ctx context.Context, us
 // Helpers
 // ---------------------------------------------------------------------------
 
-// findExistingDirectBindings finds all existing direct (not group-derived)
-// bindings for the principal in the project. Returns nil if none exist.
-// R-3: detects and returns ALL duplicates instead of silently taking the first.
-func (svc *ProjectMembershipService) findExistingDirectBindings(ctx context.Context, principalType, principalID, projectID string) ([]*store.RoleBinding, error) {
-	return svc.findExistingDirectBindingsFromStore(ctx, svc.store, principalType, principalID, projectID)
-}
-
 // findExistingDirectBindingsFromStore is like findExistingDirectBindings but
 // uses the provided store (which may be a transactional store).
 // O-1: errors are propagated, not silently swallowed.
@@ -1160,98 +1187,6 @@ func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx con
 		}
 	}
 	return result, nil
-}
-
-// atomicReplaceBinding replaces existing binding(s) with a new one for a
-// different role. Used to enforce the one-binding-per-principal invariant.
-// R-3: handles multiple existing bindings (legacy duplicates).
-func (svc *ProjectMembershipService) atomicReplaceBinding(ctx context.Context, req MembershipRequest, existing []*store.RoleBinding, newRoleDef *store.RoleDefinition) (*MembershipResult, *MembershipDecision) {
-	// Use the highest-authority existing binding for governance/role resolution.
-	primary := svc.highestAuthorityBinding(ctx, existing)
-	if primary == nil {
-		primary = existing[0]
-	}
-
-	oldRoleDef, err := svc.store.GetRoleDefinition(ctx, primary.RoleDefinitionID)
-	if err != nil {
-		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "cannot resolve existing role", HTTPStatus: 500}
-	}
-
-	// If same role and only one binding exists, idempotent: return existing.
-	if oldRoleDef.Name == newRoleDef.Name && len(existing) == 1 {
-		return &MembershipResult{Binding: primary, NewRole: newRoleDef.Name, Op: MembershipOpAdd}, nil
-	}
-
-	// Governance check for the old role too (since we're replacing it).
-	decision := svc.checkGovernance(ctx, req, oldRoleDef.Name)
-	if !decision.Allowed {
-		return nil, &decision
-	}
-
-	// All mutations, last-owner guard, and audit inside one transaction.
-	// R3-1: acquire project lock to prevent write-skew under PostgreSQL.
-	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU.
-	var replaced *store.RoleBinding
-	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
-		// Acquire project-scoped membership lock.
-		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
-			return fmt.Errorf("lock project: %w", err)
-		}
-
-		// Last-owner guard if demoting from owner (inside tx for serialization).
-		if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
-			if primary.PrincipalType == store.RoleBindingPrincipalUser {
-				if err := svc.enforceLastOwnerTx(ctx, tx, req.ProjectID); err != nil {
-					return err
-				}
-			}
-		}
-
-		var rErr error
-		replaced, rErr = svc.replaceBindingTx(ctx, tx, existing, newRoleDef.ID, req.Actor.ID())
-		if rErr != nil {
-			return rErr
-		}
-		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
-			MutationType: "project_member_role_change",
-			TargetType:   "project_membership",
-			TargetID:     req.ProjectID,
-			BeforeSummary: marshalAuditJSON(map[string]string{
-				"principalId": primary.PrincipalID,
-				"role":        oldRoleDef.Name,
-			}),
-			AfterSummary: marshalAuditJSON(map[string]string{
-				"principalId": primary.PrincipalID,
-				"role":        newRoleDef.Name,
-			}),
-		})
-	})
-	if txErr != nil {
-		if isLastOwnerError(txErr) {
-			return nil, lastOwnerDenial()
-		}
-		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "failed to replace binding: " + txErr.Error(), HTTPStatus: 500}
-	}
-
-	if len(existing) > 1 {
-		svc.logger.Warn("consolidated duplicate bindings (one-binding migration)",
-			"project_id", req.ProjectID, "count", len(existing),
-			"principal", primary.PrincipalType+":"+primary.PrincipalID)
-	}
-
-	svc.logger.Info("project member binding replaced (one-binding invariant)",
-		"project_id", req.ProjectID,
-		"old_role", oldRoleDef.Name, "new_role", newRoleDef.Name,
-		"principal", primary.PrincipalType+":"+primary.PrincipalID,
-		"actor", req.Actor.Email())
-
-	return &MembershipResult{
-		Binding:  replaced,
-		OldRole:  oldRoleDef.Name,
-		NewRole:  newRoleDef.Name,
-		Op:       MembershipOpAdd,
-		Replaced: true,
-	}, nil
 }
 
 // replaceBindingTx creates a new binding with the given role and deletes all
@@ -1293,12 +1228,6 @@ func (svc *ProjectMembershipService) replaceBindingTx(ctx context.Context, tx st
 	}
 
 	return created, nil
-}
-
-// highestAuthorityBinding returns the binding with the highest-authority role
-// from the provided list. Uses the role definition cache to resolve role names.
-func (svc *ProjectMembershipService) highestAuthorityBinding(ctx context.Context, bindings []*store.RoleBinding) *store.RoleBinding {
-	return svc.highestAuthorityBindingFromStore(ctx, svc.store, bindings)
 }
 
 // highestAuthorityBindingFromStore is like highestAuthorityBinding but reads

@@ -919,23 +919,3 @@ func createRS1UserWithRole(t *testing.T, s store.Store, userID, email, projectID
 		t.Fatalf("failed to create role binding: %v", err)
 	}
 }
-
-// createRS1ProjectViaAPI creates a project via the API with the given owner.
-func createRS1ProjectViaAPI(t *testing.T, srv *Server, projectID, ownerID string) {
-	t.Helper()
-
-	require.NoError(t, srv.store.CreateUser(context.Background(), &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(context.Background(), srv.store, ownerID)
-
-	rec := doRequestAsUser(t, srv, &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member",
-	}, http.MethodPost, "/api/v1/projects",
-		CreateProjectRequest{Name: "RS1 API Test Project"})
-
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"project creation should succeed: %s", rec.Body.String())
-}

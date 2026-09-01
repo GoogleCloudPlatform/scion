@@ -1146,7 +1146,9 @@ func TestValidationError_Format(t *testing.T) {
 
 func TestRenderMarkdown_Determinism(t *testing.T) {
 	specs := []OperationSpec{validSpec(), validAuthoritySpec()}
-	if RenderMarkdown(specs) != RenderMarkdown(specs) {
+	a := RenderMarkdown(specs)
+	b := RenderMarkdown(specs)
+	if a != b {
 		t.Error("renderer not deterministic")
 	}
 }

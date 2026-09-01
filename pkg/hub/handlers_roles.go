@@ -559,7 +559,14 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	// ProjectMembershipService for typed governance, delegation, lock,
 	// last-owner protection, transactional audit, and D4 enforcement.
 	// System-scoped operations remain generic.
-	if req.ScopeType == store.RoleScopeProject && s.membershipService != nil {
+	// R5-1: fail-closed — if membershipService is nil, return 500. Never fall
+	// through to direct store mutation for project scope.
+	if req.ScopeType == store.RoleScopeProject {
+		if s.membershipService == nil {
+			writeError(w, http.StatusInternalServerError, "internal_error",
+				"membership service unavailable — project-scope mutations require governance", nil)
+			return
+		}
 		mReq := MembershipRequest{
 			Op:            MembershipOpAdd,
 			ProjectID:     req.ScopeID,
@@ -648,7 +655,14 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 	// through ProjectMembershipService for serialization lock,
 	// last-owner protection, typed governance, transactional audit,
 	// and stable denial mapping. System-scoped operations remain generic.
-	if binding.ScopeType == store.RoleScopeProject && s.membershipService != nil {
+	// R5-1: fail-closed — if membershipService is nil, return 500. Never fall
+	// through to direct store mutation for project scope.
+	if binding.ScopeType == store.RoleScopeProject {
+		if s.membershipService == nil {
+			writeError(w, http.StatusInternalServerError, "internal_error",
+				"membership service unavailable — project-scope mutations require governance", nil)
+			return
+		}
 		mReq := MembershipRequest{
 			Op:        MembershipOpRemove,
 			ProjectID: binding.ScopeID,

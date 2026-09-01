@@ -75,14 +75,6 @@ var validProjectRoles = map[string]bool{
 	store.ProjectRoleMember: true,
 }
 
-// directUserOnlyProjectRoles are project roles that can only be assigned to
-// direct user principals. RS1 D3: project-admin group eligibility is now
-// approved and implemented, so only project-owner remains in this set.
-var directUserOnlyProjectRoles = map[string]bool{
-	store.ProjectRoleOwner: true,
-	// D3: project-admin removed — groups may now hold project-admin.
-}
-
 // ---------------------------------------------------------------------------
 // Route handler: /api/v1/projects/{id}/members[/{bindingID}]
 // ---------------------------------------------------------------------------

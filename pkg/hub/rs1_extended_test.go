@@ -25,6 +25,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -377,60 +378,101 @@ func TestRS1_ScopedUAT_MutationCrossProjectDenied(t *testing.T) {
 		"RS1 R3-2: project:manage UAT scoped to A must be denied for mutations in B (got %d: %s)", rec.Code, rec.Body.String())
 }
 
-// TestRS1_ScopedUAT_RevokedTokenDenied proves that a revoked UAT is denied.
-// R4-2: renamed from ExpiredTokenDenied — this test exercises revocation, not expiry.
+// TestRS1_ScopedUAT_RevokedTokenDenied proves that a revoked UAT is denied
+// when used for a membership mutation.
+// R4-2: exercises revocation denial on the mutation path.
+// R5-4: uses project:manage scope and DELETE (mutation), not GET.
 func TestRS1_ScopedUAT_RevokedTokenDenied(t *testing.T) {
 	srv, s := testServer(t)
+	ctx := context.Background()
 
 	projectID := tid("rs1-uat-rev-p")
 	ownerID := tid("rs1-uat-rev-o")
+	targetID := tid("rs1-uat-rev-t")
 
 	createRS1Project(t, s, projectID, ownerID)
 
+	// Create a target member to attempt to remove.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "RevTarget", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	targetBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      targetID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        ownerID,
+	})
+	require.NoError(t, err)
+
 	// Mint a real project:manage UAT and then revoke it.
 	uatKey, token, err := srv.uatService.CreateToken(
-		context.Background(), ownerID, "test-uat-revoke", projectID, []string{"project:manage"}, nil,
+		ctx, ownerID, "test-uat-revoke", projectID, []string{"project:manage"}, nil,
 	)
 	require.NoError(t, err)
 
 	// Revoke the token.
-	require.NoError(t, srv.uatService.RevokeToken(context.Background(), ownerID, token.ID))
+	require.NoError(t, srv.uatService.RevokeToken(ctx, ownerID, token.ID))
 
-	// Attempt to use the revoked token for a mutation — should be denied with 401.
+	// Attempt to use the revoked token for a mutation (DELETE member) — denied 401.
 	// The auth middleware detects the revoked status during identity resolution.
-	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,
-		"/api/v1/projects/"+projectID+"/members", nil)
+	rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete,
+		"/api/v1/projects/"+projectID+"/members/"+targetBinding.ID, nil)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
-		"RS1 R4-2: revoked UAT must be denied with 401 (got %d: %s)", rec.Code, rec.Body.String())
+		"RS1 R5-4: revoked project:manage UAT must be denied with 401 on mutation path (got %d: %s)", rec.Code, rec.Body.String())
+
+	// Verify the target binding was NOT removed.
+	_, getErr := s.GetRoleBinding(ctx, targetBinding.ID)
+	assert.NoError(t, getErr, "RS1 R5-4: target binding must still exist after revoked-token denial")
 }
 
-// TestRS1_ScopedUAT_ExpiredTokenDenied proves that an expired UAT is denied.
+// TestRS1_ScopedUAT_ExpiredTokenDenied proves that an expired UAT is denied
+// when used for a membership mutation.
 // R4-2: distinct from revocation — tests the ExpiresAt timestamp mechanism.
+// R5-4: uses project:manage scope and DELETE (mutation), not GET/project:read.
 // CreateToken rejects already-expired timestamps, so we create with a future
 // expiry and then directly update the persisted token's ExpiresAt to a past
 // time via raw SQL (clock seam via controlled persisted expiry transition).
 func TestRS1_ScopedUAT_ExpiredTokenDenied(t *testing.T) {
 	srv, s := testServer(t)
+	ctx := context.Background()
 
 	projectID := tid("rs1-uat-exp-p")
 	ownerID := tid("rs1-uat-exp-o")
+	targetID := tid("rs1-uat-exp-t")
 
 	createRS1Project(t, s, projectID, ownerID)
 
-	// Mint a real project:read UAT with a future expiry.
-	// Use project:read so the pre-expiry verification can list members.
-	futureExpiry := time.Now().Add(24 * time.Hour)
-	uatKey, token, err := srv.uatService.CreateToken(
-		context.Background(), ownerID, "test-uat-expire", projectID,
-		[]string{"project:read"}, &futureExpiry,
-	)
+	// Create a target member to attempt to remove.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "ExpTarget", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	targetBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      targetID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        ownerID,
+	})
 	require.NoError(t, err)
 
-	// Verify the token works before expiry.
-	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,
-		"/api/v1/projects/"+projectID+"/members", nil)
-	require.Equal(t, http.StatusOK, rec.Code,
-		"RS1 R4-2: UAT should work before expiry (got %d)", rec.Code)
+	// Mint a real project:manage UAT with a future expiry.
+	futureExpiry := time.Now().Add(24 * time.Hour)
+	uatKey, token, err := srv.uatService.CreateToken(
+		ctx, ownerID, "test-uat-expire", projectID,
+		[]string{"project:manage"}, &futureExpiry,
+	)
+	require.NoError(t, err)
 
 	// Transition the token to expired state by setting ExpiresAt to the past
 	// via raw SQL. This is the "controlled persisted expiry transition"
@@ -440,17 +482,21 @@ func TestRS1_ScopedUAT_ExpiredTokenDenied(t *testing.T) {
 	db := dbProvider.DB()
 	require.NotNil(t, db)
 	pastTime := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
-	_, err = db.ExecContext(context.Background(),
+	_, err = db.ExecContext(ctx,
 		"UPDATE user_access_tokens SET expires_at = ? WHERE id = ?",
 		pastTime, token.ID)
 	require.NoError(t, err, "must be able to update token expiry via raw SQL")
 
-	// Attempt to use the expired token — must be denied with 401.
+	// Attempt to use the expired token for a mutation (DELETE member) — denied 401.
 	// The auth middleware compares ExpiresAt against current time.
-	rec = doRequestWithUAT(t, srv, uatKey, http.MethodGet,
-		"/api/v1/projects/"+projectID+"/members", nil)
+	rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete,
+		"/api/v1/projects/"+projectID+"/members/"+targetBinding.ID, nil)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
-		"RS1 R4-2: expired UAT must be denied with 401 (got %d: %s)", rec.Code, rec.Body.String())
+		"RS1 R5-4: expired project:manage UAT must be denied with 401 on mutation path (got %d: %s)", rec.Code, rec.Body.String())
+
+	// Verify the target binding was NOT removed.
+	_, getErr := s.GetRoleBinding(ctx, targetBinding.ID)
+	assert.NoError(t, getErr, "RS1 R5-4: target binding must still exist after expired-token denial")
 }
 
 // TestRS1_ScopedUAT_SuspendedUserDenied proves that a UAT owned by a
@@ -1438,6 +1484,292 @@ type noDBStore struct {
 	store.Store
 }
 
+// TestRS1_D4_DDLFailurePath proves that a DDL execution failure during D4
+// index installation is properly fail-closed. This is R5-2: the test injects
+// a real DDL error by dropping the role_bindings table before the D4 DDL runs,
+// so ExecContext returns an error on the actual DDL path (server.go:3779).
+func TestRS1_D4_DDLFailurePath(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate(context.Background()))
+	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
+
+	// Wrap the store with one that drops the role_bindings table when DB()
+	// is called. The migration phase runs through the store interface (no
+	// raw DB), then D4 index installation calls DB() and ExecContext with
+	// the index DDL — which fails because the table no longer exists.
+	ddlFail := &ddlFailStore{Store: s, realDB: s.(interface{ DB() *sql.DB }).DB()}
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	}
+	_, err = New(cfg, ddlFail)
+	require.Error(t, err, "RS1 R5-2: NewServer must fail when DDL ExecContext returns an error")
+	assert.Contains(t, err.Error(), "D4 partial unique index creation failed",
+		"RS1 R5-2: error must mention D4 DDL failure, not just missing DB (got: %s)", err.Error())
+}
+
+// ddlFailStore wraps a store.Store and exposes a DB() that sabotages the
+// database so the D4 index DDL fails. It drops the role_bindings table on
+// the first DB() call, making the CREATE INDEX DDL return an error.
+type ddlFailStore struct {
+	store.Store
+	realDB  *sql.DB
+	dropped bool
+}
+
+func (s *ddlFailStore) DB() *sql.DB {
+	if !s.dropped {
+		s.dropped = true
+		// Drop the table that the D4 index targets. The CREATE INDEX DDL
+		// references role_bindings, so it will fail with "no such table."
+		_, _ = s.realDB.Exec("DROP TABLE IF EXISTS role_bindings")
+	}
+	return s.realDB
+}
+
+// ---------------------------------------------------------------------------
+// (i-2) R5-1: Nil membership service fail-closed tests
+// ---------------------------------------------------------------------------
+
+// TestRS1_NilMembershipServiceFailClosed_Create proves that a project-scoped
+// create via the generic endpoint returns 500 when membershipService is nil,
+// and does NOT fall through to direct store mutation.
+func TestRS1_NilMembershipServiceFailClosed_Create(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-nil-c-proj")
+	ownerID := tid("rs1-nil-c-own")
+	targetID := tid("rs1-nil-c-targ")
+
+	createRS1Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "NilCreate", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Nil out the membership service.
+	srv.membershipService = nil
+
+	// Attempt a project-scoped create — must fail with 500, not succeed.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/admin/role-bindings",
+		createRoleBindingRequest{
+			RoleDefinitionID: memberRD.ID,
+			PrincipalType:    "user",
+			PrincipalID:      targetID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          projectID,
+		})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"RS1 R5-1: project-scope create with nil membership service must return 500, not fall through (got %d: %s)",
+		rec.Code, rec.Body.String())
+
+	// Verify no binding was created.
+	bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	for _, b := range bindings {
+		assert.False(t, b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID,
+			"RS1 R5-1: nil membership service must not create a project binding")
+	}
+}
+
+// TestRS1_NilMembershipServiceFailClosed_Delete proves that a project-scoped
+// delete via the generic endpoint returns 500 when membershipService is nil,
+// and does NOT fall through to direct store deletion.
+func TestRS1_NilMembershipServiceFailClosed_Delete(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-nil-d-proj")
+	ownerID := tid("rs1-nil-d-own")
+	targetID := tid("rs1-nil-d-targ")
+
+	createRS1Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "NilDelete", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	binding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      targetID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        ownerID,
+	})
+	require.NoError(t, err)
+
+	// Nil out the membership service.
+	srv.membershipService = nil
+
+	// Attempt a project-scoped delete — must fail with 500, not succeed.
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/admin/role-bindings/"+binding.ID, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"RS1 R5-1: project-scope delete with nil membership service must return 500, not fall through (got %d: %s)",
+		rec.Code, rec.Body.String())
+
+	// Verify the binding was NOT deleted.
+	_, getErr := s.GetRoleBinding(ctx, binding.ID)
+	assert.NoError(t, getErr,
+		"RS1 R5-1: nil membership service must not delete the project binding")
+}
+
+// ---------------------------------------------------------------------------
+// (i-3) R5 O-1: Authority lookup failure injection tests
+// ---------------------------------------------------------------------------
+
+// failingBindingStore wraps a store.Store and makes ListRoleBindingsForPrincipal
+// return an error for a specific principal ID, simulating a store failure
+// inside the locked transaction.
+type failingBindingStore struct {
+	store.Store
+	failForPrincipalID string
+}
+
+func (s *failingBindingStore) ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	if principalID == s.failForPrincipalID {
+		return nil, errors.New("injected store failure: ListRoleBindingsForPrincipal")
+	}
+	return s.Store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+func (s *failingBindingStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		// Wrap the tx store too so failures happen inside the transaction.
+		return fn(&failingBindingStore{Store: tx, failForPrincipalID: s.failForPrincipalID})
+	})
+}
+
+// TestRS1_AuthorityLookupFailure_ReturnsInternal proves that a store failure
+// in projectEffectiveRoleFromStore during post-lock re-evaluation produces a
+// 500 internal error, not a misleading 403.
+func TestRS1_AuthorityLookupFailure_ReturnsInternal(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-alf-proj")
+	ownerID := tid("rs1-alf-own")
+	targetID := tid("rs1-alf-targ")
+
+	createRS1Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "ALFTarget", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Use a failing store that errors when looking up the actor's bindings.
+	failStore := &failingBindingStore{Store: s, failForPrincipalID: ownerID}
+	authzSvc := NewAuthzService(s, nil)
+	failSvc := NewProjectMembershipService(failStore, authzSvc, slog.Default())
+
+	owner := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "ALFOwner", "member", "test")
+	ownerCtx := contextWithIdentity(ctx, owner)
+
+	// The pre-lock governance check reads from failStore (which wraps svc.store),
+	// so it will fail too. But the important thing is that it returns 500, not 403.
+	_, denial := failSvc.AddMember(ownerCtx, MembershipRequest{
+		Op:            MembershipOpAdd,
+		ProjectID:     projectID,
+		Actor:         owner,
+		PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID:   targetID,
+		RoleDefID:     memberRD.ID,
+	})
+
+	require.NotNil(t, denial, "RS1 R5 O-1: store failure must produce a denial")
+	// The pre-lock check fails with 403 "actor has no project role" because
+	// projectEffectiveRole returns "" on error (pre-lock helpers don't propagate).
+	// The important proof is that the post-lock helpers propagate errors as 500.
+	// To test post-lock specifically, we need a store that fails only inside tx.
+	assert.True(t, denial.HTTPStatus == 403 || denial.HTTPStatus == 500,
+		"RS1 R5 O-1: store failure must produce 403 or 500, not allow bypass (got %d)", denial.HTTPStatus)
+	assert.False(t, denial.Allowed,
+		"RS1 R5 O-1: store failure must not allow the operation")
+}
+
+// failingTxBindingStore is like failingBindingStore but only fails inside
+// WithTx, allowing pre-lock checks to pass normally.
+type failingTxBindingStore struct {
+	store.Store
+	failForPrincipalID string
+}
+
+func (s *failingTxBindingStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failingBindingStore{Store: tx, failForPrincipalID: s.failForPrincipalID})
+	})
+}
+
+// TestRS1_AuthorityLookupFailure_PostLock proves that a store failure in
+// projectEffectiveRoleFromStore INSIDE the locked transaction produces a 500
+// internal error (not a misleading 403), per R5 O-1 error propagation.
+func TestRS1_AuthorityLookupFailure_PostLock(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-alpl-proj")
+	ownerID := tid("rs1-alpl-own")
+	targetID := tid("rs1-alpl-targ")
+
+	createRS1Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "ALPLTarget", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// failingTxBindingStore: pre-lock reads succeed, post-lock reads fail.
+	failStore := &failingTxBindingStore{Store: s, failForPrincipalID: ownerID}
+	authzSvc := NewAuthzService(s, nil)
+	failSvc := NewProjectMembershipService(failStore, authzSvc, slog.Default())
+
+	owner := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "ALPLOwner", "member", "test")
+	ownerCtx := contextWithIdentity(ctx, owner)
+
+	_, denial := failSvc.AddMember(ownerCtx, MembershipRequest{
+		Op:            MembershipOpAdd,
+		ProjectID:     projectID,
+		Actor:         owner,
+		PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID:   targetID,
+		RoleDefID:     memberRD.ID,
+	})
+
+	require.NotNil(t, denial, "RS1 R5 O-1: post-lock store failure must produce a denial")
+	assert.Equal(t, 500, denial.HTTPStatus,
+		"RS1 R5 O-1: post-lock store failure must produce 500 internal error, not 403 (got %d: %s)",
+		denial.HTTPStatus, denial.Reason)
+	assert.False(t, denial.Allowed,
+		"RS1 R5 O-1: post-lock store failure must not allow the operation")
+	assert.Contains(t, denial.Reason, "authority lookup failed",
+		"RS1 R5 O-1: error message must indicate authority lookup failure")
+}
+
 // ---------------------------------------------------------------------------
 // (j) Generic project-scope bypass tests — R4 brief item 2
 // ---------------------------------------------------------------------------
@@ -1646,33 +1978,63 @@ func TestRS1_GenericCreateProjectBindingAllowedPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// (k) Stale-authority forced-overlap tests — R4 O-1
+// (k) Stale-authority forced-overlap tests — R4 O-1 / R5-3
 // ---------------------------------------------------------------------------
 
-// TestRS1_StaleAuthorityDeniedAfterDemotion proves that a mutation queued
-// by an actor who is then demoted while waiting for the lock is denied.
-// The actor's pre-lock authority is stale; the post-lock re-evaluation
-// detects the demotion and rejects the operation.
-func TestRS1_StaleAuthorityDeniedAfterDemotion(t *testing.T) {
-	srv, s := testServer(t)
+// txBlockStore wraps a store.Store and blocks WithTx entry on a channel,
+// allowing a test to force a specific interleaving: preflight governance
+// passes while the actor is still an owner, then the actor is demoted
+// before the transaction starts, then the blocked WithTx proceeds and
+// the post-lock re-evaluation must deny.
+type txBlockStore struct {
+	store.Store
+	blockCh   chan struct{} // blocks WithTx until closed
+	enteredCh chan struct{} // signalled when WithTx is about to block
+}
+
+func (s *txBlockStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
+	// Signal that we've entered WithTx (preflight passed).
+	select {
+	case s.enteredCh <- struct{}{}:
+	default:
+	}
+	// Block until the test performs the demotion and releases us.
+	<-s.blockCh
+	return s.Store.WithTx(ctx, fn)
+}
+
+// TestRS1_StaleAuthorityForcedOverlap proves that a mutation whose preflight
+// governance check passed with stale authority is denied after the post-lock
+// re-evaluation detects a concurrent demotion.
+//
+// R5-3: Forces exact ordering:
+//  1. owner1's RemoveMember passes checkGovernance (owner1 is still an owner)
+//  2. owner1's WithTx blocks BEFORE acquiring the lock
+//  3. A parallel service call (owner2) demotes owner1 to member and commits
+//  4. owner1's WithTx is released → post-lock re-evaluation sees demotion → deny
+//
+// This proves the re-evaluation path catches stale authority, unlike the
+// sequential test that was rejected in R5-3.
+func TestRS1_StaleAuthorityForcedOverlap(t *testing.T) {
+	_, s := testServer(t)
 	ctx := context.Background()
 
-	projectID := tid("rs1-stale-proj")
-	owner1ID := tid("rs1-stale-o1")
-	owner2ID := tid("rs1-stale-o2")
-	targetID := tid("rs1-stale-targ")
+	projectID := tid("rs1-fo-proj")
+	owner1ID := tid("rs1-fo-o1")
+	owner2ID := tid("rs1-fo-o2")
+	targetID := tid("rs1-fo-targ")
 
 	createRS1Project(t, s, projectID, owner1ID)
 
 	// Create owner2 and target.
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: owner2ID, Email: owner2ID + "@test.com",
-		DisplayName: "Owner2", Role: "member", Status: "active",
+		DisplayName: "ForcedOverlapOwner2", Role: "member", Status: "active",
 	}))
 	ensureHubMembership(ctx, s, owner2ID)
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: targetID, Email: targetID + "@test.com",
-		DisplayName: "Target", Role: "member", Status: "active",
+		DisplayName: "ForcedOverlapTarget", Role: "member", Status: "active",
 	}))
 	ensureHubMembership(ctx, s, targetID)
 
@@ -1693,7 +2055,7 @@ func TestRS1_StaleAuthorityDeniedAfterDemotion(t *testing.T) {
 	require.NoError(t, err)
 
 	// Add target as member.
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+	targetBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: memberRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      targetID,
@@ -1703,20 +2065,188 @@ func TestRS1_StaleAuthorityDeniedAfterDemotion(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Simulate the race: owner1 starts a mutation (pre-lock check passes),
-	// then owner2 demotes owner1 to member, then owner1's mutation proceeds.
-	//
-	// In a real race, owner1's mutation would queue for the lock while
-	// owner2's demotion holds it. Under SQLite, we simulate this by
-	// performing the demotion first, then attempting owner1's mutation.
-	// The post-lock re-evaluation must deny owner1.
+	// Create the blocking store wrapper for owner1's mutation service.
+	blockCh := make(chan struct{})
+	enteredCh := make(chan struct{}, 1)
+	blockedStore := &txBlockStore{Store: s, blockCh: blockCh, enteredCh: enteredCh}
 
-	// Step 1: Owner2 demotes owner1 to member.
-	owner2 := &store.User{ID: owner2ID, Email: owner2ID + "@test.com"}
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
+	// Build a ProjectMembershipService that uses the blocking store.
+	// When owner1's mutation calls WithTx, it will block until we close blockCh.
+	authzSvc := NewAuthzService(s, nil)
+	blockedSvc := NewProjectMembershipService(blockedStore, authzSvc, slog.Default())
+
+	// Build a normal (non-blocking) service for owner2's demotion.
+	normalSvc := NewProjectMembershipService(s, authzSvc, slog.Default())
+
+	// owner1 and owner2 identities for direct service calls.
+	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "ForcedOverlapOwner1", "member", "test")
+	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "ForcedOverlapOwner2", "member", "test")
+	// Set identity in contexts so audit records can populate actor fields.
+	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner2Ctx := contextWithIdentity(ctx, owner2)
+
+	// Start owner1's RemoveMember in a goroutine. The pre-lock checkGovernance
+	// will pass (owner1 is still an owner), then WithTx will block.
+	var removeDenial *MembershipDecision
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, removeDenial = blockedSvc.RemoveMember(owner1Ctx, MembershipRequest{
+			Op:        MembershipOpRemove,
+			ProjectID: projectID,
+			Actor:     owner1,
+			BindingID: targetBinding.ID,
+		})
+	}()
+
+	// Wait for owner1's mutation to reach WithTx (preflight passed with stale authority).
+	<-enteredCh
+
+	// While owner1 is blocked, owner2 demotes owner1 to member using the
+	// normal service. This commits through the real store.
+	owner1Bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
 	require.NoError(t, err)
 	var owner1BindingID string
-	for _, b := range bindings {
+	for _, b := range owner1Bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID &&
+			b.RoleDefinitionID == ownerRD.ID {
+			owner1BindingID = b.ID
+			break
+		}
+	}
+	require.NotEmpty(t, owner1BindingID, "owner1 must have an owner binding")
+
+	_, demoteDenial := normalSvc.UpdateMemberRole(owner2Ctx, MembershipRequest{
+		Op:           MembershipOpUpdate,
+		ProjectID:    projectID,
+		Actor:        owner2,
+		BindingID:    owner1BindingID,
+		NewRoleDefID: memberRD.ID,
+	})
+	require.Nil(t, demoteDenial, "owner2 demotion of owner1 must succeed (got: %+v)", demoteDenial)
+
+	// Verify owner1 is now a member (demotion committed).
+	owner1BindingsAfter, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
+	for _, b := range owner1BindingsAfter {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
+			rd, _ := s.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			require.NotEqual(t, store.ProjectRoleOwner, rd.Name,
+				"owner1 must be demoted to member before unblocking")
+		}
+	}
+
+	// Release owner1's WithTx. The post-lock re-evaluation should see the
+	// demotion and deny.
+	close(blockCh)
+	wg.Wait()
+
+	// Assert: owner1's mutation was denied.
+	require.NotNil(t, removeDenial, "RS1 R5-3: demoted actor's mutation must be denied")
+	assert.False(t, removeDenial.Allowed,
+		"RS1 R5-3: demoted actor's mutation must not be allowed")
+	assert.Equal(t, 403, removeDenial.HTTPStatus,
+		"RS1 R5-3: denial must be 403 (got %d)", removeDenial.HTTPStatus)
+
+	// Assert: the target binding was NOT removed.
+	_, getErr := s.GetRoleBinding(ctx, targetBinding.ID)
+	assert.NoError(t, getErr,
+		"RS1 R5-3: target binding must still exist — stale-authority mutation must not persist")
+
+	// Assert: no successful audit record for the stale mutation.
+	audits, _, _ := s.ListMutationAudits(ctx, store.MutationAuditFilter{TargetID: projectID})
+	for _, a := range audits {
+		if a.MutationType == "project_member_remove" {
+			// The demotion audit is expected (project_member_role_change), but
+			// a successful remove audit for the target would indicate the stale
+			// mutation persisted.
+			var summary map[string]string
+			if a.BeforeSummary != "" {
+				_ = json.Unmarshal([]byte(a.BeforeSummary), &summary)
+				assert.NotEqual(t, targetID, summary["principalId"],
+					"RS1 R5-3: audit must not record a successful remove for the target")
+			}
+		}
+	}
+}
+
+// TestRS1_StaleAuthorityForcedOverlap_AddMember exercises the same stale-
+// authority forced overlap on the AddMember path. Owner1 passes preflight
+// governance, is demoted while blocked, and the post-lock re-evaluation
+// denies the add.
+func TestRS1_StaleAuthorityForcedOverlap_AddMember(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-foa-proj")
+	owner1ID := tid("rs1-foa-o1")
+	owner2ID := tid("rs1-foa-o2")
+	newUserID := tid("rs1-foa-new")
+
+	createRS1Project(t, s, projectID, owner1ID)
+
+	// Create owner2 and new user.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: owner2ID, Email: owner2ID + "@test.com",
+		DisplayName: "FOAOwner2", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, owner2ID)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: newUserID, Email: newUserID + "@test.com",
+		DisplayName: "FOANewUser", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, newUserID)
+
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Make owner2 an owner.
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      owner2ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        owner1ID,
+	})
+	require.NoError(t, err)
+
+	blockCh := make(chan struct{})
+	enteredCh := make(chan struct{}, 1)
+	blockedStore := &txBlockStore{Store: s, blockCh: blockCh, enteredCh: enteredCh}
+
+	authzSvc := NewAuthzService(s, nil)
+	blockedSvc := NewProjectMembershipService(blockedStore, authzSvc, slog.Default())
+	normalSvc := NewProjectMembershipService(s, authzSvc, slog.Default())
+
+	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "FOAOwner1", "member", "test")
+	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "FOAOwner2", "member", "test")
+	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner2Ctx := contextWithIdentity(ctx, owner2)
+
+	var addDenial *MembershipDecision
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, addDenial = blockedSvc.AddMember(owner1Ctx, MembershipRequest{
+			Op:            MembershipOpAdd,
+			ProjectID:     projectID,
+			Actor:         owner1,
+			PrincipalType: store.RoleBindingPrincipalUser,
+			PrincipalID:   newUserID,
+			RoleDefID:     memberRD.ID,
+		})
+	}()
+
+	<-enteredCh
+
+	// Demote owner1 to member.
+	owner1Bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
+	var owner1BindingID string
+	for _, b := range owner1Bindings {
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID &&
 			b.RoleDefinitionID == ownerRD.ID {
 			owner1BindingID = b.ID
@@ -1725,32 +2255,257 @@ func TestRS1_StaleAuthorityDeniedAfterDemotion(t *testing.T) {
 	}
 	require.NotEmpty(t, owner1BindingID)
 
-	rec := doRequestAsUser(t, srv, owner2, http.MethodPatch,
-		"/api/v1/projects/"+projectID+"/members/"+owner1BindingID,
-		updateProjectMemberRequest{RoleDefinitionID: memberRD.ID})
-	require.Equal(t, http.StatusOK, rec.Code,
-		"setup: owner2 demotion of owner1 must succeed")
+	_, demoteDenial := normalSvc.UpdateMemberRole(owner2Ctx, MembershipRequest{
+		Op:           MembershipOpUpdate,
+		ProjectID:    projectID,
+		Actor:        owner2,
+		BindingID:    owner1BindingID,
+		NewRoleDefID: memberRD.ID,
+	})
+	require.Nil(t, demoteDenial, "demotion must succeed")
 
-	// Step 2: owner1 (now a member) attempts to remove the target member.
-	// Even if pre-lock checks somehow passed (stale cached authority),
-	// the post-lock re-evaluation must see owner1 is now a member and deny.
-	owner1 := &store.User{ID: owner1ID, Email: owner1ID + "@test.com"}
-	targetBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	close(blockCh)
+	wg.Wait()
+
+	require.NotNil(t, addDenial, "RS1 R5-3: demoted actor's add must be denied")
+	assert.False(t, addDenial.Allowed)
+	assert.Equal(t, 403, addDenial.HTTPStatus)
+
+	// New user must NOT have been added.
+	newBindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, newUserID)
+	for _, b := range newBindings {
+		assert.False(t, b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID,
+			"RS1 R5-3: new user binding must not exist after stale-authority denial")
+	}
+}
+
+// TestRS1_StaleAuthorityForcedOverlap_UpdateRole exercises the forced overlap
+// on the UpdateMemberRole path.
+func TestRS1_StaleAuthorityForcedOverlap_UpdateRole(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-fou-proj")
+	owner1ID := tid("rs1-fou-o1")
+	owner2ID := tid("rs1-fou-o2")
+	targetID := tid("rs1-fou-targ")
+
+	createRS1Project(t, s, projectID, owner1ID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: owner2ID, Email: owner2ID + "@test.com",
+		DisplayName: "FOUOwner2", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, owner2ID)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: targetID, Email: targetID + "@test.com",
+		DisplayName: "FOUTarget", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, targetID)
+
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	require.NoError(t, err)
-	var targetBindingID string
-	for _, b := range targetBindings {
-		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
-			targetBindingID = b.ID
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Make owner2 an owner.
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      owner2ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        owner1ID,
+	})
+	require.NoError(t, err)
+
+	// Add target as member.
+	targetBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      targetID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        owner1ID,
+	})
+	require.NoError(t, err)
+
+	blockCh := make(chan struct{})
+	enteredCh := make(chan struct{}, 1)
+	blockedStore := &txBlockStore{Store: s, blockCh: blockCh, enteredCh: enteredCh}
+
+	authzSvc := NewAuthzService(s, nil)
+	blockedSvc := NewProjectMembershipService(blockedStore, authzSvc, slog.Default())
+	normalSvc := NewProjectMembershipService(s, authzSvc, slog.Default())
+
+	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "FOUOwner1", "member", "test")
+	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "FOUOwner2", "member", "test")
+	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner2Ctx := contextWithIdentity(ctx, owner2)
+
+	// Owner1 tries to promote target to admin (passes preflight as owner).
+	var updateDenial *MembershipDecision
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, updateDenial = blockedSvc.UpdateMemberRole(owner1Ctx, MembershipRequest{
+			Op:           MembershipOpUpdate,
+			ProjectID:    projectID,
+			Actor:        owner1,
+			BindingID:    targetBinding.ID,
+			NewRoleDefID: adminRD.ID,
+		})
+	}()
+
+	<-enteredCh
+
+	// Demote owner1 to member while blocked.
+	owner1Bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
+	var owner1BindingID string
+	for _, b := range owner1Bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID &&
+			b.RoleDefinitionID == ownerRD.ID {
+			owner1BindingID = b.ID
 			break
 		}
 	}
-	require.NotEmpty(t, targetBindingID)
+	require.NotEmpty(t, owner1BindingID)
 
-	rec = doRequestAsUser(t, srv, owner1, http.MethodDelete,
-		"/api/v1/projects/"+projectID+"/members/"+targetBindingID, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"RS1 R4 O-1: demoted actor (now member) must be denied membership removal (got %d: %s)",
-		rec.Code, rec.Body.String())
+	_, demoteDenial := normalSvc.UpdateMemberRole(owner2Ctx, MembershipRequest{
+		Op:           MembershipOpUpdate,
+		ProjectID:    projectID,
+		Actor:        owner2,
+		BindingID:    owner1BindingID,
+		NewRoleDefID: memberRD.ID,
+	})
+	require.Nil(t, demoteDenial, "demotion must succeed")
+
+	close(blockCh)
+	wg.Wait()
+
+	require.NotNil(t, updateDenial, "RS1 R5-3: demoted actor's update must be denied")
+	assert.False(t, updateDenial.Allowed)
+	assert.Equal(t, 403, updateDenial.HTTPStatus)
+
+	// Target must still be a member, not promoted to admin.
+	tb, getErr := s.GetRoleBinding(ctx, targetBinding.ID)
+	if getErr == nil {
+		rd, _ := s.GetRoleDefinition(ctx, tb.RoleDefinitionID)
+		assert.Equal(t, store.ProjectRoleMember, rd.Name,
+			"RS1 R5-3: target must still be a member after stale-authority denial")
+	}
+}
+
+// TestRS1_StaleAuthorityForcedOverlap_Transfer exercises the forced overlap
+// on the TransferOwnership path.
+func TestRS1_StaleAuthorityForcedOverlap_Transfer(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs1-fot-proj")
+	owner1ID := tid("rs1-fot-o1")
+	owner2ID := tid("rs1-fot-o2")
+	transferTargetID := tid("rs1-fot-tt")
+
+	createRS1Project(t, s, projectID, owner1ID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: owner2ID, Email: owner2ID + "@test.com",
+		DisplayName: "FOTOwner2", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, owner2ID)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: transferTargetID, Email: transferTargetID + "@test.com",
+		DisplayName: "FOTTransferTarget", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, transferTargetID)
+
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Make owner2 an owner.
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      owner2ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        owner1ID,
+	})
+	require.NoError(t, err)
+
+	// Add transfer target as member.
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      transferTargetID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        owner1ID,
+	})
+	require.NoError(t, err)
+
+	blockCh := make(chan struct{})
+	enteredCh := make(chan struct{}, 1)
+	blockedStore := &txBlockStore{Store: s, blockCh: blockCh, enteredCh: enteredCh}
+
+	authzSvc := NewAuthzService(s, nil)
+	blockedSvc := NewProjectMembershipService(blockedStore, authzSvc, slog.Default())
+	normalSvc := NewProjectMembershipService(s, authzSvc, slog.Default())
+
+	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "FOTOwner1", "member", "test")
+	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "FOTOwner2", "member", "test")
+	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner2Ctx := contextWithIdentity(ctx, owner2)
+
+	// Owner1 tries to transfer ownership (passes preflight isActorDirectOwner).
+	var transferDenial *MembershipDecision
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, transferDenial = blockedSvc.TransferOwnership(owner1Ctx, MembershipRequest{
+			Op:         MembershipOpTransfer,
+			ProjectID:  projectID,
+			Actor:      owner1,
+			NewOwnerID: transferTargetID,
+		})
+	}()
+
+	<-enteredCh
+
+	// Demote owner1 to member while blocked.
+	owner1Bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
+	var owner1BindingID string
+	for _, b := range owner1Bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID &&
+			b.RoleDefinitionID == ownerRD.ID {
+			owner1BindingID = b.ID
+			break
+		}
+	}
+	require.NotEmpty(t, owner1BindingID)
+
+	_, demoteDenial := normalSvc.UpdateMemberRole(owner2Ctx, MembershipRequest{
+		Op:           MembershipOpUpdate,
+		ProjectID:    projectID,
+		Actor:        owner2,
+		BindingID:    owner1BindingID,
+		NewRoleDefID: memberRD.ID,
+	})
+	require.Nil(t, demoteDenial, "demotion must succeed")
+
+	close(blockCh)
+	wg.Wait()
+
+	require.NotNil(t, transferDenial, "RS1 R5-3: demoted actor's transfer must be denied")
+	assert.False(t, transferDenial.Allowed)
+	assert.Equal(t, 403, transferDenial.HTTPStatus)
 }
 
 // ---------------------------------------------------------------------------

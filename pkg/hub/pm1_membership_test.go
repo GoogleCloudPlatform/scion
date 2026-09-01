@@ -1102,7 +1102,7 @@ func TestC0_ProjectListMine_OnlyActiveOwnerBindings(t *testing.T) {
 
 	var projectIDs []string
 	for _, p := range resp.Projects {
-		projectIDs = append(projectIDs, p.Project.ID)
+		projectIDs = append(projectIDs, p.ID)
 	}
 	assert.Contains(t, projectIDs, ownedProj.ID,
 		"G2: scope=mine must include project with active direct owner binding")
@@ -1210,7 +1210,7 @@ func TestC0_ProjectListShared_IncludesGroupDerived(t *testing.T) {
 
 	var projectIDs []string
 	for _, p := range resp.Projects {
-		projectIDs = append(projectIDs, p.Project.ID)
+		projectIDs = append(projectIDs, p.ID)
 	}
 	assert.Contains(t, projectIDs, groupProj.ID,
 		"G1: scope=shared must include project with active group-derived binding")

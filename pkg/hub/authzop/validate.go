@@ -339,7 +339,7 @@ func (s *OperationSpec) validateID() []error {
 			continue
 		}
 		for _, ch := range seg {
-			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') {
 				errs = append(errs, fmt.Errorf("operation ID %q: invalid character %q (only lowercase letters and digits allowed)", id, string(ch)))
 				break
 			}
