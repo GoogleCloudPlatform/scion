@@ -36,6 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
+import { navigateTo } from '../../client/main.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   ConstraintSubject,
@@ -44,6 +45,8 @@ import type {
   Iso8601,
   SubjectSelection,
   AccessBoundaryDetail,
+  AccessConstraintDraft,
+  PreviewOperation,
 } from '../../shared/access-boundaries.js';
 import { subjectSelectionOf } from '../../shared/access-boundaries.js';
 
@@ -54,12 +57,14 @@ import '../shared/access-boundary-scope-selector.js';
 import '../shared/maximum-permission-selector.js';
 import '../shared/access-boundary-schedule-editor.js';
 import '../shared/access-boundary-definition-summary.js';
+import '../shared/access-boundary-preview.js';
 
 import type { SubjectChangeDetail } from '../shared/access-boundary-subject-selector.js';
 import type { ScopeChangeDetail } from '../shared/access-boundary-scope-selector.js';
 import type { PermissionChangeDetail } from '../shared/maximum-permission-selector.js';
 import type { ScheduleChangeDetail } from '../shared/access-boundary-schedule-editor.js';
 import type { DefinitionSummaryData } from '../shared/access-boundary-definition-summary.js';
+import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
 
 @customElement('scion-page-admin-access-boundary-editor')
 export class ScionPageAdminAccessBoundaryEditor extends LitElement {
@@ -96,6 +101,9 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
    */
   @state() accessor baseRevision = '';
   @state() private isDirty = false;
+
+  // --- Preview/commit flow ---
+  @state() private showPreview = false;
 
   // --- Validation ---
   @state() private step1Error = '';
@@ -399,6 +407,47 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
+  // Draft building and preview/commit flow
+  // ---------------------------------------------------------------------------
+
+  private buildDraft(): AccessConstraintDraft | null {
+    if (!this.draftSubject || !this.draftScope) return null;
+
+    const draft: AccessConstraintDraft = {
+      name: this.draftName.trim(),
+      purpose: this.draftPurpose.trim(),
+      subject: this.draftSubject,
+      scope: this.draftScope,
+      maximumPermissions: [...this.draftRetainedPermissions],
+    };
+
+    if (this.draftNotBefore || this.draftExpiresAt) {
+      draft.appliesWhen = {};
+      if (this.draftNotBefore) draft.appliesWhen.notBefore = this.draftNotBefore;
+      if (this.draftExpiresAt) draft.appliesWhen.expiresAt = this.draftExpiresAt;
+    }
+
+    return draft;
+  }
+
+  private get previewOperation(): PreviewOperation {
+    return this.isEditMode ? 'update' : 'create';
+  }
+
+  private handleStartPreview(): void {
+    this.showPreview = true;
+  }
+
+  private handlePreviewCommitSuccess(e: CustomEvent<PreviewCommitSuccessDetail>): void {
+    this.isDirty = false;
+    navigateTo(`/admin/access-boundaries/${encodeURIComponent(e.detail.boundaryId)}`);
+  }
+
+  private handlePreviewCancel(): void {
+    this.showPreview = false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
 
@@ -621,7 +670,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Step 6: Review Summary
+  // Step 6: Review Summary + Preview/Commit
   // ---------------------------------------------------------------------------
   private renderStep6() {
     const summaryData: DefinitionSummaryData = {
@@ -640,6 +689,22 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       notBefore: this.draftNotBefore,
       expiresAt: this.draftExpiresAt,
     };
+
+    if (this.showPreview) {
+      const draft = this.buildDraft();
+      return html`
+        <scion-access-boundary-preview
+          .draft=${draft}
+          operation=${this.previewOperation}
+          constraintId=${this.boundaryId}
+          baseRevision=${this.baseRevision}
+          autoStart
+          @preview-commit-success=${(e: CustomEvent<PreviewCommitSuccessDetail>) =>
+            this.handlePreviewCommitSuccess(e)}
+          @preview-cancel=${() => this.handlePreviewCancel()}
+        ></scion-access-boundary-preview>
+      `;
+    }
 
     return html`
       <h2 class="step-title">Review</h2>
@@ -687,17 +752,19 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
               `}
         </div>
         <div class="nav-right">
-          ${
-            this.currentStep < 6
-              ? html`
-                  <sl-button variant="primary" @click=${() => this.goNext()}>
-                    Next
-                    <sl-icon name="arrow-right" slot="suffix"></sl-icon>
-                  </sl-button>
-                `
-              : nothing
-            /* The commit button will be added in F4 */
-          }
+          ${this.currentStep < 6
+            ? html`
+                <sl-button variant="primary" @click=${() => this.goNext()}>
+                  Next
+                  <sl-icon name="arrow-right" slot="suffix"></sl-icon>
+                </sl-button>
+              `
+            : html`
+                <sl-button variant="primary" @click=${() => this.handleStartPreview()}>
+                  <sl-icon name="shield-check" slot="prefix"></sl-icon>
+                  Preview impact
+                </sl-button>
+              `}
         </div>
       </div>
     `;

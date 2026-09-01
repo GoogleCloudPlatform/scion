@@ -22,7 +22,7 @@
  * The actual commit/preview functionality is added in F4.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type {
@@ -382,15 +382,7 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
           </div>
         </div>
 
-        <!-- Preview placeholder (F4 will add the actual preview) -->
-        <div class="preview-placeholder">
-          <sl-icon
-            name="shield-check"
-            style="font-size: 1.5rem; display: block; margin: 0 auto 0.5rem auto;"
-          ></sl-icon>
-          Impact preview will be available after submitting for review.
-          ${nothing /* The commit/preview button will be added in F4 */}
-        </div>
+        <!-- Impact preview is triggered via the "Preview impact" button in the editor navigation -->
       </div>
     `;
   }
