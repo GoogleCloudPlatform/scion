@@ -31,7 +31,7 @@
 - [agent.lifecycle.create](#agentlifecyclecreate) — Create an agent in a project
 - [agent.lifecycle.delete](#agentlifecycledelete) — Delete an agent
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
-- [project.lifecycle.delete](#projectlifecycledelete) — Delete a project
+- [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
 - [user.admin.suspend](#useradminsuspend) — Suspend a user account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
@@ -1157,7 +1157,7 @@
 
 **Domain:** project
 
-**Description:** Delete a project
+**Description:** Delete a project with cascading security state cleanup and atomic audit
 
 ### Entry Points
 
@@ -1173,20 +1173,42 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `delete-resource`
+**Effects:** `delete-resource`, `emit-external-effect`
+
+### Governance
+
+- **Kind:** ownership_ancestry
+- RS3 governance: direct project owner or super-admin. Hub-admin lacks project.delete and is denied at base permission. Group-derived ownership does not confer deletion authority. Stale Project.OwnerID is not consulted. Enforced by ProjectDeletionService.checkDeletionGovernance.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| target-exists | business | Project must exist and not be already deleted | Yes |
 
 ### Audit
 
 - **Event Type:** `project.lifecycle.delete`
 - **Context Fields:** actor_id
-- **Before Fields:** project_id, project_name
+- **Before Fields:** project_id, project_name, project_slug, owner_id
+- **After Fields:** cascade_summary
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** project ID (single deletion per project)
+- **Retry:** no retry — cascading deletes are best-effort; DB cascade is authoritative
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestRS3_ProjectDeleteOwnerPositiveControl`
+- `pkg/hub:TestRS3_ProjectDeleteGovernanceMatrix`
+- `pkg/hub:TestRS3_ProjectDeleteAtomicAudit`
 
 ---
 

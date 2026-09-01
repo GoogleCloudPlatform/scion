@@ -265,6 +265,54 @@ Each is documented here rather than silently grandfathered.
 
 ---
 
+## Phase 3 RS3 Findings — Project Deletion
+
+### F-RS3-01: deleteProject handler lacks domain-service governance
+
+| Field | Value |
+|---|---|
+| **Source** | RS3 implementation audit |
+| **Security effect** | delete-resource, emit-external-effect |
+| **Severity** | High |
+| **Description** | The `deleteProject` handler used only `authorize()` (base permission check via ActionDelete) with no ownership/ancestry governance, no actor status check, no credential ceiling, no atomic audit record, and no transactional cascade. All cascading deletes were best-effort outside any transaction, allowing partial security state on failure. |
+| **RS3 resolution** | Introduced `ProjectDeletionService` as a bounded domain service. Handler delegates to service for fail-closed authorization composition (base permission + ownership governance + actor status + credential ceiling), transactional cascade of security-relevant state (role bindings, groups, secrets, env vars, skill injections, GCP SAs, templates, harness configs), atomic project row deletion, and atomic `MutationAuditRecord` within a single `WithTx` block. External effects (broker dispatch, storage file cleanup, filesystem cleanup, quota release, event emission) have explicit ordering, fire-and-forget delivery, and log-and-continue failure mode. Mutation classifications updated from handler-level exemptions to service-level operation mappings. |
+| **Disposition** | `resolved-rs3` |
+
+### F-RS3-02: Missing mutation audit record for project deletion
+
+| Field | Value |
+|---|---|
+| **Source** | RS3 implementation audit |
+| **Security effect** | audit-gap |
+| **Severity** | High |
+| **Description** | The `deleteProject` handler published a `ProjectDeleted` event but did not create a `MutationAuditRecord`. The catalog declared `project.lifecycle.delete` with `Atomic: true` audit, but no implementation existed. |
+| **RS3 resolution** | `ProjectDeletionService.Delete` creates a `MutationAuditRecord` with `MutationType: "project_delete"`, before fields (project_id, project_name, project_slug, owner_id), and actor identity/credential context, written atomically within the same transaction as the project row deletion and security state cascades. |
+| **Disposition** | `resolved-rs3` |
+
+### F-RS3-03: Mutation classification incorrectly describes permission
+
+| Field | Value |
+|---|---|
+| **Source** | RS3 implementation audit |
+| **Security effect** | documentation-gap |
+| **Severity** | Low |
+| **Description** | The mutation classification for `deleteProject`'s `DeleteProject` call described it as "route-guarded by project.update permission" when the handler actually checks `ActionDelete` (project.delete permission). |
+| **RS3 resolution** | Classification replaced with operation-mapped entry: `{Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"}` in the service. |
+| **Disposition** | `resolved-rs3` |
+
+### F-RS3-04: Non-HTTP DeleteProject call sites not classified for governance bypass
+
+| Field | Value |
+|---|---|
+| **Source** | RS3 implementation audit |
+| **Security effect** | classification-gap |
+| **Severity** | Medium |
+| **Description** | `DeleteProject` is called from 4 rollback/compensation sites (createProject x3, handleProjectRegister x1, handleProjectClone x1). These are route-guarded exemptions that bypass end-user governance because they are rollback compensation for failed project creation — the project never became visible to other users and has no established security state. |
+| **RS3 resolution** | All rollback sites retain their existing `ExemptionRouteGuarded` classification with explicit comments. The RS3 test suite includes an AST-based proof test (`TestRS3_DeleteProjectCallSiteClassification`) that enumerates all non-test `DeleteProject` call sites and asserts each is classified in the mutation classifications map. New unclassified call sites will fail CI. |
+| **Disposition** | `resolved-rs3` |
+
+---
+
 ## Summary
 
 | Severity | Total | Fixed | Contained-C0 | Deferred | Baseline-AF1 | Resolved-AF1 | Accepted Risk |

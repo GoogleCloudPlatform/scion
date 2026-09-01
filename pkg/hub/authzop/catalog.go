@@ -843,7 +843,7 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "project.lifecycle.delete",
 		Domain:      "project",
-		Description: "Delete a project",
+		Description: "Delete a project with cascading security state cleanup and atomic audit",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "DELETE"},
 		},
@@ -851,17 +851,36 @@ var Catalog = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "project.delete",
-		Effects:          []SecurityEffect{EffectDeleteResource},
+		Effects:          []SecurityEffect{EffectDeleteResource, EffectEmitExternal},
 		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceOwnershipAncestry,
+			Description: "RS3 governance: direct project owner or super-admin. Hub-admin lacks project.delete and is denied at base permission. Group-derived ownership does not confer deletion authority. Stale Project.OwnerID is not consulted. Enforced by ProjectDeletionService.checkDeletionGovernance.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "target-exists", Description: "Project must exist and not be already deleted", Kind: InvariantBusiness, FailClosed: true},
+		},
+		ExternalPolicy: &ExternalEffectPolicy{
+			DeliveryMode:   DeliveryFireAndForget,
+			FailureMode:    FailureLogAndContinue,
+			IdempotencyKey: "project ID (single deletion per project)",
+			RetryPolicy:    "no retry — cascading deletes are best-effort; DB cascade is authoritative",
+			AuthBeforeEmit: true,
+		},
 		AuditObligation: &AuditObligation{
 			EventType:     "project.lifecycle.delete",
 			ContextFields: []string{"actor_id"},
-			BeforeFields:  []string{"project_id", "project_name"},
+			BeforeFields:  []string{"project_id", "project_name", "project_slug", "owner_id"},
+			AfterFields:   []string{"cascade_summary"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteOwnerPositiveControl"},
+			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteGovernanceMatrix"},
+			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteAtomicAudit"},
+		},
 	},
 
 	// =====================================================================
@@ -2540,11 +2559,13 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: updates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectOwnerRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates owner role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates project role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up GCP service accounts", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up project groups", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete handler, route-guarded by project.update permission", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up role bindings", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "deleteProject", Symbol: "DeleteSecretsByScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project delete cascade, cleans up secrets", Scope: "pkg/hub/handlers_projects_core.go"}},
+	// RS3: deleteProject handler now delegates to ProjectDeletionService.
+	// Cascade mutations are in the service's cascadeSecurityState method.
+	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteRoleBindingsForScope", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGroup", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteSecretsByScope", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGCPServiceAccount", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "handleProjectRegister", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project register rollback, deletes on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
