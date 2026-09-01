@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 89
+**Operations:** 90
 
 ## Table of Contents
 
@@ -10,6 +10,7 @@
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
 - [project.membership.list](#projectmembershiplist) — List project members and their roles
+- [project.membership.transfer](#projectmembershiptransfer) — Atomically transfer project ownership from the actor to another user
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition
@@ -126,7 +127,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- C0 containment: only project-owner may add members. CT1 D5 approved governance matrix applies in RS1.
+- RS1 governance: CT1 D5 typed governance matrix — owners manage all roles, admins manage members only. Enforced by ProjectMembershipService.checkGovernance.
 
 ### Invariants
 
@@ -180,7 +181,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- C0 containment: only project-owner may change roles. CT1 D5 governance matrix applies in RS1.
+- RS1 governance: CT1 D5 typed governance matrix — owners manage all roles, admins manage members only. Both old and new target roles are governed. Enforced by ProjectMembershipService.checkGovernance.
 
 ### Invariants
 
@@ -230,7 +231,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- C0 containment: only project-owner may remove members. CT1 D1 allows self-removal when another active direct owner remains.
+- RS1 governance: CT1 D5 typed governance matrix — owners manage all roles, admins manage members only. CT1 D1 allows self-removal when another active direct owner remains. Enforced by ProjectMembershipService.checkGovernance.
 
 ### Invariants
 
@@ -274,6 +275,62 @@
 **Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.membership.transfer
+
+**Domain:** project.membership  
+**Description:** Atomically transfer project ownership from the actor to another user
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/transfer-ownership` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `project.manage`  
+**Resource Resolver:** project-from-url
+
+**Effects:** `change-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Actor must be a direct project owner; target is promoted to owner, actor is downgraded to member — conditional-on-increase applies to the target's authority change
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- RS1 governance: only active direct project owners may transfer ownership. Actor-must-be-direct-owner is enforced by the ProjectMembershipService.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| direct-user-only-owner | security | project-owner role is direct-user-only | Yes |
+| last-owner-guard | security | Post-state: at least one active direct owner must remain | Yes |
+| single-binding-per-principal | business | CT1 D4: one direct binding per principal per project; atomic replacement for both actor and target | No |
+
+### Audit
+
+- **Event Type:** `project.membership.transfer`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** old_owner_id
+- **After Fields:** new_owner_id, old_owner_role, new_owner_role
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `role_assignment_forbidden`, `principal_ineligible`, `last_owner`
 
 ### Tests
 

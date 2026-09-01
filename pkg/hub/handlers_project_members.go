@@ -26,7 +26,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Request / Response types for project-scoped members API (PM1)
+// Request / Response types for project-scoped members API (PM1 → RS1)
 // ---------------------------------------------------------------------------
 
 // projectMemberInfo is a role binding enriched with human-friendly fields
@@ -41,9 +41,9 @@ type projectMemberInfo struct {
 
 // listProjectMembersResponse wraps the paginated result for project members.
 type listProjectMembersResponse struct {
-	Items        []projectMemberInfo `json:"items"`
-	TotalCount   int                 `json:"totalCount"`
-	Capabilities *Capabilities       `json:"_capabilities,omitempty"`
+	Items        []projectMemberInfo     `json:"items"`
+	TotalCount   int                     `json:"totalCount"`
+	Capabilities *MembershipCapabilities `json:"_capabilities,omitempty"`
 }
 
 // addProjectMemberRequest is the payload for POST /api/v1/projects/{id}/members.
@@ -60,6 +60,11 @@ type updateProjectMemberRequest struct {
 	RoleDefinitionID string `json:"roleDefinitionId"`
 }
 
+// transferOwnershipRequest is the payload for POST /api/v1/projects/{id}/transfer-ownership.
+type transferOwnershipRequest struct {
+	NewOwnerID string `json:"newOwnerId"`
+}
+
 // ---------------------------------------------------------------------------
 // Valid project-scoped role names
 // ---------------------------------------------------------------------------
@@ -71,12 +76,11 @@ var validProjectRoles = map[string]bool{
 }
 
 // directUserOnlyProjectRoles are project roles that can only be assigned to
-// direct user principals, not groups or agents. This mirrors the frontend's
-// PROJECT_DIRECT_USER_ONLY_ROLES constraint and prevents 500 errors from
-// the store's ErrDirectUserOnly guard.
+// direct user principals. RS1 D3: project-admin group eligibility is now
+// approved and implemented, so only project-owner remains in this set.
 var directUserOnlyProjectRoles = map[string]bool{
 	store.ProjectRoleOwner: true,
-	store.ProjectRoleAdmin: true,
+	// D3: project-admin removed — groups may now hold project-admin.
 }
 
 // ---------------------------------------------------------------------------
@@ -155,9 +159,7 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 	}
 	page := bindings[offset:end]
 
-	// Enrich with role name and display names. Cache role definitions
-	// per request to avoid redundant lookups (rdCache pattern from
-	// authz_candelegate.go:241-255).
+	// Enrich with role name and display names.
 	rdCache := make(map[string]string) // roleDefinitionID → roleName
 	items := make([]projectMemberInfo, 0, len(page))
 	for _, b := range page {
@@ -177,7 +179,7 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		info := projectMemberInfo{
 			RoleBinding: *b,
 			RoleName:    roleName,
-			Source:      "direct", // TODO: group-derived expansion deferred (needs architect ruling)
+			Source:      "direct",
 		}
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
@@ -185,20 +187,12 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		items = append(items, info)
 	}
 
-	// C0-CONTAINMENT: G3 — Compute advisory membership-management capabilities.
-	// Only project owners get manage_members; all other authenticated users get
-	// an explicit empty capability object so the UI deterministically becomes
-	// read-only. Server enforcement remains mandatory.
-	//
-	// Contract decision to relax: align with Phase 1 CanDelegate relaxation.
-	var memberCaps *Capabilities
+	// RS1: Server-derived operation/target capabilities replace C0 owner-only
+	// advisory capability. Capabilities are computed per the governance matrix.
+	var memberCaps *MembershipCapabilities
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		if user, ok := identity.(UserIdentity); ok {
-			if s.authzService.isProjectOwner(ctx, user.ID(), projectID) {
-				memberCaps = &Capabilities{Actions: []string{"manage_members"}}
-			} else {
-				memberCaps = &Capabilities{Actions: []string{}}
-			}
+			memberCaps = s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
 		}
 	}
 
@@ -297,35 +291,6 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		req.PrincipalID = g.ID
 	}
 
-	// Validate that the target role is project-scoped.
-	roleDef, err := s.store.GetRoleDefinition(ctx, req.RoleDefinitionID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			BadRequest(w, "role definition not found")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if roleDef.ScopeType != store.RoleScopeProject {
-		BadRequest(w, "only project-scoped roles can be assigned to project members")
-		return
-	}
-	if !validProjectRoles[roleDef.Name] {
-		BadRequest(w, "invalid project role: "+roleDef.Name)
-		return
-	}
-
-	// R2: Enforce direct-user-only constraint at the handler level.
-	// project-owner and project-admin can only be assigned to direct user
-	// principals, not groups or agents. This prevents the store's
-	// ErrDirectUserOnly from surfacing as a 500.
-	if directUserOnlyProjectRoles[roleDef.Name] && req.PrincipalType != store.RoleBindingPrincipalUser {
-		BadRequest(w, fmt.Sprintf("role %q can only be assigned to direct users, not %s principals",
-			roleDef.Name, req.PrincipalType))
-		return
-	}
-
 	// Validate lifecycle fields.
 	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
 		BadRequest(w, "expiresAt must be in the future")
@@ -336,89 +301,48 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		return
 	}
 
-	// CanDelegate: project membership check — actor must be project owner.
-	//
-	// C0-CONTAINMENT: F-QA-02 — only project owners can manage membership.
-	// Contract decision to relax: Phase 1 governance matrix.
-	if s.authzService != nil {
-		decision := s.authzService.CanDelegate(ctx, user, GrantDescriptor{
-			Type:      GrantTypeProjectMembership,
-			ProjectID: projectID,
-		})
-		if !decision.Allowed {
-			slog.Info("project member add denied: membership gate",
-				"project_id", projectID, "actor", user.Email(),
-				"reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeRoleAssignmentForbidden,
-				"You do not have permission to manage members in this project", nil)
-			return
-		}
-
-		// CanDelegate: role binding escalation check — actor must hold all
-		// permissions in the target role to prevent escalation.
-		decision = s.authzService.CanDelegate(ctx, user, GrantDescriptor{
-			Type:             GrantTypeRoleBinding,
-			RoleDefinitionID: req.RoleDefinitionID,
-			ScopeType:        store.RoleScopeProject,
-			ScopeID:          projectID,
-		})
-		if !decision.Allowed {
-			slog.Info("project member add denied: role escalation",
-				"project_id", projectID, "actor", user.Email(),
-				"target_role", roleDef.Name, "reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeTargetRoleProtected,
-				"You cannot assign the requested role in this project", nil)
-			return
-		}
-	}
-
-	rb := &store.RoleBinding{
-		RoleDefinitionID: req.RoleDefinitionID,
-		PrincipalType:    req.PrincipalType,
-		PrincipalID:      req.PrincipalID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		NotBefore:        req.NotBefore,
-		ExpiresAt:        req.ExpiresAt,
-		CreatedBy:        user.ID(),
-	}
-
-	created, err := s.store.CreateRoleBinding(ctx, rb)
-	if err != nil {
-		if errors.Is(err, store.ErrAlreadyExists) {
-			Conflict(w, "this member already has this role in this project")
-			return
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			BadRequest(w, "role definition not found")
-			return
-		}
-		writeErrorFromErr(w, err, "")
+	// RS1: Delegate to the project membership service. The service implements
+	// governance matrix, delegation checks, one-binding invariant, and audit.
+	result, decision := s.membershipService.AddMember(ctx, MembershipRequest{
+		Op:            MembershipOpAdd,
+		ProjectID:     projectID,
+		Actor:         user,
+		PrincipalType: req.PrincipalType,
+		PrincipalID:   req.PrincipalID,
+		RoleDefID:     req.RoleDefinitionID,
+		NotBefore:     req.NotBefore,
+		ExpiresAt:     req.ExpiresAt,
+	})
+	if decision != nil && !decision.Allowed {
+		slog.Info("project member add denied",
+			"project_id", projectID, "actor", user.Email(),
+			"denial_code", decision.DenialCode, "reason", decision.Reason)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
 		return
 	}
 
-	slog.Info("project member added",
-		"project_id", projectID, "binding_id", created.ID,
-		"role", roleDef.Name, "principal", req.PrincipalType+":"+req.PrincipalID,
-		"actor", user.Email())
-
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType: "project_member_add",
-		TargetType:   "project_membership",
-		TargetID:     projectID,
-		AfterSummary: `{"principalId":"` + req.PrincipalID + `","role":"` + roleDef.Name + `"}`,
-	})
+	// Resolve role name for response.
+	var roleName string
+	if result.Binding != nil {
+		if rd, err := s.store.GetRoleDefinition(ctx, result.Binding.RoleDefinitionID); err == nil {
+			roleName = rd.Name
+		}
+	}
 
 	// Return enriched response.
 	info := projectMemberInfo{
-		RoleBinding: *created,
-		RoleName:    roleDef.Name,
+		RoleBinding: *result.Binding,
+		RoleName:    roleName,
 		Source:      "direct",
 	}
-	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, created.PrincipalType, created.PrincipalID)
-	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, created.CreatedBy)
+	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, result.Binding.PrincipalType, result.Binding.PrincipalID)
+	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, result.Binding.CreatedBy)
 
-	writeJSON(w, http.StatusCreated, info)
+	status := http.StatusCreated
+	if result.Replaced {
+		status = http.StatusOK // atomic replacement returns 200, not 201
+	}
+	writeJSON(w, status, info)
 }
 
 // ---------------------------------------------------------------------------
@@ -455,155 +379,37 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Fetch the existing binding.
-	existing, err := s.store.GetRoleBinding(ctx, bindingID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			NotFound(w, "Role Binding")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Verify binding belongs to this project.
-	if existing.ScopeType != store.RoleScopeProject || existing.ScopeID != projectID {
-		NotFound(w, "Role Binding")
-		return
-	}
-
-	// Validate the new role is project-scoped.
-	newRoleDef, err := s.store.GetRoleDefinition(ctx, req.RoleDefinitionID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			BadRequest(w, "role definition not found")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if newRoleDef.ScopeType != store.RoleScopeProject {
-		BadRequest(w, "only project-scoped roles can be assigned to project members")
-		return
-	}
-	if !validProjectRoles[newRoleDef.Name] {
-		BadRequest(w, "invalid project role: "+newRoleDef.Name)
-		return
-	}
-
-	// R2: Enforce direct-user-only constraint on role change.
-	if directUserOnlyProjectRoles[newRoleDef.Name] && existing.PrincipalType != store.RoleBindingPrincipalUser {
-		BadRequest(w, fmt.Sprintf("role %q can only be assigned to direct users, not %s principals",
-			newRoleDef.Name, existing.PrincipalType))
-		return
-	}
-
-	// Last-owner guard: if changing away from project-owner, ensure at least
-	// one owner remains.
-	oldRoleDef, err := s.store.GetRoleDefinition(ctx, existing.RoleDefinitionID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner {
-		if existing.PrincipalType == store.RoleBindingPrincipalUser {
-			ownerCount, countErr := s.countDirectOwnerBindings(ctx, projectID)
-			if countErr != nil {
-				writeErrorFromErr(w, countErr, "")
-				return
-			}
-			if ownerCount <= 1 {
-				writeError(w, http.StatusConflict, ErrCodeLastOwner,
-					"Cannot change role of the last project owner — every project must retain at least one direct user owner", nil)
-				return
-			}
-		}
-	}
-
-	// CanDelegate checks.
-	//
-	// C0-CONTAINMENT: F-QA-02 — only project owners can manage membership.
-	// Contract decision to relax: Phase 1 governance matrix.
-	if s.authzService != nil {
-		decision := s.authzService.CanDelegate(ctx, user, GrantDescriptor{
-			Type:      GrantTypeProjectMembership,
-			ProjectID: projectID,
-		})
-		if !decision.Allowed {
-			slog.Info("project member role change denied: membership gate",
-				"project_id", projectID, "actor", user.Email(),
-				"reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeRoleAssignmentForbidden,
-				"You do not have permission to manage members in this project", nil)
-			return
-		}
-
-		decision = s.authzService.CanDelegate(ctx, user, GrantDescriptor{
-			Type:             GrantTypeRoleBinding,
-			RoleDefinitionID: req.RoleDefinitionID,
-			ScopeType:        store.RoleScopeProject,
-			ScopeID:          projectID,
-		})
-		if !decision.Allowed {
-			slog.Info("project member role change denied: role escalation",
-				"project_id", projectID, "actor", user.Email(),
-				"target_role", newRoleDef.Name, "reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeTargetRoleProtected,
-				"You cannot assign the requested role in this project", nil)
-			return
-		}
-	}
-
-	// Role change: create-then-delete to prevent data loss.
-	// If the create fails, the user retains their existing role.
-	// A brief duplicate-binding window is harmless (the union of both
-	// project-scoped roles applies). A missing-binding window would be
-	// a silent demotion to no access.
-	newBinding := &store.RoleBinding{
-		RoleDefinitionID: req.RoleDefinitionID,
-		PrincipalType:    existing.PrincipalType,
-		PrincipalID:      existing.PrincipalID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		NotBefore:        existing.NotBefore,
-		ExpiresAt:        existing.ExpiresAt,
-		CreatedBy:        user.ID(),
-	}
-
-	created, err := s.store.CreateRoleBinding(ctx, newBinding)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// New binding exists — now safe to delete the old one.
-	if err := s.store.DeleteRoleBinding(ctx, bindingID); err != nil {
-		// Best effort: the new binding is active; log the orphaned old binding.
-		slog.Warn("failed to delete old binding during role change",
-			"old_binding_id", bindingID, "new_binding_id", created.ID, "error", err)
-	}
-
-	slog.Info("project member role changed",
-		"project_id", projectID, "binding_id", created.ID,
-		"old_role", oldRoleDef.Name, "new_role", newRoleDef.Name,
-		"principal", existing.PrincipalType+":"+existing.PrincipalID,
-		"actor", user.Email())
-
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType:  "project_member_role_change",
-		TargetType:    "project_membership",
-		TargetID:      projectID,
-		BeforeSummary: `{"principalId":"` + existing.PrincipalID + `","role":"` + oldRoleDef.Name + `"}`,
-		AfterSummary:  `{"principalId":"` + existing.PrincipalID + `","role":"` + newRoleDef.Name + `"}`,
+	// RS1: Delegate to the project membership service.
+	result, decision := s.membershipService.UpdateMemberRole(ctx, MembershipRequest{
+		Op:           MembershipOpUpdate,
+		ProjectID:    projectID,
+		Actor:        user,
+		BindingID:    bindingID,
+		NewRoleDefID: req.RoleDefinitionID,
 	})
+	if decision != nil && !decision.Allowed {
+		slog.Info("project member role change denied",
+			"project_id", projectID, "actor", user.Email(),
+			"denial_code", decision.DenialCode, "reason", decision.Reason)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		return
+	}
+
+	// Enrich response.
+	var roleName string
+	if result.Binding != nil {
+		if rd, err := s.store.GetRoleDefinition(ctx, result.Binding.RoleDefinitionID); err == nil {
+			roleName = rd.Name
+		}
+	}
 
 	info := projectMemberInfo{
-		RoleBinding: *created,
-		RoleName:    newRoleDef.Name,
+		RoleBinding: *result.Binding,
+		RoleName:    roleName,
 		Source:      "direct",
 	}
-	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, created.PrincipalType, created.PrincipalID)
-	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, created.CreatedBy)
+	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, result.Binding.PrincipalType, result.Binding.PrincipalID)
+	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, result.Binding.CreatedBy)
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -631,90 +437,110 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
-	// Fetch the binding.
-	binding, err := s.store.GetRoleBinding(ctx, bindingID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			NotFound(w, "Role Binding")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Verify binding belongs to this project.
-	if binding.ScopeType != store.RoleScopeProject || binding.ScopeID != projectID {
-		NotFound(w, "Role Binding")
-		return
-	}
-
-	// Last-owner guard: cannot delete the last direct-user project-owner binding.
-	if binding.PrincipalType == store.RoleBindingPrincipalUser {
-		roleDef, rdErr := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-		if rdErr != nil {
-			slog.Error("last-owner check: failed to look up project-owner role definition", "error", rdErr)
-			writeErrorFromErr(w, rdErr, "")
-			return
-		}
-		if binding.RoleDefinitionID == roleDef.ID {
-			ownerCount, countErr := s.countDirectOwnerBindings(ctx, projectID)
-			if countErr != nil {
-				writeErrorFromErr(w, countErr, "")
-				return
-			}
-			if ownerCount <= 1 {
-				writeError(w, http.StatusConflict, ErrCodeLastOwner,
-					"Cannot remove the last project owner — every project must retain at least one direct user owner", nil)
-				return
-			}
-		}
-	}
-
-	// CanDelegate check.
-	//
-	// C0-CONTAINMENT: F-QA-02 — only project owners can manage membership.
-	// Contract decision to relax: Phase 1 governance matrix.
-	if s.authzService != nil {
-		decision := s.authzService.CanDelegate(ctx, user, GrantDescriptor{
-			Type:      GrantTypeProjectMembership,
-			ProjectID: projectID,
-		})
-		if !decision.Allowed {
-			slog.Info("project member removal denied: membership gate",
-				"project_id", projectID, "actor", user.Email(),
-				"reason", decision.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeRoleAssignmentForbidden,
-				"You do not have permission to manage members in this project", nil)
-			return
-		}
-	}
-
-	if err := s.store.DeleteRoleBinding(ctx, bindingID); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			NotFound(w, "Role Binding")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Resolve role name for logging.
-	var roleName string
-	if rd, rdErr := s.store.GetRoleDefinition(ctx, binding.RoleDefinitionID); rdErr == nil && rd != nil {
-		roleName = rd.Name
-	}
-
-	slog.Info("project member removed",
-		"project_id", projectID, "binding_id", bindingID,
-		"role", roleName, "principal", binding.PrincipalType+":"+binding.PrincipalID,
-		"actor", user.Email())
-
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType:  "project_member_remove",
-		TargetType:    "project_membership",
-		TargetID:      projectID,
-		BeforeSummary: `{"principalId":"` + binding.PrincipalID + `","role":"` + roleName + `"}`,
+	// RS1: Delegate to the project membership service.
+	_, decision := s.membershipService.RemoveMember(ctx, MembershipRequest{
+		Op:        MembershipOpRemove,
+		ProjectID: projectID,
+		Actor:     user,
+		BindingID: bindingID,
 	})
+	if decision != nil && !decision.Allowed {
+		slog.Info("project member removal denied",
+			"project_id", projectID, "actor", user.Email(),
+			"denial_code", decision.DenialCode, "reason", decision.Reason)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/projects/{id}/transfer-ownership — atomic ownership transfer
+// ---------------------------------------------------------------------------
+
+// handleTransferOwnership handles the atomic ownership transfer endpoint.
+func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Authorize: project.manage at project scope.
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
+		return
+	}
+
+	var req transferOwnershipRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.NewOwnerID == "" {
+		// Try email resolution.
+		BadRequest(w, "newOwnerId is required")
+		return
+	}
+
+	// Resolve email to UUID if needed.
+	if strings.Contains(req.NewOwnerID, "@") {
+		resolvedUser, err := s.store.GetUserByEmail(ctx, req.NewOwnerID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				BadRequest(w, "user not found with email: "+req.NewOwnerID)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		req.NewOwnerID = resolvedUser.ID
+	}
+
+	// Delegate to the membership service.
+	result, decision := s.membershipService.TransferOwnership(ctx, MembershipRequest{
+		Op:         MembershipOpTransfer,
+		ProjectID:  projectID,
+		Actor:      user,
+		NewOwnerID: req.NewOwnerID,
+	})
+	if decision != nil && !decision.Allowed {
+		slog.Info("project ownership transfer denied",
+			"project_id", projectID, "actor", user.Email(),
+			"denial_code", decision.DenialCode, "reason", decision.Reason)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		return
+	}
+
+	// Build response.
+	type transferResponse struct {
+		NewOwnerBinding *store.RoleBinding `json:"newOwnerBinding"`
+		OldOwnerBinding *store.RoleBinding `json:"oldOwnerBinding,omitempty"`
+		Message         string             `json:"message"`
+	}
+
+	resp := transferResponse{
+		NewOwnerBinding: result.Binding,
+		OldOwnerBinding: result.TransferOldOwnerBinding,
+		Message:         fmt.Sprintf("Ownership transferred to %s", req.NewOwnerID),
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ErrCodePrincipalIneligible indicates the principal type cannot hold the
+// requested role.
+const ErrCodePrincipalIneligible = "principal_ineligible"

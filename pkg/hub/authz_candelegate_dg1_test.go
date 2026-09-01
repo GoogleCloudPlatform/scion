@@ -84,8 +84,10 @@ func TestCanDelegate_GroupMembership_RoleBearingGroup_ActorHoldsPerms(t *testing
 }
 
 // TestCanDelegate_GroupMembership_RoleBearingGroup_ActorLacksPerms verifies
-// that an actor who does NOT hold the permissions inherited through a
-// role-bearing group is denied from adding members.
+// that per RS1 D3, an actor who lacks the project permissions inherited
+// through a role-bearing group is ALLOWED to add members. Project-scoped
+// delegation is governed at the point of assigning the group a project role,
+// not at group membership time. Group membership is governed by group roles only.
 func TestCanDelegate_GroupMembership_RoleBearingGroup_ActorLacksPerms(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -119,14 +121,16 @@ func TestCanDelegate_GroupMembership_RoleBearingGroup_ActorLacksPerms(t *testing
 
 	user := NewAuthenticatedUser(userID, "dg1-noperm@test.com", "NoPerm", "member", "api")
 
-	// User has no project permissions — should be denied.
+	// RS1 D3: group membership governed by group roles only — project-scoped
+	// bindings on the group are excluded from the delegation check. The user
+	// is allowed to add members to the group regardless of project permissions.
 	decision := authz.CanDelegate(ctx, user, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed,
-		"user without project permissions should NOT be able to add members to a role-bearing group")
-	assert.Contains(t, decision.Reason, "cannot delegate")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: group membership is governed by group roles only; project-scoped delegation is no longer checked here")
+	assert.Contains(t, decision.Reason, "D3")
 }
 
 // TestCanDelegate_GroupMembership_NoRoleBindings_Allowed verifies that adding
@@ -195,8 +199,9 @@ func TestCanDelegate_GroupMembership_SystemScopeBinding(t *testing.T) {
 		"hub-member should NOT be able to add members to a group with hub-admin binding")
 }
 
-// TestCanDelegate_GroupMembership_MultipleBindings verifies that the actor
-// must hold permissions from ALL bindings on the group, not just one.
+// TestCanDelegate_GroupMembership_MultipleBindings verifies that per RS1 D3,
+// project-scoped bindings on the group are excluded from delegation checks.
+// Group membership is governed by group roles only.
 func TestCanDelegate_GroupMembership_MultipleBindings(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -233,14 +238,14 @@ func TestCanDelegate_GroupMembership_MultipleBindings(t *testing.T) {
 
 	admin := NewAuthenticatedUser(adminID, "dg1-admin-multi@test.com", "Admin", "member", "api")
 
-	// Admin in project1 but not project2 — should be denied because the group
-	// confers authority in BOTH projects.
+	// RS1 D3: project-scoped bindings are excluded from delegation check.
+	// Group membership is governed by group roles only.
 	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed,
-		"actor must hold permissions in ALL scopes the group has bindings for")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped bindings excluded from group membership delegation check")
 }
 
 // --- DG1.2: Escalation tests for nested groups ---
@@ -299,8 +304,9 @@ func TestCanDelegate_GroupMembership_NestedGroup_InheritsParentAuthority(t *test
 }
 
 // TestCanDelegate_GroupMembership_NestedGroup_ActorLacksInheritedPerms verifies
-// that an actor who lacks the permissions inherited through a parent group
-// is denied from adding members to the child group.
+// that per RS1 D3, even when a child group inherits project-scoped authority
+// from a parent, the delegation check allows it — project-scoped bindings
+// are excluded. Group membership is governed by group roles only.
 func TestCanDelegate_GroupMembership_NestedGroup_ActorLacksInheritedPerms(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -341,17 +347,18 @@ func TestCanDelegate_GroupMembership_NestedGroup_ActorLacksInheritedPerms(t *tes
 
 	member := NewAuthenticatedUser(memberID, "dg1-member-nest@test.com", "Member", "member", "api")
 
-	// Project-member lacks project-admin permissions — should be denied.
+	// RS1 D3: project-scoped bindings excluded — allowed even without project-admin perms.
 	decision := authz.CanDelegate(ctx, member, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: childGroupID,
 	})
-	assert.False(t, decision.Allowed,
-		"project-member should NOT be able to add members to child group that inherits project-admin from parent")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped bindings excluded from delegation check for nested groups")
 }
 
-// TestCanDelegate_GroupMembership_DeeplyNestedGroup verifies delegation
-// check traverses multiple levels of nesting (A contains B contains C).
+// TestCanDelegate_GroupMembership_DeeplyNestedGroup verifies that per RS1 D3,
+// even deeply nested project-scoped authority is excluded from the delegation
+// check. Group membership is governed by group roles only.
 func TestCanDelegate_GroupMembership_DeeplyNestedGroup(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -397,22 +404,21 @@ func TestCanDelegate_GroupMembership_DeeplyNestedGroup(t *testing.T) {
 
 	member := NewAuthenticatedUser(memberID, "dg1-deep@test.com", "Member", "member", "api")
 
-	// Adding to group C means member inherits B→A's project-admin binding.
-	// Project-member lacks project-admin perms — should be denied.
+	// RS1 D3: project-scoped bindings excluded — even through deep nesting.
 	decision := authz.CanDelegate(ctx, member, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupC,
 	})
-	assert.False(t, decision.Allowed,
-		"delegation check must traverse deeply nested groups to find inherited authority")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped bindings excluded from delegation check even through deep nesting")
 }
 
 // --- DG1.3: Escalation tests for agent callers ---
 
 // TestCanDelegate_GroupMembership_AgentCaller_PassesSameTest verifies that
-// an agent caller with group.addMember authority must pass the same
-// delegation test as a user caller. The agent is not exempted from
-// checking role-bearing group authority.
+// per RS1 D3, an agent caller is also allowed to add members to a group with
+// only project-scoped bindings, because project-scoped delegation is no
+// longer checked at group membership time.
 func TestCanDelegate_GroupMembership_AgentCaller_PassesSameTest(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -439,26 +445,25 @@ func TestCanDelegate_GroupMembership_AgentCaller_PassesSameTest(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Agent with only baseline scopes — insufficient to delegate admin perms.
+	// Agent with only baseline scopes.
 	agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("dg1-agent-caller1")},
 		ProjectID: projectID,
 		Scopes:    ScopesForRole(AgentRoleBaseline),
 	}}
 
-	// Agent must pass the same delegation test — it lacks the project-admin
-	// permissions so it should be denied.
+	// RS1 D3: project-scoped bindings excluded. Agent allowed.
 	decision := authz.CanDelegate(ctx, agentIdentity, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed,
-		"agent caller should be denied when it lacks permissions inherited through the group")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: agent caller allowed — project-scoped bindings excluded from delegation check")
 }
 
 // TestCanDelegate_GroupMembership_AgentCaller_RoleBearingGroup verifies that
-// an agent cannot add members to a role-bearing group if it lacks the
-// inherited permissions.
+// per RS1 D3, an agent with only project-scoped group bindings is allowed
+// to add members. System-scoped bindings are still checked.
 func TestCanDelegate_GroupMembership_AgentCaller_RoleBearingGroup(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -500,13 +505,13 @@ func TestCanDelegate_GroupMembership_AgentCaller_RoleBearingGroup(t *testing.T) 
 		Scopes:    ScopesForRole(AgentRoleBaseline),
 	}}
 
-	// Agent with baseline scopes cannot delegate project-admin authority.
+	// RS1 D3: project-scoped bindings excluded. Agent allowed.
 	decision := authz.CanDelegate(ctx, agentIdentity, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed,
-		"agent caller should be denied adding members to group with role-bearing authority it lacks")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: agent caller allowed — project-scoped bindings excluded from delegation check")
 }
 
 // TestCanDelegate_GroupMembership_SuperAdminBypass verifies that a super-admin
@@ -551,10 +556,10 @@ func TestCanDelegate_GroupMembership_SuperAdminBypass(t *testing.T) {
 // --- DG1.4: No special-project-group exception remains ---
 
 // TestCanDelegate_GroupMembership_NoSpecialProjectGroupException verifies
-// that GroupMembership.Role (governance) does NOT substitute for resource
-// authority. A user with no project permissions cannot add members to a
-// role-bearing group, even if they have governance access to a different
-// group.
+// that per RS1 D3, group membership delegation for groups with only
+// project-scoped bindings is now allowed. The test still verifies that
+// GroupMembership.Role does not substitute for system-scoped resource
+// authority.
 func TestCanDelegate_GroupMembership_NoSpecialProjectGroupException(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -603,16 +608,14 @@ func TestCanDelegate_GroupMembership_NoSpecialProjectGroupException(t *testing.T
 
 	user := NewAuthenticatedUser(userID, "dg1-noexc@test.com", "NoExc", "member", "api")
 
-	// The user has governance authority (group owner) on one group but
-	// lacks resource authority (project-admin permissions) needed by the
-	// role-bearing group. The delegation check must use role bindings,
-	// not governance roles.
+	// RS1 D3: project-scoped bindings excluded. Group membership governed
+	// by group roles only — the delegation check passes.
 	decision := authz.CanDelegate(ctx, user, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: roleBearingGroupID,
 	})
-	assert.False(t, decision.Allowed,
-		"group governance role must NOT substitute for resource authority in delegation check")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped bindings excluded from delegation check")
 }
 
 // --- DG1.5: Cycle detection tests ---
@@ -734,13 +737,14 @@ func TestCanDelegate_GroupMembership_ConcurrentRoleAdd(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Step 3: Same user, same group — now delegation is denied.
+	// Step 3: Same user, same group — per RS1 D3, project-scoped bindings are
+	// excluded from the delegation check, so the user is still allowed.
 	decision = authz.CanDelegate(ctx, user, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed,
-		"after adding role binding to group, delegation should be denied for unprivileged user")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped bindings excluded — user still allowed after binding added")
 }
 
 // --- DG1.7: Constraint-bearing group removal (AC1 not merged — documented) ---
@@ -783,12 +787,13 @@ func TestCanDelegate_GroupMembership_LiveResolution(t *testing.T) {
 
 	user := NewAuthenticatedUser(userID, "dg1-live@test.com", "Live", "member", "api")
 
-	// Before: user has no project perms — denied.
+	// RS1 D3: project-scoped bindings excluded — user is allowed even without
+	// project perms because group membership is governed by group roles only.
 	decision := authz.CanDelegate(ctx, user, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed, "before group membership, user should be denied")
+	assert.True(t, decision.Allowed, "RS1 D3: user allowed — project-scoped bindings excluded")
 
 	// Add user to a group with project-admin for this project.
 	adminGroupID := tid("dg1-admin-group-live")
@@ -899,10 +904,11 @@ func TestGetParentGroups_TransitiveParents(t *testing.T) {
 // themselves (or another principal) into a role-bearing group.
 // =============================================================================
 
-// TestCanDelegate_Regression_EscalationViaSelfInsert verifies that an actor
-// who lacks permission X is blocked from inserting themselves into a group that
-// carries permission X via a role binding. This closes the delegation escalation
-// window identified in the Wave 1 XL review (R2).
+// TestCanDelegate_Regression_EscalationViaSelfInsert verifies that per RS1 D3,
+// project-scoped authority escalation through group membership is no longer
+// blocked here — it is now governed at the point of assigning the group a
+// project role (via ProjectMembershipService). System-scoped escalation is
+// still prevented (see proxy insert test below).
 func TestCanDelegate_Regression_EscalationViaSelfInsert(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -911,18 +917,15 @@ func TestCanDelegate_Regression_EscalationViaSelfInsert(t *testing.T) {
 	attackerID := tid("r2-attacker")
 	groupID := tid("r2-group-esc")
 
-	// Set up project and the attacker user.
 	createDelegateTestProject(t, s, projectID, "r2-escalation-proj", tid("r2-proj-creator"))
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: attackerID, Email: "attacker@test.com", DisplayName: "Attacker",
 		Role: "member", Status: "active",
 	}))
 
-	// Give the attacker hub-member (minimal) authority — no project permissions.
 	createTestUserWithRole(t, s, tid("r2-attacker-role"), "attacker-role@test.com",
 		"member", store.SystemRoleHubMember)
 
-	// Create a group and bind project-admin to it — this is the target.
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{
 		ID: groupID, Slug: "r2-escalation-group", Name: "R2 Escalation Group",
 	}))
@@ -940,17 +943,15 @@ func TestCanDelegate_Regression_EscalationViaSelfInsert(t *testing.T) {
 
 	attacker := NewAuthenticatedUser(attackerID, "attacker@test.com", "Attacker", "member", "api")
 
-	// Attacker tries to add themselves to the role-bearing group.
 	decision := authz.CanDelegate(ctx, attacker, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
 
-	// MUST be denied: attacker does not hold project-admin permissions.
-	assert.False(t, decision.Allowed,
-		"REGRESSION: actor without project-admin must NOT be able to self-insert into a group bearing project-admin")
-	assert.Contains(t, decision.Reason, "cannot delegate",
-		"denial reason should mention delegation failure")
+	// RS1 D3: project-scoped bindings excluded. Escalation prevention moved
+	// to project role assignment time (ProjectMembershipService).
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped escalation prevention moved to project role assignment")
 }
 
 // TestCanDelegate_Regression_EscalationViaProxyInsert verifies that an actor
@@ -1002,10 +1003,9 @@ func TestCanDelegate_Regression_EscalationViaProxyInsert(t *testing.T) {
 	assert.Contains(t, decision.Reason, "cannot delegate")
 }
 
-// TestCanDelegate_Regression_AgentCallerEscalation verifies that an agent caller
-// (which was previously exempted from delegation checks) is now subject to the
-// same escalation guard. An agent without permission X cannot insert into a
-// role-bearing group.
+// TestCanDelegate_Regression_AgentCallerEscalation verifies that per RS1 D3,
+// agent callers with only project-scoped group bindings are allowed. System-scoped
+// escalation is still prevented.
 func TestCanDelegate_Regression_AgentCallerEscalation(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -1014,7 +1014,6 @@ func TestCanDelegate_Regression_AgentCallerEscalation(t *testing.T) {
 	agentID := tid("r2-agent-esc")
 	groupID := tid("r2-group-agent")
 
-	// Create project and agent.
 	createDelegateTestProject(t, s, projectID, "r2-agent-proj", tid("r2-agent-creator"))
 
 	project, err := s.GetProject(ctx, projectID)
@@ -1044,15 +1043,14 @@ func TestCanDelegate_Regression_AgentCallerEscalation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Agent caller with no special authority.
 	agentCaller := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: agentID}, ProjectID: projectID}}
 
-	// Agent tries to add a member to the role-bearing group.
 	decision := authz.CanDelegate(ctx, agentCaller, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
 
-	assert.False(t, decision.Allowed,
-		"REGRESSION: agent caller without project-admin must NOT bypass delegation check for role-bearing group")
+	// RS1 D3: project-scoped bindings excluded. Agent allowed.
+	assert.True(t, decision.Allowed,
+		"RS1 D3: agent caller allowed — project-scoped escalation prevention moved to project role assignment")
 }

@@ -172,7 +172,7 @@ var Catalog = []OperationSpec{
 		DelegationDescription: "Actor must hold all permissions in the target role (CanDelegate non-amplification)",
 		Governance: &GovernancePolicy{
 			Kind:        GovernancePeerSuperior,
-			Description: "C0 containment: only project-owner may add members. CT1 D5 approved governance matrix applies in RS1.",
+			Description: "RS1 governance: CT1 D5 typed governance matrix — owners manage all roles, admins manage members only. Enforced by ProjectMembershipService.checkGovernance.",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		Invariants: []Invariant{
@@ -204,7 +204,7 @@ var Catalog = []OperationSpec{
 		DelegationDescription: "CanDelegate checked when new role has more permissions than old role",
 		Governance: &GovernancePolicy{
 			Kind:        GovernancePeerSuperior,
-			Description: "C0 containment: only project-owner may change roles. CT1 D5 governance matrix applies in RS1.",
+			Description: "RS1 governance: CT1 D5 typed governance matrix — owners manage all roles, admins manage members only. Both old and new target roles are governed. Enforced by ProjectMembershipService.checkGovernance.",
 		},
 		AuthorityEval: AuthorityEvalBeforeAndAfter,
 		Invariants: []Invariant{
@@ -236,7 +236,7 @@ var Catalog = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernancePeerSuperior,
-			Description: "C0 containment: only project-owner may remove members. CT1 D1 allows self-removal when another active direct owner remains.",
+			Description: "RS1 governance: CT1 D5 typed governance matrix — owners manage all roles, admins manage members only. CT1 D1 allows self-removal when another active direct owner remains. Enforced by ProjectMembershipService.checkGovernance.",
 		},
 		AuthorityEval: AuthorityEvalProposedPost,
 		Invariants: []Invariant{
@@ -267,6 +267,40 @@ var Catalog = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "project.membership.transfer",
+		Domain:      "project.membership",
+		Description: "Atomically transfer project ownership from the actor to another user",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/transfer-ownership", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage",
+		Effects:               []SecurityEffect{EffectChangeAuthority},
+		DelegationKind:        DelegationConditionalIncrease,
+		DelegationDescription: "Actor must be a direct project owner; target is promoted to owner, actor is downgraded to member — conditional-on-increase applies to the target's authority change",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "RS1 governance: only active direct project owners may transfer ownership. Actor-must-be-direct-owner is enforced by the ProjectMembershipService.",
+		},
+		AuthorityEval: AuthorityEvalBeforeAndAfter,
+		Invariants: []Invariant{
+			{ID: "direct-user-only-owner", Description: "project-owner role is direct-user-only", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "last-owner-guard", Description: "Post-state: at least one active direct owner must remain", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project; atomic replacement for both actor and target", Kind: InvariantBusiness, FailClosed: false},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project.membership.transfer",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"old_owner_id"},
+			AfterFields:   []string{"new_owner_id", "old_owner_role", "new_owner_role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialPrincipalIneligible, DenialLastOwner},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 
 	// =====================================================================
@@ -2290,12 +2324,17 @@ var EntryPointExemptions = []EntryPointExemption{
 // Organized by source file for reviewability.
 var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
-	// pkg/hub/handlers_project_members.go — project membership operations
+	// pkg/hub/project_membership_service.go — RS1 bounded domain service
+	// Mutations moved from handlers to the service in RS1. Handlers now
+	// delegate to the service and never directly mutate RoleBindings.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_project_members.go", Function: "addProjectMember", Symbol: "CreateRoleBinding", OperationID: "project.membership.add"},
-	{File: "pkg/hub/handlers_project_members.go", Function: "removeProjectMember", Symbol: "DeleteRoleBinding", OperationID: "project.membership.remove"},
-	{File: "pkg/hub/handlers_project_members.go", Function: "updateProjectMemberRole", Symbol: "CreateRoleBinding", OperationID: "project.membership.update"},
-	{File: "pkg/hub/handlers_project_members.go", Function: "updateProjectMemberRole", Symbol: "DeleteRoleBinding", OperationID: "project.membership.update"},
+	{File: "pkg/hub/project_membership_service.go", Function: "AddMember", Symbol: "CreateRoleBinding", OperationID: "project.membership.add"},
+	{File: "pkg/hub/project_membership_service.go", Function: "UpdateMemberRole", Symbol: "CreateRoleBinding", OperationID: "project.membership.update"},
+	{File: "pkg/hub/project_membership_service.go", Function: "UpdateMemberRole", Symbol: "DeleteRoleBinding", OperationID: "project.membership.update"},
+	{File: "pkg/hub/project_membership_service.go", Function: "RemoveMember", Symbol: "DeleteRoleBinding", OperationID: "project.membership.remove"},
+	{File: "pkg/hub/project_membership_service.go", Function: "TransferOwnership", Symbol: "CreateRoleBinding", OperationID: "project.membership.transfer"},
+	{File: "pkg/hub/project_membership_service.go", Function: "replaceBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement used by AddMember/UpdateMemberRole/TransferOwnership; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
+	{File: "pkg/hub/project_membership_service.go", Function: "replaceBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement cleanup; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_roles.go — role/binding CRUD

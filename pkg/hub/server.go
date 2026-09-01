@@ -792,6 +792,9 @@ type Server struct {
 	governanceService   *GovernanceService   // B5 transactional governance
 	capabilitiesService *CapabilitiesService // B6 capabilities computation
 
+	// RS1: Bounded domain service for project membership and ownership mutations.
+	membershipService *ProjectMembershipService
+
 	// Per-sender token-bucket limiter for the chat send paths (#1054).
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
@@ -1296,6 +1299,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize B3-B6 boundary services (preview, governance, capabilities).
 	srv.initBoundaryServices()
+
+	// RS1: Initialize the project membership domain service.
+	srv.membershipService = NewProjectMembershipService(
+		s, srv.authzService,
+		logging.Subsystem("hub.membership"),
+		srv.emitMutationAudit,
+	)
 
 	// Wire the caller-permission checker for agent service-account assignment.
 	//

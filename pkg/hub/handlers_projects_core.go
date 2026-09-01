@@ -1783,6 +1783,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RS1: Atomic ownership transfer endpoint.
+	if subPath == "transfer-ownership" {
+		s.handleTransferOwnership(w, r, projectID)
+		return
+	}
+
 	// Check for nested /agents path
 	if strings.HasPrefix(subPath, "agents") {
 		agentPath := strings.TrimPrefix(subPath, "agents")

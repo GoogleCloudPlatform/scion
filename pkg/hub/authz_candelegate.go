@@ -157,17 +157,24 @@ func (a *AuthzService) canDelegateRoleBinding(ctx context.Context, actor Identit
 }
 
 // canDelegateGroupMembership checks whether the actor can add a member to
-// a group. Because membership in a role-bearing group confers all of that
-// group's role-binding authority, the actor must hold every permission that
-// becomes newly reachable through the addition.
+// a group.
 //
-// The check covers:
-//   - Direct role bindings on the target group.
-//   - For nested group additions: the full parent closure — if group A has
-//     role R at scope S, adding group B to A means B's members inherit R at S.
-//   - Agent callers: pass the same test as user callers.
-//   - GroupMembership.Role (governance) does NOT substitute for resource
-//     authority and is not consulted here.
+// RS1 D3 approved rule: group membership mutations are governed solely by
+// group roles and bindings. The previous cross-domain project-authority scan
+// (checking that the actor held all project permissions inherited through
+// group bindings) has been removed per the approved governance appendix.
+// Project-level delegation is governed at the point of assigning a project
+// role to a group (via ProjectMembershipService), not at the point of
+// managing group members.
+//
+// The check now covers only:
+//   - System-scoped role bindings on the group closure: a scoped UAT must
+//     not delegate system-scoped authority through group membership.
+//   - System-scoped non-amplification: if the group inherits system-scoped
+//     bindings, the actor must hold those permissions.
+//
+// Project-scoped bindings on the group are explicitly excluded from this
+// check per D3.
 func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	groupID := grant.GroupID
 	if groupID == "" {
@@ -175,22 +182,15 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 	}
 
 	// Build the principal closure of the target group: the group itself plus
-	// all ancestor groups that transitively contain it. Adding a member to
-	// groupID means the new member inherits bindings on groupID AND on every
-	// ancestor group.
+	// all ancestor groups that transitively contain it.
 	groupPrincipals := []store.PrincipalRef{
 		{Type: store.RoleBindingPrincipalGroup, ID: groupID},
 	}
 
-	// Collect ancestor groups via the group's effective-group parent closure.
-	// GetEffectiveGroups returns groups a user/agent belongs to by walking UP
-	// the group hierarchy. For a group, we need to find which groups contain
-	// THIS group — i.e., its parent groups. We use the store method directly.
 	parentGroups, err := a.store.GetParentGroups(ctx, groupID)
 	if err != nil {
 		a.logger.Warn("failed to resolve parent groups for delegation check",
 			"group_id", groupID, "error", err)
-		// Fail closed: if we cannot resolve the parent closure, deny.
 		return Decision{Allowed: false, Reason: "cannot resolve parent group closure"}
 	}
 	for _, pgID := range parentGroups {
@@ -214,31 +214,43 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		return Decision{Allowed: true, Reason: "group has no role bindings; no authority delegation required"}
 	}
 
+	// RS1 D3: filter to system-scoped bindings only. Project-scoped bindings
+	// are excluded because project-level delegation is governed at role
+	// assignment time (ProjectMembershipService), not at group membership time.
+	var systemBindings []*store.RoleBinding
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem {
+			systemBindings = append(systemBindings, b)
+		}
+	}
+
 	// R4 gap (a): UAT scope bypass on group membership. If any binding on
 	// the group closure is system-scoped, a project-scoped UAT must not be
-	// allowed to delegate that authority — the GrantDescriptor for group
-	// membership has no ScopeType, so enforceUATDelegation cannot catch it.
+	// allowed to delegate that authority.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
-		for _, b := range bindings {
-			if b.ScopeType == store.RoleScopeSystem {
-				return Decision{
-					Allowed: false,
-					Reason:  "scoped credential cannot delegate system-scoped group authority",
-				}
+		if len(systemBindings) > 0 {
+			return Decision{
+				Allowed: false,
+				Reason:  "scoped credential cannot delegate system-scoped group authority",
 			}
 		}
 	}
 
-	// Collect all permissions grouped by (scopeType, scopeID) so we can
-	// verify the actor holds each permission at the appropriate scope.
+	// If no system-scoped bindings, group membership is purely group-governed
+	// per D3. Allow the delegation.
+	if len(systemBindings) == 0 {
+		return Decision{Allowed: true, Reason: "RS1 D3: group membership governed by group roles; no system-scoped authority to delegate"}
+	}
+
+	// For system-scoped bindings, verify the actor holds each permission.
 	type scopeKey struct {
 		scopeType string
 		scopeID   string
 	}
 	permsByScope := make(map[scopeKey]map[string]struct{})
-	rdCache := make(map[string]*store.RoleDefinition) // dedup GetRoleDefinition calls
+	rdCache := make(map[string]*store.RoleDefinition)
 
-	for _, b := range bindings {
+	for _, b := range systemBindings {
 		rd, ok := rdCache[b.RoleDefinitionID]
 		if !ok {
 			var rdErr error
@@ -246,7 +258,6 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 			if rdErr != nil {
 				a.logger.Warn("failed to resolve role definition for group binding",
 					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-				// Fail closed: an unresolvable role definition must deny, not skip.
 				return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
 			}
 			rdCache[b.RoleDefinitionID] = rd
@@ -260,21 +271,7 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		}
 	}
 
-	// Verify the actor holds every inherited permission at each scope.
 	for sk, perms := range permsByScope {
-		// R-3 fix: for scoped UAT actors, reject any project-scoped binding
-		// whose project doesn't match the credential's scoped project. A
-		// project-scoped UAT must not delegate group authority in a different
-		// project.
-		if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
-			if sk.scopeType == store.RoleScopeProject && sk.scopeID != scoped.ScopedProjectID() {
-				return Decision{
-					Allowed: false,
-					Reason:  "scoped credential cannot delegate group authority in a different project",
-				}
-			}
-		}
-
 		permList := make([]string, 0, len(perms))
 		for p := range perms {
 			permList = append(permList, p)
@@ -283,12 +280,12 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		if !decision.Allowed {
 			return Decision{
 				Allowed: false,
-				Reason:  "actor cannot delegate inherited group authority: " + decision.Reason,
+				Reason:  "actor cannot delegate inherited system-scoped group authority: " + decision.Reason,
 			}
 		}
 	}
 
-	return Decision{Allowed: true, Reason: "actor holds all permissions inherited through group membership"}
+	return Decision{Allowed: true, Reason: "actor holds all system-scoped permissions inherited through group membership"}
 }
 
 // canDelegateAgent checks whether the actor holds all scopes/permissions
@@ -368,14 +365,11 @@ func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity
 	return a.actorHoldsAllPermissions(ctx, actor, grant.CustomRolePermissions, grant.ScopeType, grant.ScopeID)
 }
 
-// canDelegateProjectMembership checks whether the actor can add members to
-// a project.
-//
-// C0-CONTAINMENT: F-QA-02, F-PLAN-02, F-PLAN-03 — temporarily requires
-// an active direct project-owner binding. Project admins cannot manage
-// membership until the Phase 1 governance matrix is approved. Contract
-// decision to relax: Phase 1 must define which actor roles can manage
-// which target roles.
+// canDelegateProjectMembership checks whether the actor can manage members in
+// a project. RS1: relaxed from C0 owner-only to the CT1 D5 governance matrix.
+// Both project-owner and project-admin (direct or group-derived) may manage
+// membership. Target-role governance is enforced by ProjectMembershipService,
+// not here — this gate only checks base membership management authority.
 func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	if grant.ProjectID == "" {
 		return Decision{Allowed: false, Reason: "project membership requires a project ID"}
@@ -384,7 +378,10 @@ func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor I
 	if a.isProjectOwner(ctx, userID, grant.ProjectID) {
 		return Decision{Allowed: true, Reason: "project owner can manage membership"}
 	}
-	return Decision{Allowed: false, Reason: "only project owners can manage project membership"}
+	if a.isProjectOwnerOrAdmin(ctx, userID, grant.ProjectID) {
+		return Decision{Allowed: true, Reason: "project admin can manage membership (RS1 governance matrix)"}
+	}
+	return Decision{Allowed: false, Reason: "only project owners and admins can manage project membership"}
 }
 
 // actorHoldsAllPermissions resolves the actor's effective permissions in the

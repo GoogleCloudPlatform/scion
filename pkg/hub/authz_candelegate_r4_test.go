@@ -282,14 +282,14 @@ func TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied(t *testing.T)
 	assert.True(t, decision.Allowed,
 		"full-session owner should delegate cross-project group membership")
 
-	// UAT scoped to project A must NOT delegate group authority for project B.
+	// RS1 D3: project-scoped bindings are excluded from the group membership
+	// delegation check. A scoped UAT is allowed because there are no
+	// system-scoped bindings on the group.
 	scopedOwner := NewScopedUserIdentity(owner, projectA, []string{"agent:read"})
 	decision = authz.CanDelegate(ctx, scopedOwner, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed,
-		"R-3: project-A-scoped UAT must NOT delegate group authority in project B")
-	assert.Contains(t, decision.Reason, "different project",
-		"denial reason should mention cross-project")
+	assert.True(t, decision.Allowed,
+		"RS1 D3: project-scoped bindings excluded — scoped UAT allowed for group with only project bindings")
 }
