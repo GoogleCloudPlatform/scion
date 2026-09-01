@@ -228,9 +228,9 @@ missing-eligibility-gate, information-leak, denial-quality.
 |---|---|---|---|---|---|
 | Critical | 3 | 0 | 3 | 0 | 0 |
 | High | 4 | 3 | 1 | 0 | 0 |
-| Medium | 4 | 1 | 2 | 0 | 1 |
+| Medium | 5 | 1 | 3 | 0 | 1 |
 | Low | 3 | 1 | 1 | 1 | 0 |
-| **Total** | **14** | **5** | **7** | **1** | **1** |
+| **Total** | **15** | **5** | **8** | **1** | **1** |
 
 ## C0 Containment Changes
 
