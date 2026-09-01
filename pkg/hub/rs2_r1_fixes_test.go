@@ -320,8 +320,10 @@ func TestRS2_CursorReplayAfterGrantRemoval(t *testing.T) {
 		"cursor must be rejected after grant removal changes authorization filter")
 }
 
-// TestRS2_CursorReplayAfterBindingExpiry mints a cursor with a soon-to-expire
-// binding, waits for expiry, then replays.
+// TestRS2_CursorReplayAfterBindingExpiry mints a cursor while all bindings are
+// active, then transitions one binding to expired (delete + recreate with past
+// ExpiresAt), and replays. The cursor must be rejected because the scope
+// resolution now sees fewer authorized projects → different filter hash.
 func TestRS2_CursorReplayAfterBindingExpiry(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -336,8 +338,9 @@ func TestRS2_CursorReplayAfterBindingExpiry(t *testing.T) {
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Create 4 projects. One binding expires in the past (effectively expired
-	// during the test's own authorization resolution).
+	// Create 4 projects, all authorized with active (non-expiring) bindings.
+	var bindingIDs []string
+	var projectIDs []string
 	for i := 0; i < 4; i++ {
 		p := &store.Project{
 			ID: tid(fmt.Sprintf("r1-cre-p%d", i)), Name: fmt.Sprintf("Proj %d", i),
@@ -345,30 +348,57 @@ func TestRS2_CursorReplayAfterBindingExpiry(t *testing.T) {
 			Created: time.Now().Add(time.Duration(-4+i) * time.Hour), Updated: time.Now(),
 		}
 		require.NoError(t, s.CreateProject(ctx, p))
-		rb := &store.RoleBinding{
+		projectIDs = append(projectIDs, p.ID)
+
+		rb, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: memberRD.ID,
 			PrincipalType:    store.RoleBindingPrincipalUser,
 			PrincipalID:      user.ID,
 			ScopeType:        store.RoleScopeProject,
 			ScopeID:          p.ID,
 			CreatedBy:        "test",
-		}
-		_, err := s.CreateRoleBinding(ctx, rb)
+		})
 		require.NoError(t, err)
+		bindingIDs = append(bindingIDs, rb.ID)
 	}
 
-	// Get page 1 cursor with all 4 authorized
+	// Verify all 4 are authorized and mint a cursor.
 	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/projects?limit=2", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var page1 ListProjectsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page1))
-	require.NotEmpty(t, page1.NextCursor)
-	assert.Equal(t, 4, page1.TotalCount)
+	require.NotEmpty(t, page1.NextCursor, "cursor required for page-2 replay")
+	assert.Equal(t, 4, page1.TotalCount, "all 4 projects must be visible before expiry")
 
-	// Page 2 with same auth state should work
+	// Transition binding 0 to expired: delete the active binding, then recreate
+	// it with ExpiresAt in the past. This is the deterministic clock seam the
+	// brief requires — no sleep or wall-clock dependency.
+	require.NoError(t, s.DeleteRoleBinding(ctx, bindingIDs[0]))
+	pastExpiry := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectIDs[0],
+		ExpiresAt:        &pastExpiry,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Confirm the expiry actually reduced the visible scope (sanity check).
+	recCheck := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/projects?limit=10", nil)
+	require.Equal(t, http.StatusOK, recCheck.Code)
+	var checkResp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(recCheck.Body).Decode(&checkResp))
+	assert.Equal(t, 3, checkResp.TotalCount,
+		"after expiry, only 3 projects should be visible (proves binding really changed)")
+
+	// Replay the stale cursor → must be rejected because scope hash changed.
 	rec = doRequestAsUser(t, srv, user, http.MethodGet,
 		"/api/v1/projects?limit=2&cursor="+page1.NextCursor, nil)
-	assert.Equal(t, http.StatusOK, rec.Code, "valid cursor replay should succeed")
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"cursor must be rejected after binding expiry changes authorization filter")
 }
 
 // ==========================================================================
@@ -498,14 +528,108 @@ func TestRS2_StoreMalformedExclusionFailsClosed(t *testing.T) {
 // ==========================================================================
 
 // TestRS2_MalformedConstraintExclusionHTTP verifies that a malformed
-// constraint scope ID propagates to a stable 500 through the HTTP path.
-// This exercises the full resolver → store path.
+// constraint scope ID propagates through the full HTTP path to a stable 500.
+// A constraint with a malformed ScopeID ends up as an ExcludedProjectIDs
+// entry in the store filter; parseUUIDsStrict rejects it → handler 500.
+//
+// We inject the malformed constraint via a store wrapper that returns a
+// poisoned constraint from ListAccessConstraints, since the real store
+// validates scope IDs on creation. This simulates data corruption.
 func TestRS2_MalformedConstraintExclusionHTTP(t *testing.T) {
-	// This test verifies the store-level behavior; the constraint resolver
-	// produces valid UUIDs from AccessConstraint.Scope.ID, so malformed data
-	// would indicate a data integrity issue. The store adapter now fails closed
-	// on such data rather than silently skipping it.
-	t.Log("Malformed exclusion fail-closed verified at store level by TestRS2_StoreMalformedExclusionFailsClosed")
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	admin := &store.User{
+		ID: tid("r2-mch-u"), Email: "r2-mch@test.com",
+		DisplayName: "Malformed Constraint User", Role: store.UserRoleAdmin, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+
+	// Super-admin so scope is All (constraints become ExcludedProjectIDs).
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	proj := &store.Project{
+		ID: tid("r2-mch-p"), Name: "MCH Proj", Slug: "r2-mch-proj",
+		OwnerID: admin.ID, CreatedBy: admin.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID: tid("r2-mch-a"), Slug: "r2-mch-a", Name: "mch-agent",
+		ProjectID: proj.ID, OwnerID: admin.ID,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+
+	// Install a store wrapper that injects a constraint with a malformed
+	// scope ID (simulating data corruption). The constraint targets the
+	// admin user's principal closure and blocks project.list + agent.list
+	// for a scope ID that is not a valid UUID.
+	malformedStore := &r2MalformedConstraintStore{Store: s, principalID: admin.ID}
+	origStore := srv.store
+	origAuthzStore := srv.authzService.store
+	srv.store = malformedStore
+	srv.authzService.store = malformedStore
+	defer func() {
+		srv.store = origStore
+		srv.authzService.store = origAuthzStore
+	}()
+
+	t.Run("project_list_500", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects", nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"malformed constraint scope must produce 500 through HTTP path")
+		assert.NotContains(t, rec.Body.String(), proj.Name,
+			"500 response must not leak project data")
+	})
+
+	t.Run("agent_list_500", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/agents", nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"malformed constraint scope must produce 500 through HTTP path")
+		assert.NotContains(t, rec.Body.String(), ag.Name,
+			"500 response must not leak agent data")
+	})
+}
+
+// r2MalformedConstraintStore wraps a real store and injects a poisoned
+// constraint with a malformed ScopeID into the ListAccessConstraints result.
+type r2MalformedConstraintStore struct {
+	store.Store
+	principalID string
+}
+
+func (s *r2MalformedConstraintStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
+	real, err := s.Store.ListAccessConstraints(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	pType := "user"
+	// Inject a constraint with a malformed scope ID. MaximumPermissions
+	// allowlist omits project.list and agent.list, so this constraint blocks
+	// listing for the target principal in the malformed scope.
+	poisoned := &store.AccessConstraint{
+		ID:                   "malformed-constraint-test",
+		Name:                 "poisoned-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   &s.principalID,
+		ScopeType:            "project",
+		ScopeID:              "not-a-valid-uuid", // malformed → parseUUIDsStrict error
+		MaximumPermissions:   []string{"agent.read"},
+		CreatedBy:            "test",
+	}
+	return append(real, poisoned), nil
 }
 
 // ==========================================================================
@@ -1642,18 +1766,5 @@ func TestRS2_EnrichmentOnlyFromAuthorized(t *testing.T) {
 	})
 }
 
-// ==========================================================================
-// Original-brief: pre-existing test failure reconciliation
-// ==========================================================================
-
-// TestRS2_RoleBindingAgentPrincipalStatus documents the status of the
-// TestRolesAPI_CreateRoleBinding_AgentPrincipal test. The dev report R1
-// claimed it was pre-existing; the reviewer noted make ci passes clean.
-// The test fails under direct invocation due to missing agent-binding-role
-// validation but passes in make ci because it's excluded by build tags.
-// This is not an RS2 regression.
-func TestRS2_RoleBindingAgentPrincipalStatus(t *testing.T) {
-	t.Log("TestRolesAPI_CreateRoleBinding_AgentPrincipal failure is pre-existing and " +
-		"occurs only under direct go test invocation, not make ci (which uses -tags no_sqlite " +
-		"for lint and the full test run passes). Claim removed from dev report.")
-}
+// TestRS2_RoleBindingAgentPrincipalStatus removed (R2 item 11):
+// zero-assertion documentation function; status recorded in dev report only.

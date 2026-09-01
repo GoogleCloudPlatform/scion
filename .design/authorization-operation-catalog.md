@@ -1987,6 +1987,18 @@
 - `pkg/hub:TestRS2_AgentListScopePushed`
 - `pkg/hub:TestRS2_AgentListMineSharedClassification`
 - `pkg/hub:TestRS2_AgentListSlugOracle`
+- `pkg/hub:TestRS2_AgentListMultiPageInterleaved`
+- `pkg/hub:TestRS2_FailureInjection_PrincipalGroupClosure`
+- `pkg/hub:TestRS2_FailureInjection_StoreListCount`
+- `pkg/hub:TestRS2_CursorReplayAfterGrantRemoval`
+- `pkg/hub:TestRS2_CursorReplayAfterBindingExpiry`
+- `pkg/hub:TestRS2_AllPlusConstraint_EndToEnd`
+- `pkg/hub:TestRS2_ProductionAgentJWT`
+- `pkg/hub:TestRS2_SystemAllSharedSemantics`
+- `pkg/hub:TestRS2_GroupChangeCursorReplay`
+- `pkg/hub:TestRS2_ConstraintChangeCursorReplay`
+- `pkg/hub:TestRS2_TransitiveGroupAccess`
+- `pkg/hub:TestRS2_FilterCompositionMatrix`
 
 ---
 
@@ -2209,6 +2221,22 @@
 - `pkg/hub:TestRS2_ProjectListScopePushed`
 - `pkg/hub:TestRS2_ProjectListMineSharedClassification`
 - `pkg/hub:TestRS2_ProjectListCursorBinding`
+- `pkg/hub:TestRS2_ProjectListMultiPageInterleaved`
+- `pkg/hub:TestRS2_ProjectListInterleavedWithCallerFilter`
+- `pkg/hub:TestRS2_FailureInjection_PrincipalGroupClosure`
+- `pkg/hub:TestRS2_FailureInjection_StoreListCount`
+- `pkg/hub:TestRS2_CursorReplayAfterGrantRemoval`
+- `pkg/hub:TestRS2_CursorReplayAfterBindingExpiry`
+- `pkg/hub:TestRS2_AllPlusConstraint_EndToEnd`
+- `pkg/hub:TestRS2_MalformedConstraintExclusionHTTP`
+- `pkg/hub:TestRS2_SystemAllSharedSemantics`
+- `pkg/hub:TestRS2_GroupChangeCursorReplay`
+- `pkg/hub:TestRS2_ConstraintChangeCursorReplay`
+- `pkg/hub:TestRS2_SuspensionCursorReplay`
+- `pkg/hub:TestRS2_CredentialChangeCursorReplay`
+- `pkg/hub:TestRS2_TransferredOwnership`
+- `pkg/hub:TestRS2_TransitiveGroupAccess`
+- `pkg/hub:TestRS2_FilterCompositionMatrix`
 
 ---
 
