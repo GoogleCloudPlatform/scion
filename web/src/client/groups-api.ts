@@ -148,15 +148,6 @@ async function classifyError(res: Response): Promise<GroupsApiError> {
   return new GroupsApiError('http', msg, status);
 }
 
-/**
- * Classify an error from a raw fetch response (used by deleteGroup and
- * removeMember which bypass apiFetch).
- */
-async function classifyRawError(res: Response): Promise<GroupsApiError> {
-  // parseApiError works on any Response — it just parses the JSON body.
-  return classifyError(res);
-}
-
 /* -------------------------------------------------------------------------- */
 /* URL building                                                               */
 /* -------------------------------------------------------------------------- */
@@ -232,12 +223,12 @@ export async function deleteGroup(id: string): Promise<void> {
     method: 'DELETE',
     credentials: 'include',
   });
-  if (!res.ok) throw await classifyRawError(res);
+  if (!res.ok) throw await classifyError(res);
 }
 
 /** List groups that the current user is a member of. */
 export async function listMyGroups(): Promise<AdminGroup[]> {
-  const res = await apiFetch(`${BASE_PATH}/my`);
+  const res = await apiFetch('/api/v1/users/me/groups');
   if (!res.ok) throw await classifyError(res);
   const data = (await res.json()) as { groups: AdminGroup[] };
   return data.groups;
@@ -289,24 +280,56 @@ export async function removeMember(
 
   // Non-204 success with a body may indicate security_review or lockout.
   if (res.ok) {
-    const body = (await res.json()) as {
-      security_review?: { detail?: string; message?: string };
-      lockout?: { detail?: string; message?: string };
-    };
-    if (body.security_review) {
+    const body = (await res.json()) as Record<string, unknown>;
+    const sr = body.security_review as { detail?: string; message?: string } | undefined;
+    const lo = body.lockout as { detail?: string; message?: string } | undefined;
+    if (sr) {
       return {
         outcome: 'security_review',
-        detail: body.security_review.detail ?? body.security_review.message ?? '',
+        detail: sr.detail ?? sr.message ?? '',
+        rawBody: body,
       };
     }
-    if (body.lockout) {
+    if (lo) {
       return {
         outcome: 'lockout',
-        detail: body.lockout.detail ?? body.lockout.message ?? '',
+        detail: lo.detail ?? lo.message ?? '',
+        rawBody: body,
       };
     }
     return { outcome: 'ok' };
   }
 
-  throw await classifyRawError(res);
+  // Non-ok responses may also carry structured lockout or security-review
+  // payloads (e.g. 403 CONSTRAINT_ADMIN_LOCKOUT, 403 SECURITY_REVIEW_REQUIRED).
+  // Surface these as result outcomes instead of throwing, so that UI code can
+  // display purpose-built dialogs rather than a generic error toast.
+  const errorBody = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (errorBody) {
+    const error = errorBody.error as Record<string, unknown> | undefined;
+    if (error?.code === 'CONSTRAINT_ADMIN_LOCKOUT') {
+      return {
+        outcome: 'lockout',
+        detail: (error.message as string) ?? '',
+        rawBody: errorBody,
+      };
+    }
+    if (error?.code === 'SECURITY_REVIEW_REQUIRED') {
+      return {
+        outcome: 'security_review',
+        detail: (error.message as string) ?? '',
+        rawBody: errorBody,
+      };
+    }
+  }
+
+  // Re-create the response for classifyError since we already consumed the body.
+  if (errorBody) {
+    const syntheticRes = new Response(JSON.stringify(errorBody), {
+      status: res.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    throw await classifyError(syntheticRes);
+  }
+  throw new GroupsApiError('http', `HTTP ${res.status}`, res.status);
 }

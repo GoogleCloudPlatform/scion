@@ -108,11 +108,15 @@ export interface AddMemberRequest {
  * - `ok` — member was removed successfully.
  * - `security_review` — removal triggered a security review.
  * - `lockout` — removal would lock out the caller.
+ *
+ * The `rawBody` field carries the full parsed JSON response body so that
+ * consumers can extract richer structured detail (e.g. SecurityReviewDetail,
+ * LockoutConflict) without duplicating the raw fetch call.
  */
 export type RemoveMemberResult =
   | { outcome: 'ok' }
-  | { outcome: 'security_review'; detail: string }
-  | { outcome: 'lockout'; detail: string };
+  | { outcome: 'security_review'; detail: string; rawBody: Record<string, unknown> }
+  | { outcome: 'lockout'; detail: string; rawBody: Record<string, unknown> };
 
 /* Re-export types that downstream consumers commonly need alongside groups. */
 export type { AdminGroup, Capabilities, GroupMember, GroupType };

@@ -551,7 +551,7 @@ describe('Dialog behavior and accessibility', () => {
 
 describe('API adapter migration', () => {
   it('loadMembers uses listMembers from groups-api.ts', () => {
-    expect(SOURCE).toContain("import { listMembers, addMember, GroupsApiError } from '../../client/groups-api.js'");
+    expect(SOURCE).toContain("import { listMembers, addMember, removeMember, GroupsApiError } from '../../client/groups-api.js'");
     expect(SOURCE).toMatch(/await listMembers\(this\.groupId\)/);
   });
 
@@ -565,15 +565,16 @@ describe('API adapter migration', () => {
     expect(SOURCE).not.toContain('extractApiError');
   });
 
-  it('handleRemoveMember uses raw fetch for 403 bypass', () => {
-    // removeMember should use raw fetch with credentials:'include'
+  it('handleRemoveMember uses removeMember from groups-api.ts', () => {
+    // removeMember should delegate to the adapter's removeMember()
+    // which internally uses raw fetch with credentials:'include'
     // to bypass the global scion:access-denied 403 toast
     const removeMethod = SOURCE.match(
       /handleRemoveMember[\s\S]*?(?=\n\s+\/\*|private\s+format)/
     )?.[0];
     expect(removeMethod).toBeDefined();
-    expect(removeMethod).toContain("credentials: 'include'");
-    expect(removeMethod).toContain('await fetch(');
+    expect(removeMethod).toContain('await removeMember(');
+    expect(removeMethod).not.toContain('await fetch(');
   });
 
   it('catches GroupsApiError in handleAddMember', () => {
