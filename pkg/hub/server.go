@@ -795,6 +795,9 @@ type Server struct {
 	// RS1: Bounded domain service for project membership and ownership mutations.
 	membershipService *ProjectMembershipService
 
+	// RS3: Bounded domain service for project deletion.
+	deletionService *ProjectDeletionService
+
 	// Per-sender token-bucket limiter for the chat send paths (#1054).
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
@@ -1304,6 +1307,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.membershipService = NewProjectMembershipService(
 		s, srv.authzService,
 		logging.Subsystem("hub.membership"),
+	)
+
+	// RS3: Initialize the project deletion domain service.
+	srv.deletionService = NewProjectDeletionService(
+		s, srv.authzService,
+		logging.Subsystem("hub.project-deletion"),
 	)
 
 	// RS1 R2-R2: Run one-binding migration before accepting traffic.

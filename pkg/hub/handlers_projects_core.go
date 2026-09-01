@@ -2828,153 +2828,104 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Fetch the project record before deletion so we can clean up the filesystem.
+	// Resolve the authenticated actor.
+	identity := GetIdentityFromContext(ctx)
+	userIdentity, ok := identity.(UserIdentity)
+	if !ok || userIdentity == nil {
+		// RS3: Only user principals are admitted for project deletion.
+		// Agent/broker identities are rejected.
+		Forbidden(w)
+		return
+	}
+
+	// RS3: Pre-commit external effects — dispatch agent deletions to runtime
+	// brokers BEFORE the transactional phase. These are best-effort external
+	// effects that must happen before the DB cascade removes agent records.
+	// Authorization must be checked before any external effect is emitted.
+	//
+	// Fetch the project to support pre-commit effects and authorization.
 	project, err := s.store.GetProject(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
+	// Quick authorization check before emitting any external effect.
 	if !s.authorize(w, r, projectResource(project), ActionDelete) {
 		return
 	}
 
-	// Dispatch agent deletions to runtime brokers so containers are stopped
-	// and agent files are cleaned up. The DB cascade will remove agent records,
-	// but we need the broker to tear down the actual resources first.
+	// RS3 External Effect 1: Dispatch agent deletions to runtime brokers.
+	// Delivery: fire_and_forget. Failure: log_and_continue.
+	// Idempotency: agent ID. Must happen before DB cascade.
 	s.deleteProjectAgents(ctx, project)
 
-	// Clean up all groups associated with the project (agents group, members group, etc.)
-	if projectGroups, err := s.store.ListGroups(ctx, store.GroupFilter{ProjectID: id}, store.ListOptions{Limit: 100}); err == nil {
-		for _, g := range projectGroups.Items {
-			if delErr := s.store.DeleteGroup(ctx, g.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to delete project group", "project_id", id, "group", g.ID, "slug", g.Slug, "error", delErr.Error())
-			}
-		}
-	}
-
-	// CO1: Legacy policy cleanup removed. Policies are dead data.
-
-	// Cascade-delete all project-scoped role bindings (XL review R1).
-	// This removes all membership (owner/admin/member) bindings and the
-	// hub-members visibility binding for this project. Must run before
-	// DeleteProject so the scope reference is still valid for audit.
-	if n, err := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to cascade-delete project role bindings", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("cascade-deleted project role bindings", "project_id", id, "count", n)
-	}
-
-	// Clean up project-scoped env vars (best-effort).
-	// These use scope/scope_id without FK cascade.
-	if n, err := s.store.DeleteEnvVarsByScope(ctx, store.ScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to delete project env vars", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project env vars", "project_id", id, "count", n)
-	}
-
-	// Clean up project-scoped secrets (best-effort).
-	if n, err := s.store.DeleteSecretsByScope(ctx, store.ScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to delete project secrets", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project secrets", "project_id", id, "count", n)
-	}
-
-	// Clean up project-scoped skill injections (best-effort).
-	// These use scope/scope_id without FK cascade.
-	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to delete project skill injections", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project skill injections", "project_id", id, "count", n)
-	}
-
-	// Warn about retained managed GCP service accounts (best-effort).
-	// Managed SAs are NOT deleted from GCP — only unlinked from the project.
+	// RS3 External Effect 2: Warn about retained GCP service accounts.
 	s.warnManagedGCPServiceAccounts(ctx, id)
 
-	// Clean up project-scoped GCP service account registrations (best-effort).
-	if sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: id,
-	}); err == nil {
-		for _, sa := range sas {
-			if delErr := s.store.DeleteGCPServiceAccount(ctx, sa.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to delete project GCP service account registration",
-					"project_id", id, "sa_id", sa.ID, "email", sa.Email, "error", delErr.Error())
-			}
-		}
-	}
+	// RS3 External Effect 3: Delete template and harness config storage files.
+	// Must happen before DB cascade removes the records we need to enumerate.
+	s.deleteProjectTemplateStorageFiles(ctx, id)
+	s.deleteProjectHarnessConfigStorageFiles(ctx, id)
 
-	// Clean up project-scoped templates (best-effort), including storage files.
-	s.deleteProjectTemplates(ctx, id)
-
-	// Clean up project-scoped harness configs (best-effort), including storage files.
-	s.deleteProjectHarnessConfigs(ctx, id)
-
-	// For hub-native and shared-workspace projects, notify provider brokers to clean up
-	// their local project directories. This must run before DeleteProject because
-	// the cascade deletes the project_providers we need to enumerate.
+	// RS3 External Effect 4: Notify provider brokers to clean up local dirs.
+	// Must happen before DB cascade removes project_providers.
 	if project.GitRemote == "" || project.IsSharedWorkspace() {
 		s.cleanupBrokerProjectDirectories(ctx, project)
 	}
 
-	if err := s.store.DeleteProject(ctx, id); err != nil {
-		writeErrorFromErr(w, err, "")
+	// RS3: Delegate to the bounded deletion service for authorization
+	// composition, transactional cascades, and atomic audit.
+	req := ProjectDeleteRequest{
+		ProjectID: id,
+		Actor:     userIdentity,
+	}
+	result, decision := s.deletionService.Delete(ctx, req)
+	if decision != nil {
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
 		return
 	}
 
-	// Release quota reservation for the deleted project (best-effort).
+	// RS3: Post-commit external effects. These are best-effort and
+	// idempotent — failures do not invalidate the committed deletion.
+
+	// External Effect 5: Release quota reservation (best-effort).
 	if s.quotaService != nil {
 		s.quotaService.Release(ctx, "max_projects_per_user", id)
 	}
 
-	// For hub-native and shared-workspace projects, remove the filesystem directory
-	// and clean up the per-project WebDAV lock store to prevent memory leaks.
-	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
+	// External Effect 6: Filesystem cleanup (best-effort).
+	deletedProject := result.Project
+	if (deletedProject.GitRemote == "" || deletedProject.IsSharedWorkspace()) && deletedProject.Slug != "" {
+		if projectPath, err := s.hubManagedProjectPath(deletedProject.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
 				s.projectsLogger().Warn("failed to remove hub-managed project directory",
-					"project_id", id, "slug", project.Slug, "path", projectPath, "error", err)
+					"project_id", id, "slug", deletedProject.Slug, "path", projectPath, "error", err)
 			}
 		}
 	}
 	s.webdavLocks.Delete(id)
-	// Same reason, keyed by slug rather than ID: drop the once-per-project
-	// ephemeral-path warning suppression so a slug that is deleted and later
-	// recreated warns again instead of inheriting the old suppression.
-	//
-	// Order matters, and not marginally. The hubManagedProjectPath call above
-	// can re-record this slug: on gke-shared-volume it takes the legacy-local
-	// fallback and warns, and a project served from that fallback is exactly
-	// the population that has an entry here — so evicting before that call
-	// would reliably reinstate the entry it just removed, not occasionally.
-	// The invariant is about resolutions, not reads: the eviction has to
-	// follow the last hubManagedProjectPath call for this slug. The
-	// project-configs cleanup below reads the slug three times after it —
-	// its guard, the marker, and the failure log — and all three are
-	// harmless, because none of them calls hubManagedProjectPath, and only
-	// that resolution re-records.
-	s.warnedEphemeralProjects.Delete(project.Slug)
 
-	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
-	// This stores external settings, templates, and agent homes for both
-	// git-backed linked projects and non-git external projects.
-	if project.Slug != "" && project.ID != "" {
+	// External Effect 7: Clear ephemeral project warning suppression.
+	// Order matters: must follow the last hubManagedProjectPath call.
+	s.warnedEphemeralProjects.Delete(deletedProject.Slug)
+
+	// External Effect 8: Clean up external project config directory.
+	if deletedProject.Slug != "" && deletedProject.ID != "" {
 		marker := &config.ProjectMarker{
-			ProjectID:   project.ID,
-			ProjectSlug: project.Slug,
+			ProjectID:   deletedProject.ID,
+			ProjectSlug: deletedProject.Slug,
 		}
 		if configPath, err := marker.ExternalProjectPath(); err == nil {
-			// ExternalProjectPath returns <project-configs>/<slug__uuid>/.scion —
-			// remove the parent (<slug__uuid>) directory.
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", id, "slug", project.Slug, "path", projectConfigDir, "error", err)
+					"project_id", id, "slug", deletedProject.Slug, "path", projectConfigDir, "error", err)
 			}
 		}
 	}
 
+	// External Effect 9: Publish project-deleted event (best-effort).
 	s.events.PublishProjectDeleted(ctx, id)
 
 	w.WriteHeader(http.StatusNoContent)
@@ -3082,6 +3033,60 @@ func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID stri
 		s.projectsLogger().Warn("failed to delete project harness configs", "project_id", projectID, "error", err)
 	} else if n > 0 {
 		s.projectsLogger().Info("deleted project harness configs", "project_id", projectID, "count", n)
+	}
+}
+
+// RS3: Storage-only cleanup helpers. These clean up external storage files
+// (GCS/local) without touching DB records, since DB records are now
+// cascade-deleted transactionally by the ProjectDeletionService.
+
+// deleteProjectTemplateStorageFiles deletes storage files for project-scoped
+// templates. DB records are deleted transactionally by the deletion service.
+func (s *Server) deleteProjectTemplateStorageFiles(ctx context.Context, projectID string) {
+	templates, err := s.store.ListTemplates(ctx, store.TemplateFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		s.projectsLogger().Warn("failed to list project templates for storage cleanup", "project_id", projectID, "error", err)
+		return
+	}
+	stor := s.GetStorage()
+	if stor == nil {
+		return
+	}
+	for _, tmpl := range templates.Items {
+		if tmpl.StoragePath != "" {
+			if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
+				s.projectsLogger().Warn("failed to delete template storage files",
+					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
+			}
+		}
+	}
+}
+
+// deleteProjectHarnessConfigStorageFiles deletes storage files for project-scoped
+// harness configs. DB records are deleted transactionally by the deletion service.
+func (s *Server) deleteProjectHarnessConfigStorageFiles(ctx context.Context, projectID string) {
+	configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		s.projectsLogger().Warn("failed to list project harness configs for storage cleanup", "project_id", projectID, "error", err)
+		return
+	}
+	stor := s.GetStorage()
+	if stor == nil {
+		return
+	}
+	for _, hc := range configs.Items {
+		if hc.StoragePath != "" {
+			if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
+				s.projectsLogger().Warn("failed to delete harness config storage files",
+					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
+			}
+		}
 	}
 }
 
