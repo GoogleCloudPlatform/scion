@@ -2828,54 +2828,25 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Resolve the authenticated actor.
+	// Resolve the authenticated actor — only user principals admitted.
 	identity := GetIdentityFromContext(ctx)
 	userIdentity, ok := identity.(UserIdentity)
 	if !ok || userIdentity == nil {
-		// RS3: Only user principals are admitted for project deletion.
-		// Agent/broker identities are rejected.
 		Forbidden(w)
 		return
 	}
 
-	// RS3: Pre-commit external effects — dispatch agent deletions to runtime
-	// brokers BEFORE the transactional phase. These are best-effort external
-	// effects that must happen before the DB cascade removes agent records.
-	// Authorization must be checked before any external effect is emitted.
-	//
-	// Fetch the project to support pre-commit effects and authorization.
-	project, err := s.store.GetProject(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
+	// RS3 R1: Pre-enumerate read-only effect inputs BEFORE authorization.
+	// No destructive effects are emitted here — only data is gathered.
+	// This ensures the handler has the information it needs to execute
+	// effects post-authorization, after the service's transactional cascade
+	// has already deleted the DB records.
+	effectInputs := s.preEnumerateDeletionEffects(ctx, id)
 
-	// Quick authorization check before emitting any external effect.
-	if !s.authorize(w, r, projectResource(project), ActionDelete) {
-		return
-	}
-
-	// RS3 External Effect 1: Dispatch agent deletions to runtime brokers.
-	// Delivery: fire_and_forget. Failure: log_and_continue.
-	// Idempotency: agent ID. Must happen before DB cascade.
-	s.deleteProjectAgents(ctx, project)
-
-	// RS3 External Effect 2: Warn about retained GCP service accounts.
-	s.warnManagedGCPServiceAccounts(ctx, id)
-
-	// RS3 External Effect 3: Delete template and harness config storage files.
-	// Must happen before DB cascade removes the records we need to enumerate.
-	s.deleteProjectTemplateStorageFiles(ctx, id)
-	s.deleteProjectHarnessConfigStorageFiles(ctx, id)
-
-	// RS3 External Effect 4: Notify provider brokers to clean up local dirs.
-	// Must happen before DB cascade removes project_providers.
-	if project.GitRemote == "" || project.IsSharedWorkspace() {
-		s.cleanupBrokerProjectDirectories(ctx, project)
-	}
-
-	// RS3: Delegate to the bounded deletion service for authorization
-	// composition, transactional cascades, and atomic audit.
+	// RS3: Delegate to the bounded deletion service for complete
+	// authorization composition (base permission, governance, actor status,
+	// credential ceiling, TOCTOU re-check), transactional cascades, and
+	// atomic audit. NO external effects are emitted before this call.
 	req := ProjectDeleteRequest{
 		ProjectID: id,
 		Actor:     userIdentity,
@@ -2886,70 +2857,136 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	// RS3: Post-commit external effects. These are best-effort and
-	// idempotent — failures do not invalidate the committed deletion.
+	// RS3: Post-authorization, post-commit external effects.
+	// All effects are best-effort (fire_and_forget, log_and_continue).
+	// Authorization is complete — the service has committed the deletion.
+	deletedProject := result.Project
+	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
-	// External Effect 5: Release quota reservation (best-effort).
-	if s.quotaService != nil {
-		s.quotaService.Release(ctx, "max_projects_per_user", id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// RS3 external effect helpers
+// ---------------------------------------------------------------------------
+
+// deletionEffectInputs holds read-only data pre-enumerated before
+// authorization for post-deletion external effects.
+type deletionEffectInputs struct {
+	agents    []store.Agent
+	templates []store.Template
+	harnesses []store.HarnessConfig
+	providers []store.ProjectProvider
+	project   *store.Project // may be nil if not found
+}
+
+// preEnumerateDeletionEffects gathers read-only data needed for post-deletion
+// external effects. This is called BEFORE authorization — no destructive
+// effects are emitted. All reads are best-effort: failures result in empty
+// data, which means the corresponding post-deletion effect is skipped.
+func (s *Server) preEnumerateDeletionEffects(ctx context.Context, projectID string) deletionEffectInputs {
+	var inputs deletionEffectInputs
+
+	// Read project record for broker cleanup decisions.
+	if p, err := s.store.GetProject(ctx, projectID); err == nil {
+		inputs.project = p
 	}
 
-	// External Effect 6: Filesystem cleanup (best-effort).
-	deletedProject := result.Project
-	if (deletedProject.GitRemote == "" || deletedProject.IsSharedWorkspace()) && deletedProject.Slug != "" {
-		if projectPath, err := s.hubManagedProjectPath(deletedProject.Slug); err == nil {
+	// Enumerate agents for broker dispatch.
+	if result, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 1000}); err == nil {
+		inputs.agents = result.Items
+	}
+
+	// Enumerate templates for storage file cleanup.
+	if result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
+		Scope: store.ScopeProject, ScopeID: projectID,
+	}, store.ListOptions{Limit: 1000}); err == nil {
+		inputs.templates = result.Items
+	}
+
+	// Enumerate harness configs for storage file cleanup.
+	if result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope: store.ScopeProject, ScopeID: projectID,
+	}, store.ListOptions{Limit: 1000}); err == nil {
+		inputs.harnesses = result.Items
+	}
+
+	// Enumerate project providers for broker directory cleanup.
+	if providers, err := s.store.GetProjectProviders(ctx, projectID); err == nil {
+		inputs.providers = providers
+	}
+
+	// GCP SA warnings are log-only (non-destructive) — also pre-enumerate.
+	s.warnManagedGCPServiceAccounts(ctx, projectID)
+
+	return inputs
+}
+
+// executePostDeletionEffects runs all external effects after the deletion
+// service has committed. All effects are best-effort: fire_and_forget
+// delivery with log_and_continue on failure.
+func (s *Server) executePostDeletionEffects(ctx context.Context, projectID string, project *store.Project, inputs deletionEffectInputs) {
+	// Effect 1: Dispatch agent deletions to runtime brokers.
+	s.dispatchAgentDeletions(ctx, inputs.agents)
+
+	// Effect 2: Delete template storage files (GCS/local).
+	s.deleteStorageFiles(ctx, projectID, inputs.templates, inputs.harnesses)
+
+	// Effect 3: Notify provider brokers to clean up local project directories.
+	if project.GitRemote == "" || project.IsSharedWorkspace() {
+		s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
+	}
+
+	// Effect 4: Release quota reservation.
+	if s.quotaService != nil {
+		s.quotaService.Release(ctx, "max_projects_per_user", projectID)
+	}
+
+	// Effect 5: Filesystem cleanup (hub-managed projects).
+	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
+		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
 				s.projectsLogger().Warn("failed to remove hub-managed project directory",
-					"project_id", id, "slug", deletedProject.Slug, "path", projectPath, "error", err)
+					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
 	}
-	s.webdavLocks.Delete(id)
+	s.webdavLocks.Delete(projectID)
 
-	// External Effect 7: Clear ephemeral project warning suppression.
-	// Order matters: must follow the last hubManagedProjectPath call.
-	s.warnedEphemeralProjects.Delete(deletedProject.Slug)
+	// Effect 6: Clear ephemeral project warning suppression.
+	s.warnedEphemeralProjects.Delete(project.Slug)
 
-	// External Effect 8: Clean up external project config directory.
-	if deletedProject.Slug != "" && deletedProject.ID != "" {
+	// Effect 7: Clean up external project config directory.
+	if project.Slug != "" && project.ID != "" {
 		marker := &config.ProjectMarker{
-			ProjectID:   deletedProject.ID,
-			ProjectSlug: deletedProject.Slug,
+			ProjectID:   project.ID,
+			ProjectSlug: project.Slug,
 		}
 		if configPath, err := marker.ExternalProjectPath(); err == nil {
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", id, "slug", deletedProject.Slug, "path", projectConfigDir, "error", err)
+					"project_id", projectID, "slug", project.Slug, "path", projectConfigDir, "error", err)
 			}
 		}
 	}
 
-	// External Effect 9: Publish project-deleted event (best-effort).
-	s.events.PublishProjectDeleted(ctx, id)
-
-	w.WriteHeader(http.StatusNoContent)
+	// Effect 8: Publish project-deleted event.
+	s.events.PublishProjectDeleted(ctx, projectID)
 }
 
-// deleteProjectAgents dispatches deletion of all agents in a project to their
-// runtime brokers. This is best-effort: failures are logged but do not block
-// project deletion. The database cascade will remove agent records regardless.
-func (s *Server) deleteProjectAgents(ctx context.Context, project *store.Project) {
+// dispatchAgentDeletions dispatches agent deletion to runtime brokers
+// using pre-enumerated agent data. Best-effort: failures are logged.
+func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agent) {
 	dispatcher := s.GetDispatcher()
-
-	result, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.agentLifecycleLog.Warn("failed to list agents for project deletion", "project_id", project.ID, "error", err)
-		return
-	}
-
 	now := time.Now()
-	for _, agent := range result.Items {
+	for i := range agents {
+		agent := &agents[i]
 		if !agent.DeletedAt.IsZero() {
 			continue
 		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			if err := dispatcher.DispatchAgentDelete(ctx, &agent, true, true, false, now); err != nil {
+			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
 				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
 					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 			}
@@ -2958,34 +2995,72 @@ func (s *Server) deleteProjectAgents(ctx context.Context, project *store.Project
 	}
 }
 
-// deleteProjectTemplates deletes all project-scoped templates including their
-// storage files (GCS/local). This is best-effort: failures are logged but
-// do not block project deletion.
-func (s *Server) deleteProjectTemplates(ctx context.Context, projectID string) {
-	// List all project-scoped templates so we can clean up their storage files.
-	templates, err := s.store.ListTemplates(ctx, store.TemplateFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.projectsLogger().Warn("failed to list project templates for deletion", "project_id", projectID, "error", err)
-	} else if stor := s.GetStorage(); stor != nil {
-		for _, tmpl := range templates.Items {
-			if tmpl.StoragePath != "" {
-				if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
-					s.projectsLogger().Warn("failed to delete template storage files",
-						"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
-				}
+// deleteStorageFiles deletes external storage files for templates and
+// harness configs using pre-enumerated data. Best-effort: failures are logged.
+func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templates []store.Template, harnesses []store.HarnessConfig) {
+	stor := s.GetStorage()
+	if stor == nil {
+		return
+	}
+	for _, tmpl := range templates {
+		if tmpl.StoragePath != "" {
+			if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
+				s.projectsLogger().Warn("failed to delete template storage files",
+					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}
 		}
 	}
-
-	if n, err := s.store.DeleteTemplatesByScope(ctx, store.ScopeProject, projectID); err != nil {
-		s.projectsLogger().Warn("failed to delete project templates", "project_id", projectID, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project templates", "project_id", projectID, "count", n)
+	for _, hc := range harnesses {
+		if hc.StoragePath != "" {
+			if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
+				s.projectsLogger().Warn("failed to delete harness config storage files",
+					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
+			}
+		}
 	}
 }
+
+// cleanupBrokerProjectDirectoriesFromInputs notifies provider brokers to
+// remove local project directories using pre-enumerated provider data.
+func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, project *store.Project, providers []store.ProjectProvider) {
+	if project.Slug == "" || len(providers) == 0 {
+		return
+	}
+
+	var client RuntimeBrokerClient
+	if disp := s.GetDispatcher(); disp != nil {
+		if httpDisp, ok := disp.(*HTTPAgentDispatcher); ok {
+			client = httpDisp.GetClient()
+		}
+	}
+	if client == nil {
+		return
+	}
+
+	for _, provider := range providers {
+		if s.isEmbeddedBroker(provider.BrokerID) {
+			continue
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
+		if err != nil {
+			s.projectsLogger().Warn("failed to get broker for project cleanup",
+				"project_id", project.ID, "broker", provider.BrokerID, "error", err)
+			continue
+		}
+		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
+			s.projectsLogger().Warn("failed to cleanup project on broker",
+				"project_id", project.ID, "slug", project.Slug,
+				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
+		}
+	}
+}
+
+// NOTE: deleteProjectAgents was replaced by dispatchAgentDeletions in RS3 R1,
+// which uses pre-enumerated agent data and runs only after full authorization.
+
+// NOTE: deleteProjectTemplates was removed in RS3 R1. Template DB records
+// are now cascade-deleted transactionally by ProjectDeletionService.
+// Storage files are cleaned up by deleteStorageFiles using pre-enumerated data.
 
 // warnManagedGCPServiceAccounts logs a warning for any hub-minted GCP service
 // accounts that will be retained in GCP when a project is deleted.
@@ -3007,137 +3082,11 @@ func (s *Server) warnManagedGCPServiceAccounts(ctx context.Context, projectID st
 	}
 }
 
-// deleteProjectHarnessConfigs deletes all project-scoped harness configs including
-// their storage files (GCS/local). This is best-effort: failures are logged
-// but do not block project deletion.
-func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID string) {
-	// List all project-scoped harness configs so we can clean up their storage files.
-	configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.projectsLogger().Warn("failed to list project harness configs for deletion", "project_id", projectID, "error", err)
-	} else if stor := s.GetStorage(); stor != nil {
-		for _, hc := range configs.Items {
-			if hc.StoragePath != "" {
-				if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
-					s.projectsLogger().Warn("failed to delete harness config storage files",
-						"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
-				}
-			}
-		}
-	}
+// NOTE: deleteProjectHarnessConfigs was removed in RS3 R1. Harness config DB
+// records are now cascade-deleted transactionally by ProjectDeletionService.
+// Storage files are cleaned up by deleteStorageFiles using pre-enumerated data.
 
-	if n, err := s.store.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, projectID); err != nil {
-		s.projectsLogger().Warn("failed to delete project harness configs", "project_id", projectID, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project harness configs", "project_id", projectID, "count", n)
-	}
-}
-
-// RS3: Storage-only cleanup helpers. These clean up external storage files
-// (GCS/local) without touching DB records, since DB records are now
-// cascade-deleted transactionally by the ProjectDeletionService.
-
-// deleteProjectTemplateStorageFiles deletes storage files for project-scoped
-// templates. DB records are deleted transactionally by the deletion service.
-func (s *Server) deleteProjectTemplateStorageFiles(ctx context.Context, projectID string) {
-	templates, err := s.store.ListTemplates(ctx, store.TemplateFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.projectsLogger().Warn("failed to list project templates for storage cleanup", "project_id", projectID, "error", err)
-		return
-	}
-	stor := s.GetStorage()
-	if stor == nil {
-		return
-	}
-	for _, tmpl := range templates.Items {
-		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
-				s.projectsLogger().Warn("failed to delete template storage files",
-					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
-			}
-		}
-	}
-}
-
-// deleteProjectHarnessConfigStorageFiles deletes storage files for project-scoped
-// harness configs. DB records are deleted transactionally by the deletion service.
-func (s *Server) deleteProjectHarnessConfigStorageFiles(ctx context.Context, projectID string) {
-	configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.projectsLogger().Warn("failed to list project harness configs for storage cleanup", "project_id", projectID, "error", err)
-		return
-	}
-	stor := s.GetStorage()
-	if stor == nil {
-		return
-	}
-	for _, hc := range configs.Items {
-		if hc.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
-				s.projectsLogger().Warn("failed to delete harness config storage files",
-					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
-			}
-		}
-	}
-}
-
-// cleanupBrokerProjectDirectories notifies provider brokers to remove their local
-// copies of a hub-managed project directory. This is best-effort: failures are
-// logged but do not block project deletion. The embedded broker is skipped
-// because the hub already cleans up its own filesystem copy.
-func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *store.Project) {
-	if project.Slug == "" {
-		return
-	}
-
-	providers, err := s.store.GetProjectProviders(ctx, project.ID)
-	if err != nil {
-		s.projectsLogger().Warn("failed to get project providers for cleanup", "project_id", project.ID, "error", err)
-		return
-	}
-
-	if len(providers) == 0 {
-		return
-	}
-
-	// Get the RuntimeBrokerClient from the dispatcher.
-	var client RuntimeBrokerClient
-	if disp := s.GetDispatcher(); disp != nil {
-		if httpDisp, ok := disp.(*HTTPAgentDispatcher); ok {
-			client = httpDisp.GetClient()
-		}
-	}
-	if client == nil {
-		s.projectsLogger().Warn("no RuntimeBrokerClient available for project cleanup dispatch", "project_id", project.ID)
-		return
-	}
-
-	for _, provider := range providers {
-		// Skip the embedded broker — the hub already cleans up its own copy.
-		if s.isEmbeddedBroker(provider.BrokerID) {
-			continue
-		}
-
-		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
-		if err != nil {
-			s.projectsLogger().Warn("failed to get broker for project cleanup",
-				"project_id", project.ID, "broker", provider.BrokerID, "error", err)
-			continue
-		}
-
-		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
-			s.projectsLogger().Warn("failed to cleanup project on broker",
-				"project_id", project.ID, "slug", project.Slug,
-				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
-		}
-	}
-}
+// NOTE: deleteProjectTemplateStorageFiles, deleteProjectHarnessConfigStorageFiles,
+// and cleanupBrokerProjectDirectories were refactored in RS3 R1 into
+// preEnumerateDeletionEffects + executePostDeletionEffects to ensure no
+// destructive external effects execute before complete authorization.

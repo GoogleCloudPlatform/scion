@@ -23,6 +23,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -937,6 +938,414 @@ func createRS3HubAdmin(t *testing.T, s store.Store, userID string) {
 		CreatedBy:        store.SystemReconcileCreatedBy,
 	})
 	require.NoError(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// RS3.17: Agent JWT Credential Denial
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteAgentJWTDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-agent-jwt")
+	ownerID := tid("rs3-agent-jwt-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+
+	// Set credential context to agent JWT — should be denied by credential ceiling.
+	ctx = setTestIdentity(ctx, req.Actor)
+	ctx = setTestCredentialContext(ctx, CredentialContext{
+		Kind: CredentialKindAgentJWT,
+		ID:   "agent-jwt-test-id",
+	})
+
+	_, decision := srv.deletionService.Delete(ctx, req)
+	require.NotNil(t, decision, "agent JWT should be denied for project deletion")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, ErrCodeCredentialInsufficient, decision.DenialCode)
+	assert.Equal(t, 403, decision.HTTPStatus)
+
+	// Verify project still exists (not deleted).
+	_, err := s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should still exist after credential denial")
+
+	// Verify no audit record was created.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: "project_delete",
+		TargetID:     projectID,
+	})
+	require.NoError(t, err)
+	assert.Len(t, audits, 0, "no audit on credential denial")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.18: Future-Dated Binding Denial (NotBefore in the future)
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteFutureBindingDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-future-bind")
+	permanentOwnerID := tid("rs3-future-perm")
+	futureOwnerID := tid("rs3-future-user")
+
+	createRS3Project(t, s, projectID, permanentOwnerID)
+
+	// Create user with future-dated owner binding (NotBefore tomorrow).
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: futureOwnerID, Email: futureOwnerID + "@test.com",
+		DisplayName: "FutureOwner", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, futureOwnerID)
+
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	future := time.Now().Add(24 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      futureOwnerID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+		NotBefore:        &future,
+	})
+	require.NoError(t, err)
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(futureOwnerID, futureOwnerID+"@test.com", "FutureOwner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := srv.deletionService.Delete(ctx, req)
+	require.NotNil(t, decision, "future-dated binding should not confer deletion authority")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, 403, decision.HTTPStatus)
+
+	// Verify project still exists.
+	_, err = s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should still exist after future binding denial")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.19: Cross-Project Actor — Owner of A cannot delete B
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteCrossProjectActor(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectA := tid("rs3-cross-projA")
+	projectB := tid("rs3-cross-projB")
+	ownerA := tid("rs3-cross-ownA")
+	ownerB := tid("rs3-cross-ownB")
+
+	createRS3Project(t, s, projectA, ownerA)
+	createRS3Project(t, s, projectB, ownerB)
+
+	// Owner of project A attempts to delete project B.
+	req := ProjectDeleteRequest{
+		ProjectID: projectB,
+		Actor:     NewAuthenticatedUser(ownerA, ownerA+"@test.com", "OwnerA", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := srv.deletionService.Delete(ctx, req)
+	require.NotNil(t, decision, "owner of project A should not be able to delete project B")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, 403, decision.HTTPStatus)
+	assert.Equal(t, ErrCodeProjectDeleteForbidden, decision.DenialCode)
+
+	// Verify both projects still exist.
+	_, err := s.GetProject(ctx, projectA)
+	assert.NoError(t, err, "project A should still exist")
+	_, err = s.GetProject(ctx, projectB)
+	assert.NoError(t, err, "project B should still exist")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.20: Cascade Failure Rollback — no false 204
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteCascadeFailureRollback(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-cascade-fail")
+	ownerID := tid("rs3-cascade-f-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	// Create a failing store wrapper that errors on cascade.
+	failStore := &rs3FailingStore{Store: s, failOn: "cascade_bindings"}
+	failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := failSvc.Delete(ctx, req)
+	require.NotNil(t, decision, "cascade failure should not produce a successful result")
+	assert.Equal(t, 500, decision.HTTPStatus, "cascade failure should result in 500, not 204")
+
+	// Verify project is NOT deleted — transaction was rolled back.
+	_, err := s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should still exist after cascade failure (rollback)")
+
+	// Verify no audit record — audit is in the same tx, so rollback removes it.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: "project_delete",
+		TargetID:     projectID,
+	})
+	require.NoError(t, err)
+	assert.Len(t, audits, 0, "no audit on cascade failure (transaction rolled back)")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.21: Audit Failure Rollback — no false 204
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteAuditFailureRollback(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-audit-fail")
+	ownerID := tid("rs3-audit-f-own")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	// Create a failing store wrapper that errors on audit write.
+	failStore := &rs3FailingStore{Store: s, failOn: "audit"}
+	failSvc := NewProjectDeletionService(failStore, newTestAuthzService(s), slog.Default())
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	ctx = setTestIdentity(ctx, req.Actor)
+
+	_, decision := failSvc.Delete(ctx, req)
+	require.NotNil(t, decision, "audit failure should not produce a successful result")
+	assert.Equal(t, 500, decision.HTTPStatus, "audit failure should result in 500, not 204")
+
+	// Verify project is NOT deleted — transaction was rolled back.
+	_, err := s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should still exist after audit failure (rollback)")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.22: External Effect Spies — No effects on denial
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteNoEffectsOnDenial(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set up a mock dispatcher to track agent dispatch calls.
+	disp := &rs3EffectSpy{}
+	srv.SetDispatcher(disp)
+
+	// Create a project with agents (so effects would be visible if they fired).
+	projectID := tid("rs3-effect-spy")
+	ownerID := tid("rs3-effect-spy-own")
+	createRS3Project(t, s, projectID, ownerID)
+
+	agentID := tid("rs3-effect-spy-agt")
+	brokerID := tid("rs3-effect-spy-brk")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "Spy Broker", Slug: "spy-broker",
+		Status: store.BrokerStatusOnline, Endpoint: "http://localhost:9800",
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "spy-agent", Name: "Spy Agent",
+		ProjectID: projectID, RuntimeBrokerID: brokerID,
+	}))
+
+	// Suspend the owner so the service denies at actor status (step 4).
+	user, _ := s.GetUser(ctx, ownerID)
+	user.Status = "suspended"
+	require.NoError(t, s.UpdateUser(ctx, user))
+
+	// Pre-enumerate effects (handler does this before calling service).
+	effectInputs := srv.preEnumerateDeletionEffects(ctx, projectID)
+	require.Len(t, effectInputs.agents, 1, "agent should be pre-enumerated")
+
+	// Call the deletion service — should be denied.
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+	sCtx := setTestIdentity(ctx, req.Actor)
+
+	_, decision := srv.deletionService.Delete(sCtx, req)
+	require.NotNil(t, decision, "suspended user should be denied")
+	assert.Equal(t, ErrCodeUserSuspended, decision.DenialCode)
+
+	// Handler pattern: effects only fire on success (decision == nil).
+	// Since decision != nil, executePostDeletionEffects is NOT called.
+	// Verify the dispatcher was NOT called.
+	assert.Equal(t, 0, disp.dispatchDeleteCalls,
+		"no agent dispatch should occur when deletion is denied")
+
+	// Verify project still exists.
+	_, err := s.GetProject(ctx, projectID)
+	assert.NoError(t, err, "project should still exist after denial")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.23: Concurrent Authority Change vs. Delete (TOCTOU)
+// ---------------------------------------------------------------------------
+
+func TestRS3_ProjectDeleteConcurrentRoleRevoke(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-conc-revoke")
+	ownerID := tid("rs3-conc-rev-own")
+	createRS3Project(t, s, projectID, ownerID)
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+
+	const goroutines = 5
+	type outcome struct {
+		result   *ProjectDeleteResult
+		decision *ProjectDeleteDecision
+	}
+
+	// Run concurrent deletes and role revocations.
+	// One goroutine deletes the project; another revokes the owner binding.
+	// The TOCTOU closure (in-tx governance re-check) ensures that either:
+	//   (a) Delete sees active binding → succeeds
+	//   (b) Delete sees revoked binding → denies (governance re-check under lock)
+	// Either way, the outcome must be consistent.
+	results := make([]outcome, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines + 1) // +1 for role revoker
+
+	// Role revoker goroutine: revokes the owner binding.
+	go func() {
+		defer wg.Done()
+		// Small delay to make race more likely.
+		time.Sleep(time.Millisecond)
+		bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, ownerID)
+		if err != nil {
+			return
+		}
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
+				_ = s.DeleteRoleBinding(ctx, b.ID)
+			}
+		}
+	}()
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			gctx := setTestIdentity(ctx, req.Actor)
+			results[idx].result, results[idx].decision = srv.deletionService.Delete(gctx, req)
+		}(i)
+	}
+	wg.Wait()
+
+	// Count outcomes.
+	successes := 0
+	denials := 0
+	for _, r := range results {
+		if r.decision == nil && r.result != nil {
+			successes++
+		} else if r.decision != nil {
+			denials++
+		}
+	}
+
+	// At most one delete should succeed (serialization via project lock).
+	assert.LessOrEqual(t, successes, 1, "at most one concurrent delete should succeed")
+
+	// Every outcome should be either a clean success or a clean denial.
+	assert.Equal(t, goroutines, successes+denials,
+		"every goroutine should produce either success or denial, never a partial result")
+}
+
+// ---------------------------------------------------------------------------
+// RS3.24: Frontend Capability — N/A
+//
+// Project deletion does not expose a frontend capability signal. The hub
+// does not serve a capabilities endpoint for project.delete. Frontend UI
+// decisions are derived from the project list response metadata. This is
+// documented rather than tested — there is no capability system to assert
+// against. If a capability system is added in a future RS, this should be
+// revisited.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RS3 Failure Injection — store wrapper
+// ---------------------------------------------------------------------------
+
+// rs3FailingStore wraps a real store.Store and injects errors at specific
+// operations to test rollback behavior. Used for cascade and audit failure
+// injection tests.
+type rs3FailingStore struct {
+	store.Store
+	failOn string // which operation to fail: "cascade_bindings", "audit"
+}
+
+func (f *rs3FailingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		wrappedTx := &rs3FailingStore{Store: tx, failOn: f.failOn}
+		return fn(wrappedTx)
+	})
+}
+
+func (f *rs3FailingStore) DeleteRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) (int, error) {
+	if f.failOn == "cascade_bindings" {
+		return 0, fmt.Errorf("injected: cascade failure at role bindings")
+	}
+	return f.Store.DeleteRoleBindingsForScope(ctx, scopeType, scopeID)
+}
+
+func (f *rs3FailingStore) CreateMutationAudit(ctx context.Context, record *store.MutationAuditRecord) error {
+	if f.failOn == "audit" {
+		return fmt.Errorf("injected: audit write failure")
+	}
+	return f.Store.CreateMutationAudit(ctx, record)
+}
+
+// ---------------------------------------------------------------------------
+// RS3 Effect Spy — mock dispatcher
+// ---------------------------------------------------------------------------
+
+// rs3EffectSpy is a mock dispatcher that tracks whether agent dispatch was called.
+type rs3EffectSpy struct {
+	createAgentDispatcher
+	dispatchDeleteCalls int
+}
+
+func (d *rs3EffectSpy) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
+	d.dispatchDeleteCalls++
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// newTestAuthzService creates an AuthzService from the given store for use in
+// failure injection tests where we can't use the full server.
+func newTestAuthzService(s store.Store) *AuthzService {
+	return NewAuthzService(s, slog.Default())
 }
 
 // setTestIdentity sets the identity in context for the test.

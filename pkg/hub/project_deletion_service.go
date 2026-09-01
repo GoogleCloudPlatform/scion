@@ -34,7 +34,7 @@ import (
 //
 // The service implements:
 //   - Fail-closed authorization composition (base permission + ownership/ancestry)
-//   - Protected target governance (direct owner or super-admin/hub-admin)
+//   - Protected target governance (direct owner or super-admin)
 //   - Actor status/credential ceiling enforcement
 //   - Atomic security state and audit within a transaction
 //   - Explicit external effect ordering with failure contracts
@@ -85,7 +85,20 @@ type ProjectDeleteDecision struct {
 
 // ProjectDeleteResult is the outcome of a successful project deletion.
 type ProjectDeleteResult struct {
-	Project *store.Project // The project record before deletion.
+	Project        *store.Project // The project record before deletion.
+	CascadeSummary CascadeSummary // Summary of cascade-deleted state.
+}
+
+// CascadeSummary records what was cascade-deleted in the transaction.
+type CascadeSummary struct {
+	RoleBindings    int `json:"role_bindings_deleted"`
+	Groups          int `json:"groups_deleted"`
+	Secrets         int `json:"secrets_deleted"`
+	EnvVars         int `json:"env_vars_deleted"`
+	SkillInjections int `json:"skill_injections_deleted"`
+	GCPServiceAccts int `json:"gcp_service_accounts_deleted"`
+	Templates       int `json:"templates_deleted"`
+	HarnessConfigs  int `json:"harness_configs_deleted"`
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +188,8 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	// 3. Enforce ownership/ancestry governance.
 	// Project deletion requires the actor to be:
 	//   - A direct project owner (active binding), OR
-	//   - A super-admin (system-scoped), OR
-	//   - A hub-admin (system-scoped)
+	//   - A super-admin (system-scoped)
+	// Hub-admin is denied at base permission (lacks project.delete).
 	// Group-derived ownership does NOT confer deletion authority.
 	govDecision := svc.checkDeletionGovernance(ctx, req)
 	if !govDecision.Allowed {
@@ -201,15 +214,15 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// Pre-compute system-scoped admin status outside the transaction.
-	// These are system-scoped bindings (not project-scoped), so they are
+	// Pre-compute super-admin status outside the transaction.
+	// Super-admin is a system-scoped binding (not project-scoped), so it is
 	// unaffected by the project lock and safe to read outside the tx.
-	// Reading them inside the tx would deadlock on SQLite's single-connection
+	// Reading it inside the tx would deadlock on SQLite's single-connection
 	// pool because svc.authz uses the outer store, which shares the same
 	// connection the transaction holds.
-	isAdmin := false
+	isSuperAdmin := false
 	if svc.authz != nil {
-		isAdmin = svc.authz.IsSystemAdmin(ctx, req.Actor.ID()) || svc.authz.IsHubAdmin(ctx, req.Actor.ID())
+		isSuperAdmin = svc.authz.IsSystemAdmin(ctx, req.Actor.ID())
 	}
 
 	// 6–10. Transactional phase: lock, re-check, cascade, delete, audit.
@@ -223,15 +236,16 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		// 7. Re-evaluate governance under lock to close TOCTOU window.
 		// A concurrent role change that commits between the pre-lock check
 		// and lock acquisition is visible here.
-		// System-admin/hub-admin status is pre-computed; only project-scoped
-		// ownership is re-evaluated from the transactional store.
-		reGov := svc.checkDeletionGovernanceFromStore(ctx, tx, req, isAdmin)
+		// Super-admin status is pre-computed; only project-scoped ownership
+		// is re-evaluated from the transactional store.
+		reGov := svc.checkDeletionGovernanceFromStore(ctx, tx, req, isSuperAdmin)
 		if !reGov.Allowed {
 			return fmt.Errorf("governance:%d:%s", reGov.HTTPStatus, reGov.Reason)
 		}
 
 		// 8. Cascade security-relevant state within the transaction.
-		if err := svc.cascadeSecurityState(ctx, tx, req.ProjectID); err != nil {
+		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
+		if err != nil {
 			return fmt.Errorf("cascade security state: %w", err)
 		}
 
@@ -240,7 +254,8 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			return fmt.Errorf("delete project: %w", err)
 		}
 
-		// 10. Write atomic audit record.
+		// 10. Write atomic audit record with before and after state.
+		afterJSON, _ := json.Marshal(cascadeSummary)
 		auditRecord := &store.MutationAuditRecord{
 			MutationType: "project_delete",
 			TargetType:   "project",
@@ -251,12 +266,16 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 				"project_slug": project.Slug,
 				"owner_id":     project.OwnerID,
 			}),
+			AfterSummary: string(afterJSON),
 		}
 		if err := svc.createAuditRecord(ctx, tx, auditRecord); err != nil {
 			return fmt.Errorf("audit record: %w", err)
 		}
 
-		result = &ProjectDeleteResult{Project: project}
+		result = &ProjectDeleteResult{
+			Project:        project,
+			CascadeSummary: cascadeSummary,
+		}
 		return nil
 	})
 
@@ -292,12 +311,13 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 func (svc *ProjectDeletionService) checkDeletionGovernance(ctx context.Context, req ProjectDeleteRequest) ProjectDeleteDecision {
 	actorID := req.Actor.ID()
 
-	// Super-admin and hub-admin bypass project-level governance.
+	// Super-admin bypasses project-level governance.
+	// Hub-admin is intentionally excluded — it lacks project.delete in the
+	// frozen policy and should not silently bypass governance if the base
+	// permission set later changes. Defense-in-depth: only explicit
+	// super-admin may skip direct ownership.
 	if svc.authz != nil {
 		if svc.authz.IsSystemAdmin(ctx, actorID) {
-			return ProjectDeleteDecision{Allowed: true}
-		}
-		if svc.authz.IsHubAdmin(ctx, actorID) {
 			return ProjectDeleteDecision{Allowed: true}
 		}
 	}
@@ -311,20 +331,20 @@ func (svc *ProjectDeletionService) checkDeletionGovernance(ctx context.Context, 
 	return ProjectDeleteDecision{
 		Allowed:    false,
 		DenialCode: ErrCodeProjectDeleteForbidden,
-		Reason:     "only direct project owners, super-admins, or hub-admins can delete projects",
+		Reason:     "only direct project owners or super-admins can delete projects",
 		HTTPStatus: 403,
 	}
 }
 
 // checkDeletionGovernanceFromStore re-evaluates governance from the
 // transactional store after lock acquisition (TOCTOU closure).
-// The isAdmin flag is pre-computed outside the transaction to avoid
+// The isSuperAdmin flag is pre-computed outside the transaction to avoid
 // accessing svc.authz (which uses the outer store) from inside the tx,
 // which would deadlock on SQLite's single-connection pool.
-func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.Context, tx store.Store, req ProjectDeleteRequest, isAdmin bool) ProjectDeleteDecision {
-	// Super-admin and hub-admin bypass: pre-computed outside the
-	// transaction since these are system-scoped, not project-scoped.
-	if isAdmin {
+func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.Context, tx store.Store, req ProjectDeleteRequest, isSuperAdmin bool) ProjectDeleteDecision {
+	// Super-admin bypass: pre-computed outside the transaction since
+	// super-admin is system-scoped, not project-scoped.
+	if isSuperAdmin {
 		return ProjectDeleteDecision{Allowed: true}
 	}
 
@@ -401,39 +421,52 @@ func (svc *ProjectDeletionService) checkActorStatus(ctx context.Context, actorID
 
 // cascadeSecurityState removes all security-relevant project-scoped state
 // within the transaction. This ensures no orphaned authority, credentials,
-// or security state survives project deletion.
-func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx store.Store, projectID string) error {
+// or security state survives project deletion. Returns a summary of what
+// was cascade-deleted for audit purposes.
+func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx store.Store, projectID string) (CascadeSummary, error) {
+	var cs CascadeSummary
+
 	// 1. Role bindings — all project-scoped authority grants.
 	if n, err := tx.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, projectID); err != nil {
-		return fmt.Errorf("cascade role bindings: %w", err)
-	} else if n > 0 {
-		svc.logger.Info("cascade-deleted project role bindings", "project_id", projectID, "count", n)
+		return cs, fmt.Errorf("cascade role bindings: %w", err)
+	} else {
+		cs.RoleBindings = n
+		if n > 0 {
+			svc.logger.Info("cascade-deleted project role bindings", "project_id", projectID, "count", n)
+		}
 	}
 
 	// 2. Groups — project-scoped groups (which may carry role bindings).
 	if groups, err := tx.ListGroups(ctx, store.GroupFilter{ProjectID: projectID}, store.ListOptions{Limit: 1000}); err == nil {
 		for _, g := range groups.Items {
 			if err := tx.DeleteGroup(ctx, g.ID); err != nil {
-				return fmt.Errorf("cascade group %s: %w", g.ID, err)
+				return cs, fmt.Errorf("cascade group %s: %w", g.ID, err)
 			}
+			cs.Groups++
 		}
 	} else {
-		return fmt.Errorf("list project groups: %w", err)
+		return cs, fmt.Errorf("list project groups: %w", err)
 	}
 
 	// 3. Secrets — project-scoped secrets.
-	if _, err := tx.DeleteSecretsByScope(ctx, store.ScopeProject, projectID); err != nil {
-		return fmt.Errorf("cascade secrets: %w", err)
+	if n, err := tx.DeleteSecretsByScope(ctx, store.ScopeProject, projectID); err != nil {
+		return cs, fmt.Errorf("cascade secrets: %w", err)
+	} else {
+		cs.Secrets = n
 	}
 
 	// 4. Env vars — project-scoped environment variables.
-	if _, err := tx.DeleteEnvVarsByScope(ctx, store.ScopeProject, projectID); err != nil {
-		return fmt.Errorf("cascade env vars: %w", err)
+	if n, err := tx.DeleteEnvVarsByScope(ctx, store.ScopeProject, projectID); err != nil {
+		return cs, fmt.Errorf("cascade env vars: %w", err)
+	} else {
+		cs.EnvVars = n
 	}
 
 	// 5. Skill injections — project-scoped skill injections.
-	if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, projectID); err != nil {
-		return fmt.Errorf("cascade skill injections: %w", err)
+	if n, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, projectID); err != nil {
+		return cs, fmt.Errorf("cascade skill injections: %w", err)
+	} else {
+		cs.SkillInjections = n
 	}
 
 	// 6. GCP service account registrations — project-scoped.
@@ -443,24 +476,51 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	}); err == nil {
 		for _, sa := range sas {
 			if err := tx.DeleteGCPServiceAccount(ctx, sa.ID); err != nil {
-				return fmt.Errorf("cascade GCP SA %s: %w", sa.ID, err)
+				return cs, fmt.Errorf("cascade GCP SA %s: %w", sa.ID, err)
 			}
+			cs.GCPServiceAccts++
 		}
 	} else {
-		return fmt.Errorf("list project GCP SAs: %w", err)
+		return cs, fmt.Errorf("list project GCP SAs: %w", err)
 	}
 
 	// 7. Templates — project-scoped (DB records only; storage files are external).
-	if _, err := tx.DeleteTemplatesByScope(ctx, store.ScopeProject, projectID); err != nil {
-		return fmt.Errorf("cascade templates: %w", err)
+	if n, err := tx.DeleteTemplatesByScope(ctx, store.ScopeProject, projectID); err != nil {
+		return cs, fmt.Errorf("cascade templates: %w", err)
+	} else {
+		cs.Templates = n
 	}
 
 	// 8. Harness configs — project-scoped (DB records only; storage files are external).
-	if _, err := tx.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, projectID); err != nil {
-		return fmt.Errorf("cascade harness configs: %w", err)
+	if n, err := tx.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, projectID); err != nil {
+		return cs, fmt.Errorf("cascade harness configs: %w", err)
+	} else {
+		cs.HarnessConfigs = n
 	}
 
-	return nil
+	// ---------------------------------------------------------------------------
+	// Cascade inventory disposition — project-linked tables NOT deleted here:
+	//
+	// | Table                  | Disposition                                           |
+	// |------------------------|-------------------------------------------------------|
+	// | agents                 | Deleted by CompositeStore.DeleteProject (Ent FK cascade)|
+	// | conversations          | Data orphan — retained for audit/history               |
+	// | messages               | Data orphan — retained for audit/history               |
+	// | schedules              | Ent FK cascade on project deletion; also validated at   |
+	// |                        | execution time against project existence                |
+	// | user_access_tokens     | Scoped UATs validated at use-time: token validation     |
+	// |                        | checks project existence, so orphaned tokens fail closed|
+	// | broker_dispatches      | Data orphan — historical dispatch log, no security role |
+	// | subscription_templates | Nullable project_id — not exclusively project-scoped    |
+	// | project_contributors   | Ent FK cascade on project deletion                     |
+	// | project_sync_state     | Ent FK cascade on project deletion                     |
+	// | lifecycle_hooks        | Ent FK cascade on project deletion                     |
+	// | agent_credentials      | Deleted transitively: agents FK-cascade → credentials  |
+	// |                        | cascade with agent deletion                             |
+	// | project_providers      | Ent FK cascade on project deletion                     |
+	// ---------------------------------------------------------------------------
+
+	return cs, nil
 }
 
 // ---------------------------------------------------------------------------
