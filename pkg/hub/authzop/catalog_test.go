@@ -404,68 +404,10 @@ func TestEntryPointsCoverRouteMetadata(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
 	covered := catalogAndExemptionPatterns()
 
-	var uncoveredRoutes []string
-	for route := range routeKeys {
-		base, hasSuffix := normalizeTrailingSlash(route)
-		if hasSuffix {
-			// Trailing-slash pattern: covered if any catalog/exemption
-			// pattern starts with this prefix, or if the exact trailing-
-			// slash pattern is in the set.
-			found := false
-			if covered[base] {
-				found = true
-			}
-			if !found {
-				for pat := range covered {
-					if strings.HasPrefix(pat, base) {
-						found = true
-						break
-					}
-				}
-			}
-			if !found {
-				uncoveredRoutes = append(uncoveredRoutes, route)
-			}
-		} else {
-			// Exact pattern: must appear in catalog or exemptions.
-			if !covered[route] {
-				uncoveredRoutes = append(uncoveredRoutes, route)
-			}
-		}
-	}
-
+	uncoveredRoutes := findUncoveredRoutes(routeKeys, covered)
 	if len(uncoveredRoutes) > 0 {
 		t.Errorf("route-metadata entries not covered by any catalog operation or exemption (%d/%d):\n  %s",
 			len(uncoveredRoutes), len(routeKeys), strings.Join(uncoveredRoutes, "\n  "))
-	}
-
-	// Reverse check: log stale exemptions whose patterns are not in route-metadata.
-	// This is informational — some exemptions cover non-route entry points
-	// (e.g., method-prefixed OIDC patterns, broker.inbound).
-	var staleExemptions []string
-	for _, ex := range EntryPointExemptions {
-		pat := ex.Pattern
-		if idx := strings.Index(pat, " "); idx >= 0 {
-			pat = pat[idx+1:]
-		}
-		if !routeKeys[pat] {
-			// Check if it could be a method-specific sub-pattern of a
-			// trailing-slash route
-			prefix := pat
-			if last := strings.LastIndex(prefix, "/"); last > 0 {
-				trailingParent := prefix[:last+1]
-				if routeKeys[trailingParent] {
-					continue // covered by parent route-metadata entry
-				}
-			}
-			staleExemptions = append(staleExemptions, ex.Pattern)
-		}
-	}
-	if len(staleExemptions) > 0 {
-		// These are non-route-metadata patterns (OIDC, identity-token, broker.inbound)
-		// that are valid exemptions but don't map to route_metadata keys.
-		t.Logf("exemptions not in routeMetadataTable (expected for non-HTTP/method-prefixed entries): %s",
-			strings.Join(staleExemptions, ", "))
 	}
 
 	t.Logf("route-metadata reconciliation: %d routes, %d covered, %d catalog+exemption patterns",
@@ -477,26 +419,7 @@ func TestEntryPointsCoverRouteMetadata(t *testing.T) {
 // patterns like OIDC and method-prefixed entries).
 func TestStaleExemptionDetection(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
-
-	// Known non-route-metadata exemption patterns (OIDC, agent identity token, broker)
-	knownNonRoute := map[string]bool{
-		"GET /.well-known/openid-configuration": true,
-		"GET /.well-known/jwks.json":            true,
-		"POST /api/v1/agent/identity-token":     true,
-		"broker.inbound":                        true,
-	}
-
-	var stale []string
-	for _, ex := range EntryPointExemptions {
-		if knownNonRoute[ex.Pattern] {
-			continue
-		}
-		if routeKeys[ex.Pattern] {
-			continue
-		}
-		stale = append(stale, ex.Pattern)
-	}
-
+	stale := findStaleExemptions(EntryPointExemptions, routeKeys)
 	if len(stale) > 0 {
 		t.Errorf("stale exemption patterns (not in routeMetadataTable and not known non-route): %s",
 			strings.Join(stale, ", "))
@@ -536,42 +459,10 @@ func TestProjectMembershipGovernance(t *testing.T) {
 // functions that exist in the repository.
 func TestCatalogTestRefsExist(t *testing.T) {
 	repoRoot := findRepoRoot(t)
-
-	// Collect all unique package:function pairs
-	refs := make(map[string][]OperationID)
-	for _, spec := range Catalog {
-		for _, tr := range spec.TestRefs {
-			key := tr.Package + ":" + tr.Function
-			refs[key] = append(refs[key], spec.ID)
-		}
-	}
-
-	for ref, ops := range refs {
-		parts := strings.SplitN(ref, ":", 2)
-		pkg, fn := parts[0], parts[1]
-
-		pkgDir := filepath.Join(repoRoot, pkg)
-		if _, err := os.Stat(pkgDir); os.IsNotExist(err) {
-			t.Errorf("test ref package %q does not exist (referenced by %v)", pkg, ops)
-			continue
-		}
-
-		// Check that the function exists in test files
-		found := false
-		testFiles, _ := filepath.Glob(filepath.Join(pkgDir, "*_test.go"))
-		for _, tf := range testFiles {
-			content, err := os.ReadFile(tf)
-			if err != nil {
-				continue
-			}
-			if strings.Contains(string(content), "func "+fn+"(") {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("test function %q not found in package %q (referenced by %v)", fn, pkg, ops)
-		}
+	refs := collectTestRefs(Catalog)
+	missing := findMissingTestRefs(repoRoot, refs)
+	for _, m := range missing {
+		t.Error(m)
 	}
 }
 
@@ -802,6 +693,233 @@ func TestGenerateCoverageReport(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared production validation helpers
+//
+// These functions contain the production validation logic used by both the
+// gate tests and the proof tests. Each proof test injects a violation into
+// production-derived data and calls the same helper that the gate test uses.
+// ---------------------------------------------------------------------------
+
+// findUncoveredRoutes returns route-metadata keys not covered by any catalog
+// entry-point or exemption pattern. Used by TestEntryPointsCoverRouteMetadata
+// and TestProofUnclassifiedEntryPointDetected.
+func findUncoveredRoutes(routeKeys map[string]bool, covered map[string]bool) []string {
+	var uncovered []string
+	for route := range routeKeys {
+		base, hasSuffix := normalizeTrailingSlash(route)
+		if hasSuffix {
+			found := false
+			if covered[base] {
+				found = true
+			}
+			if !found {
+				for pat := range covered {
+					if strings.HasPrefix(pat, base) {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				uncovered = append(uncovered, route)
+			}
+		} else {
+			if !covered[route] {
+				uncovered = append(uncovered, route)
+			}
+		}
+	}
+	return uncovered
+}
+
+// knownNonRouteExemptions lists exemption patterns that are valid but do not
+// correspond to routeMetadataTable keys (OIDC, agent identity token).
+var knownNonRouteExemptions = map[string]bool{
+	"GET /.well-known/openid-configuration": true,
+	"GET /.well-known/jwks.json":            true,
+	"POST /api/v1/agent/identity-token":     true,
+}
+
+// findStaleExemptions returns exemption patterns not in routeMetadataTable
+// and not in the known non-route set. Used by TestStaleExemptionDetection
+// and TestProofStaleExemptionDetected.
+func findStaleExemptions(exemptions []EntryPointExemption, routeKeys map[string]bool) []string {
+	var stale []string
+	for _, ex := range exemptions {
+		if knownNonRouteExemptions[ex.Pattern] {
+			continue
+		}
+		if routeKeys[ex.Pattern] {
+			continue
+		}
+		stale = append(stale, ex.Pattern)
+	}
+	return stale
+}
+
+// mutationClassificationCounts builds the key→count map for classifications.
+func mutationClassificationCounts(classifications []MutationClassification) map[string]int {
+	counts := make(map[string]int)
+	for _, mc := range classifications {
+		key := mc.File + ":" + mc.Function + ":" + mc.Symbol
+		counts[key]++
+	}
+	return counts
+}
+
+// findUnclassifiedMutations returns discovered call-site keys that have
+// fewer classifications than discoveries. Used by
+// TestMutationClassificationBidirectional and TestProofUnclassifiedMutationDetected.
+func findUnclassifiedMutations(discoveredCounts, classifiedCounts map[string]int) []string {
+	var unclassified []string
+	for key, dCount := range discoveredCounts {
+		if classifiedCounts[key] < dCount {
+			unclassified = append(unclassified, key)
+		}
+	}
+	return unclassified
+}
+
+// findStaleMutationClassifications returns classification keys that have
+// fewer discoveries than classifications. Used by
+// TestMutationClassificationBidirectional and TestProofStaleMutationClassificationDetected.
+func findStaleMutationClassifications(discoveredCounts, classifiedCounts map[string]int) []string {
+	var stale []string
+	for key, cCount := range classifiedCounts {
+		if discoveredCounts[key] < cCount {
+			stale = append(stale, key)
+		}
+	}
+	return stale
+}
+
+// collectTestRefs collects all unique package:function pairs from catalog test refs.
+func collectTestRefs(catalog []OperationSpec) map[string][]OperationID {
+	refs := make(map[string][]OperationID)
+	for _, spec := range catalog {
+		for _, tr := range spec.TestRefs {
+			key := tr.Package + ":" + tr.Function
+			refs[key] = append(refs[key], spec.ID)
+		}
+	}
+	return refs
+}
+
+// findMissingTestRefs returns error messages for test refs that reference
+// nonexistent packages or functions. Used by TestCatalogTestRefsExist and
+// TestProofNonexistentTestRefDetected.
+func findMissingTestRefs(repoRoot string, refs map[string][]OperationID) []string {
+	var missing []string
+	for ref, ops := range refs {
+		parts := strings.SplitN(ref, ":", 2)
+		pkg, fn := parts[0], parts[1]
+
+		pkgDir := filepath.Join(repoRoot, pkg)
+		if _, err := os.Stat(pkgDir); os.IsNotExist(err) {
+			missing = append(missing, "test ref package "+pkg+" does not exist (referenced by "+opIDsStr(ops)+")")
+			continue
+		}
+
+		found := false
+		testFiles, _ := filepath.Glob(filepath.Join(pkgDir, "*_test.go"))
+		for _, tf := range testFiles {
+			content, err := os.ReadFile(tf)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(content), "func "+fn+"(") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, "test function "+fn+" not found in package "+pkg+" (referenced by "+opIDsStr(ops)+")")
+		}
+	}
+	return missing
+}
+
+func opIDsStr(ops []OperationID) string {
+	ss := make([]string, len(ops))
+	for i, id := range ops {
+		ss[i] = string(id)
+	}
+	return strings.Join(ss, ", ")
+}
+
+// permissionResourceTypes reads the permission registry source and returns
+// a map of permission ID → resource type string.
+func permissionResourceTypes(t *testing.T) map[string]string {
+	t.Helper()
+	repoRoot := findRepoRoot(t)
+	registryFile := filepath.Join(repoRoot, "pkg/hub/permissions/registry.go")
+	content, err := os.ReadFile(registryFile)
+	if err != nil {
+		t.Fatalf("cannot read permission registry: %v", err)
+	}
+	permResources := make(map[string]string)
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{ID:") {
+			continue
+		}
+		id := extractQuoted(line, "ID:")
+		resource := extractField(line, "Resource:")
+		if id != "" && resource != "" {
+			permResources[id] = resource
+		}
+	}
+	return permResources
+}
+
+// findDomainResourceMismatches validates that each operation's base permission
+// has a Resource type compatible with its domain per the compatibility map.
+// Returns error messages for mismatches and unmapped domains. Used by
+// TestCatalogBasePermissionSemanticsAssertive and TestProofPermissionSemanticMismatchDetected.
+func findDomainResourceMismatches(catalog []OperationSpec, permResources map[string]string, compatMap map[string][]string) []string {
+	var errors []string
+	for _, spec := range catalog {
+		if spec.BasePermission == "" {
+			continue
+		}
+		resource, ok := permResources[spec.BasePermission]
+		if !ok {
+			continue // covered by TestCatalogBasePermissionsExist
+		}
+
+		domain := spec.Domain
+		bestMatch := ""
+		var bestResources []string
+		for d, allowedResources := range compatMap {
+			if domain == d || strings.HasPrefix(domain, d+".") {
+				if len(d) > len(bestMatch) {
+					bestMatch = d
+					bestResources = allowedResources
+				}
+			}
+		}
+		if bestMatch != "" {
+			compatible := false
+			for _, ar := range bestResources {
+				if resource == ar {
+					compatible = true
+					break
+				}
+			}
+			if !compatible {
+				errors = append(errors, "operation "+string(spec.ID)+" (domain="+domain+"): permission "+
+					spec.BasePermission+" has resource "+resource+", expected one of "+strings.Join(bestResources, ", "))
+			}
+		} else {
+			errors = append(errors, "operation "+string(spec.ID)+": domain "+domain+
+				" has no explicit resource mapping (resource="+resource+") — add to domainResourceCompatibility")
+		}
+	}
+	return errors
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1028,12 +1146,8 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 		}
 	}
 
-	// Build classification lookup: key = file:function:symbol, value = count
-	classifiedCounts := make(map[string]int)
-	for _, mc := range MutationClassifications {
-		key := mc.File + ":" + mc.Function + ":" + mc.Symbol
-		classifiedCounts[key]++
-	}
+	// Build classification lookup
+	classifiedCounts := mutationClassificationCounts(MutationClassifications)
 
 	// Build discovered lookup
 	discoveredCounts := make(map[string]int)
@@ -1042,29 +1156,13 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 		discoveredCounts[key]++
 	}
 
-	// Forward: every discovered site must be classified
-	var unclassified []string
-	for key, dCount := range discoveredCounts {
-		cCount := classifiedCounts[key]
-		if cCount < dCount {
-			unclassified = append(unclassified, key+" (discovered="+
-				strings.Repeat("1", dCount)+", classified="+strings.Repeat("1", cCount)+")")
-		}
-	}
+	unclassified := findUnclassifiedMutations(discoveredCounts, classifiedCounts)
 	if len(unclassified) > 0 {
 		t.Errorf("unclassified mutation call sites (%d):\n  %s",
 			len(unclassified), strings.Join(unclassified, "\n  "))
 	}
 
-	// Reverse: every classification must match a discovered site
-	var stale []string
-	for key, cCount := range classifiedCounts {
-		dCount := discoveredCounts[key]
-		if dCount < cCount {
-			stale = append(stale, key+" (classified="+
-				strings.Repeat("1", cCount)+", discovered="+strings.Repeat("1", dCount)+")")
-		}
-	}
+	stale := findStaleMutationClassifications(discoveredCounts, classifiedCounts)
 	if len(stale) > 0 {
 		t.Errorf("stale mutation classifications (%d):\n  %s",
 			len(stale), strings.Join(stale, "\n  "))
@@ -1111,68 +1209,10 @@ var domainResourceCompatibility = map[string][]string{
 // base permission has a Resource type compatible with its domain per the
 // explicit mapping table above. This replaces the log-only version (R6).
 func TestCatalogBasePermissionSemanticsAssertive(t *testing.T) {
-	repoRoot := findRepoRoot(t)
-	registryFile := filepath.Join(repoRoot, "pkg/hub/permissions/registry.go")
-	content, err := os.ReadFile(registryFile)
-	if err != nil {
-		t.Fatalf("cannot read permission registry: %v", err)
-	}
-
-	// Build map of permission ID → resource type string
-	permResources := make(map[string]string)
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{ID:") {
-			continue
-		}
-		id := extractQuoted(line, "ID:")
-		resource := extractField(line, "Resource:")
-		if id != "" && resource != "" {
-			permResources[id] = resource
-		}
-	}
-
-	for _, spec := range Catalog {
-		if spec.BasePermission == "" {
-			continue
-		}
-		resource, ok := permResources[spec.BasePermission]
-		if !ok {
-			continue // covered by TestCatalogBasePermissionsExist
-		}
-
-		// Find the most specific domain prefix that matches.
-		// Longer prefix wins (e.g., "role.binding" over "role").
-		domain := spec.Domain
-		compatible := false
-		bestMatch := ""
-		var bestResources []string
-		for d, allowedResources := range domainResourceCompatibility {
-			if domain == d || strings.HasPrefix(domain, d+".") {
-				if len(d) > len(bestMatch) {
-					bestMatch = d
-					bestResources = allowedResources
-				}
-			}
-		}
-		if bestMatch != "" {
-			for _, ar := range bestResources {
-				if resource == ar {
-					compatible = true
-					break
-				}
-			}
-			if !compatible {
-				t.Errorf("operation %q (domain=%s): permission %q has resource %s, expected one of %v",
-					spec.ID, domain, spec.BasePermission, resource, bestResources)
-				compatible = true // don't fall through to unmapped check
-			}
-		}
-		if !compatible {
-			t.Logf("operation %q: domain %q has no explicit resource mapping (resource=%s) — add to domainResourceCompatibility",
-				spec.ID, domain, resource)
-		}
+	permResources := permissionResourceTypes(t)
+	mismatches := findDomainResourceMismatches(Catalog, permResources, domainResourceCompatibility)
+	for _, m := range mismatches {
+		t.Error(m)
 	}
 }
 
@@ -1182,37 +1222,19 @@ func TestCatalogBasePermissionSemanticsAssertive(t *testing.T) {
 
 // TestProofUnclassifiedEntryPointDetected proves that a route-metadata entry
 // not covered by any catalog operation or exemption is detected by the
-// reconciliation gate. This is the real unclassified-entry proof test.
+// production reconciliation helper. Injects a fake route into production-
+// derived route keys and calls findUncoveredRoutes.
 func TestProofUnclassifiedEntryPointDetected(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
 	covered := catalogAndExemptionPatterns()
 
-	// Simulate adding a new route to route_metadata that is not covered
+	// Inject a fake route into production-derived data
 	fakeRoute := "/api/v1/proof/unclassified-route"
 	routeKeys[fakeRoute] = true
 
-	var uncovered []string
-	for route := range routeKeys {
-		_, hasSuffix := normalizeTrailingSlash(route)
-		if hasSuffix {
-			found := false
-			for pat := range covered {
-				if strings.HasPrefix(pat, route) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				uncovered = append(uncovered, route)
-			}
-		} else {
-			if !covered[route] {
-				uncovered = append(uncovered, route)
-			}
-		}
-	}
+	// Call the same production helper used by TestEntryPointsCoverRouteMetadata
+	uncovered := findUncoveredRoutes(routeKeys, covered)
 
-	// The fake route must be in the uncovered list
 	found := false
 	for _, u := range uncovered {
 		if u == fakeRoute {
@@ -1221,128 +1243,236 @@ func TestProofUnclassifiedEntryPointDetected(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("expected unclassified route to be detected, but it was not")
+		t.Error("expected findUncoveredRoutes to detect injected unclassified route, but it did not")
 	}
 }
 
 // TestProofUnclassifiedMutationDetected proves that a scanner-discovered
 // mutation call site without a classification entry is detected by the
-// bidirectional gate.
+// production bidirectional helper. Injects a fake call site into production-
+// derived counts and calls findUnclassifiedMutations.
 func TestProofUnclassifiedMutationDetected(t *testing.T) {
-	// Simulate a discovered site that has no classification
+	// Start from production classification counts
+	classifiedCounts := mutationClassificationCounts(MutationClassifications)
+
+	// Inject a fake discovered site not in any classification
 	discoveredCounts := map[string]int{
-		"pkg/hub/proof_test_file.go:proofFunc:CreateRoleBinding": 1,
-	}
-	classifiedCounts := make(map[string]int)
-	for _, mc := range MutationClassifications {
-		key := mc.File + ":" + mc.Function + ":" + mc.Symbol
-		classifiedCounts[key]++
+		"pkg/hub/proof_injected.go:proofFunc:CreateRoleBinding": 1,
 	}
 
-	var unclassified []string
-	for key, dCount := range discoveredCounts {
-		if classifiedCounts[key] < dCount {
-			unclassified = append(unclassified, key)
-		}
-	}
-
+	// Call the same production helper used by TestMutationClassificationBidirectional
+	unclassified := findUnclassifiedMutations(discoveredCounts, classifiedCounts)
 	if len(unclassified) == 0 {
-		t.Error("expected unclassified mutation to be detected, but it was not")
+		t.Error("expected findUnclassifiedMutations to detect injected call site, but it did not")
 	}
 }
 
 // TestProofStaleMutationClassificationDetected proves that a classification
-// entry for a non-existent call site is detected by the bidirectional gate.
+// entry for a non-existent call site is detected by the production
+// bidirectional helper. Injects a fake classification into production-derived
+// counts and calls findStaleMutationClassifications.
 func TestProofStaleMutationClassificationDetected(t *testing.T) {
-	// Simulate a classification that has no matching discovered site
-	classifiedCounts := map[string]int{
-		"pkg/hub/nonexistent.go:noFunc:DeleteRoleBinding": 1,
-	}
-	discoveredCounts := make(map[string]int) // empty = nothing discovered
+	// Start from production classification counts and inject a stale entry
+	classifiedCounts := mutationClassificationCounts(MutationClassifications)
+	classifiedCounts["pkg/hub/nonexistent.go:noFunc:DeleteRoleBinding"] = 1
 
-	var stale []string
-	for key, cCount := range classifiedCounts {
-		if discoveredCounts[key] < cCount {
-			stale = append(stale, key)
-		}
-	}
+	// Use empty discovered set — the stale entry won't match anything
+	discoveredCounts := make(map[string]int)
 
-	if len(stale) == 0 {
-		t.Error("expected stale classification to be detected, but it was not")
-	}
-}
+	// Call the same production helper used by TestMutationClassificationBidirectional
+	stale := findStaleMutationClassifications(discoveredCounts, classifiedCounts)
 
-// TestProofStaleExemptionDetected proves that an exemption for a pattern not
-// in routeMetadataTable is detected by the stale exemption test.
-func TestProofStaleExemptionDetected(t *testing.T) {
-	routeKeys := routeMetadataKeys(t)
-
-	// A fake exemption pattern that doesn't exist in route_metadata
-	fakePattern := "/api/v1/proof/nonexistent-exempt"
-	knownNonRoute := map[string]bool{
-		"GET /.well-known/openid-configuration": true,
-		"GET /.well-known/jwks.json":            true,
-		"POST /api/v1/agent/identity-token":     true,
-		"broker.inbound":                        true,
-	}
-
-	// The fake pattern should be detected as stale
-	if routeKeys[fakePattern] || knownNonRoute[fakePattern] {
-		t.Fatal("proof setup error: fake pattern should not be in either set")
-	}
-	// Detection confirmed: the pattern would be flagged by TestStaleExemptionDetection
-}
-
-// TestProofNonexistentTestRefDetected verifies that a nonexistent test
-// reference would be caught by TestCatalogTestRefsExist. It constructs a
-// test ref pointing to a function that does not exist and checks that the
-// lookup correctly reports it as missing.
-func TestProofNonexistentTestRefDetected(t *testing.T) {
-	repoRoot := findRepoRoot(t)
-	pkgDir := filepath.Join(repoRoot, "pkg/hub/authzop")
-	if _, err := os.Stat(pkgDir); os.IsNotExist(err) {
-		t.Fatal("test setup error: pkg/hub/authzop should exist")
-	}
-
-	// Use a generated function name that cannot appear as a function
-	// declaration in test files (contains characters invalid in Go identifiers).
-	fakeFn := "TestZZZ_NoSuchFunction_" + "12345"
 	found := false
-	testFiles, _ := filepath.Glob(filepath.Join(pkgDir, "*_test.go"))
-	for _, tf := range testFiles {
-		content, err := os.ReadFile(tf)
-		if err != nil {
-			continue
-		}
-		if strings.Contains(string(content), "func "+fakeFn+"(") {
+	for _, s := range stale {
+		if strings.Contains(s, "nonexistent.go") {
 			found = true
 			break
 		}
 	}
-	if found {
-		t.Errorf("proof setup error: %s should not exist", fakeFn)
+	if !found {
+		t.Error("expected findStaleMutationClassifications to detect injected stale entry, but it did not")
 	}
-	// Detection confirmed: TestCatalogTestRefsExist would flag this TestRef
 }
 
-// TestProofPermissionSemanticMismatchDetected proves that a permission with
-// an incompatible resource type for its domain is detected.
-func TestProofPermissionSemanticMismatchDetected(t *testing.T) {
-	// Simulate checking a project.membership operation with a ResourceAgent resource
-	allowedResources := domainResourceCompatibility["project.membership"]
-	mismatchResource := "ResourceAgent"
+// TestProofStaleExemptionDetected proves that an exemption for a pattern not
+// in routeMetadataTable is detected by the production stale-exemption helper.
+// Injects a fake exemption into production-derived data and calls
+// findStaleExemptions.
+func TestProofStaleExemptionDetected(t *testing.T) {
+	routeKeys := routeMetadataKeys(t)
 
-	compatible := false
-	for _, ar := range allowedResources {
-		if ar == mismatchResource {
-			compatible = true
+	// Build exemptions list with an injected stale entry
+	fakePattern := "/api/v1/proof/nonexistent-exempt"
+	injected := append(
+		append([]EntryPointExemption{}, EntryPointExemptions...),
+		EntryPointExemption{Pattern: fakePattern, Kind: ExemptionInternalOnly, Reason: "proof", Owner: "proof"},
+	)
+
+	// Call the same production helper used by TestStaleExemptionDetection
+	stale := findStaleExemptions(injected, routeKeys)
+
+	found := false
+	for _, s := range stale {
+		if s == fakePattern {
+			found = true
 			break
 		}
 	}
-	if compatible {
-		t.Error("proof setup error: ResourceAgent should not be compatible with project.membership domain")
+	if !found {
+		t.Error("expected findStaleExemptions to detect injected stale exemption, but it did not")
 	}
-	// Detection confirmed: the semantic validation would flag this mismatch
+}
+
+// TestProofNonexistentTestRefDetected proves that a nonexistent test
+// reference is detected by the production test-ref helper. Injects a fake
+// test ref into production-derived data and calls findMissingTestRefs.
+func TestProofNonexistentTestRefDetected(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+
+	// Start from production test refs and inject a fake nonexistent one
+	refs := collectTestRefs(Catalog)
+	refs["pkg/hub/authzop:TestZZZ_NoSuchFunction_12345"] = []OperationID{"proof.testref"}
+
+	// Call the same production helper used by TestCatalogTestRefsExist
+	missing := findMissingTestRefs(repoRoot, refs)
+	if len(missing) == 0 {
+		t.Error("expected findMissingTestRefs to detect injected nonexistent test ref, but it did not")
+	}
+	found := false
+	for _, m := range missing {
+		if strings.Contains(m, "TestZZZ_NoSuchFunction_12345") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("findMissingTestRefs returned %v but did not flag the injected ref", missing)
+	}
+}
+
+// TestProofPermissionSemanticMismatchDetected proves that a permission with
+// an incompatible resource type for its domain is detected by the production
+// semantic validation helper. Injects a spec with a mismatched resource type
+// and calls findDomainResourceMismatches.
+func TestProofPermissionSemanticMismatchDetected(t *testing.T) {
+	// Create a fake catalog with a known domain-resource mismatch
+	fakeSpec := OperationSpec{
+		ID:             "proof.mismatch",
+		Domain:         "project.membership",
+		BasePermission: "proof.mismatch.perm",
+	}
+
+	// Fake permission registry with an incompatible resource
+	permResources := map[string]string{
+		"proof.mismatch.perm": "ResourceAgent", // ResourceAgent is NOT compatible with project.membership
+	}
+
+	// Call the same production helper used by TestCatalogBasePermissionSemanticsAssertive
+	mismatches := findDomainResourceMismatches([]OperationSpec{fakeSpec}, permResources, domainResourceCompatibility)
+	if len(mismatches) == 0 {
+		t.Error("expected findDomainResourceMismatches to detect injected mismatch, but it did not")
+	}
+}
+
+// TestProofUnmappedDomainDetected proves that a catalog operation with a
+// domain not in domainResourceCompatibility is detected by the production
+// semantic validation helper (fail-closed behavior).
+func TestProofUnmappedDomainDetected(t *testing.T) {
+	fakeSpec := OperationSpec{
+		ID:             "proof.unmapped",
+		Domain:         "completely.unknown.domain",
+		BasePermission: "proof.unmapped.perm",
+	}
+
+	permResources := map[string]string{
+		"proof.unmapped.perm": "ResourceUnknown",
+	}
+
+	// Call the same production helper — unmapped domain must produce an error
+	mismatches := findDomainResourceMismatches([]OperationSpec{fakeSpec}, permResources, domainResourceCompatibility)
+	if len(mismatches) == 0 {
+		t.Error("expected findDomainResourceMismatches to detect unmapped domain, but it did not")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CI gate coverage assertion
+// ---------------------------------------------------------------------------
+
+// TestCIGateCoversAllAF1Tests verifies that all required AF1 gate test
+// functions exist in this package. The CI gate script runs ALL tests in the
+// package (not a -run regex), so this test ensures the minimum required set
+// of gate tests is present. If a required gate test is accidentally deleted
+// or renamed, this test catches it.
+func TestCIGateCoversAllAF1Tests(t *testing.T) {
+	requiredGateTests := []string{
+		// Structural validation
+		"TestCatalogValidation",
+		"TestCatalogNoDuplicateIDs",
+		"TestCatalogNoDuplicateEntryPoints",
+		// Exemption validation
+		"TestEntryPointExemptionsAreValid",
+		"TestNoExemptionOverlapWithCatalog",
+		// Permission coverage
+		"TestCatalogBasePermissionsExist",
+		"TestCatalogBasePermissionSemantics",
+		"TestCatalogBasePermissionSemanticsAssertive",
+		"TestRegisteredPermissionsConsumed",
+		// Entry-point reconciliation
+		"TestEntryPointsCoverRouteMetadata",
+		"TestStaleExemptionDetection",
+		// Governance
+		"TestProjectMembershipGovernance",
+		// Test ref validation
+		"TestCatalogTestRefsExist",
+		// Mutation classification
+		"TestMutationClassificationsValid",
+		"TestMutationClassificationBidirectional",
+		// Mutation scan
+		"TestSecurityMutationSymbolsNotEmpty",
+		"TestSecurityMutationScanProduction",
+		"TestSecurityMutationSymbolsValid",
+		// Report
+		"TestGenerateCoverageReport",
+		"TestCatalogReportStaleness",
+		// Proof tests
+		"TestProofDuplicateEntryPointRejected",
+		"TestProofDuplicateOperationIDRejected",
+		"TestProofMissingGovernanceRejected",
+		"TestProofUnclassifiedEntryPointDetected",
+		"TestProofUnclassifiedMutationDetected",
+		"TestProofStaleMutationClassificationDetected",
+		"TestProofStaleExemptionDetected",
+		"TestProofNonexistentTestRefDetected",
+		"TestProofPermissionSemanticMismatchDetected",
+		"TestProofUnmappedDomainDetected",
+	}
+
+	repoRoot := findRepoRoot(t)
+	pkgDir := filepath.Join(repoRoot, "pkg/hub/authzop")
+	testFiles, err := filepath.Glob(filepath.Join(pkgDir, "*_test.go"))
+	if err != nil || len(testFiles) == 0 {
+		t.Fatal("cannot find test files in pkg/hub/authzop")
+	}
+
+	// Read all test file contents
+	var allContent strings.Builder
+	for _, tf := range testFiles {
+		content, err := os.ReadFile(tf)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", tf, err)
+		}
+		allContent.Write(content)
+		allContent.WriteByte('\n')
+	}
+	src := allContent.String()
+
+	for _, name := range requiredGateTests {
+		if !strings.Contains(src, "func "+name+"(") {
+			t.Errorf("required AF1 gate test %q not found in package — was it renamed or deleted?", name)
+		}
+	}
+	t.Logf("CI gate coverage: %d required gate tests verified present", len(requiredGateTests))
 }
 
 // Ensure SecurityMutationSymbols keys are valid identifiers (no spaces, etc).

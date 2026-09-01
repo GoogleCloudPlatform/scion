@@ -2,9 +2,10 @@
 # Guard: authorization operation catalog must be structurally valid, permission
 # coverage must be complete, and the generated catalog report must be up to date.
 #
-# This is the CI gate for AF1 (Authorization Audit Foundation). It runs the
-# catalog validation tests and checks that the generated catalog report matches
-# the checked-in version.
+# This is the CI gate for AF1 (Authorization Audit Foundation). It runs ALL
+# tests in pkg/hub/authzop/ — every test in the package is an AF1 gate test.
+# Using full-package execution avoids brittle -run regex that can silently
+# omit new gate tests.
 #
 # WHAT THIS CHECKS
 #
@@ -18,6 +19,10 @@
 # 8. Test refs reference existing packages and functions.
 # 9. The generated catalog report matches the checked-in version.
 # 10. Proof tests demonstrate that unclassified/duplicate violations are caught.
+# 11. Every route-metadata entry is covered by catalog or exemption.
+# 12. Every mutation call site is classified (bidirectional).
+# 13. Stale exemptions are detected.
+# 14. Domain-resource semantic compatibility is assertive and fail-closed.
 #
 # EXIT CODES
 #   0  all checks pass
@@ -31,8 +36,10 @@ cd "$(dirname "$0")/.."
 echo "=== Authorization catalog validation ==="
 echo ""
 
-# Run the catalog validation tests with the no_sqlite tag to match CI convention.
-if ! go test -tags no_sqlite -run 'TestCatalog|TestEntryPoint|TestNoExemption|TestRegisteredPermissions|TestProjectMembership|TestProof|TestSecurity|TestGenerate' ./pkg/hub/authzop/ -v 2>&1; then
+# Run ALL tests in the authzop package. Every test in the package is an AF1
+# gate test. Full-package execution is future-proof: new tests are automatically
+# included without updating a -run regex.
+if ! go test -tags no_sqlite -count=1 ./pkg/hub/authzop/ -v 2>&1; then
     echo ""
     echo "check-authorization-catalog: FAILED"
     exit 1
