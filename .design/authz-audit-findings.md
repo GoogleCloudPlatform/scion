@@ -223,15 +223,55 @@ missing-eligibility-gate, information-leak, denial-quality.
 
 ---
 
+## Phase 2 (AF1) Baseline Mismatches
+
+The following mismatches were discovered during AF1 audit foundation cataloging.
+Each is documented here rather than silently grandfathered.
+
+### F-AF1-01: Route metadata table does not use method-specific patterns
+
+| Field | Value |
+|---|---|
+| **Source** | AF1 entry-point inventory |
+| **Security effect** | missing-eligibility-gate (classification gap) |
+| **Severity** | Medium |
+| **Description** | Most routes in `routeMetadataTable` use path-only patterns (e.g., `/api/v1/agents/`) rather than method-specific patterns (e.g., `GET /api/v1/agents/`, `DELETE /api/v1/agents/`). A single route entry covers both reads and writes, preventing method-specific authorization at the route guard level. The catalog uses method-specific entry point patterns where the security effect differs by method. |
+| **Current state** | Route metadata covers all registered mux patterns but lumps GET/POST/PATCH/DELETE under one classification. Handler-level authorization is the defense-in-depth layer. |
+| **Disposition** | `baseline-af1` — catalog documents the gap; method-specific route metadata conversion is a Phase 3/AH5 deliverable. |
+
+### F-AF1-02: 97 permissions reserved/deferred, not yet catalog-consumed
+
+| Field | Value |
+|---|---|
+| **Source** | AF1 permission coverage validation |
+| **Security effect** | audit-gap |
+| **Severity** | Low |
+| **Description** | Of 119 registered permissions, 22 are consumed by catalog operations and 97 are reserved/deferred with explicit rationale. The deferred permissions fall into: route-guarded CRUD (AH2-AH5), Phase 2 D4 hub-admin conversion, agent token scopes (non-route-enforced), and deprecated policy permissions (CO1 410 Gone). |
+| **Current state** | Every registered permission is accounted for — either consumed by a catalog operation or documented as reserved/deferred with a target tranche. |
+| **Disposition** | `baseline-af1` — tracked for resolution in AH1-AH5 tranches. |
+
+### F-AF1-03: 53 security mutation call sites discovered, classification pending
+
+| Field | Value |
+|---|---|
+| **Source** | AF1 security mutation scan |
+| **Security effect** | audit-gap |
+| **Severity** | Medium |
+| **Description** | AST-based scan found 53 security-relevant mutation call sites across 16 symbol types in `pkg/hub/` and `pkg/store/`. These include 10 CreateRoleBinding sites, 5 DeleteRoleBinding sites, 5 AddGroupMember sites, 11 DeleteAgent sites, and others. Each site needs classification as either mapped to a catalog operation or explicitly exempted (store-layer internal, migration, test fixture). |
+| **Current state** | Mutation scan runs as an informational test. Full bidirectional classification (unclassified-site and stale-classification detection) will be enforced in the CI gate when the classification table is populated. |
+| **Disposition** | `baseline-af1` — informational scan complete; bidirectional enforcement deferred to AF1.1 follow-up or AH1. |
+
+---
+
 ## Summary
 
-| Severity | Total | Fixed | Contained-C0 | Deferred | Accepted Risk |
-|---|---|---|---|---|---|
-| Critical | 3 | 0 | 3 | 0 | 0 |
-| High | 4 | 3 | 1 | 0 | 0 |
-| Medium | 5 | 1 | 3 | 1 | 0 |
-| Low | 3 | 2 | 1 | 0 | 0 |
-| **Total** | **15** | **6** | **8** | **1** | **0** |
+| Severity | Total | Fixed | Contained-C0 | Deferred | Baseline-AF1 | Accepted Risk |
+|---|---|---|---|---|---|---|
+| Critical | 3 | 0 | 3 | 0 | 0 | 0 |
+| High | 4 | 3 | 1 | 0 | 0 | 0 |
+| Medium | 7 | 1 | 3 | 1 | 2 | 0 |
+| Low | 4 | 2 | 1 | 0 | 1 | 0 |
+| **Total** | **18** | **6** | **8** | **1** | **3** | **0** |
 
 ## C0 Containment Changes
 
