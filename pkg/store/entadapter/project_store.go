@@ -481,12 +481,15 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 
 	// RS2: ExcludedProjectIDs — exclude specific projects from an All scope
 	// when project-scoped constraints block the list permission. Fail-closed:
-	// malformed IDs are silently skipped (they can't match real rows anyway).
+	// malformed exclusion IDs are an authorization predicate error (they
+	// represent constraint scope data that cannot be applied, which would
+	// silently widen access if skipped).
 	if len(filter.ExcludedProjectIDs) > 0 {
-		excludeIDs, _ := parseUUIDs(filter.ExcludedProjectIDs)
-		if len(excludeIDs) > 0 {
-			query.Where(project.IDNotIn(excludeIDs...))
+		excludeIDs, err := parseUUIDsStrict(filter.ExcludedProjectIDs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization predicate: ExcludedProjectIDs: %w", err)
 		}
+		query.Where(project.IDNotIn(excludeIDs...))
 	}
 
 	totalCount := 0
@@ -615,6 +618,21 @@ func (s *ProjectStore) populateProjectComputed(ctx context.Context, p *store.Pro
 		p.ProjectType = store.ProjectTypeHubManaged
 	}
 	return nil
+}
+
+// parseUUIDsStrict parses a slice of string UUIDs and returns an error if any
+// fail to parse. Used for authorization predicates where silently skipping a
+// malformed ID would widen access (e.g., ExcludedProjectIDs).
+func parseUUIDsStrict(ids []string) ([]uuid.UUID, error) {
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := uuid.Parse(id)
+		if err != nil {
+			return nil, fmt.Errorf("malformed UUID %q: %w", id, err)
+		}
+		out = append(out, uid)
+	}
+	return out, nil
 }
 
 // parseUUIDs parses a slice of string UUIDs, skipping any that fail to parse.

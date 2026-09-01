@@ -322,10 +322,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// or unions with them. For All, AuthorizedProjectIDs remains nil, but
 	// project-scoped constraint exclusions still apply.
 	if !scopeResult.Scopes.IsAll() {
-		filter.AuthorizedProjectIDs = scopeResult.Scopes.ProjectIDs()
+		filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
 	}
 	if len(scopeResult.ExcludedProjectIDs) > 0 {
-		filter.ExcludedProjectIDs = scopeResult.ExcludedProjectIDs
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
 	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
@@ -340,28 +340,46 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// Classification is an intersection with authority, not an authorization bypass.
 	switch query.Get("scope") {
 	case "mine":
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// RS2 Finding 6: Non-user identities (agent JWT) cannot hold direct
+			// project-owner RoleBindings. Mine is empty for them.
+			filter.MemberOrOwnerProjectIDs = []string{"__none__"}
+		} else {
+			ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "listAgents: owner resolution failed (fail-closed)", "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"unable to resolve authorization", nil)
+				return
+			}
 			if len(ownerIDs) > 0 {
 				filter.MemberOrOwnerProjectIDs = ownerIDs
 			} else {
-				// No active direct owner bindings — return empty.
 				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
 			}
 			// RS2: Do NOT set filter.OwnerID. Agent creator ownership must
 			// not expand the Mine set beyond owned projects (D6 decision).
 		}
 	case "shared":
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			// Active effective access: direct user + group-derived, lifecycle-filtered.
-			allEffectiveIDs := mergeProjectIDs(
-				s.resolveUserProjectIDs(ctx, userIdent.ID()),
-				s.resolveUserEffectiveProjectIDs(ctx, userIdent.ID()),
-			)
-			ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
-			sharedIDs := subtractProjectIDs(allEffectiveIDs, ownerIDs)
-			if len(sharedIDs) > 0 {
-				filter.MemberProjectIDs = sharedIDs
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// RS2 Finding 6: Non-user identities cannot hold owner bindings,
+			// so Shared = full scope - empty Mine = full scope. No filter needed.
+		} else {
+			sharedResult, resolveErr := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "listAgents: shared resolution failed (fail-closed)", "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"unable to resolve authorization", nil)
+				return
+			}
+			if sharedResult.IsAllScope {
+				// Finding 7: System-All Shared — exclude agents from owned
+				// projects by adding owner project IDs to ExcludedProjectIDs.
+				filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, sharedResult.OwnerExcludeIDs...)
+			} else if len(sharedResult.ProjectIDs) > 0 {
+				filter.MemberProjectIDs = sharedResult.ProjectIDs
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
@@ -370,8 +388,17 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		if query.Get("mine") == "true" {
-			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				ownerIDs := s.resolveUserOwnerProjectIDs(ctx, userIdent.ID())
+			userIdent := GetUserIdentityFromContext(ctx)
+			if userIdent == nil {
+				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
+			} else {
+				ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+				if resolveErr != nil {
+					slog.WarnContext(ctx, "listAgents: owner resolution failed (fail-closed)", "error", resolveErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"unable to resolve authorization", nil)
+					return
+				}
 				if len(ownerIDs) > 0 {
 					filter.MemberOrOwnerProjectIDs = ownerIDs
 				} else {
@@ -387,6 +414,17 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+
+	// Finding 8: Canonicalize all set-like filter fields before hashing.
+	if len(filter.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(filter.ExcludedProjectIDs)
+	}
+	if len(filter.MemberOrOwnerProjectIDs) > 1 {
+		filter.MemberOrOwnerProjectIDs = canonicalizeStringSlice(filter.MemberOrOwnerProjectIDs)
+	}
+	if len(filter.MemberProjectIDs) > 1 {
+		filter.MemberProjectIDs = canonicalizeStringSlice(filter.MemberProjectIDs)
 	}
 
 	// RS2: Cursor binding computed AFTER authorization scope and all caller

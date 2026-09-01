@@ -812,21 +812,6 @@ func exprToString(expr ast.Expr) string {
 }
 
 // ==========================================================================
-// RS2: Store Adapter — ExcludedProjectIDs
-// ==========================================================================
-
-// TestRS2_StoreExcludedProjectIDs verifies that the ExcludedProjectIDs filter
-// excludes specific projects from list results while preserving others.
-// This is tested via HTTP to exercise the full store path.
-func TestRS2_StoreExcludedProjectIDs(t *testing.T) {
-	// This is primarily a store-level concern, but we verify it works end-to-end
-	// through the constraint application path in a later constraint test.
-	// The store adapter tests (entadapter/project_store_test.go) cover the
-	// raw filter behavior.
-	t.Log("ExcludedProjectIDs store adapter tested via constraint application")
-}
-
-// ==========================================================================
 // Helpers
 // ==========================================================================
 
