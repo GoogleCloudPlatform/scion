@@ -57,6 +57,9 @@ func (s *OperationSpec) Validate() error {
 	if s.BasePermission == "" && len(s.Exemptions) == 0 {
 		errs = append(errs, errors.New("base permission is required (or an exemption must justify its absence)"))
 	}
+	if s.ResourceResolver == "" && len(s.Exemptions) == 0 {
+		errs = append(errs, errors.New("resource resolver is required (or an exemption must justify its absence)"))
+	}
 	if len(s.Effects) == 0 {
 		errs = append(errs, errors.New("at least one security effect is required"))
 	}
@@ -83,20 +86,30 @@ func (s *OperationSpec) Validate() error {
 	}
 
 	// Principal kind validation.
+	pkSeen := make(map[PrincipalKind]bool)
 	for i, pk := range s.Principals {
 		if !validPrincipalKinds[pk] {
 			errs = append(errs, fmt.Errorf("principal [%d]: unknown kind %q", i, pk))
 		}
+		if pkSeen[pk] {
+			errs = append(errs, fmt.Errorf("principal [%d]: duplicate principal kind %q", i, pk))
+		}
+		pkSeen[pk] = true
 	}
 
 	// Security effect validation.
 	hasAuthorityEffect := false
 	hasBoundaryEffect := false
 	hasAuditRequiredEffect := false
+	effSeen := make(map[SecurityEffect]bool)
 	for i, eff := range s.Effects {
 		if !validSecurityEffects[eff] {
 			errs = append(errs, fmt.Errorf("effect [%d]: unknown security effect %q", i, eff))
 		}
+		if effSeen[eff] {
+			errs = append(errs, fmt.Errorf("effect [%d]: duplicate security effect %q", i, eff))
+		}
+		effSeen[eff] = true
 		if eff.IsAuthorityEffect() {
 			hasAuthorityEffect = true
 		}
@@ -157,17 +170,23 @@ func (s *OperationSpec) Validate() error {
 		invSeen[inv.ID] = true
 	}
 
-	// Denial code validation — codes must not be empty.
+	// Denial code validation — codes must not be empty and not duplicate.
+	dcSeen := make(map[DenialCode]bool)
 	for i, dc := range s.DenialCodes {
 		if dc == "" {
 			errs = append(errs, fmt.Errorf("denial code [%d]: empty denial code", i))
 		}
+		if dcSeen[dc] {
+			errs = append(errs, fmt.Errorf("denial code [%d]: duplicate denial code %q", i, dc))
+		}
+		dcSeen[dc] = true
 	}
 
 	// Test reference validation — at least one is required unless exempted.
 	if len(s.TestRefs) == 0 && !s.hasExemptionKind(ExemptionTestFixture) {
 		errs = append(errs, errors.New("at least one test reference is required"))
 	}
+	trSeen := make(map[string]bool)
 	for i, tr := range s.TestRefs {
 		if tr.Package == "" {
 			errs = append(errs, fmt.Errorf("test ref [%d]: package is required", i))
@@ -175,6 +194,11 @@ func (s *OperationSpec) Validate() error {
 		if tr.Function == "" {
 			errs = append(errs, fmt.Errorf("test ref [%d]: function is required", i))
 		}
+		trKey := tr.Package + ":" + tr.Function
+		if trSeen[trKey] {
+			errs = append(errs, fmt.Errorf("test ref [%d]: duplicate test ref %s", i, trKey))
+		}
+		trSeen[trKey] = true
 	}
 
 	// Exemption validation.

@@ -66,7 +66,7 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 			if method == "" {
 				method = "—"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | `%s` |\n", ep.Kind, method, ep.Pattern))
+			b.WriteString(fmt.Sprintf("| %s | %s | `%s` |\n", escapeTableCell(string(ep.Kind)), escapeTableCell(method), escapeTableCell(ep.Pattern)))
 		}
 		b.WriteString("\n")
 	}
@@ -136,7 +136,7 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 			if inv.FailClosed {
 				fc = "Yes"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", inv.ID, inv.Description, fc))
+			b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", escapeTableCell(inv.ID), escapeTableCell(inv.Description), fc))
 		}
 		b.WriteString("\n")
 	}
@@ -190,4 +190,9 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 // anchorID converts an operation ID to a GitHub-compatible Markdown anchor.
 func anchorID(id OperationID) string {
 	return strings.ReplaceAll(strings.ToLower(string(id)), ".", "")
+}
+
+// escapeTableCell escapes pipe characters in a Markdown table cell value.
+func escapeTableCell(s string) string {
+	return strings.ReplaceAll(s, "|", "\\|")
 }

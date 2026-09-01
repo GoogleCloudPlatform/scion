@@ -104,6 +104,11 @@ func TestValidate_RequiredFields(t *testing.T) {
 			wantErr: "base permission is required",
 		},
 		{
+			name:    "missing resource resolver without exemption",
+			mutate:  func(s *OperationSpec) { s.ResourceResolver = "" },
+			wantErr: "resource resolver is required",
+		},
+		{
 			name:    "missing effects",
 			mutate:  func(s *OperationSpec) { s.Effects = nil },
 			wantErr: "at least one security effect is required",
@@ -135,6 +140,7 @@ func TestValidate_ExemptionsBypassEntryPointAndPrincipalRequirements(t *testing.
 	s.EntryPoints = nil
 	s.Principals = nil
 	s.BasePermission = ""
+	s.ResourceResolver = ""
 	s.Exemptions = []Exemption{
 		{Kind: ExemptionInternalOnly, Reason: "Internal-only operation"},
 	}
@@ -147,6 +153,39 @@ func TestValidate_ExemptionsBypassEntryPointAndPrincipalRequirements(t *testing.
 	if err := s.Validate(); err != nil {
 		t.Errorf("expected exemptions to bypass requirements, got: %v", err)
 	}
+}
+
+func TestValidate_ResourceResolverExemptionBehavior(t *testing.T) {
+	t.Run("missing resolver without exemption fails", func(t *testing.T) {
+		s := validSpec()
+		s.ResourceResolver = ""
+		err := s.Validate()
+		if err == nil {
+			t.Fatal("expected error for missing resource resolver")
+		}
+		if !strings.Contains(err.Error(), "resource resolver is required") {
+			t.Errorf("expected resource resolver error, got: %v", err)
+		}
+	})
+
+	t.Run("missing resolver with exemption passes", func(t *testing.T) {
+		s := validSpec()
+		s.ResourceResolver = ""
+		s.Exemptions = []Exemption{
+			{Kind: ExemptionPublicEndpoint, Reason: "No resource scope needed for public endpoint"},
+		}
+		if err := s.Validate(); err != nil {
+			t.Errorf("expected exemption to bypass resource resolver requirement, got: %v", err)
+		}
+	})
+
+	t.Run("present resolver passes", func(t *testing.T) {
+		s := validSpec()
+		// ResourceResolver is set by validSpec()
+		if err := s.Validate(); err != nil {
+			t.Errorf("expected valid spec, got: %v", err)
+		}
+	})
 }
 
 func TestValidate_UnknownEntryPointKind(t *testing.T) {
@@ -445,9 +484,9 @@ func TestValidate_MultipleErrors(t *testing.T) {
 		t.Fatalf("expected *ValidationError, got %T", err)
 	}
 	// Should have at least: ID, domain, description, entry points,
-	// principals, base permission, effects, test refs
-	if len(ve.Errors) < 7 {
-		t.Errorf("expected at least 7 errors, got %d: %v", len(ve.Errors), err)
+	// principals, base permission, resource resolver, effects, test refs
+	if len(ve.Errors) < 9 {
+		t.Errorf("expected at least 9 errors, got %d: %v", len(ve.Errors), err)
 	}
 }
 
@@ -636,5 +675,142 @@ func TestValidate_AllValidExemptionKinds(t *testing.T) {
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid exemption kind %q caused error: %v", k, err)
 		}
+	}
+}
+
+// --- N1: Duplicate detection tests ---
+
+func TestValidate_DuplicatePrincipals(t *testing.T) {
+	s := validSpec()
+	s.Principals = []PrincipalKind{PrincipalUser, PrincipalUser}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate principals")
+	}
+	if !strings.Contains(err.Error(), `duplicate principal kind "user"`) {
+		t.Errorf("expected duplicate principal error, got: %v", err)
+	}
+}
+
+func TestValidate_DuplicateEffects(t *testing.T) {
+	s := validSpec()
+	s.Effects = []SecurityEffect{EffectReadOne, EffectReadOne}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate effects")
+	}
+	if !strings.Contains(err.Error(), `duplicate security effect "read-one"`) {
+		t.Errorf("expected duplicate effect error, got: %v", err)
+	}
+}
+
+func TestValidate_DuplicateDenialCodes(t *testing.T) {
+	s := validSpec()
+	s.DenialCodes = []DenialCode{DenialForbidden, DenialForbidden}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate denial codes")
+	}
+	if !strings.Contains(err.Error(), `duplicate denial code "forbidden"`) {
+		t.Errorf("expected duplicate denial code error, got: %v", err)
+	}
+}
+
+func TestValidate_DuplicateTestRefs(t *testing.T) {
+	s := validSpec()
+	s.TestRefs = []TestRef{
+		{Package: "pkg/hub", Function: "TestFoo"},
+		{Package: "pkg/hub", Function: "TestFoo"},
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate test refs")
+	}
+	if !strings.Contains(err.Error(), "duplicate test ref") {
+		t.Errorf("expected duplicate test ref error, got: %v", err)
+	}
+}
+
+func TestValidate_DistinctDuplicatesPass(t *testing.T) {
+	s := validSpec()
+	s.Principals = []PrincipalKind{PrincipalUser, PrincipalAgent}
+	s.Effects = []SecurityEffect{EffectReadOne, EffectListScoped}
+	s.DenialCodes = []DenialCode{DenialForbidden, DenialLastOwner}
+	s.TestRefs = []TestRef{
+		{Package: "pkg/hub", Function: "TestA"},
+		{Package: "pkg/hub", Function: "TestB"},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("expected distinct values to pass, got: %v", err)
+	}
+}
+
+// --- N5: RenderMarkdown tests ---
+
+func TestRenderMarkdown_Determinism(t *testing.T) {
+	specs := []OperationSpec{validSpec(), validAuthoritySpec()}
+	out1 := RenderMarkdown(specs)
+	out2 := RenderMarkdown(specs)
+	if out1 != out2 {
+		t.Error("RenderMarkdown is not deterministic: two calls with same input produced different output")
+	}
+}
+
+func TestRenderMarkdown_SmokeSections(t *testing.T) {
+	s := validAuthoritySpec()
+	s.Invariants = []Invariant{
+		{ID: "last-owner", Description: "Must not orphan project", FailClosed: true},
+	}
+	s.DenialCodes = []DenialCode{DenialLastOwner}
+	out := RenderMarkdown([]OperationSpec{s})
+
+	checks := []struct {
+		label string
+		want  string
+	}{
+		{"catalog heading", "# Authorization Operation Catalog"},
+		{"operation count", "**Operations:** 1"},
+		{"operation ID heading", "## test.authority"},
+		{"domain", "**Domain:** test"},
+		{"entry points table", "### Entry Points"},
+		{"principals", "**Principals:**"},
+		{"base permission", "**Base Permission:** `test.read`"},
+		{"resource resolver", "**Resource Resolver:** test-resolver"},
+		{"effects", "`grant-authority`"},
+		{"delegation section", "### Delegation"},
+		{"governance section", "### Governance"},
+		{"invariants table", "### Invariants"},
+		{"invariant ID", "last-owner"},
+		{"audit section", "### Audit"},
+		{"denial codes", "`LAST_OWNER`"},
+		{"test refs", "### Tests"},
+		{"toc link", "[test.authority](#testauthority)"},
+	}
+
+	for _, c := range checks {
+		if !strings.Contains(out, c.want) {
+			t.Errorf("missing %s: expected output to contain %q", c.label, c.want)
+		}
+	}
+}
+
+func TestRenderMarkdown_Empty(t *testing.T) {
+	out := RenderMarkdown(nil)
+	if !strings.Contains(out, "**Operations:** 0") {
+		t.Error("empty catalog should show 0 operations")
+	}
+}
+
+func TestRenderMarkdown_PipeEscaping(t *testing.T) {
+	s := validSpec()
+	s.Invariants = []Invariant{
+		{ID: "pipe|test", Description: "A | in description", FailClosed: false},
+	}
+	out := RenderMarkdown([]OperationSpec{s})
+	if strings.Contains(out, "| pipe|test |") {
+		t.Error("pipe character in invariant ID should be escaped")
+	}
+	if !strings.Contains(out, `pipe\|test`) {
+		t.Error("expected escaped pipe in invariant ID")
 	}
 }
