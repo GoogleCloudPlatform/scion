@@ -489,7 +489,9 @@ export class ScionGroupMemberEditor extends LitElement {
     this.addDialogOpen = false;
     // Return focus to the Add Member button
     requestAnimationFrame(() => {
-      const addBtn = this.shadowRoot?.querySelector<HTMLElement>('.list-header sl-button, .section-header sl-button');
+      const addBtn = this.shadowRoot?.querySelector<HTMLElement>(
+        '.list-header sl-button, .section-header sl-button'
+      );
       addBtn?.focus();
     });
   }
@@ -794,7 +796,11 @@ export class ScionGroupMemberEditor extends LitElement {
               <th scope="col">Member</th>
               <th scope="col">Role</th>
               <th scope="col" class="hide-mobile">Added</th>
-              ${this.canRemove ? html`<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>` : nothing}
+              ${this.canRemove
+                ? html`<th scope="col" class="actions-cell">
+                    <span class="sr-only">Actions</span>
+                  </th>`
+                : nothing}
             </tr>
           </thead>
           <tbody>
