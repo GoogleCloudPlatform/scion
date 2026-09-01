@@ -2276,6 +2276,10 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/github-app/installations/", Kind: ExemptionHubAdmin, Reason: "GitHub App installation by ID, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/github-app/installations/discover", Kind: ExemptionHubAdmin, Reason: "GitHub App installation discover, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/github-app/sync-permissions", Kind: ExemptionHubAdmin, Reason: "GitHub App permission sync, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
+
+	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
+	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
 }
 
 // MutationClassifications maps every discovered security-relevant mutation
@@ -2303,11 +2307,25 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleDefinition", Symbol: "DeleteRoleDefinition", OperationID: "role.definition.delete"},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/handlers_access_constraints.go
+	// pkg/hub/access_constraint_governance.go — B5 transactional governance
+	// PR #1445 moved store mutations from handlers to CommitBoundaryChange,
+	// compensateAuditFailure, and ReplaceRoleBinding in the governance layer.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_access_constraints.go", Function: "createAccessConstraint", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
-	{File: "pkg/hub/handlers_access_constraints.go", Function: "updateAccessConstraint", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
-	{File: "pkg/hub/handlers_access_constraints.go", Function: "deleteAccessConstraint", Symbol: "DeleteAccessConstraint", OperationID: "access.constraint.delete"},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "DeleteAccessConstraint", OperationID: "access.constraint.delete"},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "CreateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "DeleteAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Governance role binding replacement during boundary mutation, route-guarded via CommitBoundaryChange", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Governance role binding replacement during boundary mutation, route-guarded via CommitBoundaryChange", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Governance role binding replacement rollback: deletes new binding on old-binding-delete failure", Scope: "pkg/hub/access_constraint_governance.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/access_constraint_recovery.go — constraint recovery operations
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/access_constraint_recovery.go", Function: "RecoverAll", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Constraint recovery: re-enables constraints disabled by audit failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
+	{File: "pkg/hub/access_constraint_recovery.go", Function: "rollbackDisable", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Constraint recovery rollback: restores constraint on disable failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_groups.go — group CRUD and membership

@@ -239,39 +239,39 @@ Each is documented here rather than silently grandfathered.
 | **Current state** | Route metadata covers all registered mux patterns but lumps GET/POST/PATCH/DELETE under one classification. Handler-level authorization is the defense-in-depth layer. |
 | **Disposition** | `baseline-af1` — catalog documents the gap; method-specific route metadata conversion is a Phase 3/AH5 deliverable. |
 
-### F-AF1-02: 97 permissions reserved/deferred, not yet catalog-consumed
+### F-AF1-02: Permission coverage — 78 consumed, 41 reserved/deferred
 
 | Field | Value |
 |---|---|
 | **Source** | AF1 permission coverage validation |
 | **Security effect** | audit-gap |
 | **Severity** | Low |
-| **Description** | Of 119 registered permissions, 22 are consumed by catalog operations and 97 are reserved/deferred with explicit rationale. The deferred permissions fall into: route-guarded CRUD (AH2-AH5), Phase 2 D4 hub-admin conversion, agent token scopes (non-route-enforced), and deprecated policy permissions (CO1 410 Gone). |
-| **Current state** | Every registered permission is accounted for — either consumed by a catalog operation or documented as reserved/deferred with a target tranche. |
+| **Description** | The initial AF1 catalog discovery found 22 permissions consumed and 97 reserved/deferred out of 119 registered. Subsequent AF1 catalog expansion (89 operations) raised consumption to 78/119 consumed by catalog operations, with 41 remaining as reserved/deferred with explicit rationale per tranche. The deferred permissions fall into: route-guarded CRUD (AH2-AH5), Phase 2 D4 hub-admin conversion, agent token scopes (non-route-enforced), and deprecated policy permissions (CO1 410 Gone). |
+| **Current state** | `TestRegisteredPermissionsConsumed` enforces 78/119 consumed, 41 reserved/deferred. Every registered permission is accounted for — either consumed by a catalog operation or documented as reserved/deferred with a target tranche. CI gate prevents regression. |
 | **Disposition** | `baseline-af1` — tracked for resolution in AH1-AH5 tranches. |
 
-### F-AF1-03: 53 security mutation call sites discovered, classification pending
+### F-AF1-03: Security mutation call sites — 182/182 bidirectional classification enforced
 
 | Field | Value |
 |---|---|
 | **Source** | AF1 security mutation scan |
 | **Security effect** | audit-gap |
 | **Severity** | Medium |
-| **Description** | AST-based scan found 53 security-relevant mutation call sites across 16 symbol types in `pkg/hub/` and `pkg/store/`. These include 10 CreateRoleBinding sites, 5 DeleteRoleBinding sites, 5 AddGroupMember sites, 11 DeleteAgent sites, and others. Each site needs classification as either mapped to a catalog operation or explicitly exempted (store-layer internal, migration, test fixture). |
-| **Current state** | Mutation scan runs as an informational test. Full bidirectional classification (unclassified-site and stale-classification detection) will be enforced in the CI gate when the classification table is populated. |
-| **Disposition** | `baseline-af1` — informational scan complete; bidirectional enforcement deferred to AF1.1 follow-up or AH1. |
+| **Description** | AST-based scan initially found 53 security-relevant mutation call sites. Subsequent catalog expansion and PR #1445 governance additions raised the total to 182 discovered call sites across `pkg/hub/` and `pkg/store/`. Each site is classified as either mapped to a catalog operation or explicitly exempted (store-layer internal, migration, test fixture, governance compensating action). |
+| **Current state** | `TestMutationClassificationBidirectional` enforces 182/182 bidirectional agreement: every scanner-discovered site has a classification entry, and every classification entry is still discoverable by the scanner. CI gate prevents regression in either direction (unclassified sites or stale classifications). |
+| **Disposition** | `resolved-af1` — bidirectional classification complete and CI-enforced. |
 
 ---
 
 ## Summary
 
-| Severity | Total | Fixed | Contained-C0 | Deferred | Baseline-AF1 | Accepted Risk |
-|---|---|---|---|---|---|---|
-| Critical | 3 | 0 | 3 | 0 | 0 | 0 |
-| High | 4 | 3 | 1 | 0 | 0 | 0 |
-| Medium | 7 | 1 | 3 | 1 | 2 | 0 |
-| Low | 4 | 2 | 1 | 0 | 1 | 0 |
-| **Total** | **18** | **6** | **8** | **1** | **3** | **0** |
+| Severity | Total | Fixed | Contained-C0 | Deferred | Baseline-AF1 | Resolved-AF1 | Accepted Risk |
+|---|---|---|---|---|---|---|---|
+| Critical | 3 | 0 | 3 | 0 | 0 | 0 | 0 |
+| High | 4 | 3 | 1 | 0 | 0 | 0 | 0 |
+| Medium | 7 | 1 | 3 | 1 | 1 | 1 | 0 |
+| Low | 4 | 2 | 1 | 0 | 1 | 0 | 0 |
+| **Total** | **18** | **6** | **8** | **1** | **2** | **1** | **0** |
 
 ## C0 Containment Changes
 
