@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "Adding this group would create a cycle in the group hierarchy"
+  }
+}

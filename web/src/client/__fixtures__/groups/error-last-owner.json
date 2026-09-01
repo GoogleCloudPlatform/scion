@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "Cannot remove the last owner of a group"
+  }
+}

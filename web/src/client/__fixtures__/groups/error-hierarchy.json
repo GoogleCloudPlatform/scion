@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "forbidden",
+    "message": "Only group owners can add owners or admins"
+  }
+}
