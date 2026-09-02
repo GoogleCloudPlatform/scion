@@ -106,13 +106,9 @@ test.describe('Capability gating: admin vs read-only (AC1, AC8)', () => {
         waitUntil: 'domcontentloaded',
       });
 
-      // Wait for the page to settle; the read-only user may see groups if they
-      // have the list capability, or may see permission denied.
-      // Give time for the page to fully render.
-      await roPage.waitForTimeout(3000);
-
       // If they can see the list, Create group button should NOT be present.
       // (It may be a permission denied page instead.)
+      // toHaveCount auto-retries, so no explicit wait is needed.
       const createBtn = roPage.getByRole('button', { name: 'Create group' });
       await expect(createBtn).toHaveCount(0);
     } finally {

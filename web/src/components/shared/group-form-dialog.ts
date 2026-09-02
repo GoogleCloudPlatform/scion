@@ -434,12 +434,15 @@ export class ScionGroupFormDialog extends LitElement {
       hasChanges = true;
     }
 
-    // Labels: compare against original
+    // Labels: compare against original (order-independent)
     const labelsMap = this.buildLabelsMap();
     const originalMap = this.buildLabelsMapFrom(this.originalLabels);
-    const labelsJson = JSON.stringify(labelsMap);
-    const originalJson = JSON.stringify(originalMap);
-    if (labelsJson !== originalJson) {
+    const keysMap = Object.keys(labelsMap);
+    const keysOriginal = Object.keys(originalMap);
+    const labelsChanged =
+      keysMap.length !== keysOriginal.length ||
+      keysMap.some((key) => labelsMap[key] !== originalMap[key]);
+    if (labelsChanged) {
       patch.labels = labelsMap;
       hasChanges = true;
     }

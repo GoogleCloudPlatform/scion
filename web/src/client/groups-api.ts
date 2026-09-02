@@ -304,6 +304,7 @@ export async function removeMember(
   // payloads (e.g. 403 CONSTRAINT_ADMIN_LOCKOUT, 403 SECURITY_REVIEW_REQUIRED).
   // Surface these as result outcomes instead of throwing, so that UI code can
   // display purpose-built dialogs rather than a generic error toast.
+  const clonedRes = res.clone();
   const errorBody = (await res.json().catch(() => null)) as Record<string, unknown> | null;
   if (errorBody) {
     const error = errorBody.error as Record<string, unknown> | undefined;
@@ -323,13 +324,7 @@ export async function removeMember(
     }
   }
 
-  // Re-create the response for classifyError since we already consumed the body.
-  if (errorBody) {
-    const syntheticRes = new Response(JSON.stringify(errorBody), {
-      status: res.status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-    throw await classifyError(syntheticRes);
-  }
-  throw new GroupsApiError('http', `HTTP ${res.status}`, res.status);
+  // Use the cloned response for classifyError since we already consumed the
+  // original body above.
+  throw await classifyError(clonedRes);
 }

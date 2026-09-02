@@ -79,22 +79,21 @@ test.describe('List states: empty variants and permission denied (AC5)', () => {
         waitUntil: 'domcontentloaded',
       });
 
-      // Wait for the page to settle
-      await viewerPage.waitForTimeout(3_000);
-
       // The viewer should see a permission-denied state, be redirected away,
       // or at least NOT see the normal admin "Create group" button.
-      const seesPermissionDenied = await viewerPage
-        .getByText(/permission denied|forbidden|not authorized|access denied/i)
-        .isVisible()
-        .catch(() => false);
-      const redirectedAway = !viewerPage.url().includes('/admin/groups');
-      const noCreateButton = !(await viewerPage
-        .getByRole('button', { name: 'Create group' })
-        .isVisible()
-        .catch(() => false));
+      await expect(async () => {
+        const seesPermissionDenied = await viewerPage
+          .getByText(/permission denied|forbidden|not authorized|access denied/i)
+          .isVisible()
+          .catch(() => false);
+        const redirectedAway = !viewerPage.url().includes('/admin/groups');
+        const noCreateButton = !(await viewerPage
+          .getByRole('button', { name: 'Create group' })
+          .isVisible()
+          .catch(() => false));
 
-      expect(seesPermissionDenied || redirectedAway || noCreateButton).toBe(true);
+        expect(seesPermissionDenied || redirectedAway || noCreateButton).toBe(true);
+      }).toPass({ timeout: 15_000 });
     } finally {
       await viewerContext.close();
     }

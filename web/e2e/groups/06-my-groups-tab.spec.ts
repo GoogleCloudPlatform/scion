@@ -41,19 +41,18 @@ test.describe('My groups tab (AC6)', () => {
     const myGroupsPanel = page.locator('sl-tab-panel[name="mine"]');
     await myGroupsPanel.waitFor({ state: 'visible', timeout: 10_000 });
 
-    // Wait for the content to settle — data is fetched on tab activation
-    await page.waitForTimeout(2_000);
-
     // Either the panel shows groups or an empty state message.
-    // Check within the panel's DOM (visible elements only).
-    const panelContent = await myGroupsPanel.textContent();
-    const hasGroupContent = panelContent?.includes('E2E Test Group') ||
-      panelContent?.includes('No Group') ||
-      panelContent?.includes('member') ||
-      // Any content means the panel loaded
-      (panelContent && panelContent.trim().length > 0);
+    // Use toPass() to retry until content is loaded (data is fetched on tab activation).
+    await expect(async () => {
+      const panelContent = await myGroupsPanel.textContent();
+      const hasGroupContent = panelContent?.includes('E2E Test Group') ||
+        panelContent?.includes('No Group') ||
+        panelContent?.includes('member') ||
+        // Any content means the panel loaded
+        (panelContent && panelContent.trim().length > 0);
 
-    expect(hasGroupContent).toBeTruthy();
+      expect(hasGroupContent).toBeTruthy();
+    }).toPass({ timeout: 10_000 });
   });
 
   test('My groups tab deep-links via ?tab=mine', async ({ page }) => {

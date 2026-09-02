@@ -70,9 +70,10 @@ test.describe('axe accessibility checks (AC20)', () => {
     await page.goto('/admin/groups?q=xyznonexistent99999', {
       waitUntil: 'domcontentloaded',
     });
-    // Wait for the page to settle — it may show "No Groups Match" or another
-    // empty-state message. Give the filtered state time to render.
-    await page.waitForTimeout(2_000);
+    // Wait for the filtered-empty state to render before running axe.
+    await expect(page.getByText('No Groups Match These Filters')).toBeVisible({
+      timeout: 10_000,
+    });
 
     await assertAxeClean(page);
   });

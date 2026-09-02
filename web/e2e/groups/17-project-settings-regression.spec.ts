@@ -56,9 +56,6 @@ test.describe('Project settings member editor regression (AC18)', () => {
       waitUntil: 'domcontentloaded',
     });
 
-    // Wait for the page to load
-    await page.waitForTimeout(3000);
-
     // Check that the group-member-editor component is present (inside project
     // settings) and renders members or an empty state — meaning it hasn't broken.
     const memberEditor = page.locator('scion-group-member-editor');
