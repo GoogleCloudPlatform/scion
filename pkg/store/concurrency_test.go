@@ -15,6 +15,8 @@
 package store
 
 import (
+	"os"
+	"regexp"
 	"testing"
 )
 
@@ -96,24 +98,24 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 	}
 }
 
-// TestAdvisoryLockKeys_AllUnique asserts that every declared advisory lock key
-// has a unique value. A duplicate constant would silently make two unrelated
-// operations mutually exclusive under the advisory lock, which presents as
-// "the migration sometimes doesn't run" and is extremely hard to diagnose.
+// TestAdvisoryLockKeys_AllUnique reads concurrency.go from disk, extracts
+// every AdvisoryLockKey declaration with a regex, and verifies:
+//  1. Every source-declared name appears in the test's compiled key list.
+//  2. Every key value is unique (no two names share the same numeric value).
 //
-// This test enumerates every key explicitly. If you add a new key to
-// concurrency.go and this test does not fail with "missing key" — you must add
-// it here too.
+// This catches both value collisions (which the Go compiler permits — different
+// const names with the same value are legal) and drift (a key added to the
+// source but not to the test list). The previous version used a hardcoded
+// count which never actually caught drift because both literals were updated
+// in the same commit.
 func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 	type entry struct {
 		name string
 		key  AdvisoryLockKey
 	}
 
-	// Every singleton advisory lock key. Keep this list in sync with
-	// concurrency.go — the test's value is that it catches duplicates
-	// at compile time that the Go compiler cannot catch (different const
-	// names with the same numeric value are legal Go).
+	// Compiled key list — must stay in sync with concurrency.go.
+	// The source-driven regex check below catches any drift.
 	all := []entry{
 		{"LockScheduleEvaluator", LockScheduleEvaluator},
 		{"LockAgentHeartbeatTimeout", LockAgentHeartbeatTimeout},
@@ -141,20 +143,52 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockQuotaEnforcement", LockQuotaEnforcement},
 	}
 
-	// Assert the count matches what we expect so a newly added key that
-	// is not added to this list is caught.
-	// Singleton range: 0x5C100001–0x5C100014 = 20 keys.
-	// Per-object range: 0x5C101001–0x5C101002 = 2 keys.
-	const expectedTotal = 22
-	if len(all) != expectedTotal {
-		t.Fatalf("expected %d advisory lock keys, got %d — update this test when adding a key", expectedTotal, len(all))
-	}
-
+	// --- Check 1: value uniqueness ---
 	seen := make(map[AdvisoryLockKey]string, len(all))
 	for _, e := range all {
 		if prev, dup := seen[e.key]; dup {
 			t.Errorf("duplicate advisory lock key value 0x%X: %s and %s", int64(e.key), prev, e.name)
 		}
 		seen[e.key] = e.name
+	}
+
+	// --- Check 2: completeness against source ---
+	// Read concurrency.go from disk and extract every line that declares an
+	// AdvisoryLockKey constant. The regex matches lines like:
+	//     LockFoo AdvisoryLockKey = 0x5C100001
+	src, err := os.ReadFile("concurrency.go")
+	if err != nil {
+		t.Fatalf("reading concurrency.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`(\w+)\s+AdvisoryLockKey\s*=\s*0x[0-9A-Fa-f]+`)
+	matches := re.FindAllStringSubmatch(string(src), -1)
+	if len(matches) == 0 {
+		t.Fatal("regex found zero AdvisoryLockKey declarations in concurrency.go")
+	}
+
+	// Build a set of names from the compiled test list.
+	testNames := make(map[string]bool, len(all))
+	for _, e := range all {
+		testNames[e.name] = true
+	}
+
+	// Every name in the source file must appear in the test list.
+	for _, m := range matches {
+		name := m[1]
+		if !testNames[name] {
+			t.Errorf("concurrency.go declares %s but this test does not include it — add it to the 'all' slice", name)
+		}
+	}
+
+	// Every name in the test list must appear in the source file.
+	sourceNames := make(map[string]bool, len(matches))
+	for _, m := range matches {
+		sourceNames[m[1]] = true
+	}
+	for _, e := range all {
+		if !sourceNames[e.name] {
+			t.Errorf("test includes %s but concurrency.go does not declare it — remove it from the 'all' slice", e.name)
+		}
 	}
 }
