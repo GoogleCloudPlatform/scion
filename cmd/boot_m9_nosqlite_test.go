@@ -372,7 +372,9 @@ func TestM9_NoRemedyOnPostDeriveLine(t *testing.T) {
 
 	// Find the reportResidualUnattributed function body.
 	fnStart := strings.Index(source, "func reportResidualUnattributed(")
-	require.Greater(t, fnStart, 0, "must find reportResidualUnattributed in source")
+	require.Greater(t, fnStart, 0,
+		"cannot find func reportResidualUnattributed in boot_data_migrations.go; "+
+			"was it renamed or moved? Update the scan target (see M7 source-scan guard for precedent)")
 
 	// Extract from function start to end of file (sufficient — it's the
 	// last function in the file).
@@ -382,7 +384,8 @@ func TestM9_NoRemedyOnPostDeriveLine(t *testing.T) {
 	// "Post-derivation failures" marker.
 	postDeriveStart := strings.Index(fnBody, "Post-derivation failures")
 	require.Greater(t, postDeriveStart, 0,
-		"must find 'Post-derivation failures' marker in reportResidualUnattributed")
+		"cannot find 'Post-derivation failures' marker in reportResidualUnattributed; "+
+			"was the slog message renamed? Update the scan target")
 
 	postDeriveSection := fnBody[postDeriveStart:]
 
@@ -412,7 +415,9 @@ func TestM9_NoRemedyAnywhereInReport(t *testing.T) {
 	source := string(src)
 
 	fnStart := strings.Index(source, "func reportResidualUnattributed(")
-	require.Greater(t, fnStart, 0)
+	require.Greater(t, fnStart, 0,
+		"cannot find func reportResidualUnattributed in boot_data_migrations.go; "+
+			"was it renamed or moved? Update the scan target")
 
 	fnBody := source[fnStart:]
 

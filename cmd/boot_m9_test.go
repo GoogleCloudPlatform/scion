@@ -805,6 +805,217 @@ func TestM9_Gate6_AccumulatorResetOnRepeatedPass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Gate C: Per-project identity from real log output (design §4.8 correction 4)
+// ---------------------------------------------------------------------------
+//
+// This test runs the actual boot hook, parses the per-project log lines,
+// and asserts BOTH identities PER PROJECT with NO AGGREGATION from the
+// LOGGED values. A table-driven test over synthetic BackfillResult structs
+// cannot catch the mutation that ships the exact gteam defect:
+//
+//   deriveCount := len(result.Errors)    // conflates row_errors with derive_failures
+//
+// That mutation compiles and is invisible to any test that constructs its
+// own fixture. Only a test that reads what the boot hook actually logged
+// can detect it.
+//
+// MUTATION: change `deriveCount := sumDeriveFailures(result.DeriveFailures)`
+// to `deriveCount := len(result.Errors)` in runMessageBackfill. Both
+// identities fail for Project A (which has a write failure), and the
+// error classification identity fails because derive_failures(logged)
+// includes write failures.
+
+// TestM9_GateC_PerProjectIdentityFromLog seeds two projects with
+// different dispositions, runs the boot hook, parses the per-project
+// log lines, and asserts both identities per project (no aggregation).
+//
+// Project A: derive failure + hazardA inferred (with AddParticipant
+//   write failures from non-UUID principals). This is the gteam shape:
+//   derive_failures > 0 AND write_failures > 0 in the same project,
+//   so derive_failures != row_errors, and the mutation is detectable.
+// Project B: clean attributed (baseline)
+//
+// The two identities, as verified from the LOG LINE:
+//
+//   processed  = attributed + inferred + skipped + derive_failures
+//   row_errors = derive_failures + write_failures + resolution_failures
+//
+// These are DIFFERENT equations. The first counts message disposition
+// (each message in exactly one category). The second counts errors
+// (each error in exactly one type; a message may produce 0, 1, or N
+// errors — AddParticipant can fail twice for one successfully-stamped
+// message).
+func TestM9_GateC_PerProjectIdentityFromLog(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// ---- Project A: derive failure + hazardA inferred ----
+	pidA := uuid.NewString()
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   pidA,
+		Name: "gateC-mixed",
+		Slug: "gateC-mixed-" + pidA[:8],
+	})
+	require.NoError(t, err)
+
+	// A-1: derive-refused message (non-UUID principals, no thread).
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: pidA,
+		Msg:       "derive-refused",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
+	})
+	require.NoError(t, err)
+
+	// A-2: hazardA message (valid dm key, non-UUID principals → Inferred).
+	// AddParticipant may produce write failures for the non-UUID principals.
+	id1 := uuid.NewString()
+	id2 := uuid.NewString()
+	if id1 > id2 {
+		id1, id2 = id2, id1 // canonical order
+	}
+	dmKeyA := fmt.Sprintf("dm:agent:%s:user:%s", id1, id2)
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: pidA,
+		Msg:       "hazardA-inferred",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
+		ThreadID:  dmKeyA,
+	})
+	require.NoError(t, err)
+
+	// ---- Project B: clean attributed ----
+	pidB := uuid.NewString()
+	err = s.CreateProject(ctx, &store.Project{
+		ID:   pidB,
+		Name: "gateC-clean",
+		Slug: "gateC-clean-" + pidB[:8],
+	})
+	require.NoError(t, err)
+
+	senderB := uuid.NewString()
+	recipientB := uuid.NewString()
+	err = s.CreateUser(ctx, &store.User{
+		ID:    senderB,
+		Email: "gateC-b@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        recipientB,
+		Name:      "gateC-b-agent",
+		Slug:      "gateC-b-agent-" + recipientB[:8],
+		ProjectID: pidB,
+	})
+	require.NoError(t, err)
+
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   pidB,
+		Msg:         "clean-attributed",
+		Sender:      "user:" + senderB,
+		SenderID:    senderB,
+		Recipient:   "agent:" + recipientB,
+		RecipientID: recipientB,
+	})
+	require.NoError(t, err)
+
+	// ---- Run the boot hook ----
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	runBootDataMigrations(ctx, s)
+
+	logOutput := buf.String()
+
+	// ---- Parse per-project log lines and assert identities ----
+	projectIDs := []string{pidA, pidB}
+	for _, pid := range projectIDs {
+		t.Run("project="+pid[:8], func(t *testing.T) {
+			var projectLine string
+			for _, line := range strings.Split(logOutput, "\n") {
+				if strings.Contains(line, "Message backfill: project completed") &&
+					strings.Contains(line, pid) {
+					projectLine = line
+					break
+				}
+			}
+			require.NotEmpty(t, projectLine,
+				"must find per-project log line for project %s", pid[:8])
+
+			// Extract all logged values from the ACTUAL log line.
+			processed, ok := extractLoggedInt(projectLine, "processed")
+			require.True(t, ok, "must find processed= in log line")
+			attributed, ok := extractLoggedInt(projectLine, "attributed")
+			require.True(t, ok, "must find attributed= in log line")
+			inferred, ok := extractLoggedInt(projectLine, "inferred")
+			require.True(t, ok, "must find inferred= in log line")
+			skipped, ok := extractLoggedInt(projectLine, "skipped")
+			require.True(t, ok, "must find skipped= in log line")
+			deriveFailures, ok := extractLoggedInt(projectLine, "derive_failures")
+			require.True(t, ok, "must find derive_failures= in log line")
+			writeFailures, ok := extractLoggedInt(projectLine, "write_failures")
+			require.True(t, ok, "must find write_failures= in log line")
+			resolutionFailures, ok := extractLoggedInt(projectLine, "resolution_failures")
+			require.True(t, ok, "must find resolution_failures= in log line")
+			rowErrors, ok := extractLoggedInt(projectLine, "row_errors")
+			require.True(t, ok, "must find row_errors= in log line")
+
+			// Identity 1: message disposition.
+			// Each MESSAGE goes to exactly one category. Write failures from
+			// AddParticipant do NOT affect this — those are supplementary
+			// errors on a message already counted as Attributed/Inferred.
+			// Only SetMessageConversationID failures would affect this, and
+			// this test has none.
+			dispositionSum := attributed + inferred + skipped + deriveFailures
+			assert.Equal(t, processed, dispositionSum,
+				"GATE C identity 1 (project %s): processed (%d) must equal "+
+					"attributed (%d) + inferred (%d) + skipped (%d) + derive_failures (%d) = %d; "+
+					"MUTATION: deriveCount=len(Errors) inflates derive_failures to include write errors, breaking this",
+				pid[:8], processed, attributed, inferred, skipped, deriveFailures, dispositionSum)
+
+			// Identity 2: error classification.
+			// Each ERROR entry is classified as exactly one type. A single
+			// message can produce multiple errors (e.g. 2 AddParticipant
+			// failures for one Inferred message).
+			errorSum := deriveFailures + writeFailures + resolutionFailures
+			assert.Equal(t, rowErrors, errorSum,
+				"GATE C identity 2 (project %s): row_errors (%d) must equal "+
+					"derive_failures (%d) + write_failures (%d) + resolution_failures (%d) = %d; "+
+					"MUTATION: deriveCount=len(Errors) makes derive_failures=row_errors, so errorSum overflows",
+				pid[:8], rowErrors, deriveFailures, writeFailures, resolutionFailures, errorSum)
+		})
+	}
+
+	// ---- Verify the fixture shape catches the mutation ----
+	var lineA string
+	for _, line := range strings.Split(logOutput, "\n") {
+		if strings.Contains(line, pidA) && strings.Contains(line, "project completed") {
+			lineA = line
+			break
+		}
+	}
+	require.NotEmpty(t, lineA)
+
+	// Project A must have derive_failures > 0 (for the mutation to change them).
+	df, _ := extractLoggedInt(lineA, "derive_failures")
+	re, _ := extractLoggedInt(lineA, "row_errors")
+	require.Greater(t, df, 0,
+		"fixture: Project A must have derive_failures > 0")
+	require.Greater(t, re, df,
+		"fixture: Project A must have row_errors > derive_failures "+
+			"(write failures from AddParticipant), so the mutation "+
+			"deriveCount=len(Errors) is distinguishable")
+
+	// Project A must have inferred > 0 (gteam's hazardA population).
+	inf, _ := extractLoggedInt(lineA, "inferred")
+	require.Greater(t, inf, 0,
+		"fixture: Project A must have inferred > 0 to represent gteam's hazardA population")
+}
+
+// ---------------------------------------------------------------------------
 // Gate 7: M7 tests untouched
 // ---------------------------------------------------------------------------
 
