@@ -559,14 +559,24 @@ func TestBuildLogFilter_ParticipantID(t *testing.T) {
 			wantOut:   "user-456",
 		},
 		{
-			name: "participant filter not added for non-message logs",
+			name: "participant filter applies regardless of LogID",
 			opts: LogQueryOptions{
 				AgentID:       "agent-123",
 				ParticipantID: "user-456",
 				LogID:         "scion-agents",
 			},
 			projectID: "my-project",
-			wantOut:   "user-456",
+			// Access-control constraint is unconditional on log-routing.
+			wantIn: `(labels.recipient_id = "user-456" OR labels.sender_id = "user-456")`,
+		},
+		{
+			name: "participant filter applies with no LogID",
+			opts: LogQueryOptions{
+				AgentID:       "agent-123",
+				ParticipantID: "user-456",
+			},
+			projectID: "",
+			wantIn:    `(labels.recipient_id = "user-456" OR labels.sender_id = "user-456")`,
 		},
 		{
 			name: "participant and agent filters coexist",

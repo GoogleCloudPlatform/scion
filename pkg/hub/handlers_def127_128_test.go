@@ -25,11 +25,14 @@ package hub
 //   DEF-127  — thread path still returns 409 (covered in handlers_read_switch_test.go)
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -210,5 +213,122 @@ func TestDEF128b_ParticipantFilter_MutationTest(t *testing.T) {
 	// The participant ID must NOT appear in the unscoped filter (mutation baseline).
 	if strings.Contains(withoutParticipant, "user-456") {
 		t.Errorf("unscoped filter should not contain user-456: %q", withoutParticipant)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-128b defect #1: non-manage + no user identity → deny (fail closed)
+// ---------------------------------------------------------------------------
+
+// nonUserIdentity is a minimal Identity that does NOT implement UserIdentity.
+// This simulates a caller kind (future or synthetic) that passes basic
+// authentication but is not a user — testing the fail-closed guard.
+type nonUserIdentity struct {
+	id string
+}
+
+func (n *nonUserIdentity) ID() string   { return n.id }
+func (n *nonUserIdentity) Type() string { return "synthetic" }
+
+func TestDEF128b_NonManageNonUser_Denied(t *testing.T) {
+	// A non-manage caller with no UserIdentity must be denied (403), not
+	// served an unscoped query. This is the fail-closed invariant.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create an agent to query.
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "def128b-deny-project",
+		Slug: "def128b-deny-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	agent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "def128b-deny-agent",
+		Slug:      "def128b-deny-agent",
+		ProjectID: project.ID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Construct a request with a non-user identity injected directly into
+	// the context. This bypasses the auth middleware but lets us test the
+	// handler's fail-closed guard in isolation.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/agents/"+agent.ID+"/message-logs", nil)
+	reqCtx := contextWithIdentity(req.Context(), &nonUserIdentity{id: "synth-001"})
+	req = req.WithContext(reqCtx)
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentMessageLogs(rec, req, agent.ID)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-manage + non-user: expected 403, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-128b defect #3: ParticipantID unconditional on LogID
+// ---------------------------------------------------------------------------
+
+func TestDEF128b_ParticipantFilter_Unconditional(t *testing.T) {
+	// ParticipantID must be emitted regardless of LogID. An access-control
+	// constraint conditional on a log-routing value is a silent drop.
+	for _, logID := range []string{"scion-messages", "scion-agents", "scion-server", ""} {
+		t.Run("LogID="+logID, func(t *testing.T) {
+			result := BuildLogFilter(LogQueryOptions{
+				AgentID:       "agent-123",
+				ParticipantID: "user-456",
+				LogID:         logID,
+			})
+			want := `(labels.recipient_id = "user-456" OR labels.sender_id = "user-456")`
+			if !strings.Contains(result, want) {
+				t.Errorf("ParticipantID filter missing for LogID=%q: %q", logID, result)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-128b mutation test: remove participant constraint → red
+// ---------------------------------------------------------------------------
+
+func TestDEF128b_MutationTest_Compiling(t *testing.T) {
+	// Mutation: if BuildLogFilter ignores ParticipantID, the filter for a
+	// scoped query equals the filter for an unscoped query. This test
+	// catches that mutation.
+	scoped := BuildLogFilter(LogQueryOptions{
+		AgentID:       "agent-123",
+		ParticipantID: "user-456",
+		LogID:         "scion-messages",
+	}, "my-project")
+
+	unscoped := BuildLogFilter(LogQueryOptions{
+		AgentID: "agent-123",
+		LogID:   "scion-messages",
+	}, "my-project")
+
+	if scoped == unscoped {
+		t.Fatalf("MUTATION DETECTED: scoped and unscoped filters are identical — "+
+			"ParticipantID constraint is not being applied.\n  scoped:   %q\n  unscoped: %q",
+			scoped, unscoped)
+	}
+
+	// The scoped filter MUST contain the participant constraint.
+	if !strings.Contains(scoped, `labels.recipient_id = "user-456"`) {
+		t.Errorf("scoped filter missing recipient_id: %q", scoped)
+	}
+	if !strings.Contains(scoped, `labels.sender_id = "user-456"`) {
+		t.Errorf("scoped filter missing sender_id: %q", scoped)
+	}
+
+	// The unscoped filter must NOT contain the user ID.
+	if strings.Contains(unscoped, "user-456") {
+		t.Errorf("unscoped filter contains user-456: %q", unscoped)
 	}
 }

@@ -317,7 +317,8 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 	if !canManage.Allowed {
 		decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
 		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+			logAuthzDenial(r, identity, res, ActionRead, decision.Reason)
+			Forbidden(w)
 			return
 		}
 	}
@@ -336,14 +337,22 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		LogID:     logging.MessageLogID,
 	}
 
-	// DEF-128b: non-manage users see only their own messages, matching the
+	// DEF-128b: non-manage callers see only their own messages, matching the
 	// hub-store path's filter.ParticipantID = user.ID() constraint.
-	// Agent-identity callers are already scoped by project isolation above
-	// and do not need participant filtering.
+	//
+	// Fail closed: if the caller is not-manage and we cannot resolve a user
+	// identity, deny rather than return an unscoped query. An absent identity
+	// must produce less access, not more. Any future identity kind that is
+	// not a user must be explicitly handled here — silent pass-through is
+	// an over-grant.
 	if !canManage.Allowed {
-		if user := GetUserIdentityFromContext(ctx); user != nil {
-			opts.ParticipantID = user.ID()
+		user := GetUserIdentityFromContext(ctx)
+		if user == nil {
+			// No user identity and not a manager — deny.
+			Forbidden(w)
+			return
 		}
+		opts.ParticipantID = user.ID()
 	}
 
 	if v := query.Get("tail"); v != "" {

@@ -187,11 +187,15 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 	} else if opts.AgentID != "" {
 		parts = append(parts, fmt.Sprintf(`labels.agent_id = %q`, opts.AgentID))
 	}
-	// DEF-128b: participant scoping for message logs. When a non-manage user
-	// queries message logs, restrict results to entries where that user is
-	// either the sender or the recipient. This mirrors the hub-store
-	// ParticipantID filter (handlers_messages.go:258-260).
-	if opts.ParticipantID != "" && opts.LogID == logging.MessageLogID {
+	// DEF-128b: participant scoping. When ParticipantID is set, restrict
+	// results to entries where that user is either the sender or the
+	// recipient. This mirrors the hub-store ParticipantID filter
+	// (handlers_messages.go:258-260).
+	//
+	// Unconditional on LogID: an access-control constraint must not be
+	// conditional on a log-routing value set by a different author at a
+	// different layer. If ParticipantID is set, it applies.
+	if opts.ParticipantID != "" {
 		parts = append(parts, fmt.Sprintf(
 			`(labels.recipient_id = %q OR labels.sender_id = %q)`,
 			opts.ParticipantID, opts.ParticipantID))
