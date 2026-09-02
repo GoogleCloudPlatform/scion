@@ -1305,3 +1305,129 @@ func TestBackfill_DEF114_DMKeyCanonicalCause(t *testing.T) {
 	assert.Contains(t, result.Errors[0], "dm key is not canonical")
 	assert.Equal(t, 1, result.DeriveFailures[DeriveErrDMKeyCanonical])
 }
+
+// TestBackfill_DEF114_AttributedMessageIDs_Pinned pins the exact set of
+// attributed message IDs for a fixture with a known mix of derivable and
+// non-derivable messages. A count alone could mask a swap where one message
+// moves from attributed to refused while another moves the other way;
+// asserting the exact ID set catches that.
+func TestBackfill_DEF114_AttributedMessageIDs_Pinned(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	// --- Derivable messages (3) ---
+
+	// DM between UUID principals — case 3 success.
+	derivable1 := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-6*time.Minute))
+
+	// Same pair, reverse direction — same conversation.
+	derivable2 := newTestMessage(projectID, "agent:bot", agentID,
+		"user:alice", userID, now.Add(-5*time.Minute))
+
+	// Thread-keyed message — case 2 success.
+	derivable3 := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-4*time.Minute))
+	derivable3.ThreadID = "build-thread"
+
+	// --- Non-derivable messages (3, one per distinct cause) ---
+
+	// Non-UUID sender — principal_pair failure.
+	nonDerivable1 := newTestMessage(projectID, "user:alice@example.com",
+		"alice@example.com", "agent:bot", agentID, now.Add(-3*time.Minute))
+
+	// Malformed dm: ThreadID — dm_key_parse failure.
+	nonDerivable2 := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-2*time.Minute))
+	nonDerivable2.ThreadID = "dm:agent:" + agentID // wrong segment count
+
+	// Non-canonical dm: ThreadID — dm_key_not_canonical failure.
+	nonDerivable3 := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-1*time.Minute))
+	nonDerivable3.ThreadID = "dm:user:" + userID + ":agent:" + agentID
+
+	// --- A broadcasted message (skipped, not refused) ---
+	skipped := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now)
+	skipped.Broadcasted = true
+
+	allMsgs := []store.Message{
+		derivable1, derivable2, derivable3,
+		nonDerivable1, nonDerivable2, nonDerivable3,
+		skipped,
+	}
+
+	msgStore := &mockMessageStore{messages: allMsgs}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	// --- Pin counts exactly ---
+	assert.Equal(t, 7, result.TotalProcessed)
+	assert.Equal(t, 3, result.Attributed, "exactly 3 derivable messages")
+	assert.Equal(t, 1, result.Skipped, "1 broadcasted message")
+	assert.Len(t, result.Errors, 3, "exactly 3 non-derivable messages")
+
+	// --- Pin the exact set of attributed message IDs ---
+	wantAttributed := map[string]bool{
+		derivable1.ID: true,
+		derivable2.ID: true,
+		derivable3.ID: true,
+	}
+	wantRefused := map[string]bool{
+		nonDerivable1.ID: true,
+		nonDerivable2.ID: true,
+		nonDerivable3.ID: true,
+	}
+
+	// Check every message was stamped or not stamped as expected.
+	for _, msg := range allMsgs {
+		stamped, err := msgStore.GetMessage(ctx, msg.ID)
+		require.NoError(t, err)
+
+		if wantAttributed[msg.ID] {
+			assert.NotEmpty(t, stamped.ConversationID,
+				"message %s should be attributed but has no conversation_id", msg.ID)
+		} else {
+			assert.Empty(t, stamped.ConversationID,
+				"message %s should NOT be attributed but has conversation_id=%s",
+				msg.ID, stamped.ConversationID)
+		}
+	}
+
+	// Check that every error entry references a refused message, not a
+	// derivable one.
+	for _, errStr := range result.Errors {
+		foundRefused := false
+		for id := range wantRefused {
+			if strings.Contains(errStr, id) {
+				foundRefused = true
+				break
+			}
+		}
+		assert.True(t, foundRefused,
+			"error entry must reference a refused message ID: %s", errStr)
+
+		for id := range wantAttributed {
+			assert.NotContains(t, errStr, id,
+				"error entry must NOT reference an attributed message ID")
+		}
+	}
+
+	// --- Pin per-cause breakdown ---
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrPrincipalPair])
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrDMKeyParse])
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrDMKeyCanonical])
+	assert.Equal(t, 0, result.DeriveFailures[DeriveErrThreadNoProject])
+
+	// --- Pin hazardA ---
+	assert.Equal(t, 1, result.HazardAEmailCount,
+		"exactly one message has non-UUID principals")
+}
