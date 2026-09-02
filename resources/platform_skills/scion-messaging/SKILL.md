@@ -45,6 +45,37 @@ Effective communication requires balancing responsiveness with focus.
 4.  **Simple Questions**: Gather all necessary info first, then ask clearly. Don't send a stream of consciousness.
 5.  **Status Blocked**: When waiting for a reply or a scheduled event, use `sciontool status blocked "<reason>"` to signal you are intentionally waiting.
 
+## Message Formatting
+
+The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient sees.
+
+To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n sequences — those will appear as literal characters in the delivered message.
+
+Correct — real newlines in a quoted string:
+```bash
+scion message --non-interactive @reviewer "PR #42 is ready for review.
+
+Branch: fix/auth-bug
+CI: all green"
+```
+
+Correct — heredoc for longer messages:
+```bash
+scion message --non-interactive @reviewer "$(cat <<'EOF'
+PR #42 is ready for review.
+
+Branch: fix/auth-bug
+CI: all green
+EOF
+)"
+```
+
+Wrong — JSON-encoded body with literal \n:
+```bash
+# BAD: literal \n chars appear in the delivered message
+scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
+```
+
 ## Message Content Best Practices
 
 Every message should move work forward. High-signal messages are functional and concrete.
@@ -160,6 +191,7 @@ is a broadcast to subscribers, not a delivery to an addressee.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
 - **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
+- **Anti-Pattern**: JSON-encoding or escaping the message body before passing to `scion message`. The CLI delivers the body verbatim — use real newlines in shell strings or heredocs.
 
 ## Verification Checklist
 
