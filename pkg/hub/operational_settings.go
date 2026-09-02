@@ -42,6 +42,13 @@ type sectionState struct {
 	UpdatedAt time.Time
 	UpdatedBy string
 	Origin    string
+
+	// Malformed is true when Value is not valid JSON. Set once at
+	// Refresh/Update time so the parse failure is logged exactly once per
+	// ingest rather than once per getter call (DEF-92). Getters can then
+	// distinguish "validated document" from "unreadable document" without
+	// re-parsing and without swallowing errors silently.
+	Malformed bool
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -223,12 +230,20 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		if !exists || prev.Revision != row.Revision {
 			changed = append(changed, row.Section)
 		}
+		malformed := !json.Valid(row.Value)
+		if malformed {
+			slog.Error("operational settings: malformed JSON in section document",
+				"section", row.Section,
+				"revision", row.Revision,
+			)
+		}
 		o.cache[row.Section] = sectionState{
 			Value:     row.Value,
 			Revision:  row.Revision,
 			UpdatedAt: row.UpdatedAt,
 			UpdatedBy: row.UpdatedBy,
 			Origin:    row.Origin,
+			Malformed: malformed,
 		}
 	}
 
@@ -468,6 +483,13 @@ func (o *OperationalSettings) Update(
 	}
 
 	// Update local cache.
+	malformed := !json.Valid(result.Value)
+	if malformed {
+		slog.Error("operational settings: malformed JSON after write (should not happen)",
+			"section", section,
+			"revision", result.Revision,
+		)
+	}
 	o.mu.Lock()
 	o.cache[section] = sectionState{
 		Value:     result.Value,
@@ -475,6 +497,7 @@ func (o *OperationalSettings) Update(
 		UpdatedAt: result.UpdatedAt,
 		UpdatedBy: result.UpdatedBy,
 		Origin:    result.Origin,
+		Malformed: malformed,
 	}
 	o.mu.Unlock()
 
