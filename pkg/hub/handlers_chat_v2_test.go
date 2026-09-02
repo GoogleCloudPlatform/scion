@@ -3457,10 +3457,10 @@ func enableWriteDenySwitch(t *testing.T, srv *Server) {
 	}
 }
 
-// TestG2_AC6_WriteDenySwitch_IntegrationChatV2 verifies AC-G2-6: with the
-// ConversationWriteDenySwitch OFF (default), a message sent to a topic without
-// a conversation_id succeeds (B10 behaviour). With the switch ON, the same
-// request is denied.
+// TestG2_AC6_WriteDenySwitch_IntegrationChatV2 verifies AC-G2-6: with no
+// OperationalSettings wired (ops is nil), the write-deny gate short-circuits
+// at `ops != nil` and the message is delivered (B10 behaviour). With the
+// switch explicitly ON, the same request is denied.
 func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
 	srv, _, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
@@ -3480,17 +3480,19 @@ func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
 
 	body := map[string]string{"content": "AC-G2-6 probe"}
 
-	// --- Switch OFF (default) -------------------------------------------------
-	// B10 behaviour: derivation failure is logged but the message is delivered.
+	// --- No OperationalSettings (ops nil) ------------------------------------
+	// testServer() does not wire OperationalSettings, so ops is nil and
+	// writeDenyEnabled() short-circuits at `ops != nil` → false. The message
+	// is delivered (B10 behaviour).
 	before := messaging.WriteDenialMetrics.Total()
 	rec := doRequest(t, srv, http.MethodPost,
 		"/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("[switch OFF] expected 201, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("[ops nil] expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Counter must not increment when switch is OFF — denials are not enforced.
+	// Counter must not increment when ops is nil — denials are not enforced.
 	if after := messaging.WriteDenialMetrics.Total(); after != before {
-		t.Errorf("[switch OFF] WriteDenialMetrics changed from %d to %d; expected no change",
+		t.Errorf("[ops nil] WriteDenialMetrics changed from %d to %d; expected no change",
 			before, after)
 	}
 
@@ -3515,5 +3517,146 @@ func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
 	if after := messaging.WriteDenialMetrics.Total(); after <= before {
 		t.Errorf("[switch ON] WriteDenialMetrics did not increment: before=%d after=%d",
 			before, after)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9a upgrade-cutover tests
+// ---------------------------------------------------------------------------
+
+// enableEnvelopeSwitchViaAbsentRow configures OperationalSettings on the
+// server with NO messaging section seeded. The consolidated switch takes
+// the compiled default (ON) from the absent row. The canary assertion is
+// the point of this helper — it proves the switch is ON from the default,
+// not from an explicit value. Without it, a silent failure makes the
+// upgrade-cutover tests vacuous.
+func enableEnvelopeSwitchViaAbsentRow(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	// No messaging section seeded — absent row → compiled default → ON.
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("ops.Refresh failed: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	// Canary: the switch must be ON from the compiled default with no row present.
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableEnvelopeSwitchViaAbsentRow: ConversationEnvelopeSwitch() is false — " +
+			"absent row did not produce compiled default ON")
+	}
+}
+
+// enableEnvelopeSwitchViaStaleKeys configures OperationalSettings on the
+// server with a messaging row containing ONLY the two stale keys, both false.
+// This is the common upgrade shape: handlePutMessaging on the old code seeded
+// both pointers unconditionally, so every hub that ever called the endpoint
+// has both keys written explicitly. The new key is absent, so the getter
+// takes the compiled default (ON).
+func enableEnvelopeSwitchViaStaleKeys(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(
+		`{"conversation_read_switch":false,"conversation_write_deny_switch":false}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("ops.Refresh failed: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	// Canary: stale keys only → new key absent → compiled default ON.
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableEnvelopeSwitchViaStaleKeys: ConversationEnvelopeSwitch() is false — " +
+			"stale-keys-only row did not produce compiled default ON")
+	}
+}
+
+// TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault verifies that a hub
+// upgrading to the Phase 9a code with NO messaging row gets the write-deny
+// gate live by default. This is the never-configured-hub case.
+func TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic WITHOUT setTopicConversationID — resolution will fail.
+	topicID := tid("9a-absent-row")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-conv-id-9a",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Wire OperationalSettings with no messaging row — absent → ON.
+	enableEnvelopeSwitchViaAbsentRow(t, srv)
+
+	body := map[string]string{"content": "Phase 9a absent-row probe"}
+	before := messaging.WriteDenialMetrics.Total()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (write denied), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeConversationNotResolved)
+	}
+
+	if after := messaging.WriteDenialMetrics.Total(); after <= before {
+		t.Errorf("WriteDenialMetrics did not increment: before=%d after=%d", before, after)
+	}
+}
+
+// TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive verifies that a hub
+// whose messaging row contains ONLY the two stale keys (both false) gets the
+// write-deny gate live after upgrade with no migration. This is the COMMON
+// upgrade shape: the old handlePutMessaging seeded both pointers on every
+// write, so any hub that ever touched the endpoint has an explicit false for
+// the key its operator never set. The new key is absent, so the compiled
+// default (ON) takes effect.
+func TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic WITHOUT setTopicConversationID — resolution will fail.
+	topicID := tid("9a-stale-keys")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-conv-id-9a-stale",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Wire OperationalSettings with stale keys only — new key absent → ON.
+	enableEnvelopeSwitchViaStaleKeys(t, srv)
+
+	body := map[string]string{"content": "Phase 9a stale-keys probe"}
+	before := messaging.WriteDenialMetrics.Total()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (write denied), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeConversationNotResolved)
+	}
+
+	if after := messaging.WriteDenialMetrics.Total(); after <= before {
+		t.Errorf("WriteDenialMetrics did not increment: before=%d after=%d", before, after)
 	}
 }
