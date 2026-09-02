@@ -1407,11 +1407,30 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			})
 			// DEF-3: Independent consistency check against prior messages.
 			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog)
+			persisted := false
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
+				persisted = true
 				// B11/B13: only publish when persistence succeeded.
 				s.events.PublishUserMessage(ctx, storeMsg)
+			}
+
+			// Phase 9e: render the delivery envelope for group[] agent
+			// recipients. Gated on persistence success (matching the
+			// processMentions pattern, not the looser broadcastDirect one)
+			// so unpersisted messages never carry fabricated envelope data.
+			// Stamped before dispatch so the agent receives the new format;
+			// the observer copy below (`observerMsg := agentMsg`) inherits
+			// DeliveryText intentionally — observers need the same rendered
+			// content for audit fidelity.
+			if s.writeDenyEnabled() && persisted {
+				agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  storeMsg.ID,
+					ConvResult: convResult,
+					Msg:        &agentMsg,
+					CreatedAt:  storeMsg.CreatedAt,
+				})
 			}
 
 			if dispatcher == nil {
