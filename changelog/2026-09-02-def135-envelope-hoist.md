@@ -42,3 +42,27 @@ This is accepted because DM and thread conversations are **resolved by
 deterministic key** — the next message from the same user to the same agent
 resolves the identical conversation and uses it. An empty conversation is inert
 and self-healing, not an orphan requiring cleanup.
+
+### 3. Broadcasts with surface + external_ref no longer carry a conversation in the envelope
+
+Base rendered the Phase 11 conversation into the broadcast envelope while
+persisting no conversation_id on the row — exactly the envelope/row disagreement
+this defect exists to remove. The fix unifies on no-conversation-for-broadcasts,
+matching the documented invariant at `handlers_agent_messaging.go:1898`
+("broadcasts deliberately skip conversation resolution"). Phase 11 still creates
+the conversation row; it is simply not stamped on the broadcast.
+
+### 4. Tripwire: Phase 11 unification changes which conversation messages persist into
+
+When both Phase 11 (explicit `surface` + `external_ref`) and Phase 5 (inferred
+DM/thread) produce a result, the precedence rule selects Phase 11. Phase 11
+produces a **group** conversation keyed on the external ref; Phase 5 produces a
+**direct** conversation keyed on the sender/agent pair.
+
+No live caller sets `surface` + `external_ref` on this endpoint today, so
+nothing changes in practice. **The day anyone enables Phase 11 on a plugin that
+also resolves DM conversations, Discord messages will move from DM conversations
+into group conversations.** This is Alternative B from the design, which was
+explicitly rejected because it splits every user's history at the deploy
+boundary. It must not happen as a side effect of enabling Phase 11; it requires a
+deliberate product decision and migration plan.
