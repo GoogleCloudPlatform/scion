@@ -1887,7 +1887,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 					nil)
 				return
 			}
-			convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			var resolveErr error
+			convResult, resolveErr = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			if resolveErr != nil {
+				// DEF-127a: infrastructure error — return 500, not 409.
+				slog.Error("read-switch: DM conversation lookup failed",
+					"key", key, "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to look up conversation", nil)
+				return
+			}
 		} else {
 			// Thread key — look up the topic to get the projectID for the external_ref.
 			if wcs != nil {
@@ -1906,8 +1915,19 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				Channel:        "web",
 				ConversationID: convResult.ConversationID,
 			}
+		} else if isDM {
+			// DEF-127: a never-used DM is a normal first-use state, not a
+			// defect. Authorization already passed (key-based, line 1825-1832),
+			// so returning empty is safe. Emit counter + WARN for observability.
+			messaging.DMAbsentMetrics.Inc()
+			slog.Warn("read-switch: DM conversation absent, returning empty",
+				"key", key)
+			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
+			return
 		} else {
 			// G3 / AC-G3-2,5: no fallback — return typed error.
+			// Thread conversations are created by the topic system, so absence
+			// is genuine drift.
 			slog.Warn("read-switch: conversation not resolved, returning error",
 				"key", key, "is_dm", isDM)
 			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
