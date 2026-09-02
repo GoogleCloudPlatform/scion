@@ -1346,6 +1346,11 @@ type MessageStore interface {
 	// reachable (actionable) and unreachable (expected, stable) buckets,
 	// so that a permanent non-zero count of orphaned messages does not
 	// create alarm fatigue by firing a WARN on every boot forever.
+	//
+	// DEPENDENCY: correct only because ListProjects (empty ProjectFilter)
+	// applies no unconditional filter, so it returns every row in projects
+	// and NOT EXISTS is its exact complement. An unconditional filter added
+	// to ListProjects would silently break this invariant.
 	CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error)
 }
 

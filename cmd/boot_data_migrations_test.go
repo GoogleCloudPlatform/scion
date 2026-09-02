@@ -676,6 +676,99 @@ func TestResidualReport_AC9(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Steady-state reachable WARN gate
+// ---------------------------------------------------------------------------
+
+// TestResidualReport_SteadyStateReachableWarn gates the specific defect that
+// caused M6 to be re-specified: a reachable count that reads 0 on a
+// steady-state boot because the count was derived from work the backfill
+// performed and a steady-state boot performs none.
+//
+// This test is distinct from AC-9's steady-state case. AC-9 seeds an
+// attributable message: it gets attributed on boot 1, so boot 2's reachable
+// count is legitimately 0 and the WARN correctly does not fire. That test
+// cannot distinguish "reachable is correctly 0" from "reachable reads 0
+// because the counter is broken." This test seeds an UNATTRIBUTABLE reachable
+// message (non-UUID principals in a listed project) so the reachable count
+// is non-zero on both boots.
+//
+// Mutation-tested: replacing the anti-join count with a sum-of-per-project-
+// counts approach (reachable derived from backfill work performed) makes
+// the second-boot assertion fail — the sum yields 0 because no work was
+// performed, and the WARN is silently suppressed.
+func TestResidualReport_SteadyStateReachableWarn(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Seed a message that CANNOT be attributed: non-UUID principals in a
+	// listed project. The backfill will process it, refuse it as a row-level
+	// refusal (DeriveErrPrincipalPair), and leave conversation_id NULL.
+	// It is reachable (project exists) but permanently unattributable.
+	projectID := uuid.NewString()
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "steady-state-warn-project",
+		Slug: "ss-warn-" + projectID[:8],
+	})
+	require.NoError(t, err)
+
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: projectID,
+		Msg:       "permanently unattributable reachable message",
+		Sender:    "user:alice@example.com",   // non-UUID principal
+		Recipient: "agent:some-bot",            // non-UUID principal
+		// No ThreadID — forces principal-pair derivation, which fails
+		// on non-UUID principals.
+	})
+	require.NoError(t, err)
+
+	// ---- First boot ----
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	origLogger := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(origLogger)
+
+	runBootDataMigrations(ctx, s)
+
+	logOutput := buf.String()
+
+	// Sanity: the WARN must fire on the first boot. The message is
+	// unattributable but reachable — reachable count is 1.
+	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
+		"first boot: WARN must fire for reachable unattributable message")
+
+	// Verify the backfill completed and the project is in projects_done.
+	marker, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+	require.NotNil(t, marker.CompletedAt,
+		"first boot: backfill marker must be complete after processing all projects")
+
+	// ---- Second boot (steady state) ----
+	// Every project is in projects_done. The backfill's fast path fires:
+	// "already complete, skipping." No runBackfillForProject call, no
+	// per-project counts. If reachable were derived from work performed,
+	// the sum would be 0 and the WARN would be silently suppressed.
+	buf.Reset()
+	runBootDataMigrations(ctx, s)
+
+	logOutput = buf.String()
+
+	// The backfill must be skipped (steady state).
+	assert.Contains(t, logOutput, "already complete, skipping",
+		"steady-state: backfill must be skipped on second boot")
+
+	// THE GATE: the WARN must STILL fire on the second boot.
+	// This is the assertion that catches the sum-of-per-project-counts
+	// approach. On a steady-state boot no work is performed, the naive
+	// sum yields 0, and this assertion fails.
+	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
+		"steady-state: WARN must still fire for reachable unattributable messages "+
+			"even when no backfill work was performed on this boot")
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
