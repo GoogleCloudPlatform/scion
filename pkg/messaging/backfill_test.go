@@ -547,6 +547,20 @@ func TestBackfill_HazardA_EmailBasedDMKeys(t *testing.T) {
 	assert.Equal(t, 0, result.ConversationsCreated, "no conversation created for failed derivation")
 	assert.NotEmpty(t, result.Errors, "derivation failure should be recorded as an error")
 
+	// DEF-114: error string must contain the actual cause, not the old
+	// fixed "key derivation failed" string.
+	assert.Contains(t, result.Errors[0], "dm key derivation from principals failed",
+		"error must name the actual cause")
+
+	// DEF-114: hazardA is now counted at the derive-failure site, so
+	// non-UUID principals are visible even when derivation fails.
+	assert.Equal(t, 1, result.HazardAEmailCount,
+		"non-UUID principal must be counted as hazardA even on derive failure")
+
+	// DEF-114: per-cause breakdown.
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrPrincipalPair],
+		"principal_pair cause must be counted")
+
 	// Message should NOT be stamped — derivation failed.
 	stamped, _ := msgStore.GetMessage(ctx, msg.ID)
 	assert.Empty(t, stamped.ConversationID)
@@ -761,12 +775,16 @@ func TestBackfill_HazardA_BothSidesEmail(t *testing.T) {
 	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
 	require.NoError(t, err)
 
-	// After DeriveConversationKey repoint, email-based IDs fail key derivation.
-	// The message is skipped with an error, not assigned to a hazard-A group.
-	assert.Equal(t, 0, result.HazardAEmailCount, "key derivation fails before hazard detection")
+	// DEF-114: non-UUID principals are now counted as hazardA at the
+	// derive-failure site, fixing the structural gap where hazardA could
+	// never see the population it exists to measure.
+	assert.Equal(t, 1, result.HazardAEmailCount,
+		"non-UUID principals must be counted as hazardA on derive failure")
 	assert.Equal(t, 0, result.Inferred, "message is skipped, not inferred")
 	assert.Equal(t, 0, result.Attributed)
 	assert.NotEmpty(t, result.Errors, "derivation failure should be recorded as an error")
+	assert.Contains(t, result.Errors[0], "dm key derivation from principals failed",
+		"error must name the actual cause")
 }
 
 func TestBackfill_ConversationParticipants(t *testing.T) {
@@ -1137,4 +1155,153 @@ func TestBackfill_DMPrefixedThreadID_ProducesDirectConversation(t *testing.T) {
 	// AC-DEF15-6: external_ref must equal the dm: key verbatim.
 	assert.Equal(t, dmKey, conv.ExternalRef,
 		"AC-DEF15-6: external_ref must equal the dm: key verbatim")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-114: derive-failure reason propagation and per-cause breakdown
+// ---------------------------------------------------------------------------
+
+// TestBackfill_DEF114_ErrorContainsCause verifies that result.Errors entries
+// contain the actual DeriveConversationKey error, not the old fixed string
+// "key derivation failed".
+func TestBackfill_DEF114_ErrorContainsCause(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	// A message with a non-UUID sender ID triggers principal-pair failure.
+	msg := newTestMessage(projectID, "user:alice@example.com", "alice@example.com",
+		"agent:bot", agentID, time.Now())
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	require.Len(t, result.Errors, 1)
+	// The error must contain the message ID AND the actual cause.
+	assert.Contains(t, result.Errors[0], msg.ID, "error must contain message ID")
+	assert.Contains(t, result.Errors[0], "dm key derivation from principals failed",
+		"error must contain the actual derive failure cause, not a fixed string")
+	// The old fixed string must NOT appear.
+	assert.NotContains(t, result.Errors[0], "key derivation failed\"",
+		"the old generic error string must not appear")
+}
+
+// TestBackfill_DEF114_DeriveFailuresBreakdown verifies the per-cause counter
+// map is populated for all four derive failure causes.
+func TestBackfill_DEF114_DeriveFailuresBreakdown(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	now := time.Now()
+
+	// Cause 1: principal_pair — non-UUID sender.
+	msgPrincipal := newTestMessage(projectID, "user:alice@example.com", "alice@example.com",
+		"agent:bot", agentID, now.Add(-4*time.Minute))
+
+	// Cause 2: principal_pair — unknown kind "bot".
+	msgUnknownKind := newTestMessage(projectID, "bot:helper", userID,
+		"agent:bot", agentID, now.Add(-3*time.Minute))
+
+	// Cause 3: dm_key_parse — malformed dm: ThreadID.
+	msgDMParse := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-2*time.Minute))
+	msgDMParse.ThreadID = "dm:agent:" + agentID // wrong segment count
+
+	// Cause 4: thread_no_project — thread with no project. This requires
+	// a message with a non-dm ThreadID processed with an empty projectID.
+	// Since Run requires a non-empty ProjectID, we can only trigger this
+	// if the message has a thread but projectID is empty in the inputs.
+	// Actually, the config.ProjectID is always passed to groupForMessage,
+	// so this cause is unreachable through Run. We verify the other three.
+
+	// A normal message that succeeds — to verify it is NOT counted.
+	msgOK := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-1*time.Minute))
+
+	msgStore := &mockMessageStore{messages: []store.Message{
+		msgPrincipal, msgUnknownKind, msgDMParse, msgOK,
+	}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	// Exactly 3 failures, 1 success.
+	assert.Equal(t, 4, result.TotalProcessed)
+	assert.Equal(t, 1, result.Attributed)
+	assert.Len(t, result.Errors, 3)
+
+	// Per-cause breakdown.
+	assert.Equal(t, 2, result.DeriveFailures[DeriveErrPrincipalPair],
+		"two messages fail principal-pair derivation (non-UUID and unknown kind)")
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrDMKeyParse],
+		"one message fails dm: key parse")
+	assert.Equal(t, 0, result.DeriveFailures[DeriveErrThreadNoProject],
+		"thread_no_project is unreachable through Run (ProjectID is required)")
+	assert.Equal(t, 0, result.DeriveFailures[DeriveErrDMKeyCanonical],
+		"no messages have non-canonical dm: keys in this test")
+
+	// hazardA: only the email principal counts (non-UUID ID), not the
+	// unknown-kind case (which has a valid UUID).
+	assert.Equal(t, 1, result.HazardAEmailCount,
+		"only messages with non-UUID IDs count as hazardA")
+}
+
+// TestBackfill_DEF114_DeriveFailures_NilWhenNoFailures verifies that
+// DeriveFailures is nil (not an empty map) when all messages derive
+// successfully, so the JSON serialization omits it via omitempty.
+func TestBackfill_DEF114_DeriveFailures_NilWhenNoFailures(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	msg := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, time.Now())
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Attributed)
+	assert.Empty(t, result.Errors)
+	assert.Nil(t, result.DeriveFailures,
+		"DeriveFailures must be nil (not empty map) when no failures occur")
+}
+
+// TestBackfill_DEF114_DMKeyCanonicalCause verifies that a non-canonical dm:
+// ThreadID produces the dm_key_not_canonical cause.
+func TestBackfill_DEF114_DMKeyCanonicalCause(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+	agentID := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
+	// Non-canonical: user before agent (canonical order is agent < user).
+	msg := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, time.Now())
+	msg.ThreadID = "dm:user:" + userID + ":agent:" + agentID
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	require.Len(t, result.Errors, 1)
+	assert.Contains(t, result.Errors[0], "dm key is not canonical")
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrDMKeyCanonical])
 }

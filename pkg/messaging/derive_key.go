@@ -35,6 +35,26 @@ type KeyInputs struct {
 	RecipientID   string
 }
 
+// DeriveError is returned by DeriveConversationKey when key derivation is
+// refused. Cause provides a machine-readable category for aggregate reporting;
+// the wrapped Err provides the human-readable detail.
+type DeriveError struct {
+	Cause string
+	Err   error
+}
+
+func (e *DeriveError) Error() string { return e.Err.Error() }
+func (e *DeriveError) Unwrap() error { return e.Err }
+
+// Derive-error cause constants. These match the four refusal branches in
+// DeriveConversationKey and are stable identifiers for aggregate counters.
+const (
+	DeriveErrDMKeyParse      = "dm_key_parse"        // dm: prefix, ParseDMKey or re-derive failed
+	DeriveErrDMKeyCanonical  = "dm_key_not_canonical" // dm: prefix, parsed but not canonical
+	DeriveErrThreadNoProject = "thread_no_project"    // non-dm ThreadID, empty ProjectID
+	DeriveErrPrincipalPair   = "principal_pair"       // empty ThreadID, principal-pair derivation failed
+)
+
 // DeriveConversationKey is the ONLY function that should construct a conversation
 // external_ref (thread: or dm: key). All call sites must use this function.
 //
@@ -51,12 +71,12 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 		if parseErr != nil {
 			// DO NOT fall through to case 2 — falling through is exactly how
 			// DEF-15 produces its defective row.
-			return "", "", nil, fmt.Errorf("dm key parse failed: %w", parseErr)
+			return "", "", nil, &DeriveError{Cause: DeriveErrDMKeyParse, Err: fmt.Errorf("dm key parse failed: %w", parseErr)}
 		}
 
 		rederived, deriveErr := messages.DMConversationKey(kindA, idA, kindB, idB)
 		if deriveErr != nil {
-			return "", "", nil, fmt.Errorf("dm key re-derivation failed: %w", deriveErr)
+			return "", "", nil, &DeriveError{Cause: DeriveErrDMKeyParse, Err: fmt.Errorf("dm key re-derivation failed: %w", deriveErr)}
 		}
 
 		// We re-derive to verify canonicality (token order, UUID format, kind casing)
@@ -65,7 +85,7 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 		// authorised against — that is the read-gate normalisation refused in §2.15.4(c).
 		// Differ means error, never silent rewrite.
 		if rederived != in.ThreadID {
-			return "", "", nil, fmt.Errorf("dm key is not canonical: got %q, canonical form is %q", in.ThreadID, rederived)
+			return "", "", nil, &DeriveError{Cause: DeriveErrDMKeyCanonical, Err: fmt.Errorf("dm key is not canonical: got %q, canonical form is %q", in.ThreadID, rederived)}
 		}
 
 		return in.ThreadID, "direct", nil, nil
@@ -74,7 +94,7 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 	// Case 2: ThreadID non-empty, no "dm:" prefix — thread conversation.
 	if in.ThreadID != "" {
 		if in.ProjectID == "" {
-			return "", "", nil, fmt.Errorf("thread key requires non-empty projectID")
+			return "", "", nil, &DeriveError{Cause: DeriveErrThreadNoProject, Err: fmt.Errorf("thread key requires non-empty projectID")}
 		}
 		pid := in.ProjectID
 		return fmt.Sprintf("thread:%s:%s", in.ProjectID, in.ThreadID), "group", &pid, nil
@@ -83,7 +103,7 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 	// Case 3: ThreadID empty — derive from principal pair.
 	ref, deriveErr := messages.DMConversationKey(in.SenderKind, in.SenderID, in.RecipientKind, in.RecipientID)
 	if deriveErr != nil {
-		return "", "", nil, fmt.Errorf("dm key derivation from principals failed: %w", deriveErr)
+		return "", "", nil, &DeriveError{Cause: DeriveErrPrincipalPair, Err: fmt.Errorf("dm key derivation from principals failed: %w", deriveErr)}
 	}
 	return ref, "direct", nil, nil
 }

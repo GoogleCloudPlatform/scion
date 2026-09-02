@@ -558,3 +558,85 @@ func TestResolveOrCreateConversationByKey_DefaultSurfaceIsNative(t *testing.T) {
 		t.Errorf("Surface: got %q, want %q", mock.lastConv.Surface, "native")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DEF-114: DeriveError cause classification
+// ---------------------------------------------------------------------------
+
+func TestDeriveConversationKey_DeriveError_CauseClassification(t *testing.T) {
+	const (
+		agentUUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+		userUUID  = "550e8400-e29b-41d4-a716-446655440000"
+	)
+
+	tests := []struct {
+		name      string
+		input     KeyInputs
+		wantCause string
+	}{
+		{
+			name:      "dm_key_parse: malformed dm: key (wrong segment count)",
+			input:     KeyInputs{ThreadID: "dm:agent:" + agentUUID},
+			wantCause: DeriveErrDMKeyParse,
+		},
+		{
+			name:      "dm_key_parse: unknown kind in dm: key",
+			input:     KeyInputs{ThreadID: "dm:bot:" + agentUUID + ":user:" + userUUID},
+			wantCause: DeriveErrDMKeyParse,
+		},
+		{
+			name:      "dm_key_not_canonical: user before agent",
+			input:     KeyInputs{ThreadID: "dm:user:" + userUUID + ":agent:" + agentUUID},
+			wantCause: DeriveErrDMKeyCanonical,
+		},
+		{
+			name:      "thread_no_project: non-dm ThreadID with empty ProjectID",
+			input:     KeyInputs{ThreadID: "my-thread", ProjectID: ""},
+			wantCause: DeriveErrThreadNoProject,
+		},
+		{
+			name: "principal_pair: non-UUID sender",
+			input: KeyInputs{
+				SenderKind: "user", SenderID: "alice@example.com",
+				RecipientKind: "agent", RecipientID: agentUUID,
+			},
+			wantCause: DeriveErrPrincipalPair,
+		},
+		{
+			name: "principal_pair: unknown kind",
+			input: KeyInputs{
+				SenderKind: "bot", SenderID: userUUID,
+				RecipientKind: "agent", RecipientID: agentUUID,
+			},
+			wantCause: DeriveErrPrincipalPair,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, err := DeriveConversationKey(tt.input)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var de *DeriveError
+			if !errors.As(err, &de) {
+				t.Fatalf("expected *DeriveError, got %T: %v", err, err)
+			}
+			if de.Cause != tt.wantCause {
+				t.Errorf("Cause: got %q, want %q", de.Cause, tt.wantCause)
+			}
+		})
+	}
+}
+
+// TestDeriveConversationKey_SuccessReturnsNilError ensures successful
+// derivation returns a plain nil, not a zero-valued *DeriveError.
+func TestDeriveConversationKey_SuccessReturnsNilError(t *testing.T) {
+	_, _, _, err := DeriveConversationKey(KeyInputs{
+		SenderKind: "user", SenderID: "550e8400-e29b-41d4-a716-446655440000",
+		RecipientKind: "agent", RecipientID: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+}

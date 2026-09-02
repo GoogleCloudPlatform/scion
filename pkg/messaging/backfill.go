@@ -48,8 +48,12 @@ type BackfillResult struct {
 	Inferred             int `json:"inferred"`
 	Skipped              int `json:"skipped"`
 	ConversationsCreated int `json:"conversationsCreated"`
-	HazardAEmailCount    int `json:"hazardAEmailCount"`
-	HazardBSlugCount     int `json:"hazardBSlugCount"`
+	HazardAEmailCount    int            `json:"hazardAEmailCount"`
+	HazardBSlugCount     int            `json:"hazardBSlugCount"`
+	// DeriveFailures counts refused messages by cause (DEF-114). Keys are
+	// DeriveErr* constants from derive_key.go. This is the per-cause
+	// breakdown that makes the dominant failure mode diagnosable.
+	DeriveFailures       map[string]int `json:"deriveFailures,omitempty"`
 	// LastCheckpoint is the pagination cursor of the last completed page.
 	// Pass this value as BackfillConfig.Checkpoint to resume from this position.
 	// Empty when the backfill completed in a single page (no more data to process).
@@ -135,9 +139,33 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 				continue
 			}
 
-			g := s.groupForMessage(msg, cfg.ProjectID, groups)
-			if g == nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("message %s: key derivation failed", msg.ID))
+			g, deriveErr := s.groupForMessage(msg, cfg.ProjectID, groups)
+			if deriveErr != nil {
+				// Propagate the real error so the dominant failure mode is
+				// diagnosable (DEF-114). Each entry names the actual cause.
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
+
+				// Aggregate per-cause counter (DEF-114).
+				var de *DeriveError
+				if errors.As(deriveErr, &de) {
+					if result.DeriveFailures == nil {
+						result.DeriveFailures = make(map[string]int)
+					}
+					result.DeriveFailures[de.Cause]++
+
+					// Hazard (a) fix: non-UUID principals are exactly what
+					// makes principal-pair derivation fail, so the hazardA
+					// counter must be updated here — not after a successful
+					// derive where it structurally can never fire (DEF-114).
+					if de.Cause == DeriveErrPrincipalPair {
+						_, senderID := parsePrincipal(msg.Sender, msg.SenderID)
+						_, recipientID := parsePrincipal(msg.Recipient, msg.RecipientID)
+						if !isValidUUID(senderID) || !isValidUUID(recipientID) {
+							result.HazardAEmailCount++
+						}
+					}
+				}
 				continue
 			}
 			g.messageIDs = append(g.messageIDs, msg.ID)
@@ -180,9 +208,9 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 }
 
 // groupForMessage finds or creates the conversation group for a message.
-// Returns nil when key derivation fails (e.g. malformed dm: key); the caller
-// MUST check for nil before appending message IDs.
-func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, groups map[string]*conversationGroup) *conversationGroup {
+// Returns (nil, err) when key derivation fails; the caller propagates the
+// error into result.Errors with the actual cause (DEF-114).
+func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, groups map[string]*conversationGroup) (*conversationGroup, error) {
 	senderKind, senderID := parsePrincipal(msg.Sender, msg.SenderID)
 	recipientKind, recipientID := parsePrincipal(msg.Recipient, msg.RecipientID)
 
@@ -195,8 +223,9 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 		RecipientID:   recipientID,
 	})
 	if deriveErr != nil {
-		// Key derivation refused — return nil so the caller skips this message.
-		return nil
+		// Key derivation refused — return the error so the caller can
+		// classify and report the actual cause (DEF-114).
+		return nil, deriveErr
 	}
 	key := extRef
 	kind := derivedKind
@@ -227,11 +256,16 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 	}
 
 	// Hazard (a): check for non-UUID sender/recipient IDs.
+	// This fires only when derivation succeeds despite non-UUID principals
+	// (e.g. thread-keyed messages where the key comes from ThreadID, not
+	// the principal pair). The dominant hazardA population — messages that
+	// FAIL to derive because of non-UUID principals — is counted in Run
+	// at the derive-error handling site (DEF-114).
 	if !isValidUUID(senderID) || !isValidUUID(recipientID) {
 		g.hazardA = true
 	}
 
-	return g
+	return g, nil
 }
 
 // resolveGroup resolves the default agent reference and sets the drift state.
