@@ -237,6 +237,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"external_ref requires surface to be set", nil)
 		return
 	}
+	// preDispatchConvResult is declared here so Phase 9b(ii) rendering can
+	// use it after the Phase 11 block and before dispatch.
+	var preDispatchConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
 		var keyOpts []messaging.ConversationByKeyOption
 		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
@@ -264,6 +267,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 		} else {
+			preDispatchConvResult = convResult
 			if req.Message.Metadata == nil {
 				req.Message.Metadata = make(map[string]string)
 			}
@@ -286,6 +290,25 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// when the hub received the message, not when dispatch completed (which can
 	// be up to 30s later under retry).
 	now := time.Now().UTC()
+
+	// Phase 9b(ii): render the delivery envelope before dispatch when the
+	// envelope switch is ON. The message ID is pre-generated here (same UUID
+	// that will be persisted). For this path, dispatch precedes persist, so
+	// the rendered envelope may reference identifiers for a row that does not
+	// yet exist — the declared gap in Decision 4.
+	//
+	// preDispatchConvResult is only populated for external-channel messages
+	// (Phase 11 path). Native messages resolved via Phase 5 dual-write have
+	// no pre-dispatch conversation and honestly omit the conversation key.
+	brokerInboundMsgID := api.NewUUID()
+	if s.writeDenyEnabled() {
+		req.Message.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  brokerInboundMsgID,
+			ConvResult: preDispatchConvResult,
+			Msg:        req.Message,
+			CreatedAt:  now,
+		})
+	}
 
 	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer retryCancel()
@@ -327,7 +350,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// the web chat — both live and after a refresh. This mirrors the
 	// persistence + SSE pattern used by handleAgentMessage.
 	storeMsg := &store.Message{
-		ID:            api.NewUUID(),
+		ID:            brokerInboundMsgID,
 		ProjectID:     agent.ProjectID,
 		Sender:        req.Message.Sender,
 		SenderID:      senderUserID,
@@ -416,10 +439,17 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log)
 	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
-		log.Error("Failed to persist inbound broker message", "error", err)
+		log.Error("Failed to persist inbound broker message",
+			"error", err,
+			"message_id", storeMsg.ID,
+			"conversation_id", storeMsg.ConversationID,
+			"agent_id", agent.ID,
+		)
 		// Non-fatal: the dispatch already succeeded, so the agent got the
-		// message. Failing the HTTP response here would mislead the caller
-		// into retrying — which would double-deliver.
+		// message. The agent now holds identifiers (message_id,
+		// conversation_id) that reference an unpersisted row. Failing the
+		// HTTP response here would mislead the caller into retrying —
+		// which would double-deliver.
 	} else {
 		s.events.PublishUserMessage(r.Context(), storeMsg)
 	}

@@ -1120,6 +1120,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			s.events.PublishUserMessage(ctx, storeMsg)
 			messaging.RecordStep(ctx, "sse_published")
 		}
+
+		// Phase 9b(ii): render the delivery envelope from the persisted row
+		// and conversation result when the envelope switch is ON.
+		if s.writeDenyEnabled() && persistedMsgID != "" {
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: convResult,
+				Msg:        structuredMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
+		}
 	}
 
 	// Managed agent path: deliver message directly via backend, bypass broker.
@@ -1803,6 +1814,18 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
 		}
 
+		// Phase 9b(ii): render the delivery envelope for this broadcast
+		// recipient. ConvResult is nil — broadcasts deliberately skip
+		// conversation resolution (no conversation for broadcasts).
+		if s.writeDenyEnabled() {
+			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: nil,
+				Msg:        &agentMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
+		}
+
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
@@ -1949,6 +1972,27 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// B11/B13: only publish when persistence succeeded.
 		if persisted {
 			s.events.PublishUserMessage(ctx, storeMsg)
+		}
+
+		// Phase 9b(ii): render the delivery envelope for this mention
+		// recipient. The parent conversation IS resolved (convResult is
+		// live in the calling handleAgentMessage scope), but it is
+		// deliberately NOT propagated here: the mention target is not
+		// necessarily a participant in the parent conversation. For a
+		// direct conversation, the mention target is by definition not a
+		// participant (invariant D-1). Stamping the parent's conversation
+		// ID onto a delivery to a non-participant would disclose the
+		// identity of a conversation that agent has no access to.
+		// The group case (where the target IS a participant) is an open
+		// question — it requires a participant check and is out of scope
+		// for Phase 9b.
+		if s.writeDenyEnabled() && persisted {
+			mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: nil,
+				Msg:        mentionMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
 		}
 
 		// Dispatch to the mentioned agent's runtime.

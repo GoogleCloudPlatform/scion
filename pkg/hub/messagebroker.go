@@ -661,8 +661,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	// convResult is declared here (not inside the block) so Phase 9b(ii)
+	// rendering can read it after persistence.
+	var convResult *messaging.ConversationResult
 	if !msg.Broadcasted {
-		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
@@ -720,6 +722,19 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
 		return
+	}
+
+	// Phase 9b(ii): render the delivery envelope from the persisted message
+	// row and conversation result when the envelope switch is ON. The broker
+	// delivers DeliveryText verbatim; when empty, it falls back to
+	// FormatForDelivery (legacy path).
+	if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  storeMsg.ID,
+			ConvResult: convResult,
+			Msg:        msg,
+			CreatedAt:  storeMsg.CreatedAt,
+		})
 	}
 
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above

@@ -1161,6 +1161,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		CreatedAt:     now,
 	}
 	// B15 dual-write: resolve-or-create conversation for web chat user→agent messages.
+	// chatV2ConvResult is declared outside the block so Phase 9b(ii)
+	// rendering can read it after persistence.
+	var chatV2ConvResult *messaging.ConversationResult
 	{
 		var convResult *messaging.ConversationResult
 		if key != "" {
@@ -1206,6 +1209,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
 		}
+		chatV2ConvResult = convResult
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
@@ -1250,6 +1254,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	s.events.PublishUserMessage(ctx, storeMsg)
+
+	// Phase 9b(ii): render the delivery envelope from the persisted message
+	// row and conversation result when the envelope switch is ON.
+	if s.writeDenyEnabled() {
+		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  storeMsg.ID,
+			ConvResult: chatV2ConvResult,
+			Msg:        msg,
+			CreatedAt:  storeMsg.CreatedAt,
+		})
+	}
 
 	// Dispatch to the primary agent.
 	dispatcher := s.GetDispatcher()
@@ -1306,6 +1321,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				CreatedAt:     now,
 			}
 			// B15 dual-write: resolve-or-create conversation for web chat mention fan-out.
+			var mentionConvResult *messaging.ConversationResult
 			{
 				var convResult *messaging.ConversationResult
 				if key != "" {
@@ -1341,11 +1357,22 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				if convResult != nil {
 					mentionStoreMsg.ConversationID = convResult.ConversationID
 				}
+				mentionConvResult = convResult
 			}
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 			} else {
 				s.events.PublishUserMessage(ctx, mentionStoreMsg)
+			}
+
+			// Phase 9b(ii): render the delivery envelope for the mention.
+			if s.writeDenyEnabled() {
+				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  mentionStoreMsg.ID,
+					ConvResult: mentionConvResult,
+					Msg:        mentionMsg,
+					CreatedAt:  mentionStoreMsg.CreatedAt,
+				})
 			}
 
 			if dispatcher != nil {
