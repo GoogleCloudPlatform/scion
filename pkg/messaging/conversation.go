@@ -71,9 +71,14 @@ type ParticipantEnsurer interface {
 
 // ConversationResult carries the outcome of a resolve-or-create operation,
 // including the actual ExternalRef read back from the database.
+// Kind, Surface and DisplayName are populated from the same row the resolver
+// already loaded — no additional query is required.
 type ConversationResult struct {
 	ConversationID string
 	ExternalRef    string // actual external_ref from the DB, not reconstructed
+	Kind           string // "direct" or "group"
+	Surface        string // "native", "discord", "slack", "telegram", etc.
+	DisplayName    string // human-readable, may be empty
 }
 
 // ResolveOrCreateDMConversation resolves (or creates) a direct-message
@@ -122,6 +127,9 @@ func ResolveOrCreateDMConversation(
 		return &ConversationResult{
 			ConversationID: result.ID,
 			ExternalRef:    result.ExternalRef,
+			Kind:           result.Kind,
+			Surface:        result.Surface,
+			DisplayName:    result.DisplayName,
 		}, nil
 	}
 
@@ -165,6 +173,9 @@ func ResolveOrCreateDMConversation(
 	return &ConversationResult{
 		ConversationID: result.ID,
 		ExternalRef:    result.ExternalRef,
+		Kind:           result.Kind,
+		Surface:        result.Surface,
+		DisplayName:    result.DisplayName,
 	}, nil
 }
 
@@ -201,6 +212,9 @@ func ResolveDMConversationForRead(
 	return &ConversationResult{
 		ConversationID: conv.ID,
 		ExternalRef:    conv.ExternalRef,
+		Kind:           conv.Kind,
+		Surface:        conv.Surface,
+		DisplayName:    conv.DisplayName,
 	}
 }
 
@@ -347,7 +361,11 @@ func ResolveThreadConversationForRead(
 			if lookupErr == nil && convID != "" {
 				log.Debug("read-switch: conversation resolved via topic lookup (DEF-100)",
 					"external_ref", extRef, "conversation_id", convID)
-				return &ConversationResult{ConversationID: convID}
+				return &ConversationResult{
+					ConversationID: convID,
+					Kind:           kind,     // from DeriveConversationKey
+					Surface:        "native", // topic lookup only applies to native topics
+				}
 			}
 			if lookupErr == nil && convID == "" {
 				// Topic exists but not yet backfilled — no conversation to resolve.
@@ -376,5 +394,8 @@ func ResolveThreadConversationForRead(
 	return &ConversationResult{
 		ConversationID: conv.ID,
 		ExternalRef:    conv.ExternalRef,
+		Kind:           conv.Kind,
+		Surface:        conv.Surface,
+		DisplayName:    conv.DisplayName,
 	}
 }

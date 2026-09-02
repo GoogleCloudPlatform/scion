@@ -158,7 +158,11 @@ func ResolveOrCreateConversationByKey(
 		if lookupErr == nil && convID != "" {
 			log.Debug("conversation resolved via topic lookup (sink-level)",
 				"external_ref", extRef, "conversation_id", convID)
-			return &ConversationResult{ConversationID: convID}, nil
+			return &ConversationResult{
+				ConversationID: convID,
+				Kind:           kind,    // from DeriveConversationKey
+				Surface:        "native", // topic lookup only applies to native topics
+			}, nil
 		}
 		if lookupErr == nil && convID == "" {
 			// Topic exists but not yet backfilled — refuse to mint.
@@ -196,5 +200,8 @@ func ResolveOrCreateConversationByKey(
 	return &ConversationResult{
 		ConversationID: result.ID,
 		ExternalRef:    result.ExternalRef,
+		Kind:           result.Kind,
+		Surface:        result.Surface,
+		DisplayName:    result.DisplayName,
 	}, nil
 }
