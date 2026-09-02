@@ -265,6 +265,18 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SECURITY-GATE: require harness_config.create permission before any mutation.
+	// Scope-aware: project-scoped requests authorize against the project parent
+	// so that project-level role bindings (owner/admin/member) grant access.
+	res := Resource{Type: "harness_config"}
+	if req.ScopeID != "" {
+		res.ParentType = "project"
+		res.ParentID = req.ScopeID
+	}
+	if !s.authorize(w, r, res, ActionCreate) {
+		return
+	}
+
 	slug := req.Slug
 	if slug == "" {
 		slug = api.Slugify(req.Name)
@@ -402,6 +414,13 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 	hc, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to this specific harness config.
+	// The list endpoint filters via AuthorizeReadBatch; without this check
+	// a caller could bypass list filtering by addressing the config by ID.
+	if !s.authorize(w, r, harnessConfigResource(hc), ActionRead) {
 		return
 	}
 

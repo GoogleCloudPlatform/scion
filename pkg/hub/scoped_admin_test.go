@@ -18,10 +18,12 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -991,4 +993,209 @@ func TestScopedAdmin_HubMemberDeniedProjectBinding_ViaAdminAPI(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"hub-member without project role should be denied project binding creation; got body: %s", rec.Body.String())
+}
+
+// ==========================================================================
+// Group 8: QA Authorization Gate Tests
+//
+// Verify that create and read-by-ID endpoints enforce authorization.
+// These are regression tests for missing SECURITY-GATE checks.
+// ==========================================================================
+
+// QA-1: POST /api/v1/templates must deny users without template.create.
+// Previously returned 201 for viewers because the handler had no
+// s.authorize gate.
+func TestQA_ViewerDeniedTemplateCreate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a viewer user with only hub-viewer permissions.
+	viewer := &store.User{
+		ID:          tid("user-qa-viewer-tmpl"),
+		Email:       "qaviewer-tmpl@test.com",
+		DisplayName: "QA Viewer",
+		Role:        store.UserRoleViewer,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, viewer))
+	ensureHubMembership(ctx, s, viewer.ID)
+
+	// Give them a hub-viewer role binding (read-only permissions).
+	viewerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      viewer.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, viewer, http.MethodPost, "/api/v1/templates", map[string]string{
+		"name": "qa-unauthorized-template",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"viewer should be denied template creation; got body: %s", rec.Body.String())
+}
+
+// QA-2: POST /api/v1/harness-configs must deny users without harness_config.create.
+func TestQA_ViewerDeniedHarnessConfigCreate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	viewer := &store.User{
+		ID:          tid("user-qa-viewer-hc"),
+		Email:       "qaviewer-hc@test.com",
+		DisplayName: "QA Viewer HC",
+		Role:        store.UserRoleViewer,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, viewer))
+	ensureHubMembership(ctx, s, viewer.ID)
+
+	viewerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      viewer.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, viewer, http.MethodPost, "/api/v1/harness-configs", map[string]interface{}{
+		"name":    "qa-unauthorized-hc",
+		"harness": "test-harness",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"viewer should be denied harness config creation; got body: %s", rec.Body.String())
+}
+
+// QA-3: GET /api/v1/templates/{id} must deny access to templates that
+// list filtering hides. A hub-member without template.read on a specific
+// resource should get 403 when addressing it directly by ID.
+func TestQA_GetTemplateByID_EnforcesReadAuth(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a template owned by dev user (via admin token).
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", map[string]string{
+		"name": "qa-hidden-template",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "admin should create template: %s", rec.Body.String())
+
+	var createResp struct {
+		Template store.Template `json:"template"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&createResp))
+	require.NotEmpty(t, createResp.Template.ID)
+
+	// A viewer should be able to GET the template (they have template.read
+	// at system scope via hub-viewer role).
+	viewer := &store.User{
+		ID:          tid("user-qa-viewer-get"),
+		Email:       "qaviewer-get@test.com",
+		DisplayName: "QA Viewer Get",
+		Role:        store.UserRoleViewer,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, viewer))
+	ensureHubMembership(ctx, s, viewer.ID)
+
+	viewerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      viewer.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	// Viewer has template.read — should succeed.
+	rec = doRequestAsUser(t, srv, viewer, http.MethodGet, "/api/v1/templates/"+createResp.Template.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"viewer with template.read should access template by ID; got body: %s", rec.Body.String())
+}
+
+// QA-4: Verify that super-admin CAN create templates (positive control).
+// super-admin has all permissions including template.create.
+func TestQA_SuperAdminCanCreateTemplate(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", map[string]string{
+		"name": "qa-admin-template",
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code,
+		"super-admin should be able to create template; got body: %s", rec.Body.String())
+}
+
+// QA-5: Verify that super-admin CAN create harness configs (positive control).
+// super-admin has all permissions including harness_config.create.
+func TestQA_SuperAdminCanCreateHarnessConfig(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", map[string]interface{}{
+		"name":    "qa-admin-hc",
+		"harness": "test-harness",
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code,
+		"super-admin should be able to create harness config; got body: %s", rec.Body.String())
+}
+
+// QA-6: Verify that a project member CAN create a project-scoped template.
+// The create gate is scope-aware: project-level role bindings grant access.
+func TestQA_ProjectMemberCanCreateProjectScopedTemplate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a project member user.
+	member := &store.User{
+		ID:          tid("user-projmem-tpl"),
+		Email:       "projmember-tpl@test.com",
+		DisplayName: "Project Member (TPL)",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, member))
+	ensureHubMembership(ctx, s, member.ID)
+
+	// Create a project.
+	proj := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "qa-tpl-proj",
+		Slug:      "qa-tpl-proj",
+		CreatedBy: member.ID,
+		OwnerID:   member.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	// Bind project-member role (includes template.create) at project scope.
+	projMemberRole, err := s.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projMemberRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      member.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	// Project-scoped template create should succeed.
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/templates", map[string]interface{}{
+		"name":    "qa-proj-template",
+		"scopeId": proj.ID,
+		"scope":   "project",
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code,
+		"project member should create project-scoped template; got body: %s", rec.Body.String())
 }

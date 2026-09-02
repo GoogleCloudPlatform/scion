@@ -282,6 +282,18 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		scopeID = req.ProjectID
 	}
 
+	// SECURITY-GATE: require template.create permission before any mutation.
+	// Scope-aware: project-scoped requests authorize against the project parent
+	// so that project-level role bindings (owner/admin/member) grant access.
+	res := Resource{Type: "template"}
+	if scopeID != "" {
+		res.ParentType = "project"
+		res.ParentID = scopeID
+	}
+	if !s.authorize(w, r, res, ActionCreate) {
+		return
+	}
+
 	// Generate slug from request or name — always sanitize caller-supplied
 	// slugs through Slugify to prevent path-traversal via crafted values.
 	slug := req.Slug
@@ -455,6 +467,13 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to this specific template.
+	// The list endpoint filters via AuthorizeReadBatch; without this check
+	// a caller could bypass list filtering by addressing the template by ID.
+	if !s.authorize(w, r, templateResource(template), ActionRead) {
 		return
 	}
 
