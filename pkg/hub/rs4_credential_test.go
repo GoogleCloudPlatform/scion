@@ -571,6 +571,41 @@ func TestRS4_ServiceBoundaryCredentialEnforcement(t *testing.T) {
 		err := srv.uatService.DeleteToken(brokerCtx, ownerID, token.ID)
 		assert.ErrorIs(t, err, ErrUATCredentialDenied)
 	})
+
+	// Actor/user binding: a valid session for user A cannot operate on user B's tokens.
+	otherUserID := tid("rs4-sb-other")
+	rs4UserWithRole(t, s, otherUserID, projectID, store.ProjectRoleOwner)
+
+	t.Run("CreateToken_wrong_user_rejected", func(t *testing.T) {
+		// ownerID's session context tries to create a token for otherUserID.
+		_, _, err := srv.uatService.CreateToken(sessionCtx, otherUserID, "cross-user", projectID, []string{"agent:read"}, nil)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden,
+			"session for user A must not create tokens for user B")
+	})
+
+	t.Run("ListTokens_wrong_user_rejected", func(t *testing.T) {
+		_, err := srv.uatService.ListTokens(sessionCtx, otherUserID)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden,
+			"session for user A must not list user B's tokens")
+	})
+
+	t.Run("GetToken_wrong_user_rejected", func(t *testing.T) {
+		_, err := srv.uatService.GetToken(sessionCtx, otherUserID, token.ID)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden,
+			"session for user A must not get user B's tokens")
+	})
+
+	t.Run("RevokeToken_wrong_user_rejected", func(t *testing.T) {
+		err := srv.uatService.RevokeToken(sessionCtx, otherUserID, token.ID)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden,
+			"session for user A must not revoke user B's tokens")
+	})
+
+	t.Run("DeleteToken_wrong_user_rejected", func(t *testing.T) {
+		err := srv.uatService.DeleteToken(sessionCtx, otherUserID, token.ID)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden,
+			"session for user A must not delete user B's tokens")
+	})
 }
 
 // ---------------------------------------------------------------------------
