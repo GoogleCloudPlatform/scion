@@ -224,6 +224,9 @@ func (m *mockMigrationStore) addMessage(msg *store.Message) {
 
 // TestStep2_KindEncodedRowAddsParticipants verifies that a kind-encoded row
 // with no participants gets both principals added after migration.
+//
+// Fixture class F-7: already new-format → participant rebuild only;
+// key byte-identical after.
 func TestStep2_KindEncodedRowAddsParticipants(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
@@ -244,6 +247,8 @@ func TestStep2_KindEncodedRowAddsParticipants(t *testing.T) {
 		Surface:     "native",
 		ExternalRef: extRef,
 	})
+
+	keyBefore := ms.conversations[convID].ExternalRef
 
 	svc := NewDMMigrationService(ms)
 	result, err := svc.Run(ctx, DMMigrationConfig{})
@@ -266,6 +271,12 @@ func TestStep2_KindEncodedRowAddsParticipants(t *testing.T) {
 	assert.True(t, hasAgent, "agent participant should be added")
 	assert.Equal(t, 2, result.ParticipantsAdded, "ParticipantsAdded should be 2")
 	assert.Equal(t, 1, result.TotalScanned, "TotalScanned should be 1")
+
+	// F-7: key must be byte-identical after migration (participant rebuild only).
+	assert.Equal(t, keyBefore, ms.conversations[convID].ExternalRef,
+		"F-7: key must be byte-identical after migration")
+	assert.Equal(t, 0, result.OldFormatRekeyed,
+		"F-7: new-format key must not be counted as rekeyed")
 }
 
 // TestStep2_SkipsWhenPrincipalNotFound verifies that when one principal doesn't
@@ -522,6 +533,9 @@ func TestStep3b_OldFormatRekey(t *testing.T) {
 
 // TestStep3b_AmbiguousIDInNeither verifies that when an ID is found in neither
 // the user nor agent table, it's counted as ambiguous and skipped.
+//
+// Fixture class F-4: old-format, neither resolves → NOT rekeyed,
+// counted Ambiguous, still denied.
 func TestStep3b_AmbiguousIDInNeither(t *testing.T) {
 	ms := newMockMigrationStore()
 	ctx := context.Background()
@@ -545,6 +559,16 @@ func TestStep3b_AmbiguousIDInNeither(t *testing.T) {
 
 	assert.Equal(t, 1, result.Ambiguous, "should be counted as ambiguous")
 	assert.Equal(t, 0, result.OldFormatRekeyed)
+
+	// F-4: key must be unchanged.
+	assert.Equal(t, oldKey, ms.conversations[convID].ExternalRef,
+		"F-4: key must be unchanged when neither ID is resolvable")
+
+	// F-4: access must still be denied (old-format key fails ParseDMKey).
+	assert.Error(t, messages.CheckDMParticipantKey("direct", oldKey, "user", id1),
+		"F-4: old-format key must deny access to id1")
+	assert.Error(t, messages.CheckDMParticipantKey("direct", oldKey, "user", id2),
+		"F-4: old-format key must deny access to id2")
 }
 
 // TestStep3b_AmbiguousIDInBoth verifies that when an ID exists in both user
@@ -1199,4 +1223,416 @@ func TestB14_EmptyRefRowLeftKeyless(t *testing.T) {
 	// (c) EmptyRefSkipped counter must be 1.
 	assert.Equal(t, 1, result.EmptyRefSkipped,
 		"EmptyRefSkipped should be 1")
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial fixture-class tests (F-1 through F-5)
+//
+// These tests exercise the old-format rekey path (step 3b) against edge
+// cases that are security-relevant. The governing rule:
+//   Under-granting is recoverable; over-granting is not.
+//   A wrong key is worse than no key, since the key IS the ACL.
+// ---------------------------------------------------------------------------
+
+// TestF1_OldFormatRekey_ExactKey_Granted_ThirdDenied verifies fixture class
+// F-1: an old-format dm:<uuidA>:<uuidB> row where both IDs resolve (one user,
+// one agent) is rekeyed to the exact canonical key; both named principals are
+// granted by CheckDMParticipantKey; and an unrelated third principal is denied.
+func TestF1_OldFormatRekey_ExactKey_Granted_ThirdDenied(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	// Deterministic UUIDs for exact-key assertion. userID < agentID lexically.
+	userID := "11111111-1111-1111-1111-111111111111"
+	agentID := "22222222-2222-2222-2222-222222222222"
+	strangerID := "33333333-3333-3333-3333-333333333333"
+	convID := uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "f1@example.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "f1-agent"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@example.com"}
+
+	// Old-format key: dm:{sorted(userID, agentID)}.
+	// userID < agentID lexically, so already sorted.
+	oldKey := "dm:" + userID + ":" + agentID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.OldFormatRekeyed, "F-1: should rekey old-format row")
+
+	// (a) Exact resulting key.
+	expectedKey, keyErr := messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, keyErr)
+	conv := ms.conversations[convID]
+	assert.Equal(t, expectedKey, conv.ExternalRef,
+		"F-1: must rekey to exact canonical key")
+
+	// (b) Both named principals granted by the rekeyed ACL.
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", userID),
+		"F-1: user must be granted by the rekeyed ACL")
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "agent", agentID),
+		"F-1: agent must be granted by the rekeyed ACL")
+
+	// (c) Third principal denied.
+	assert.Error(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", strangerID),
+		"F-1: stranger must be denied by the rekeyed ACL")
+}
+
+// TestF2_OldFormatRekey_ReversedLexicalOrder_CanonicalKey verifies fixture
+// class F-2: when the user UUID is lexically GREATER than the agent UUID
+// (reversed from F-1), the migration still produces a canonical key that
+// follows the ordering rule: agent: < user: lexically, so agent comes first.
+func TestF2_OldFormatRekey_ReversedLexicalOrder_CanonicalKey(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	// F-2: user UUID is lexically GREATER than agent UUID (reversed from F-1).
+	userID := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	agentID := "11111111-1111-1111-1111-111111111111"
+	convID := uuid.NewString()
+
+	require.Greater(t, userID, agentID,
+		"precondition: userID must be lexically greater for F-2")
+
+	ms.users[userID] = &store.User{ID: userID, Email: "f2@example.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "f2-agent"}
+
+	// Old-format key: dm:{sorted(agentID, userID)} = dm:<agentID>:<userID>
+	// since agentID < userID lexically.
+	oldKey := "dm:" + agentID + ":" + userID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.OldFormatRekeyed, "F-2: should rekey")
+
+	// The canonical key must follow the ordering rule regardless of UUID order.
+	expectedKey, keyErr := messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, keyErr)
+	conv := ms.conversations[convID]
+	assert.Equal(t, expectedKey, conv.ExternalRef,
+		"F-2: reversed UUID order must produce the correct canonical key")
+
+	// Verify the ordering rule: "agent:" < "user:" lexically, so agent comes first.
+	assert.True(t, strings.HasPrefix(conv.ExternalRef, "dm:agent:"),
+		"F-2: canonical key must start with dm:agent: (agent: < user: lexically)")
+
+	// Both principals must be granted.
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", userID),
+		"F-2: user must be granted")
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "agent", agentID),
+		"F-2: agent must be granted")
+}
+
+// TestF3_OldFormat_OneResolves_NotRekeyed verifies fixture class F-3: an
+// old-format row where one principal resolves and the other does not must NOT
+// be rekeyed, must be counted as Ambiguous, and must still deny access.
+//
+// This is security-relevant: if the migration treated an unresolvable
+// principal as a kind by default (e.g., falling back to "user"), the
+// resulting key would name the wrong principal — a fabricated ACL.
+func TestF3_OldFormat_OneResolves_NotRekeyed(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	resolvedID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	unresolvedID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	convID := uuid.NewString()
+
+	// Only the first UUID is resolvable (as a user).
+	ms.users[resolvedID] = &store.User{ID: resolvedID, Email: "f3@example.com"}
+	// unresolvedID is in neither the user nor agent table.
+
+	// Old-format key: sorted. resolvedID (aaa...) < unresolvedID (bbb...).
+	oldKey := "dm:" + resolvedID + ":" + unresolvedID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	// NOT rekeyed.
+	assert.Equal(t, oldKey, ms.conversations[convID].ExternalRef,
+		"F-3: key must be unchanged when one principal is unresolvable")
+	assert.Equal(t, 0, result.OldFormatRekeyed, "F-3: must NOT be counted as rekeyed")
+	assert.Equal(t, 1, result.Ambiguous, "F-3: should count as ambiguous")
+
+	// Still denied: old-format key doesn't pass CheckDMParticipantKey
+	// (it lacks kind encoding, so ParseDMKey fails on it).
+	assert.Error(t, messages.CheckDMParticipantKey("direct", oldKey, "user", resolvedID),
+		"F-3: old-format key must deny access to the resolved principal")
+	assert.Error(t, messages.CheckDMParticipantKey("direct", oldKey, "user", unresolvedID),
+		"F-3: old-format key must deny access to the unresolved principal")
+}
+
+// TestF5_OldFormat_IdenticalUUIDs_Rekeyed verifies fixture class F-5:
+// an old-format row where both UUIDs are identical and the principal is
+// resolvable IS rekeyed, producing a degenerate self-DM key where the
+// same principal appears on both sides.
+//
+// FINDING: the migration has no distinctness check for the two principals.
+// resolveKind succeeds for both (same UUID, same lookup), DMConversationKey
+// accepts the pair, and the result is dm:user:<uuid>:user:<uuid>. This
+// produces a syntactically valid key that grants the single principal access
+// via both slots.
+//
+// Whether a self-DM should be permitted is an open product question. This
+// test encodes today's behaviour: the migration rekeys it, and the ACL
+// grants the named principal. The DegeneratePairs counter preserves the
+// evidence that the source row was anomalous.
+func TestF5_OldFormat_IdenticalUUIDs_Rekeyed(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	sameID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	strangerID := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	convID := uuid.NewString()
+
+	// The UUID exists as a user — it IS resolvable.
+	ms.users[sameID] = &store.User{ID: sameID, Email: "f5@example.com"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@example.com"}
+
+	// Old-format key with identical UUIDs: dm:<uuid>:<uuid>.
+	oldKey := "dm:" + sameID + ":" + sameID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	// The migration rekeyes identical UUIDs into a self-DM key.
+	assert.Equal(t, 1, result.OldFormatRekeyed,
+		"F-5: identical UUIDs are rekeyed (no distinctness check)")
+
+	// Exact resulting key: dm:user:<uuid>:user:<uuid>.
+	expectedKey, keyErr := messages.DMConversationKey("user", sameID, "user", sameID)
+	require.NoError(t, keyErr)
+	conv := ms.conversations[convID]
+	assert.Equal(t, expectedKey, conv.ExternalRef,
+		"F-5: must produce the degenerate self-DM key")
+
+	// The named principal IS granted by the self-DM ACL.
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", sameID),
+		"F-5: named principal must be granted by the self-DM ACL")
+
+	// A stranger IS denied.
+	assert.Error(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", strangerID),
+		"F-5: stranger must be denied by the self-DM ACL")
+
+	// DegeneratePairs counter preserves the evidence.
+	assert.Equal(t, 1, result.DegeneratePairs,
+		"F-5: degenerate pair must be counted")
+
+	// DegeneratePairs is counted IN ADDITION TO OldFormatRekeyed, not instead.
+	assert.Equal(t, 1, result.OldFormatRekeyed,
+		"F-5: degenerate pair must also count in OldFormatRekeyed")
+}
+
+// TestF8_OldFormat_BothUsers_Rekeyed verifies fixture class F-8: an old-format
+// row where both principals resolve as users is rekeyed with true kinds. The
+// canonical key orders by UUID (since both tokens share the "user:" prefix).
+//
+// This exercises the UUID-tiebreak branch of the canonical ordering comparator,
+// which is unreachable from mixed-kind inputs.
+func TestF8_OldFormat_BothUsers_Rekeyed(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	// Two user UUIDs, user1 < user2 lexically.
+	user1ID := "11111111-1111-1111-1111-111111111111"
+	user2ID := "22222222-2222-2222-2222-222222222222"
+	strangerID := "33333333-3333-3333-3333-333333333333"
+	convID := uuid.NewString()
+
+	ms.users[user1ID] = &store.User{ID: user1ID, Email: "f8-user1@example.com"}
+	ms.users[user2ID] = &store.User{ID: user2ID, Email: "f8-user2@example.com"}
+	ms.users[strangerID] = &store.User{ID: strangerID, Email: "stranger@example.com"}
+
+	// Old-format key: dm:{sorted(user1ID, user2ID)} = dm:<user1>:<user2>.
+	oldKey := "dm:" + user1ID + ":" + user2ID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.OldFormatRekeyed, "F-8: should rekey same-kind pair")
+
+	// Exact resulting key: dm:user:<min>:user:<max> — ordered by UUID.
+	expectedKey, keyErr := messages.DMConversationKey("user", user1ID, "user", user2ID)
+	require.NoError(t, keyErr)
+	conv := ms.conversations[convID]
+	assert.Equal(t, expectedKey, conv.ExternalRef,
+		"F-8: must rekey to exact canonical key with true kinds")
+
+	// Both principals granted.
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", user1ID),
+		"F-8: user1 must be granted")
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", user2ID),
+		"F-8: user2 must be granted")
+
+	// Third party denied.
+	assert.Error(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "user", strangerID),
+		"F-8: stranger must be denied")
+}
+
+// TestF8_ReversedInput_CanonicalKey verifies F-8's ordering invariant: the
+// same two user principals, seeded in the opposite lexical order, must
+// produce a byte-identical canonical key.
+func TestF8_ReversedInput_CanonicalKey(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	// Same UUIDs as F-8, but user1 > user2 lexically (reversed).
+	user1ID := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	user2ID := "22222222-2222-2222-2222-222222222222"
+	convID := uuid.NewString()
+
+	require.Greater(t, user1ID, user2ID,
+		"precondition: user1ID must be lexically greater for reversed variant")
+
+	ms.users[user1ID] = &store.User{ID: user1ID, Email: "f8r-user1@example.com"}
+	ms.users[user2ID] = &store.User{ID: user2ID, Email: "f8r-user2@example.com"}
+
+	// Old-format key: dm:{sorted} = dm:<user2>:<user1> since user2 < user1.
+	oldKey := "dm:" + user2ID + ":" + user1ID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.OldFormatRekeyed)
+
+	// Must produce the same canonical key as DMConversationKey, regardless
+	// of which UUID is "first" in the old-format key.
+	expectedKey, keyErr := messages.DMConversationKey("user", user1ID, "user", user2ID)
+	require.NoError(t, keyErr)
+	assert.Equal(t, expectedKey, ms.conversations[convID].ExternalRef,
+		"F-8 reversed: must produce byte-identical canonical key regardless of input order")
+}
+
+// TestF9_OldFormat_BothAgents_Rekeyed verifies fixture class F-9: an old-format
+// row where both principals resolve as agents is rekeyed with true kinds. The
+// canonical key orders by UUID (since both tokens share the "agent:" prefix).
+func TestF9_OldFormat_BothAgents_Rekeyed(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	// Two agent UUIDs, agent1 < agent2 lexically.
+	agent1ID := "44444444-4444-4444-4444-444444444444"
+	agent2ID := "55555555-5555-5555-5555-555555555555"
+	strangerID := "66666666-6666-6666-6666-666666666666"
+	convID := uuid.NewString()
+
+	ms.agents[agent1ID] = &store.Agent{ID: agent1ID, Slug: "f9-agent1"}
+	ms.agents[agent2ID] = &store.Agent{ID: agent2ID, Slug: "f9-agent2"}
+	ms.agents[strangerID] = &store.Agent{ID: strangerID, Slug: "stranger-agent"}
+
+	// Old-format key: dm:{sorted(agent1, agent2)} = dm:<agent1>:<agent2>.
+	oldKey := "dm:" + agent1ID + ":" + agent2ID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.OldFormatRekeyed, "F-9: should rekey same-kind pair")
+
+	// Exact resulting key: dm:agent:<min>:agent:<max> — ordered by UUID.
+	expectedKey, keyErr := messages.DMConversationKey("agent", agent1ID, "agent", agent2ID)
+	require.NoError(t, keyErr)
+	conv := ms.conversations[convID]
+	assert.Equal(t, expectedKey, conv.ExternalRef,
+		"F-9: must rekey to exact canonical key with true kinds")
+
+	// Both principals granted.
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "agent", agent1ID),
+		"F-9: agent1 must be granted")
+	assert.NoError(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "agent", agent2ID),
+		"F-9: agent2 must be granted")
+
+	// Third party denied.
+	assert.Error(t, messages.CheckDMParticipantKey("direct", conv.ExternalRef, "agent", strangerID),
+		"F-9: stranger must be denied")
+}
+
+// TestF9_ReversedInput_CanonicalKey verifies F-9's ordering invariant: the
+// same two agent principals, seeded in the opposite lexical order, must
+// produce a byte-identical canonical key.
+func TestF9_ReversedInput_CanonicalKey(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+
+	// Same-kind agents, agent1 > agent2 lexically (reversed).
+	agent1ID := "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	agent2ID := "22222222-2222-2222-2222-222222222222"
+	convID := uuid.NewString()
+
+	require.Greater(t, agent1ID, agent2ID,
+		"precondition: agent1ID must be lexically greater for reversed variant")
+
+	ms.agents[agent1ID] = &store.Agent{ID: agent1ID, Slug: "f9r-agent1"}
+	ms.agents[agent2ID] = &store.Agent{ID: agent2ID, Slug: "f9r-agent2"}
+
+	// Old-format key: dm:{sorted} = dm:<agent2>:<agent1> since agent2 < agent1.
+	oldKey := "dm:" + agent2ID + ":" + agent1ID
+	ms.addConv(&store.Conversation{
+		ID:          convID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: oldKey,
+	})
+
+	svc := NewDMMigrationService(ms)
+	result, err := svc.Run(ctx, DMMigrationConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.OldFormatRekeyed)
+
+	// Must produce the same canonical key as DMConversationKey.
+	expectedKey, keyErr := messages.DMConversationKey("agent", agent1ID, "agent", agent2ID)
+	require.NoError(t, keyErr)
+	assert.Equal(t, expectedKey, ms.conversations[convID].ExternalRef,
+		"F-9 reversed: must produce byte-identical canonical key regardless of input order")
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -39,6 +40,7 @@ type DMMigrationResult struct {
 	ParticipantsAdded int      // step 2: participants derived from key
 	EmptyRefSkipped   int      // step 3a: empty-ref rows left keyless (B14 ruling)
 	OldFormatRekeyed  int      // step 3b: old dm:X:Y rows re-keyed
+	DegeneratePairs   int      // step 3b: rows where both principals are the same ID (self-DM)
 	Unparseable       int      // rows that could not be processed
 	Ambiguous         int      // IDs found in neither or both tables
 	Errors            []string // non-fatal errors encountered
@@ -313,6 +315,16 @@ func (s *DMMigrationService) stepRekeyOldFormat(
 		result.Errors = append(result.Errors,
 			fmt.Sprintf("step3b: ambiguous kind resolution for conversation %s — id1=%s id2=%s (found in neither or both tables)", conv.ID, id1, id2))
 		return
+	}
+
+	// Record degenerate pairs: both principals are the same ID, producing a
+	// self-DM key. The row still rekeys normally — this counter preserves the
+	// evidence that the source row was anomalous, since a dm:user:X:user:X key
+	// is indistinguishable from a legitimate same-kind DM after migration.
+	if id1 == id2 {
+		result.DegeneratePairs++
+		slog.Warn("degenerate DM pair: both principals are the same ID",
+			"conversation_id", conv.ID, "principal_id", id1, "resolved_kind", kind1)
 	}
 
 	// Compute the kind-encoded key.
