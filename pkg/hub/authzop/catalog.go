@@ -625,7 +625,12 @@ var Catalog = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialScopeViolation},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestRS4_IssuerAuthority"},
+			{Package: "pkg/hub", Function: "TestRS4_TargetScope"},
+			{Package: "pkg/hub", Function: "TestRS4_Audit_Mint"},
+		},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,
 			Reason: "Token creation is authenticated-only (user manages own tokens); no per-resource permission required beyond session validity",
@@ -636,8 +641,10 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "credential.token.revoke",
 		Domain:      "credential",
-		Description: "Revoke a user access token",
+		Description: "Revoke or delete a user access token",
 		EntryPoints: []EntryPoint{
+			// RS4/G6: Both soft-revoke and hard-delete share one operation ID (A5).
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens/{id}/revoke", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -654,11 +661,15 @@ var Catalog = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:     "credential.token.revoke",
 			ContextFields: []string{"actor_id"},
-			BeforeFields:  []string{"token_id"},
+			BeforeFields:  []string{"token_id", "action"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestRS4_Audit_Revoke"},
+			{Package: "pkg/hub", Function: "TestRS4_Audit_Delete"},
+		},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,
 			Reason: "Token revocation is authenticated-only (user manages own tokens)",
@@ -2346,7 +2357,8 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/auth/me", Kind: ExemptionAuthenticationOnly, Reason: "Read own identity, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/auth/admin-status", Kind: ExemptionAuthenticationOnly, Reason: "Check own admin status, self-service", Owner: "route_metadata.go"},
 	// /api/v1/auth/tokens: GET is self-service (exempted); POST is cataloged as credential.token.create.
-	// /api/v1/auth/tokens/: GET is self-service (exempted); DELETE is cataloged as credential.token.revoke.
+	// /api/v1/auth/tokens/: GET is self-service (exempted); POST {id}/revoke and DELETE {id} are both
+	// cataloged as credential.token.revoke (RS4/A5: one operation, two entry points).
 	// The catalog uses method-specific entry points; the route metadata uses the base pattern for both.
 	{Pattern: "/api/v1/auth/scopes", Kind: ExemptionAuthenticationOnly, Reason: "List available scopes, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},

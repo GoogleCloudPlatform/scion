@@ -672,6 +672,20 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requireSessionCredential enforces the A1 credential caveat: only session/dev
+// credentials may perform token-management operations. UATs, agent JWTs, broker
+// tokens, and any other non-session identity are rejected.
+func requireSessionCredential(user UserIdentity) error {
+	if _, ok := user.(*ScopedUserIdentity); ok {
+		return ErrUATCredentialDenied
+	}
+	// Agent identities are also rejected.
+	if _, ok := user.(AgentIdentity); ok {
+		return ErrUATCredentialDenied
+	}
+	return nil
+}
+
 // handleTokens routes user access token requests.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -726,6 +740,12 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(user); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	tokens, err := s.uatService.ListTokens(r.Context(), user.ID())
 	if err != nil {
 		InternalError(w)
@@ -748,10 +768,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent UAT-creates-UAT: reject if authenticated with a UAT
-	if _, ok := user.(*ScopedUserIdentity); ok {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"access tokens cannot create other access tokens", nil)
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(user); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
 
@@ -770,10 +789,18 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, err.Error(), nil)
 		case errors.Is(err, ErrUATExpiryTooLong):
 			ValidationError(w, err.Error(), nil)
-		case strings.Contains(err.Error(), "required"):
+		case errors.Is(err, ErrUATExpiryPast):
 			ValidationError(w, err.Error(), nil)
-		case strings.Contains(err.Error(), "project not found"):
+		case errors.Is(err, ErrUATNameRequired):
 			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATProjectIDEmpty):
+			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATScopeEmpty):
+			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATScopeViolation):
+			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), nil)
+		case errors.Is(err, ErrUATProjectForbidden):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 		default:
 			InternalError(w)
 		}
@@ -791,6 +818,12 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request, id strin
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Unauthorized(w)
+		return
+	}
+
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(user); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
 
@@ -812,17 +845,18 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(user); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	if err := s.uatService.RevokeToken(r.Context(), user.ID(), id); err != nil {
 		NotFound(w, "access token")
 		return
 	}
 
-	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
-		MutationType: "credential_revoke",
-		TargetType:   "user_access_token",
-		TargetID:     id,
-	})
-
+	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -834,11 +868,18 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(user); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	if err := s.uatService.DeleteToken(r.Context(), user.ID(), id); err != nil {
 		NotFound(w, "access token")
 		return
 	}
 
+	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
 }
 

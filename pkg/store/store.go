@@ -1007,6 +1007,16 @@ type UserAccessTokenStore interface {
 	// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
 	// Returns the number of tokens deleted.
 	DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error)
+
+	// LockUserForTokens acquires a per-user serialization lock for token
+	// mutations. On PostgreSQL this executes SELECT ... FOR UPDATE on the
+	// user row, serializing concurrent token transactions for the same user.
+	// On SQLite this is a plain read (SQLite already serializes writes at
+	// the database level).
+	//
+	// Must be called inside a transaction (WithTx) before any token count
+	// or mutation. Returns ErrNotFound if the user does not exist.
+	LockUserForTokens(ctx context.Context, userID string) error
 }
 
 // =============================================================================

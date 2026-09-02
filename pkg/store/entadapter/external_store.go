@@ -21,10 +21,13 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -711,6 +714,32 @@ func (s *ExternalStore) DeleteUserAccessTokensByProject(ctx context.Context, pro
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// LockUserForTokens acquires a per-user serialization lock for token
+// mutations. On PostgreSQL this runs SELECT id FROM users WHERE id = $1
+// FOR UPDATE, serializing concurrent token transactions for the same user.
+// On SQLite all writes are database-serialized, so a plain existence check
+// provides the same ordering guarantee.
+func (s *ExternalStore) LockUserForTokens(ctx context.Context, userID string) error {
+	uid, err := parseGetID(userID)
+	if err != nil {
+		return err
+	}
+
+	q := s.client.User.Query().Where(user.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock user for tokens: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // Ensure ExternalStore satisfies the external-identity store sub-interfaces.

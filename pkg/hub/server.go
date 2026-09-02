@@ -1115,9 +1115,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("User token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
 
-	// Initialize user access token service
-	srv.uatService = NewUserAccessTokenService(s, s, s)
-
 	// Initialize invite code service
 	srv.inviteService = NewInviteService(s)
 
@@ -1314,6 +1311,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.project-deletion"),
 	)
+
+	// RS4: Initialize user access token service with authorization, audit, and
+	// transactional support via the bounded domain service pattern.
+	srv.uatService = NewUserAccessTokenService(s, srv.authzService, logging.Subsystem("hub.uat"))
 
 	// RS1 R2-R2: Run one-binding migration before accepting traffic.
 	// Idempotent — safe to re-run on every startup. Consolidates legacy
@@ -2276,8 +2277,10 @@ func (s *Server) GetUserTokenService() *UserTokenService {
 	return s.userTokenService
 }
 
-// GetUATService returns the user access token service.
-func (s *Server) GetUATService() *UserAccessTokenService {
+// getUATService returns the user access token service.
+// RS4/G13: unexported — no production in-repo caller exists and an exported
+// accessor would be a latent bypass door around the bounded service.
+func (s *Server) getUATService() *UserAccessTokenService {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.uatService
