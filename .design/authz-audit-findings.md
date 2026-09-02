@@ -392,6 +392,20 @@ Preflight report: `/scion-volumes/scratchpad/projects/policy-refactor/aa-rs6-pre
 | F-RS6-33 | **High** | Runtime-broker HMAC can assert any active user identity without user consent (arbitrary identity impersonation via `X-Scion-On-Behalf-Of`); see product decisions A-5, C2c | open-rs6 |
 | F-RS6-36 | Low | `authzop.MutationClassifications` contains no messaging symbol | open-rs6 |
 
+### RS4 Credential/Secret Reference Slice — Resolved Findings
+
+| ID | Severity | Title | Resolution | Disposition |
+|---|---|---|---|---|
+| F-RS4-01 | **High** | UAT mint has no issuer ceiling: any valid scope can be minted regardless of the issuer's project authority | Issuer ceiling check added — `scopeToPermissionIDs` converts scope strings to permission IDs, then `getEffectivePermissions` verifies the actor holds each one. `ErrUATScopeViolation` sentinel returned. | `resolved-rs4` |
+| F-RS4-02 | **High** | Non-member can probe project existence via distinct error responses on token mint (oracle) | `IsProjectMember` check added before permission resolution — non-members and nonexistent projects both receive `ErrUATProjectForbidden`. | `resolved-rs4` |
+| F-RS4-03 | **High** | UATs can manage other UATs — all 5 token routes accept scoped tokens, contradicting frozen decision A1 | `requireSessionCredential` guard rejects `ScopedUserIdentity` and `AgentIdentity` on all 5 routes with 403 "forbidden". | `resolved-rs4` |
+| F-RS4-04 | **High** | Token revoke/delete has no audit record — DELETE handler's fire-and-forget `emitMutationAudit` races with the response and can silently drop | Atomic audit via `store.WithTx`: mutation + audit record in a single transaction for mint, revoke, and delete. Fire-and-forget removed. | `resolved-rs4` |
+| F-RS4-05 | Medium | Token create audit record has no `after_summary` — auditor cannot reconstruct what was minted | `afterSummary` populated with `token_id`, `scopes`, `project_id` inside the transaction. Plaintext key never recorded. | `resolved-rs4` |
+| F-RS4-06 | Medium | Token cap check is not concurrency-safe — concurrent mints can exceed `UATMaxPerUser` | `LockUserForTokens` (SELECT FOR UPDATE on user row) serializes concurrent token transactions inside `WithTx`. | `resolved-rs4` |
+| F-RS4-07 | Medium | Error mapping uses `strings.Contains` pattern matching on error messages | Typed sentinel errors (`ErrUATScopeViolation`, `ErrUATProjectForbidden`, etc.) with `errors.Is` checks replace string matching. | `resolved-rs4` |
+| F-RS4-08 | Low | `GetUATService` is exported with no production callers | Unexported to `getUATService`. | `resolved-rs4` |
+| F-RS4-09 | Low | `TestMutationAudit_CredentialRevocation` is vacuous — skips on non-201, drives DELETE which emitted nothing, logs empty results | Superseded by `TestRS4_MutationAudit_CredentialRevocation_Asserting` which verifies exactly one `credential_revoke` audit record. | `resolved-rs4` |
+
 ### Open product decisions
 
 | ID | Question | Recommendation |

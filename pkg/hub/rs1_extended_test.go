@@ -114,7 +114,7 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"handlers_auth.go":                "auth handler: system-scoped binding cleanup during user deactivation, not project membership",
 		"access_constraint_governance.go": "constraint governance: creates role bindings for system governance, not project membership",
 		"project_membership_service.go":   "the membership service itself",
-		"useraccesstoken.go":              "UAT service: internal token management",
+		"useraccesstoken.go":              "RS4 bounded credential service: uses store mutations for token CRUD, not project membership role bindings",
 		"seed.go":                         "bootstrap seeding: creates initial system/hub-level role bindings, not project membership",
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
 	}

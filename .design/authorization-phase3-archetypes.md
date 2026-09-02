@@ -86,21 +86,29 @@ obligations for destructive operations.
 
 ### 4. Credential or Secret Operation
 
-**Selected operation:** UAT (User Access Token) create
+**Selected operations:** UAT (User Access Token) create and revoke/delete
 
 | Evidence              | Location                                          |
 |-----------------------|---------------------------------------------------|
-| Handler               | `pkg/hub/handlers_auth.go:676` — `handleTokens()` |
-| Entry point           | `POST /api/v1/auth/tokens`                         |
-| Credential minting    | Creates project-scoped bearer token                |
-| Scope validation      | Token scopes validated against permission registry |
-| Permission            | `user.manage` (self-service)                       |
+| Bounded service       | `pkg/hub/useraccesstoken.go` — `UserAccessTokenService` (RS4) |
+| Create handler        | `pkg/hub/handlers_auth.go` — `handleCreateToken()` |
+| Revoke handler        | `pkg/hub/handlers_auth.go` — `handleRevokeToken()` |
+| Delete handler        | `pkg/hub/handlers_auth.go` — `handleDeleteToken()` |
+| Credential caveat     | `requireSessionCredential()` rejects `ScopedUserIdentity` and `AgentIdentity` (A1) |
+| Issuer ceiling        | `scopeToPermissionIDs` + `getEffectivePermissions` — token scopes ⊆ issuer permissions (G1) |
+| Oracle resistance     | `IsProjectMember` + `ErrUATProjectForbidden` — non-member and nonexistent identical (G2/G10) |
+| Atomic audit          | `store.WithTx` — mutation + `credential_create`/`credential_revoke` audit in one tx (G3/G4) |
+| Token cap             | `LockUserForTokens` (SELECT FOR UPDATE) → `CountUserAccessTokens` inside tx (G7) |
+| Catalog operations    | `credential.token.create`, `credential.token.revoke` |
+| Tests                 | `rs4_credential_test.go`: T-I1..I10, T-P1..P8, T-C1..C9, T-A1..A9, T-X1..X5, T-D1..D4, T-G1..G6, T-R1..R5 |
 
 **Why this archetype:** Exercises credential minting, scope validation, issuer
-identity, and the requirement that minted credentials cannot exceed the
+ceiling, and the requirement that minted credentials cannot exceed the
 issuer's authority. Demonstrates `issuer_credential` governance kind, separate
 credential kinds (`session_jwt` for authenticated user issuing a `scoped_uat`),
-and after-state audit fields for credential issuance effects.
+atomic audit for both create and destroy paths, oracle resistance for
+target-project authorization, and the A1 frozen decision that tokens cannot
+act on tokens (credential caveat).
 
 ### 5. Boundary Relaxation
 
