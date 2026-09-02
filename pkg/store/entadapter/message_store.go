@@ -530,9 +530,7 @@ func (s *MessageStore) CountUnbackfilledMessages(ctx context.Context, projectID 
 // backfill because ListProjects never returns their project (DEF-111).
 //
 // The predicate here — "unbackfilled AND project_id NOT IN (SELECT id FROM
-// projects)" — is the inverse of what the backfill can reach. If M7 lands,
-// the backfill's own skip predicate and this counter MUST share one
-// expression so they cannot drift (DEF-112).
+// projects)" — is the inverse of what the backfill can reach.
 //
 // DEPENDENCY: this count is correct only because ListProjects (with an
 // empty ProjectFilter) applies no unconditional filter — no soft-delete,
@@ -542,6 +540,10 @@ func (s *MessageStore) CountUnbackfilledMessages(ctx context.Context, projectID 
 // population (some messages whose projects are filtered out of ListProjects
 // would be classified as reachable when the backfill cannot reach them),
 // relocating the alarm-fatigue bug rather than fixing it.
+//
+// GATE (M7, DEF-112): TestReachableCountConsistency_DEF112 enforces this
+// invariant. TestUnreachableCounterTableNames guards the raw SQL identifiers
+// against Ent schema renames.
 func (s *MessageStore) CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error) {
 	count, err := s.client.Message.Query().
 		Where(

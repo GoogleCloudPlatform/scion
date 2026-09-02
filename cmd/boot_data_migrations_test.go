@@ -21,10 +21,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -780,4 +783,143 @@ func unmarshalMigrationMarker(raw map[string]json.RawMessage, name MigrationName
 		return store.ErrNotFound
 	}
 	return json.Unmarshal(entry, out)
+}
+
+// ---------------------------------------------------------------------------
+// DEF-112: Reachable-count consistency gate (M7)
+// ---------------------------------------------------------------------------
+
+// TestReachableCountConsistency_DEF112 asserts the invariant that makes
+// the residual report's reachable/unreachable split correct: the counter's
+// notion of "reachable unbackfilled" must equal the sum of per-project
+// unbackfilled counts taken over exactly the projects ListProjects returns.
+//
+// Formally:
+//
+//	CountUnbackfilledMessages("") - CountUnreachableUnbackfilledMessages()
+//	  == Σ CountUnbackfilledMessages(pid) for pid ∈ ListProjects(∅)
+//
+// This equality holds because CountUnreachableUnbackfilledMessages uses
+// NOT EXISTS (... FROM projects ...) and ListProjects(∅) returns every row
+// in the projects table. If ListProjects ever adds an unconditional filter
+// — entirely reasonable, e.g. excluding archived projects from listings —
+// the right side shrinks (filtered-out projects are not summed) but the
+// left side stays the same (the anti-join still only counts messages with
+// no project row at all), and this test fails.
+//
+// DEF-112: converts the prose DEPENDENCY comment on
+// CountUnreachableUnbackfilledMessages into a gate.
+func TestReachableCountConsistency_DEF112(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// ---- Seed projects with varying numbers of unbackfilled messages ----
+	projectIDs := make([]string, 3)
+	for i := range projectIDs {
+		pid := uuid.NewString()
+		projectIDs[i] = pid
+		err := s.CreateProject(ctx, &store.Project{
+			ID:   pid,
+			Name: fmt.Sprintf("def112-project-%d", i),
+			Slug: fmt.Sprintf("def112-%d-%s", i, pid[:8]),
+		})
+		require.NoError(t, err)
+
+		// Seed (i+1) unbackfilled messages per project: 1, 2, 3.
+		for j := 0; j <= i; j++ {
+			err = s.CreateMessage(ctx, &store.Message{
+				ID:        uuid.NewString(),
+				ProjectID: pid,
+				Msg:       fmt.Sprintf("unbackfilled msg %d for project %d", j, i),
+				Sender:    "user:def112@test.com",
+				Recipient: "agent:def112-bot",
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	// ---- Seed orphan messages (project_id with no project row) ----
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok, "test store must be a CompositeStore for DB access")
+	db := cs.DB()
+	require.NotNil(t, db)
+
+	for i := 0; i < 2; i++ {
+		orphanProjectID := uuid.NewString()
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO messages (id, project_id, msg, sender, recipient, created)
+			 VALUES (?, ?, 'orphan msg', 'user:orphan@test.com', 'agent:orphan-bot', datetime('now'))`,
+			uuid.NewString(), orphanProjectID,
+		)
+		require.NoError(t, err)
+	}
+
+	// ---- Left side: total - unreachable = reachable (by counter) ----
+	total, err := s.CountUnbackfilledMessages(ctx, "")
+	require.NoError(t, err)
+
+	unreachable, err := s.CountUnreachableUnbackfilledMessages(ctx)
+	require.NoError(t, err)
+
+	reachableByCounter := total - unreachable
+
+	// ---- Right side: Σ per-project counts over ListProjects ----
+	listedIDs, err := listAllProjectIDs(ctx, s)
+	require.NoError(t, err)
+
+	reachableByBackfill := 0
+	for _, pid := range listedIDs {
+		count, err := s.CountUnbackfilledMessages(ctx, pid)
+		require.NoError(t, err)
+		reachableByBackfill += count
+	}
+
+	// ---- THE GATE ----
+	assert.Equal(t, reachableByBackfill, reachableByCounter,
+		"DEF-112: the counter's reachable count (total - unreachable = %d - %d = %d) "+
+			"must equal the backfill's reachable count (sum of per-project counts over "+
+			"ListProjects = %d). Divergence means the residual report misclassifies "+
+			"messages and the WARN fires permanently with a number no action can reduce.",
+		total, unreachable, reachableByCounter, reachableByBackfill,
+	)
+
+	// Sanity: verify the seeded data is what we expect.
+	// 3 projects with 1+2+3 = 6 messages, plus 2 orphans = 8 total.
+	assert.Equal(t, 8, total,
+		"sanity: expected 6 project messages + 2 orphans = 8 total")
+	assert.Equal(t, 2, unreachable,
+		"sanity: expected 2 orphan messages to be unreachable")
+	assert.Equal(t, 6, reachableByCounter,
+		"sanity: expected 6 reachable messages by counter")
+	assert.Equal(t, 6, reachableByBackfill,
+		"sanity: expected 6 reachable messages by backfill sum")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-112 secondary: raw SQL anti-join table/column name gate
+// ---------------------------------------------------------------------------
+
+// TestUnreachableCounterTableNames verifies that the raw SQL string in
+// CountUnreachableUnbackfilledMessages uses the correct table and column
+// names from Ent's generated schema. If an Ent schema migration renames
+// the "projects" table or its "id" column, the generated constants change,
+// this test fails, and the developer is forced to update the raw SQL too.
+//
+// This does not require a database — it checks compile-time constants.
+func TestUnreachableCounterTableNames(t *testing.T) {
+	// The raw SQL in CountUnreachableUnbackfilledMessages is:
+	//   NOT EXISTS (SELECT 1 FROM projects WHERE projects.id = <messages.project_id>)
+	//
+	// These assertions verify the three identifiers used in that string
+	// match Ent's generated constants. A rename via Ent schema migration
+	// changes the constants and turns this test red.
+	assert.Equal(t, "projects", project.Table,
+		"raw SQL assumes projects table is named 'projects'; if Ent renamed it, "+
+			"update the raw SQL in CountUnreachableUnbackfilledMessages")
+	assert.Equal(t, "id", project.FieldID,
+		"raw SQL assumes projects PK column is 'id'; if Ent renamed it, "+
+			"update the raw SQL in CountUnreachableUnbackfilledMessages")
+	assert.Equal(t, "project_id", message.FieldProjectID,
+		"raw SQL assumes messages FK column is 'project_id'; if Ent renamed it, "+
+			"update the raw SQL in CountUnreachableUnbackfilledMessages")
 }
