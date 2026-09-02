@@ -381,11 +381,7 @@ func printAttributionReport(out io.Writer, r *AttributionReport, projectLabel st
 	_, _ = fmt.Fprintf(out, "Attribution completeness — project %s\n", projectLabel)
 	_, _ = fmt.Fprintf(out, "  messages total                        %d\n", r.Total)
 	_, _ = fmt.Fprintf(out, "  attributed (conversation_id set)      %d\n", r.Attributed)
-	_, _ = fmt.Fprintf(out, "  unattributed — backfillable           %d", r.Backfillable)
-	if r.Backfillable > 0 {
-		_, _ = fmt.Fprint(out, "   -> run 'scion server backfill --execute'")
-	}
-	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  unattributed — backfillable           %d\n", r.Backfillable)
 	_, _ = fmt.Fprintf(out, "  unattributed — broadcast              %d", r.BroadcastNotBackfillable)
 	if r.BroadcastNotBackfillable > 0 {
 		_, _ = fmt.Fprint(out, "   -> BLOCKS FLIP (backfill skips broadcasts)")

@@ -383,15 +383,18 @@ func TestBootDMKeyMigration_EmptyRefUntouched(t *testing.T) {
 // Warning still fires
 // ---------------------------------------------------------------------------
 
-// TestBootDataMigrations_WarningStillFires verifies that the backfill
-// warning still fires after the boot hook when there are messages that
-// the backfill cannot attribute. Re-pointing the warning is M6.
+// TestBootDataMigrations_ReachableWarnFires verifies that the residual
+// report emits a WARN for messages that remain unattributed in listed
+// projects (M6 §4.6). The message is unattributable: it has no ThreadID
+// and non-UUID principals, so key derivation fails (DeriveErrPrincipalPair).
+// The backfill processes it, refuses it as a row-level refusal, and the
+// WARN fires because conversation_id is still NULL and the project exists.
 //
-// The message must be unattributable: it has no ThreadID and non-UUID
-// principals, so key derivation fails (DeriveErrPrincipalPair). The
-// backfill processes it, refuses it as a row-level refusal, and the
-// warning fires because conversation_id is still NULL.
-func TestBootDataMigrations_WarningStillFires(t *testing.T) {
+// Replaces the old TestBootDataMigrations_WarningStillFires whose
+// precondition expired: it asserted "Messages without conversation
+// attribution detected" which was the old maybeWarnUnbackfilledMessages
+// message. M6 replaced that with the split reachable/unreachable report.
+func TestBootDataMigrations_ReachableWarnFires(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
@@ -428,8 +431,10 @@ func TestBootDataMigrations_WarningStillFires(t *testing.T) {
 	runBootDataMigrations(ctx, s)
 
 	logOutput := buf.String()
-	assert.Contains(t, logOutput, "Messages without conversation attribution detected",
-		"warning must still fire for messages the backfill cannot attribute")
+	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
+		"WARN must fire for reachable unattributed messages")
+	assert.NotContains(t, logOutput, "scion server backfill",
+		"remediation string must not appear (M6 removed it)")
 }
 
 // Error log bounding tests are in boot_data_migrations_safety_test.go
@@ -493,8 +498,9 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	assert.NotNil(t, backfillDone.CompletedAt,
 		"backfill marker should be written after backfill pass")
 
-	// Warning should still fire for the unattributable message.
-	assert.Contains(t, logOutput, "Messages without conversation attribution detected")
+	// Reachable WARN should fire for the unattributable message
+	// (it's in a valid project, so it's reachable but unattributed).
+	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects")
 
 	// Verify the conversation was re-keyed.
 	convs, err := s.ListConversations(ctx, store.ConversationFilter{Kind: "direct"}, store.ListOptions{Limit: 100})
@@ -515,6 +521,158 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	logOutput = buf.String()
 	assert.Contains(t, logOutput, "already complete, skipping",
 		"second boot should skip the migration")
+}
+
+// ---------------------------------------------------------------------------
+// AC-9: Residual report — reachable/unreachable split
+// ---------------------------------------------------------------------------
+
+// TestResidualReport_AC9 verifies acceptance criterion 9 (design §9):
+//
+//   - Seed one unattributed message in a listed project (reachable) and one
+//     referencing a project ID with no row (unreachable/orphan).
+//   - After the boot hook runs: the reachable one is attributed; the orphan
+//     is reported as unreachable at INFO, not as a WARN; the WARN for
+//     reachable messages does not fire; and no log line advertises
+//     "scion server backfill --execute".
+//   - The specific failure guarded against is the orphan being counted in
+//     the actionable bucket — that is the bug that makes the warning
+//     permanent.
+//
+// Steady-state case: run the boot hook a second time so every project is
+// already in projects_done and no backfill work is performed. Both counts
+// must still be correct and the WARN must still not fire.
+func TestResidualReport_AC9(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// ---- Seed a reachable, attributable message ----
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	// Create user and agent so the backfill's principal resolution works.
+	err := s.CreateUser(ctx, &store.User{
+		ID:    userID,
+		Email: "ac9-user@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+
+	projectID := uuid.NewString()
+	err = s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "ac9-reachable-project",
+		Slug: "ac9-reach-" + projectID[:8],
+	})
+	require.NoError(t, err)
+
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Name:      "ac9-agent",
+		Slug:      "ac9-agent-" + agentID[:8],
+		ProjectID: projectID,
+	})
+	require.NoError(t, err)
+
+	reachableMsgID := uuid.NewString()
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          reachableMsgID,
+		ProjectID:   projectID,
+		Msg:         "reachable message for AC-9",
+		Sender:      "user:" + userID,
+		SenderID:    userID,
+		Recipient:   "agent:" + agentID,
+		RecipientID: agentID,
+		// No ThreadID — principal-pair derivation with valid UUIDs.
+		// ConversationID empty — this is unattributed.
+	})
+	require.NoError(t, err)
+
+	// ---- Seed an unreachable orphan message ----
+	// This message references a project_id that has no row in the projects
+	// table, simulating a hard-deleted project (DEF-111).
+	orphanProjectID := uuid.NewString() // no CreateProject for this
+	orphanMsgID := uuid.NewString()
+	orphanUserID := uuid.NewString()
+	orphanAgentID := uuid.NewString()
+
+	// Must insert via raw SQL because CreateMessage may validate project_id
+	// existence in some store implementations.
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok, "test store must be a CompositeStore for DB access")
+	db := cs.DB()
+	require.NotNil(t, db)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO messages (id, project_id, msg, sender, sender_id, recipient, recipient_id, created)
+		 VALUES (?, ?, 'orphan message for AC-9', ?, ?, ?, ?, datetime('now'))`,
+		orphanMsgID, orphanProjectID,
+		"user:"+orphanUserID, orphanUserID,
+		"agent:"+orphanAgentID, orphanAgentID,
+	)
+	require.NoError(t, err)
+
+	// ---- Capture log output ----
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	origLogger := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(origLogger)
+
+	// ---- First boot ----
+	runBootDataMigrations(ctx, s)
+
+	logOutput := buf.String()
+
+	// 1. The reachable message must be attributed (conversation_id set).
+	msg, err := s.GetMessage(ctx, reachableMsgID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, msg.ConversationID,
+		"reachable message must be attributed after boot hook")
+
+	// 2. The orphan must be reported as unreachable at INFO, not WARN.
+	assert.Contains(t, logOutput, "Message attribution complete",
+		"INFO line must appear reporting unreachable count")
+	assert.Contains(t, logOutput, "unreachable=1",
+		"unreachable count must be 1 (the orphan)")
+	assert.Contains(t, logOutput, "hard-deleted projects",
+		"INFO detail must mention hard-deleted projects (DEF-111)")
+
+	// 3. The WARN for reachable messages must NOT fire (the reachable one
+	//    was attributed, so reachable count is 0).
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"WARN must not fire when all reachable messages are attributed")
+
+	// 4. No log line advertises the backfill command.
+	assert.NotContains(t, logOutput, "scion server backfill",
+		"no log line may advertise 'scion server backfill --execute' (M6)")
+
+	// 5. The specific failure to test for: the orphan must NOT be counted
+	//    in the actionable (reachable) bucket.
+	// (Covered by assertions 2 and 3 above — if the orphan were counted
+	// as reachable, the WARN would fire with count=1.)
+
+	// ---- Steady-state case: second boot ----
+	// Every project is now in projects_done and no backfill work is performed.
+	// Both counts must still be correct and WARN must not fire.
+	buf.Reset()
+	runBootDataMigrations(ctx, s)
+
+	logOutput = buf.String()
+
+	// The unreachable count must still be reported correctly.
+	assert.Contains(t, logOutput, "Message attribution complete",
+		"steady-state: INFO line must appear on second boot")
+	assert.Contains(t, logOutput, "unreachable=1",
+		"steady-state: unreachable count must still be 1")
+
+	// The WARN must still not fire (reachable is still 0).
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"steady-state: WARN must not fire on second boot")
+
+	// No backfill command advertised.
+	assert.NotContains(t, logOutput, "scion server backfill",
+		"steady-state: no backfill command must appear")
 }
 
 // ---------------------------------------------------------------------------

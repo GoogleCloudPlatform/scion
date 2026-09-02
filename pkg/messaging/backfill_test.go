@@ -177,6 +177,12 @@ func (m *mockMessageStore) CountUnbackfilledMessages(_ context.Context, projectI
 	return count, nil
 }
 
+func (m *mockMessageStore) CountUnreachableUnbackfilledMessages(_ context.Context) (int, error) {
+	// The mock does not track project existence, so it returns 0.
+	// Tests that need this behaviour use a real store.
+	return 0, nil
+}
+
 // mockConversationStore is an in-memory ConversationStore used by backfill tests.
 type mockConversationStore struct {
 	mu            sync.Mutex

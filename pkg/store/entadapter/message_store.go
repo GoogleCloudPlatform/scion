@@ -523,3 +523,31 @@ func (s *MessageStore) CountUnbackfilledMessages(ctx context.Context, projectID 
 	}
 	return count, nil
 }
+
+// CountUnreachableUnbackfilledMessages returns the number of messages with
+// a NULL conversation_id whose project_id does not reference an existing
+// project row. These are permanently unattributable by the per-project
+// backfill because ListProjects never returns their project (DEF-111).
+//
+// The predicate here — "unbackfilled AND project_id NOT IN (SELECT id FROM
+// projects)" — is the inverse of what the backfill can reach. If M7 lands,
+// the backfill's own skip predicate and this counter MUST share one
+// expression so they cannot drift (DEF-112).
+func (s *MessageStore) CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error) {
+	count, err := s.client.Message.Query().
+		Where(
+			message.ConversationIDIsNil(),
+			func(sel *entsql.Selector) {
+				sel.Where(entsql.P(func(b *entsql.Builder) {
+					b.WriteString("NOT EXISTS (SELECT 1 FROM projects WHERE projects.id = ").
+						WriteString(sel.C(message.FieldProjectID)).
+						WriteString(")")
+				}))
+			},
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return count, nil
+}

@@ -52,9 +52,9 @@ var defaultBackfillBudget = 10 * time.Minute
 // (design A2). Failures are logged at ERROR and the completion marker is
 // left unwritten so the next boot retries.
 //
-// After the data migrations, the existing backfill warning is re-checked
-// so that operators still see unattributed-message counts. Re-pointing
-// that warning is M6, not this commit.
+// After the data migrations, the residual report splits unattributed
+// messages into reachable (actionable, WARN) and unreachable (stable,
+// INFO) buckets per design §4.6 / M6.
 func runBootDataMigrations(ctx context.Context, s store.Store) {
 	runWithAdvisoryLock(ctx, s, store.LockDataMigrations, "conversation data migrations", func() {
 		// Each migration is wrapped in its own deferred recover so that a
@@ -72,10 +72,8 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		runMigrationSafe(ctx, s, "Message backfill", runMessageBackfill)     // §4.5
 	})
 
-	// The backfill warning must still fire. Re-pointing it to a split
-	// reachable/unreachable report is M6; for now, preserve the existing
-	// behaviour exactly.
-	maybeWarnUnbackfilledMessages(ctx, s)
+	// Split the residual report into reachable/unreachable (M6, §4.6).
+	reportResidualUnattributed(ctx, s)
 }
 
 // runMigrationSafe calls fn inside a deferred recover. A panic is logged at
@@ -388,6 +386,72 @@ func logBoundedErrors(prefix string, errors []string, limit int) {
 		slog.Warn(fmt.Sprintf("%s: %d more row errors not shown", prefix, total-limit),
 			"shown", limit,
 			"total", total,
+		)
+	}
+}
+
+// reportResidualUnattributed splits the residual unattributed-message count
+// into reachable (actionable) and unreachable (stable) buckets (design §4.6).
+//
+// - INFO, always: reports attributed count and unreachable count, with a
+//   detail string explaining that unreachable messages reference hard-deleted
+//   projects and cannot be attributed by per-project backfill (DEF-111).
+// - WARN, only when the reachable count is non-zero: reports the actionable
+//   count of messages that remain unattributed in listed projects.
+//
+// This replaces the old maybeWarnUnbackfilledMessages which advertised
+// "scion server backfill --execute" — that remedy is stale after auto-run
+// and is not emitted anywhere.
+//
+// The reachable count is derived from an anti-join query
+// (CountUnreachableUnbackfilledMessages) rather than summing per-project
+// backfill results, because on a steady-state boot — every project in
+// projects_done, zero backfill work performed — there are no per-project
+// counts to sum. The sum approach yields zero in the state the hub occupies
+// almost all its life, which silently suppresses the WARN. See the LEAD
+// CONSTRAINT discussion in the design doc §4.6 correction.
+//
+// CONSEQUENCE: the DEF-112 drift concern is now live. The counter's
+// predicate ("project_id NOT IN projects") and the backfill's skip predicate
+// must share one expression. This makes M7 required, not optional.
+func reportResidualUnattributed(ctx context.Context, s store.Store) {
+	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	totalUnbackfilled, err := s.CountUnbackfilledMessages(tCtx, "")
+	if err != nil {
+		slog.Warn("Failed to count unbackfilled messages for residual report", "error", err)
+		return
+	}
+
+	if totalUnbackfilled == 0 {
+		// No unattributed messages at all — nothing to report.
+		return
+	}
+
+	unreachable, err := s.CountUnreachableUnbackfilledMessages(tCtx)
+	if err != nil {
+		slog.Warn("Failed to count unreachable unbackfilled messages", "error", err)
+		// Fall through with unreachable=0 so the total is still reported
+		// as reachable. This is the conservative direction: it may
+		// over-warn but will never suppress a real problem.
+		unreachable = 0
+	}
+
+	reachable := totalUnbackfilled - unreachable
+
+	// INFO always: report the stable unreachable count.
+	if unreachable > 0 {
+		slog.Info("Message attribution complete",
+			"unreachable", unreachable,
+			"detail", "unreachable messages reference hard-deleted projects and cannot be attributed by per-project backfill (DEF-111); this count is expected to be stable",
+		)
+	}
+
+	// WARN only when reachable > 0: these are actionable.
+	if reachable > 0 {
+		slog.Warn("Messages remain unattributed in listed projects",
+			"count", reachable,
 		)
 	}
 }

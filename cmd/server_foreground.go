@@ -1320,7 +1320,6 @@ func maybeWarnUnbackfilledMessages(ctx context.Context, s store.Store) {
 	}
 	slog.Warn("Messages without conversation attribution detected",
 		"count", count,
-		"action", "Run 'scion server backfill --execute' to attribute historical messages to conversations. Use 'scion server backfill' (default: dry-run) to preview first.",
 	)
 }
 

@@ -675,9 +675,17 @@ func TestBackfillMarker_PreservesSiblingKeys(t *testing.T) {
 // Warning still fires after backfill
 // ---------------------------------------------------------------------------
 
-// TestBootBackfill_WarningStillFires verifies that the existing backfill
-// warning still fires after the backfill completes (re-pointing is M6).
-func TestBootBackfill_WarningStillFires(t *testing.T) {
+// TestBootBackfill_ReachableWarnFires verifies that the split residual
+// report emits a WARN for reachable unattributed messages after the
+// backfill completes (M6 re-pointed the old warning). The message is
+// unattributable (non-UUID principals) but in a listed project, so it
+// is reachable and counted in the actionable bucket.
+//
+// Precondition update (M6): the old test asserted "Messages without
+// conversation attribution detected" which was the old
+// maybeWarnUnbackfilledMessages message. M6 replaced that with the
+// split reachable/unreachable report per design §4.6.
+func TestBootBackfill_ReachableWarnFires(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
@@ -707,8 +715,10 @@ func TestBootBackfill_WarningStillFires(t *testing.T) {
 	runBootDataMigrations(ctx, s)
 
 	logOutput := buf.String()
-	assert.Contains(t, logOutput, "Messages without conversation attribution detected",
-		"warning must still fire after backfill (re-pointing is M6)")
+	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
+		"reachable WARN must fire after backfill for unattributed messages in listed projects")
+	assert.NotContains(t, logOutput, "scion server backfill",
+		"remediation string must not appear (M6 removed it)")
 }
 
 // ---------------------------------------------------------------------------

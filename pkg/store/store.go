@@ -1335,6 +1335,18 @@ type MessageStore interface {
 	// conversation_id for the given project. When projectID is empty, counts
 	// across all projects.
 	CountUnbackfilledMessages(ctx context.Context, projectID string) (int, error)
+
+	// CountUnreachableUnbackfilledMessages returns the number of messages with
+	// a NULL conversation_id whose project_id does not reference an existing
+	// project row. These messages are permanently unattributable by the
+	// per-project backfill because ListProjects will never return their
+	// project (DEF-111: the projects table hard-deletes).
+	//
+	// This count is used to split the residual attribution report into
+	// reachable (actionable) and unreachable (expected, stable) buckets,
+	// so that a permanent non-zero count of orphaned messages does not
+	// create alarm fatigue by firing a WARN on every boot forever.
+	CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error)
 }
 
 // =============================================================================
