@@ -53,7 +53,7 @@ To include newlines, use real newlines inside shell quoted strings or heredocs. 
 
 Correct — real newlines in a quoted string:
 ```bash
-scion message --non-interactive agent:reviewer "PR #42 is ready for review.
+scion message --non-interactive @reviewer "PR #42 is ready for review.
 
 Branch: fix/auth-bug
 CI: all green"
@@ -61,7 +61,7 @@ CI: all green"
 
 Correct — heredoc for longer messages:
 ```bash
-scion message --non-interactive agent:reviewer "$(cat <<'EOF'
+scion message --non-interactive @reviewer "$(cat <<'EOF'
 PR #42 is ready for review.
 
 Branch: fix/auth-bug
@@ -73,7 +73,7 @@ EOF
 Wrong — JSON-encoded body with literal \n:
 ```bash
 # BAD: literal \n chars appear in the delivered message
-scion message --non-interactive agent:reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
+scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
 ```
 
 ## Message Content Best Practices
