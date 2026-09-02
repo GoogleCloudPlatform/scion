@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scion.fullname" . }}
+  labels:
+    {{- include "scion.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{- if eq .Values.mode "hub" }}
+  SCION_SERVER_HUB_HOST: "0.0.0.0"
+  SCION_SERVER_LOGFORMAT: "json"
+  {{- with .Values.server.logLevel }}
+  SCION_SERVER_LOGLEVEL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.database.path }}
+  SCION_SERVER_DATABASE_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.storage.provider }}
+  SCION_SERVER_STORAGE_PROVIDER: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.storage.bucket }}
+  SCION_HUB_STORAGE_BUCKET: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.secrets.backend }}
+  SCION_SERVER_SECRETS_BACKEND: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.secrets.gcpProjectId }}
+  SCION_SERVER_SECRETS_GCPPROJECTID: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.server.publicUrl }}
+  SCION_SERVER_BASE_URL: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.server.adminEmails }}
+  SCION_SERVER_HUB_ADMINEMAILS: {{ join "," .Values.server.adminEmails | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.imageRegistry }}
+  SCION_IMAGE_REGISTRY: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.telemetry.cloudLogging.enabled }}
+  SCION_LOG_GCP: "true"
+  {{- with .Values.telemetry.cloudLogging.gcpProjectId }}
+  SCION_CLOUD_LOGGING_PROJECT_ID: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.telemetry.cloudLogging.logId }}
+  SCION_CLOUD_LOGGING_LOG_ID: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.telemetry.otelLogBridge.enabled }}
+  SCION_OTEL_LOG_BRIDGE: "true"
+  {{- end }}
