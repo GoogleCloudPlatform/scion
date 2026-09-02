@@ -1215,7 +1215,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	maybeWarnUnbackfilledMessages(ctx, s)
+	runBootDataMigrations(ctx, s)
 
 	if err := s.Ping(ctx); err != nil {
 		_ = s.Close()
