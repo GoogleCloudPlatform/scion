@@ -84,6 +84,11 @@ All permissions in Scion are additive and must be explicitly granted via a RoleB
 
 ### Monotonic Restrictions (AccessConstraints)
 An **AccessConstraint** is a maximum-permissions boundary that can only *reduce* (never widen) a principal's granted authority. It acts as an absolute ceiling.
+
+:::note[User-Facing Access Boundaries]
+In the Scion Web Dashboard, monotonic restrictions (AccessConstraints) are exposed and managed end-to-end as **Access Boundaries** under the Admin Suite. They provide a guided authoring workflow and an interactive preview engine to visualize security policies before committing them.
+:::
+
 - **Ceiling Enforcement**: If a RoleBinding grants a principal 10 permissions, but an AccessConstraint limits that principal to a maximum of 3 specific permissions, the principal will only have those 3 permissions.
 - **Targeting**: AccessConstraints can target specific principals, entire group closures (a group and all its subgroups), or all principals (`all_principals`).
 - **Offline Recovery**: Under `disabled: true`, an AccessConstraint is deactivated. This is used in offline recovery to restore administrator access in the event of a lockout.
@@ -270,7 +275,12 @@ The Scion Web Dashboard includes a centralized **Admin Management Suite** (acces
 
 - **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. This allows administrators to view and modify the global `settings.yaml` through the Web UI with support for tabbed navigation, sensitive field masking, and hot-reloading of key settings like log levels, telemetry defaults, and admin emails.
 - **Users List**: View all authenticated users, search for specific accounts, track "Last Seen" timestamps, and manage their system-wide roles (e.g., granting `hub-admin` access).
-- **Groups Management**: Create organizational groups and manage their membership with a human-friendly member editor and user search autocomplete. Group creation is strictly authorized, and the `project:` prefix is a reserved slug. To prevent slug collisions, colliding group identifiers require a system marker combined with the `ProjectID`. Membership lookups rely on canonical identity resolution. This enables policy-based authorization where permissions can be granted to an entire team at once, while strictly enforcing group ownership and authorization rules.
+- **Groups Management**: Full-featured admin UI/UX for creating and managing custom membership groups. Administrators can easily define hierarchical collections of users and manage their membership using a human-friendly editor with user search autocomplete. Group creation is strictly authorized, and the `project:` prefix is a reserved slug. To prevent slug collisions, colliding group identifiers require a system marker combined with the `ProjectID`. Membership lookups rely on canonical identity resolution. This enables policy-based authorization where permissions can be granted to an entire team at once, while strictly enforcing group ownership and authorization rules.
+- **Access Boundaries**: Full-featured administrative suite for defining and managing monotonic permission ceilings (AccessConstraints) via the Hub Admin UI.
+  - **Inventory Page**: Provides a centralized view of all active and disabled access boundaries configured on the Hub.
+  - **Guided Authoring Workflow**: A step-by-step UI workflow for creating and editing boundaries, including targeting individual principals, group closures, or all principals, and specifying allowed maximum permissions.
+  - **Preview Engine**: An interactive evaluation sandbox enabling administrators to simulate, dry-run, and verify the impact of an access boundary on a principal's effective permissions prior to committing. Backed by the **Provenance/Explain API**, it details exactly which positive permissions are restricted and why.
+  - **Transactional Governance & Atomic Audit**: Built-in backend security guarantees that all access boundary operations are transactionally secure and recorded in the atomic mutation audit log.
 - **Role & Binding Management**: Full CRUD interfaces for Role Definitions and Role Bindings. Administrators can define custom roles, map permissions, and bind them to users, groups, or agents at the Hub or Project scope, while the system enforces `CanDelegate` checks to prevent privilege escalation.
 - **Quota Management**: Dedicated admin view to manage the Quota System. Administrators can view, create, and update `LimitDefinition` thresholds and monitor `EntitlementBinding` status across projects.
 - **Admin Security & Navigation**: The dashboard uses a **Per-Resource Permission-Gated Admin UI** to render and restrict access to the Admin Suite. Instead of a binary `role===admin` check:
