@@ -52,6 +52,24 @@ type migrationMarker struct {
 	Residuals   int        `json:"residuals,omitempty"` // row-level refusals (permanent, non-retryable)
 }
 
+// backfillMarker records the per-project progress of the message backfill
+// migration (design §4.5). It extends migrationMarker with a list of
+// projects whose backfill pass has completed.
+//
+// Lifecycle:
+//   - Each project that completes a full pass (M-1': run-level success;
+//     row refusals do NOT disqualify) is appended to ProjectsDone and
+//     persisted immediately, so progress survives a crash or budget
+//     exhaustion.
+//   - When every enumerated project is in ProjectsDone, CompletedAt is set
+//     and ProjectsDone is cleared (bounded growth). Subsequent boots do a
+//     single marker read.
+type backfillMarker struct {
+	CompletedAt  *time.Time `json:"completed_at"`            // nil => not yet complete
+	Residuals    int        `json:"residuals,omitempty"`      // aggregate row-level refusals
+	ProjectsDone []string   `json:"projects_done,omitempty"`  // projects whose pass completed
+}
+
 // IsMigrationComplete returns true if the named migration has a completion
 // marker with a non-nil CompletedAt timestamp. A missing _migrations section,
 // a malformed document, or a missing/null CompletedAt are all treated as
@@ -179,4 +197,50 @@ func persistMigrationsDoc(ctx context.Context, s store.Store, raw map[string]jso
 		return fmt.Errorf("upserting %s: %w", migrationsSectionName, err)
 	}
 	return nil
+}
+
+// loadBackfillMarker reads the backfill marker from the _migrations doc.
+// Returns a zero-value backfillMarker (not complete, no projects done) if
+// the section is absent, malformed, or missing the backfill key — all of
+// which mean "retry", the safe direction.
+func loadBackfillMarker(ctx context.Context, s store.Store) (backfillMarker, error) {
+	_, raw, err := loadMigrationsDoc(ctx, s)
+	if err != nil {
+		return backfillMarker{}, err
+	}
+	if raw == nil {
+		return backfillMarker{}, nil
+	}
+
+	entry, ok := raw[string(MigrationBackfill)]
+	if !ok {
+		return backfillMarker{}, nil
+	}
+
+	var m backfillMarker
+	if err := json.Unmarshal(entry, &m); err != nil {
+		// Malformed entry: safe direction is retry.
+		return backfillMarker{}, nil
+	}
+	return m, nil
+}
+
+// saveBackfillProgress persists the backfill marker (per-project progress)
+// into the _migrations doc, preserving all sibling keys (M-2).
+func saveBackfillProgress(ctx context.Context, s store.Store, m backfillMarker) error {
+	_, raw, err := loadMigrationsDoc(ctx, s)
+	if err != nil {
+		return fmt.Errorf("loading migrations doc: %w", err)
+	}
+	if raw == nil {
+		raw = make(map[string]json.RawMessage)
+	}
+
+	markerJSON, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("marshaling backfill marker: %w", err)
+	}
+	raw[string(MigrationBackfill)] = markerJSON
+
+	return persistMigrationsDoc(ctx, s, raw)
 }

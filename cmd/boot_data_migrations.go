@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -28,6 +29,18 @@ import (
 // row and is unbounded; logging it whole turns a bad migration into a
 // disk-space incident (design §4.3). We log the first N plus the total.
 const maxBootLogErrors = 10
+
+// defaultBackfillBudget is the maximum wall-clock time the message backfill
+// is allowed to consume during a single boot. Measured on the gteam snapshot
+// (24,700 messages, 39 projects): a full execute run completes in 37 seconds
+// (design §7 OQ-1). The budget is set generously at 10 minutes purely as a
+// runaway guard rather than a tuning parameter — it is not expected to be
+// reached under normal operation. If a single project's backfill exceeds the
+// entire budget, it is retried from scratch on every boot; the budget check
+// logs at ERROR naming the project (design §4.5).
+//
+// Exported as a variable (not a constant) so tests can override it.
+var defaultBackfillBudget = 10 * time.Minute
 
 // runBootDataMigrations runs the conversation-model data migrations that an
 // upgrading hub needs. It is called once during store setup, before the hub
@@ -44,7 +57,8 @@ const maxBootLogErrors = 10
 // that warning is M6, not this commit.
 func runBootDataMigrations(ctx context.Context, s store.Store) {
 	runWithAdvisoryLock(ctx, s, store.LockDataMigrations, "conversation data migrations", func() {
-		runDMKeyMigration(ctx, s) // §4.4 — repair, unbudgeted
+		runDMKeyMigration(ctx, s)      // §4.4 — repair, unbudgeted
+		runMessageBackfill(ctx, s)     // §4.5 — attribution, budgeted
 	})
 
 	// The backfill warning must still fire. Re-pointing it to a split
@@ -129,6 +143,199 @@ func runDMKeyMigration(ctx context.Context, s store.Store) {
 		slog.Error("DM key migration: failed to write completion marker; will retry next boot",
 			"error", markErr)
 	}
+}
+
+// runMessageBackfill runs the per-project message backfill with M-1' marker
+// semantics (design §4.5).
+//
+// It enumerates projects exactly as the CLI does, skips those already in
+// the marker's projects_done, runs the backfill for each remaining project,
+// and persists per-project progress. A time budget bounds the total boot
+// penalty; if exhausted mid-list, the next boot resumes at the first
+// project not yet in projects_done.
+//
+// M-1' (design §4.3): a run-level failure (could not list, could not write,
+// context cancelled) means the pass did not happen — log ERROR, do not
+// record that project as done. Row-level refusals are terminal, correct,
+// permanent outcomes — they do NOT block progress.
+func runMessageBackfill(ctx context.Context, s store.Store) {
+	// Fast path: already complete. O(1) with respect to data volume.
+	marker, err := loadBackfillMarker(ctx, s)
+	if err != nil {
+		slog.Error("Message backfill: failed to check completion marker; will attempt migration",
+			"error", err)
+		// Fall through: attempting the migration is safer than skipping it.
+	} else if marker.CompletedAt != nil {
+		slog.Debug("Message backfill: already complete, skipping")
+		return
+	}
+
+	slog.Info("Message backfill: starting")
+
+	// Enumerate projects, exactly as cmd/server_backfill.go does.
+	projectIDs, err := listAllProjectIDs(ctx, s)
+	if err != nil {
+		slog.Error("Message backfill: failed to list projects; will retry next boot",
+			"error", err)
+		return
+	}
+
+	if len(projectIDs) == 0 {
+		slog.Info("Message backfill: no projects found; marking complete")
+		if markErr := markBackfillComplete(ctx, s, marker); markErr != nil {
+			slog.Error("Message backfill: failed to write completion marker",
+				"error", markErr)
+		}
+		return
+	}
+
+	// Build the set of already-done projects for O(1) lookup.
+	doneSet := make(map[string]bool, len(marker.ProjectsDone))
+	for _, pid := range marker.ProjectsDone {
+		doneSet[pid] = true
+	}
+
+	budget := defaultBackfillBudget
+	deadline := time.Now().Add(budget)
+	totalResiduals := marker.Residuals // carry forward from prior boots
+
+	for _, pid := range projectIDs {
+		if doneSet[pid] {
+			continue
+		}
+
+		// Check budget BEFORE starting the project, so we don't begin
+		// work we can't finish within the budget.
+		if time.Now().After(deadline) {
+			slog.Error("Message backfill: time budget exhausted; will resume next boot",
+				"budget", budget.String(),
+				"projects_remaining", countRemaining(projectIDs, doneSet),
+			)
+			return
+		}
+
+		projectStart := time.Now()
+		result, runErr := runBackfillForProject(ctx, s, pid)
+
+		// --- M-1' decision point (per-project) ---
+
+		if runErr != nil {
+			// RUN-LEVEL failure: this project's pass did not complete.
+			// Do NOT record it as done. Log and continue to the next
+			// project — one project failing should not block others.
+			slog.Error("Message backfill: project did not complete; will retry next boot",
+				"project", pid,
+				"error", runErr,
+			)
+			continue
+		}
+
+		// The pass completed. Row-level refusals are a terminal outcome.
+		residuals := len(result.Errors)
+		totalResiduals += residuals
+
+		slog.Info("Message backfill: project completed",
+			"project", pid,
+			"processed", result.TotalProcessed,
+			"attributed", result.Attributed,
+			"skipped", result.Skipped,
+			"row_errors", residuals,
+			"elapsed", time.Since(projectStart).Round(time.Millisecond).String(),
+		)
+
+		if residuals > 0 {
+			logBoundedErrors("Message backfill ("+pid+")", result.Errors, maxBootLogErrors)
+		}
+
+		// Record this project as done and persist immediately, so
+		// progress survives a crash between projects.
+		marker.ProjectsDone = append(marker.ProjectsDone, pid)
+		marker.Residuals = totalResiduals
+		doneSet[pid] = true
+
+		if saveErr := saveBackfillProgress(ctx, s, marker); saveErr != nil {
+			slog.Error("Message backfill: failed to persist per-project progress; will retry next boot",
+				"project", pid,
+				"error", saveErr,
+			)
+			// Don't continue — if we can't persist progress, we risk
+			// re-processing projects on the next boot. Stop and retry.
+			return
+		}
+	}
+
+	// Check whether every enumerated project is in projects_done.
+	// Only set completed_at when that is true (design §4.5).
+	remaining := countRemaining(projectIDs, doneSet)
+	if remaining > 0 {
+		slog.Warn("Message backfill: not all projects completed; will retry incomplete projects next boot",
+			"remaining", remaining,
+			"done", len(doneSet),
+		)
+		return
+	}
+
+	// Set completed_at, clear projects_done (bounded growth per design §4.5).
+	if markErr := markBackfillComplete(ctx, s, marker); markErr != nil {
+		slog.Error("Message backfill: failed to write completion marker; will retry next boot",
+			"error", markErr)
+		return
+	}
+
+	slog.Info("Message backfill: all projects complete",
+		"projects", len(projectIDs),
+		"total_residuals", totalResiduals,
+	)
+}
+
+// listAllProjectIDs enumerates all projects, paginating as the CLI does.
+func listAllProjectIDs(ctx context.Context, s store.Store) ([]string, error) {
+	var projectIDs []string
+	cursor := ""
+	for {
+		projects, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500, Cursor: cursor})
+		if err != nil {
+			return nil, fmt.Errorf("listing projects: %w", err)
+		}
+		for _, p := range projects.Items {
+			projectIDs = append(projectIDs, p.ID)
+		}
+		if projects.NextCursor == "" {
+			break
+		}
+		cursor = projects.NextCursor
+	}
+	return projectIDs, nil
+}
+
+// runBackfillForProject runs the backfill for a single project in execute
+// mode. Extracted for testability.
+func runBackfillForProject(ctx context.Context, s store.Store, projectID string) (*messaging.BackfillResult, error) {
+	svc := messaging.NewBackfillService(s, s, s)
+	return svc.Run(ctx, messaging.BackfillConfig{
+		ProjectID: projectID,
+		DryRun:    false,
+	})
+}
+
+// markBackfillComplete sets completed_at and clears projects_done to bound
+// the marker's growth (design §4.5). The residual count is preserved.
+func markBackfillComplete(ctx context.Context, s store.Store, m backfillMarker) error {
+	now := time.Now().UTC()
+	m.CompletedAt = &now
+	m.ProjectsDone = nil // clear for bounded growth
+	return saveBackfillProgress(ctx, s, m)
+}
+
+// countRemaining returns the number of project IDs not in the done set.
+func countRemaining(projectIDs []string, doneSet map[string]bool) int {
+	n := 0
+	for _, pid := range projectIDs {
+		if !doneSet[pid] {
+			n++
+		}
+	}
+	return n
 }
 
 // logBoundedErrors logs a sample of per-row errors, capped at limit entries,

@@ -384,13 +384,18 @@ func TestBootDMKeyMigration_EmptyRefUntouched(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBootDataMigrations_WarningStillFires verifies that the backfill
-// warning still fires after the boot hook. Re-pointing the warning is
-// M6, not this commit.
+// warning still fires after the boot hook when there are messages that
+// the backfill cannot attribute. Re-pointing the warning is M6.
+//
+// The message must be unattributable: it has no ThreadID and non-UUID
+// principals, so key derivation fails (DeriveErrPrincipalPair). The
+// backfill processes it, refuses it as a row-level refusal, and the
+// warning fires because conversation_id is still NULL.
 func TestBootDataMigrations_WarningStillFires(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	// Seed an unattributed message so the warning triggers.
+	// Seed an unattributed message that cannot be attributed.
 	projectID := uuid.NewString()
 	err := s.CreateProject(ctx, &store.Project{
 		ID:   projectID,
@@ -403,10 +408,11 @@ func TestBootDataMigrations_WarningStillFires(t *testing.T) {
 	err = s.CreateMessage(ctx, &store.Message{
 		ID:        msgID,
 		ProjectID: projectID,
-		ThreadID:  "thread:" + uuid.NewString(),
+		// No ThreadID — forces principal-pair derivation path,
+		// which fails on non-UUID principals.
 		Msg:       "test message for warning check",
-		Sender:    "user:test",
-		Recipient: "agent:test",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
 		// ConversationID is empty — this message is unattributed.
 	})
 	require.NoError(t, err)
@@ -423,7 +429,7 @@ func TestBootDataMigrations_WarningStillFires(t *testing.T) {
 
 	logOutput := buf.String()
 	assert.Contains(t, logOutput, "Messages without conversation attribution detected",
-		"the existing backfill warning must still fire after M4")
+		"warning must still fire for messages the backfill cannot attribute")
 }
 
 // Error log bounding tests are in boot_data_migrations_safety_test.go
@@ -441,7 +447,8 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 
 	_, userID, agentID := seedOldFormatDMConversation(t, ctx, s)
 
-	// Also seed an unattributed message so the warning fires.
+	// Also seed an unattributed message that cannot be attributed
+	// (non-UUID principals, no ThreadID → DeriveErrPrincipalPair).
 	projectID := uuid.NewString()
 	err := s.CreateProject(ctx, &store.Project{
 		ID:   projectID,
@@ -453,10 +460,10 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	err = s.CreateMessage(ctx, &store.Message{
 		ID:        uuid.NewString(),
 		ProjectID: projectID,
-		ThreadID:  "thread:" + uuid.NewString(),
+		// No ThreadID — forces principal-pair path, fails on non-UUID.
 		Msg:       "test message for full flow",
-		Sender:    "user:test",
-		Recipient: "agent:test",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
 	})
 	require.NoError(t, err)
 
@@ -476,12 +483,17 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	assert.Contains(t, logOutput, "DM key migration: starting")
 	assert.Contains(t, logOutput, "DM key migration: pass completed")
 
-	// Marker should be written.
+	// Markers should be written.
 	done, err := IsMigrationComplete(ctx, s, MigrationDMKey)
 	require.NoError(t, err)
-	assert.True(t, done, "marker should be written after migration pass")
+	assert.True(t, done, "DM key marker should be written after migration pass")
 
-	// Warning should still fire.
+	backfillDone, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+	assert.NotNil(t, backfillDone.CompletedAt,
+		"backfill marker should be written after backfill pass")
+
+	// Warning should still fire for the unattributable message.
 	assert.Contains(t, logOutput, "Messages without conversation attribution detected")
 
 	// Verify the conversation was re-keyed.
