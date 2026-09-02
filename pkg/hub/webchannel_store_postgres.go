@@ -1014,7 +1014,7 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err != nil {
 		return fmt.Errorf("webchat migration conn: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var acquired bool
 	if err := conn.QueryRowContext(context.Background(),
