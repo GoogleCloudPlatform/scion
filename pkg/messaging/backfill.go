@@ -54,6 +54,12 @@ type BackfillResult struct {
 	// DeriveErr* constants from derive_key.go. This is the per-cause
 	// breakdown that makes the dominant failure mode diagnosable.
 	DeriveFailures       map[string]int `json:"deriveFailures,omitempty"`
+	// WriteFailures counts errors that occur AFTER key derivation succeeds —
+	// e.g. participant-validation failures during persistGroup. These are
+	// distinct from DeriveFailures: derive succeeded, but persisting the
+	// result failed. The honest invariant is:
+	//   sum(DeriveFailures) + WriteFailures == len(Errors)
+	WriteFailures int `json:"writeFailures,omitempty"`
 	// LastCheckpoint is the pagination cursor of the last completed page.
 	// Pass this value as BackfillConfig.Checkpoint to resume from this position.
 	// Empty when the backfill completed in a single page (no more data to process).
@@ -203,6 +209,7 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 		if err := s.persistGroup(ctx, g, result); err != nil {
 			result.Errors = append(result.Errors,
 				fmt.Sprintf("group %s: %v", g.key, err))
+			result.WriteFailures++
 		}
 	}
 
@@ -358,6 +365,7 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 			if !errors.Is(err, store.ErrAlreadyExists) {
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("adding participant %s:%s to %s: %v", p.kind, p.id, actualConvID, err))
+				result.WriteFailures++
 			}
 		}
 	}
@@ -367,6 +375,7 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 		if err := s.msgStore.SetMessageConversationID(ctx, msgID, actualConvID); err != nil {
 			result.Errors = append(result.Errors,
 				fmt.Sprintf("stamping message %s: %v", msgID, err))
+			result.WriteFailures++
 			continue
 		}
 

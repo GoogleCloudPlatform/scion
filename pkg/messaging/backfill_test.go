@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -1428,34 +1429,40 @@ func TestBackfill_DEF114_AttributedMessageIDs_Pinned(t *testing.T) {
 	assert.Equal(t, 0, result.DeriveFailures[DeriveErrThreadNoProject])
 
 	// --- Self-checking: sum(DeriveFailures) == len(Errors) ---
-	assertDeriveFailuresTotalEqualsErrors(t, result)
+	assertErrorInvariant(t, result)
 
 	// --- Pin hazardA ---
 	assert.Equal(t, 1, result.HazardAEmailCount,
 		"exactly one message has non-UUID principals")
 }
 
-// assertDeriveFailuresTotalEqualsErrors checks that the sum of all
-// DeriveFailures values equals len(result.Errors). This makes the
-// per-cause breakdown self-checking: if a future failure branch returns
-// a plain error rather than *DeriveError, the "unclassified" bucket
-// catches it rather than silently dropping it from the totals.
-func assertDeriveFailuresTotalEqualsErrors(t *testing.T, result *BackfillResult) {
+// assertErrorInvariant checks the honest relation between the three error
+// populations: sum(DeriveFailures) + WriteFailures == len(Errors).
+//
+// DeriveFailures counts messages refused at key-derivation time.
+// WriteFailures counts errors that occur after derivation succeeds
+// (e.g. participant-validation or stamping failures in persistGroup).
+// Together they must account for every entry in Errors.
+//
+// The previous assertion (sum(DeriveFailures) == len(Errors)) was false
+// on production-shaped data because write failures land in Errors but
+// belong in no derive bucket.
+func assertErrorInvariant(t *testing.T, result *BackfillResult) {
 	t.Helper()
-	total := 0
+	deriveTotal := 0
 	for _, count := range result.DeriveFailures {
-		total += count
+		deriveTotal += count
 	}
-	assert.Equal(t, len(result.Errors), total,
-		"sum(DeriveFailures) must equal len(Errors); "+
-			"a mismatch means a derive failure escaped classification. "+
-			"DeriveFailures=%v, len(Errors)=%d", result.DeriveFailures, len(result.Errors))
+	assert.Equal(t, len(result.Errors), deriveTotal+result.WriteFailures,
+		"sum(DeriveFailures) + WriteFailures must equal len(Errors); "+
+			"a mismatch means an error escaped classification. "+
+			"DeriveFailures=%v (sum=%d), WriteFailures=%d, len(Errors)=%d",
+		result.DeriveFailures, deriveTotal, result.WriteFailures, len(result.Errors))
 }
 
-// TestBackfill_DEF114_DeriveFailuresTotalEqualsErrors is the standalone
-// self-checking assertion: the per-cause breakdown must sum to the total
-// error count, always.
-func TestBackfill_DEF114_DeriveFailuresTotalEqualsErrors(t *testing.T) {
+// TestBackfill_DEF114_ErrorInvariant is the standalone self-checking
+// assertion: sum(DeriveFailures) + WriteFailures == len(Errors).
+func TestBackfill_DEF114_ErrorInvariant(t *testing.T) {
 	ctx := context.Background()
 	projectID := uuid.NewString()
 	agentID := uuid.NewString()
@@ -1492,5 +1499,102 @@ func TestBackfill_DEF114_DeriveFailuresTotalEqualsErrors(t *testing.T) {
 	assert.Len(t, result.Errors, 2)
 
 	// The self-checking invariant.
-	assertDeriveFailuresTotalEqualsErrors(t, result)
+	assertErrorInvariant(t, result)
+}
+
+// ---------------------------------------------------------------------------
+// Write-failure invariant tests (DEF-119/DEF-120 broken-invariant fix)
+// ---------------------------------------------------------------------------
+
+// failingAddParticipantStore wraps mockConversationStore and returns an
+// error from AddParticipant for a specific principal kind, simulating a
+// post-derivation write failure.
+type failingAddParticipantStore struct {
+	mockConversationStore
+	failKind string // principal kind that triggers the failure
+}
+
+func (f *failingAddParticipantStore) AddParticipant(_ context.Context, p *store.ConversationParticipant) error {
+	if p.PrincipalKind == f.failKind {
+		return fmt.Errorf("invalid enum value for principal_kind: %s", p.PrincipalKind)
+	}
+	return f.mockConversationStore.AddParticipant(context.Background(), p)
+}
+
+// TestBackfill_WriteFailure_CountedSeparately verifies that post-derivation
+// write failures are counted in WriteFailures (not DeriveFailures) and that
+// the honest invariant sum(DeriveFailures) + WriteFailures == len(Errors)
+// holds when both populations are present.
+//
+// This is the test the broken invariant lacked: a fixture that actually
+// contains a write failure, proving the two populations are distinct.
+func TestBackfill_WriteFailure_CountedSeparately(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	// A derivable message — key derivation will succeed.
+	userID := uuid.NewString()
+	msgOK := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, now.Add(-2*time.Minute))
+
+	// A non-derivable message — key derivation will fail (principal_pair).
+	msgDeriveFail := newTestMessage(projectID, "user:alice@example.com",
+		"alice@example.com", "agent:bot", agentID, now.Add(-1*time.Minute))
+
+	msgStore := &mockMessageStore{messages: []store.Message{msgOK, msgDeriveFail}}
+
+	// Use a conversation store that fails AddParticipant for "agent" kind,
+	// simulating a post-derivation write failure on the derivable message.
+	convStore := &failingAddParticipantStore{failKind: "agent"}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.TotalProcessed)
+
+	// One derive failure (principal_pair), one write failure (AddParticipant).
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrPrincipalPair],
+		"one message should fail at derivation")
+	assert.Equal(t, 1, result.WriteFailures,
+		"one message should produce a post-derivation write failure")
+
+	// Total errors = derive failures + write failures.
+	assert.Equal(t, 2, len(result.Errors), "should have exactly 2 errors total")
+
+	// The honest invariant must hold.
+	assertErrorInvariant(t, result)
+}
+
+// TestBackfill_WriteFailure_OnlyWriteFailures verifies the invariant when
+// ALL errors are write failures and there are zero derive failures.
+func TestBackfill_WriteFailure_OnlyWriteFailures(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	// One derivable message — key derivation succeeds but persist fails.
+	msg := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, time.Now())
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &failingAddParticipantStore{failKind: "agent"}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.TotalProcessed)
+	assert.Equal(t, 0, len(result.DeriveFailures), "no derive failures")
+	assert.Equal(t, 1, result.WriteFailures, "one write failure")
+	assert.Equal(t, 1, len(result.Errors))
+
+	// Invariant: 0 + 1 == 1.
+	assertErrorInvariant(t, result)
 }

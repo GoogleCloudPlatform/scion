@@ -393,6 +393,8 @@ func TestBackfillMergeResult(t *testing.T) {
 		ConversationsCreated: 1,
 		HazardAEmailCount:    1,
 		HazardBSlugCount:     0,
+		WriteFailures:        1,
+		DeriveFailures:       map[string]int{"principal_pair": 2},
 		LastCheckpoint:       "old-cp",
 		Errors:               []string{"err1"},
 	}
@@ -404,6 +406,8 @@ func TestBackfillMergeResult(t *testing.T) {
 		ConversationsCreated: 4,
 		HazardAEmailCount:    2,
 		HazardBSlugCount:     1,
+		WriteFailures:        3,
+		DeriveFailures:       map[string]int{"principal_pair": 1, "dm_key_parse": 5},
 		LastCheckpoint:       "new-cp",
 		Errors:               []string{"err2", "err3"},
 	}
@@ -417,8 +421,38 @@ func TestBackfillMergeResult(t *testing.T) {
 	assert.Equal(t, 5, dst.ConversationsCreated)
 	assert.Equal(t, 3, dst.HazardAEmailCount)
 	assert.Equal(t, 1, dst.HazardBSlugCount)
+	assert.Equal(t, 4, dst.WriteFailures)
 	assert.Equal(t, "new-cp", dst.LastCheckpoint)
 	assert.Equal(t, []string{"err1", "err2", "err3"}, dst.Errors)
+
+	// DEF-119: DeriveFailures maps must be merged.
+	assert.Equal(t, 3, dst.DeriveFailures["principal_pair"], "should sum principal_pair counts")
+	assert.Equal(t, 5, dst.DeriveFailures["dm_key_parse"], "should carry over dm_key_parse count")
+}
+
+// TestBackfillMergeResult_NilDeriveFailures verifies nil-safety of DeriveFailures merge.
+func TestBackfillMergeResult_NilDeriveFailures(t *testing.T) {
+	// dst nil, src non-nil.
+	dst := &messaging.BackfillResult{}
+	src := &messaging.BackfillResult{
+		DeriveFailures: map[string]int{"principal_pair": 3},
+	}
+	mergeBackfillResult(dst, src)
+	assert.Equal(t, 3, dst.DeriveFailures["principal_pair"])
+
+	// dst non-nil, src nil.
+	dst2 := &messaging.BackfillResult{
+		DeriveFailures: map[string]int{"dm_key_parse": 2},
+	}
+	src2 := &messaging.BackfillResult{}
+	mergeBackfillResult(dst2, src2)
+	assert.Equal(t, 2, dst2.DeriveFailures["dm_key_parse"])
+
+	// Both nil.
+	dst3 := &messaging.BackfillResult{}
+	src3 := &messaging.BackfillResult{}
+	mergeBackfillResult(dst3, src3)
+	assert.Nil(t, dst3.DeriveFailures)
 }
 
 // TestBackfillPreUpgradeCheckpointRejected ensures that a pre-upgrade
