@@ -1014,6 +1014,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convResult = &messaging.ConversationResult{
 				ConversationID: structuredMsg.ConversationID,
 				ExternalRef:    conv.ExternalRef,
+				Kind:           conv.Kind,
+				Surface:        conv.Surface,
+				DisplayName:    conv.DisplayName,
 			}
 		} else {
 			// B5 SECURITY: derive sender identity for the conversation key
