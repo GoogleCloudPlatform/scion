@@ -777,8 +777,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/role-bindings": {
 		Pattern: "/api/v1/admin/role-bindings", RouteID: "admin.roleBindings",
-		Classification: RouteHubAdmin,
-		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+		// RouteAuthenticated: authorization is scope-aware and handled
+		// inline. GET checks role_binding.read at hub scope. POST defers
+		// to the membership service for project-scoped requests (project
+		// owners need only project.manage, not hub-level role_binding.create)
+		// and checks role_binding.create at hub scope for system-scoped
+		// requests.
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/role-bindings/": {
 		Pattern: "/api/v1/admin/role-bindings/", RouteID: "admin.roleBindings.byId",
