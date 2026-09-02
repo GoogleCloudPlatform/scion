@@ -13,15 +13,20 @@
 // limitations under the License.
 
 /**
- * Spec 12 — Role hierarchy: admin adds member OK, adding owner denied (AC13)
+ * Spec 12 — Role hierarchy display and governance role copy
  *
- * A governance-admin of a group can add members at the "member" level but
- * attempting to add at the "owner" level is denied by the hierarchy rule.
+ * Tests role display at different levels (owner/admin/member) and verifies
+ * the governance role helper copy in the Add Member dialog.
  *
- * Since the hub validates that agent IDs exist before allowing them as
- * members, we test role hierarchy through:
- * - API-seeded members at different role levels
- * - UI verification of the role display and role selector options
+ * NOTE: This spec does NOT test AC13 (hierarchy denial — "admin can add
+ * member but not owner"). That requires a group-admin principal who has
+ * the RBAC addMember permission, which no hub role definition currently
+ * grants. AC13 is untested until a backend decision resolves this gap.
+ * See QA findings F-11 and F-13.
+ *
+ * TODO: Once a role granting group-admin addMember exists, add a test
+ * that logs in as a group admin, attempts to add an owner (expects
+ * hierarchy denial inline), and adds a member (expects success).
  */
 
 import { test, expect } from '@playwright/test';

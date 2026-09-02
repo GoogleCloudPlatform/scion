@@ -97,9 +97,13 @@ export class ScionGroupMemberEditor extends LitElement {
    * compatibility with the project settings page.
    */
   private get canAdd(): boolean {
-    return (
-      !this.readOnly && (!this.capabilities || this.capabilities.actions.includes('addMember'))
-    );
+    if (this.readOnly) return false;
+    // When capabilities is provided (even if empty), use capability-driven logic (fail-closed).
+    // When capabilities is not provided, fall back to !readOnly for backward compat (project settings).
+    if (this.capabilities !== undefined) {
+      return this.capabilities.actions.includes('addMember');
+    }
+    return true;
   }
 
   /**
@@ -109,9 +113,13 @@ export class ScionGroupMemberEditor extends LitElement {
    * compatibility with the project settings page.
    */
   private get canRemove(): boolean {
-    return (
-      !this.readOnly && (!this.capabilities || this.capabilities.actions.includes('removeMember'))
-    );
+    if (this.readOnly) return false;
+    // When capabilities is provided (even if empty), use capability-driven logic (fail-closed).
+    // When capabilities is not provided, fall back to !readOnly for backward compat (project settings).
+    if (this.capabilities !== undefined) {
+      return this.capabilities.actions.includes('removeMember');
+    }
+    return true;
   }
 
   /**
@@ -224,7 +232,7 @@ export class ScionGroupMemberEditor extends LitElement {
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: var(--scion-text-muted, #64748b);
+      color: var(--scion-text-secondary, #475569);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }

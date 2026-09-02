@@ -91,9 +91,7 @@ test.describe('axe accessibility checks (AC20)', () => {
       page.getByRole('heading', { name: 'Axe Detail Test' }),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Disable button-name: the Shoelace overflow dropdown trigger
-    // (sl-button[caret]) lacks accessible text — pre-existing issue.
-    await assertAxeClean(page, ['button-name']);
+    await assertAxeClean(page);
   });
 
   test('create dialog passes axe', async ({ page }) => {
@@ -144,7 +142,6 @@ test.describe('axe accessibility checks (AC20)', () => {
     });
     await page.waitForTimeout(500);
 
-    // Disable button-name for the overflow dropdown trigger
-    await assertAxeClean(page, ['button-name']);
+    await assertAxeClean(page);
   });
 });

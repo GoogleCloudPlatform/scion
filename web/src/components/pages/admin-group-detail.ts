@@ -232,7 +232,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
       font-size: 0.6875rem;
       font-family: var(--scion-font-mono, monospace);
       background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
+      color: var(--scion-text-secondary, #475569);
     }
 
     .loading-state {
@@ -482,7 +482,13 @@ export class ScionPageAdminGroupDetail extends LitElement {
                 ${canDelete
                   ? html`
                       <sl-dropdown>
-                        <sl-button slot="trigger" variant="default" size="small" caret>
+                        <sl-button
+                          slot="trigger"
+                          variant="default"
+                          size="small"
+                          caret
+                          aria-label="More actions"
+                        >
                           <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
                         </sl-button>
                         <sl-menu>
@@ -581,7 +587,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
         .group=${this.group}
         .memberCount=${this.memberCount}
         @group-deleted=${(e: CustomEvent<GroupDeletedDetail>) => this.handleGroupDeleted(e)}
-        @sl-after-hide=${() => this.returnFocusTo('#delete-group-item')}
+        @sl-after-hide=${() => this.returnFocusToOverflowTrigger()}
       ></scion-group-delete-dialog>
     `;
   }
@@ -610,6 +616,16 @@ export class ScionPageAdminGroupDetail extends LitElement {
     requestAnimationFrame(() => {
       const el = this.shadowRoot?.querySelector<HTMLElement>(selector);
       el?.focus();
+    });
+  }
+
+  /** Return focus to the overflow dropdown trigger button (for delete dialog cancel). */
+  private returnFocusToOverflowTrigger(): void {
+    requestAnimationFrame(() => {
+      const trigger = this.shadowRoot?.querySelector<HTMLElement>(
+        'sl-dropdown sl-button[slot="trigger"]'
+      );
+      trigger?.focus();
     });
   }
 

@@ -81,15 +81,19 @@ test.describe('Capability gating: admin vs read-only (AC1, AC8)', () => {
       displayName: 'E2E Read-Only User',
     });
 
-    // Give the read-only user read+list permissions only
+    // Give the read-only user read+list permissions only.
+    // TODO: No 'group-viewer' role definition exists in the hub currently.
+    // When one is added, remove this skip and enable the role-binding below.
     const roleDef = await findRoleDefinition(env.baseURL, env.devToken, 'group-viewer');
-    if (roleDef) {
-      await createRoleBinding(env.baseURL, env.devToken, {
-        roleDefinitionId: roleDef.id,
-        principalType: 'user',
-        principalId: readOnlySession.user.id,
-      });
+    if (!roleDef) {
+      test.skip(true, 'No group-viewer role definition exists in the hub — cannot test read-only capability gating (AC1 read-only arm)');
+      return;
     }
+    await createRoleBinding(env.baseURL, env.devToken, {
+      roleDefinitionId: roleDef.id,
+      principalType: 'user',
+      principalId: readOnlySession.user.id,
+    });
 
     const roContext = await page.context().browser()!.newContext({
       storageState: readOnlySession.storageStatePath,

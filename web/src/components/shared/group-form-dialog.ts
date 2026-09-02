@@ -302,7 +302,13 @@ export class ScionGroupFormDialog extends LitElement {
     const value = (e.target as HTMLInputElement).value;
     this.formSlug = value;
     this.slugDetached = true;
-    if (this.slugError) this.slugError = '';
+    // Inline validation: reject reserved project: prefix immediately.
+    if (this.mode === 'create' && value.startsWith('project:')) {
+      this.slugError =
+        'Slugs cannot start with "project:" — that prefix is reserved for system-managed groups.';
+    } else if (this.slugError) {
+      this.slugError = '';
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -576,6 +582,16 @@ export class ScionGroupFormDialog extends LitElement {
     });
   }
 
+  /** Focus the name input after the dialog opens. */
+  private focusNameInput(): void {
+    requestAnimationFrame(() => {
+      const nameInput = this.shadowRoot?.querySelector<HTMLElement>('#name-input');
+      if (nameInput) {
+        nameInput.focus();
+      }
+    });
+  }
+
   private focusSlugField(): void {
     requestAnimationFrame(() => {
       const slugInput = this.shadowRoot?.querySelector<HTMLElement>('#slug-input');
@@ -612,6 +628,7 @@ export class ScionGroupFormDialog extends LitElement {
         label=${dialogTitle}
         open
         @sl-request-close=${(e: Event) => this.onRequestClose(e)}
+        @sl-after-show=${() => this.focusNameInput()}
       >
         ${this.mode === 'create'
           ? html`
@@ -682,7 +699,9 @@ export class ScionGroupFormDialog extends LitElement {
           slot="footer"
           variant="primary"
           ?loading=${this.submitting}
-          ?disabled=${this.mode === 'create' ? !this.formName.trim() : this.submitting}
+          ?disabled=${this.mode === 'create'
+            ? !this.formName.trim() || this.submitting
+            : this.submitting}
           @click=${() => void this.handleSubmit()}
         >
           ${this.mode === 'create' ? 'Create group' : 'Save changes'}

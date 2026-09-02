@@ -128,6 +128,15 @@ export class ScionPageAdminGroups extends LitElement {
       margin-bottom: 1rem;
     }
 
+    /* Improve active tab text contrast (4.5:1 on white) */
+    sl-tab::part(base) {
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    sl-tab[active]::part(base) {
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
     /* Filters */
     .filter-bar {
       display: flex;
@@ -185,7 +194,7 @@ export class ScionPageAdminGroups extends LitElement {
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: var(--scion-text-muted, #64748b);
+      color: var(--scion-text-secondary, #475569);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
@@ -328,7 +337,7 @@ export class ScionPageAdminGroups extends LitElement {
       font-size: 0.6875rem;
       font-family: var(--scion-font-mono, monospace);
       background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
+      color: var(--scion-text-secondary, #475569);
     }
 
     /* Pagination */
@@ -576,6 +585,10 @@ export class ScionPageAdminGroups extends LitElement {
     this.readFiltersFromURL();
     void this.loadCurrentUser();
     void this.loadData();
+    // If deep-linking to ?tab=mine, load my groups immediately.
+    if (this.activeTab === 'mine') {
+      void this.loadMyGroups();
+    }
   }
 
   override disconnectedCallback(): void {
@@ -610,7 +623,13 @@ export class ScionPageAdminGroups extends LitElement {
     this.filterGroupType = (params.get('groupType') ?? '') as typeof this.filterGroupType;
     this.filterOwnedByMe = params.get('owner') === 'me';
     this.activeTab = params.get('tab') === 'mine' ? 'mine' : 'all';
-    this.currentCursor = params.get('cursor') ?? undefined;
+    const cursor = params.get('cursor') ?? undefined;
+    this.currentCursor = cursor;
+    // When deep-linking with a cursor, seed the page-token stack so the pager
+    // knows the user is past page 1 and enables the Previous button.
+    if (cursor) {
+      this.pageTokenStack = [''];
+    }
   }
 
   syncFiltersToURL(): void {

@@ -238,7 +238,7 @@ export class ScionBoundarySummaryNotice extends LitElement {
         align-items: center;
         gap: 0.25rem;
         font-size: 0.8125rem;
-        color: var(--scion-primary, #3b82f6);
+        color: var(--sl-color-primary-700, #1d4ed8);
         text-decoration: none;
         margin-top: 0.75rem;
       }
