@@ -284,6 +284,7 @@ type Message struct {
 	Body        string          `json:"body"`
 	Attachments []AttachmentRef `json:"attachments,omitempty"`
 	Visibility  Visibility      `json:"visibility,omitempty"`
+	Urgent      bool            `json:"urgent,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
 }
 

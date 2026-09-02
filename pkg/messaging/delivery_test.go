@@ -378,6 +378,68 @@ func TestFormatNewDelivery_MultipleAddressees(t *testing.T) {
 	}
 }
 
+// TestFormatNewDelivery_Urgent (AC-9-10a) verifies that an urgent message
+// produces "urgent": true in the delivered envelope. This pins the urgent
+// semantics on the new envelope so drift between the new renderer and the
+// legacy renderer (pkg/messages/format.go) is caught.
+func TestFormatNewDelivery_Urgent(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-015",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Urgent request",
+		Urgent:    true,
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{ID: "conv-1000", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+
+	env := extractEnvelope(t, result)
+	if !env.Urgent {
+		t.Error("urgent = false, want true")
+	}
+
+	// Also verify via raw JSON that "urgent": true appears.
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	urgentVal, ok := raw["urgent"]
+	if !ok {
+		t.Fatal("missing 'urgent' key in JSON")
+	}
+	if urgentVal != true {
+		t.Errorf("urgent = %v, want true", urgentVal)
+	}
+}
+
+// TestFormatNewDelivery_NotUrgent_OmitsKey verifies that a non-urgent message
+// does not include "urgent" in the JSON (omitempty).
+func TestFormatNewDelivery_NotUrgent_OmitsKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-016",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Normal request",
+		Urgent:    false,
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{ID: "conv-1001", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+
+	jsonStr := extractJSON(t, result)
+	if strings.Contains(jsonStr, `"urgent"`) {
+		t.Error("JSON contains 'urgent' key for non-urgent message; want omitted")
+	}
+}
+
 // TestFormatNewDelivery_NilConversation_OmitsKey (DEF-102, AC-9-4) verifies
 // that when no conversation context is available, the "conversation" key is
 // absent from the JSON envelope (not fabricated), and the message body is

@@ -467,6 +467,57 @@ func TestMapLegacyEnvelope_Visibility(t *testing.T) {
 	}
 }
 
+// ---------- Urgent mapping (OQ-1b) ----------
+
+// TestMapLegacyEnvelope_UrgentMapped verifies that old.Urgent is mapped to
+// Message.Urgent. This pins the urgent semantics that were previously
+// silently discarded by the conversion (noted in DEF-103 footnote).
+func TestMapLegacyEnvelope_UrgentMapped(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Urgent task",
+		Type:      messages.TypeInstruction,
+		Urgent:    true,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !msg.Urgent {
+		t.Error("msg.Urgent = false, want true; old.Urgent must be mapped")
+	}
+}
+
+// TestMapLegacyEnvelope_NotUrgent verifies that non-urgent messages produce
+// Urgent=false on the new Message.
+func TestMapLegacyEnvelope_NotUrgent(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Normal task",
+		Type:      messages.TypeInstruction,
+		Urgent:    false,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Urgent {
+		t.Error("msg.Urgent = true, want false; non-urgent message should not be marked urgent")
+	}
+}
+
 // ---------- PersistedIdentity / DEF-103 ----------
 
 // TestMapLegacyEnvelope_ThreadedMessage_NoReplyTo (DEF-103, AC-9-12) verifies

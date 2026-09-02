@@ -186,6 +186,7 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 		Body:        old.Msg,
 		Attachments: attachments,
 		Visibility:  vis,
+		Urgent:      old.Urgent,
 		CreatedAt:   createdAt,
 	}
 
