@@ -403,8 +403,6 @@ func TestStep3a_EmptyRefRowSkipped(t *testing.T) {
 		"external_ref must remain empty")
 
 	assert.Equal(t, 1, result.EmptyRefSkipped, "EmptyRefSkipped should be 1")
-	assert.Equal(t, 0, result.EmptyRefMerged, "EmptyRefMerged should be 0")
-	assert.Equal(t, 0, result.EmptyRefRekeyed, "EmptyRefRekeyed should be 0")
 }
 
 // TestStep3a_EmptyRefNotRekeyed verifies that an empty-ref row with no
@@ -448,7 +446,6 @@ func TestStep3a_EmptyRefNotRekeyed(t *testing.T) {
 	assert.Equal(t, "", conv.ExternalRef, "ExternalRef must remain empty (B14)")
 	assert.Equal(t, &projectID, conv.ProjectID, "ProjectID must be unchanged")
 	assert.Equal(t, 1, result.EmptyRefSkipped, "EmptyRefSkipped should be 1")
-	assert.Equal(t, 0, result.EmptyRefRekeyed, "EmptyRefRekeyed should be 0")
 }
 
 // TestStep3a_EmptyRefSkippedRegardlessOfParticipantCount verifies that
@@ -481,8 +478,6 @@ func TestStep3a_EmptyRefSkippedRegardlessOfParticipantCount(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.EmptyRefSkipped, "empty-ref row should be skipped (B14)")
-	assert.Equal(t, 0, result.EmptyRefRekeyed)
-	assert.Equal(t, 0, result.EmptyRefMerged)
 }
 
 // ---------------------------------------------------------------------------
@@ -705,7 +700,6 @@ func TestDryRun_NoWrites(t *testing.T) {
 	assert.Equal(t, 3, result.TotalScanned, "should scan all 3 conversations")
 	assert.Equal(t, 2, result.ParticipantsAdded, "should count 2 missing participants")
 	assert.Equal(t, 1, result.EmptyRefSkipped, "should count 1 empty-ref skipped (B14)")
-	assert.Equal(t, 0, result.EmptyRefRekeyed, "should count 0 re-key (B14 ruling)")
 	assert.Equal(t, 1, result.OldFormatRekeyed, "should count 1 old-format re-key")
 
 	// No actual changes should be made.
@@ -963,7 +957,6 @@ func TestMigration_MixedScenarios(t *testing.T) {
 	assert.Equal(t, 3, result.TotalScanned)
 	assert.Equal(t, 2, result.ParticipantsAdded, "2 participants from kind-encoded row")
 	assert.Equal(t, 1, result.EmptyRefSkipped, "1 empty-ref skipped (B14)")
-	assert.Equal(t, 0, result.EmptyRefRekeyed, "0 empty-ref re-keyed (B14)")
 	assert.Equal(t, 1, result.OldFormatRekeyed, "1 old-format re-keyed")
 	assert.Equal(t, 0, result.Unparseable)
 	assert.Equal(t, 0, result.Ambiguous)
@@ -1160,8 +1153,8 @@ func TestB1_SharedPredicate_MergeConversationDirectly(t *testing.T) {
 // keyless and participant-less after migration. The migration must NOT derive
 // a key from the participant index (that would be fabrication of an ACL).
 //
-// Mutation contract: reverting the skip (restoring the old stepMergeOrRekeyEmptyRef
-// logic) causes this test to fail because the row gets re-keyed.
+// Mutation contract: reverting the skip (restoring the old merge-or-rekey
+// logic in stepSkipEmptyRef) causes this test to fail because the row gets re-keyed.
 //
 // DEF-29 (open): a keyless direct row has no ACL. This test pins current-but-wrong
 // behaviour — the migration leaves these rows keyless because deriving a key from
@@ -1206,10 +1199,4 @@ func TestB14_EmptyRefRowLeftKeyless(t *testing.T) {
 	// (c) EmptyRefSkipped counter must be 1.
 	assert.Equal(t, 1, result.EmptyRefSkipped,
 		"EmptyRefSkipped should be 1")
-
-	// (d) EmptyRefMerged and EmptyRefRekeyed must both be 0.
-	assert.Equal(t, 0, result.EmptyRefMerged,
-		"EmptyRefMerged should be 0")
-	assert.Equal(t, 0, result.EmptyRefRekeyed,
-		"EmptyRefRekeyed should be 0")
 }

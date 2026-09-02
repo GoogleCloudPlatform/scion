@@ -37,8 +37,6 @@ type DMMigrationConfig struct {
 type DMMigrationResult struct {
 	TotalScanned      int      // total direct conversations examined
 	ParticipantsAdded int      // step 2: participants derived from key
-	EmptyRefMerged    int      // step 3a: empty-ref rows merged with existing
-	EmptyRefRekeyed   int      // step 3a: empty-ref rows re-keyed in place
 	EmptyRefSkipped   int      // step 3a: empty-ref rows left keyless (B14 ruling)
 	OldFormatRekeyed  int      // step 3b: old dm:X:Y rows re-keyed
 	Unparseable       int      // rows that could not be processed
@@ -72,7 +70,7 @@ type DMMigrationStore interface {
 // categories of old rows:
 //
 //  1. Kind-encoded rows that may lack participants (listing-index rebuild)
-//  2. Empty external_ref rows (merge with existing or re-key in place)
+//  2. Empty external_ref rows (skipped — left keyless per B14 ruling)
 //  3. Old-format dm:{sorted(id1,id2)} rows without kind encoding (re-key)
 type DMMigrationService struct {
 	store DMMigrationStore
@@ -105,7 +103,7 @@ func (s *DMMigrationService) Run(ctx context.Context, cfg DMMigrationConfig) (*D
 		case convClassKindEncoded:
 			s.stepRebuildParticipants(ctx, conv, cfg.DryRun, result)
 		case convClassEmptyRef:
-			s.stepMergeOrRekeyEmptyRef(ctx, conv, cfg.DryRun, result)
+			s.stepSkipEmptyRef(ctx, conv, cfg.DryRun, result)
 		case convClassOldFormat:
 			s.stepRekeyOldFormat(ctx, conv, cfg.DryRun, result)
 		default:
@@ -260,10 +258,10 @@ func (s *DMMigrationService) countMissingParticipants(
 }
 
 // ---------------------------------------------------------------------------
-// Step 3a: Merge or re-key empty-ref rows
+// Step 3a: Skip empty-ref rows (B14 ruling — left keyless)
 // ---------------------------------------------------------------------------
 
-func (s *DMMigrationService) stepMergeOrRekeyEmptyRef(
+func (s *DMMigrationService) stepSkipEmptyRef(
 	_ context.Context,
 	_ *store.Conversation,
 	_ bool,
