@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -31,6 +32,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// listConversationsFailStore wraps a real store.Store and overrides
+// ListConversations to return an error, simulating a run-level failure
+// in DMMigrationService.collectDirectConversations. All other methods
+// — critically including GetHubSetting and UpsertHubSetting — pass
+// through to the real store on a live context.
+//
+// This is the test fixture for AC-2b. A cancelled-context approach is
+// insufficient because it also disables the marker write, making the
+// test tautological: the marker would be absent because the write was
+// impossible, not because the guard refused it.
+type listConversationsFailStore struct {
+	store.Store
+}
+
+func (s *listConversationsFailStore) ListConversations(_ context.Context, _ store.ConversationFilter, _ store.ListOptions) (*store.ListResult[store.Conversation], error) {
+	return nil, errors.New("injected: listing direct conversations failed")
+}
 
 // ---------------------------------------------------------------------------
 // AC-1: Idempotence — second boot performs no migration writes
@@ -161,27 +180,37 @@ func TestBootDMKeyMigration_RowRefusal_MarkerWritten(t *testing.T) {
 }
 
 // TestBootDMKeyMigration_RunLevelFailure_NoMarker verifies AC-2b: when
-// the migration pass itself fails (could not list, could not write,
-// context cancelled), no marker is written and the next boot retries.
+// the migration pass itself fails (could not list conversations), no
+// marker is written and the next boot retries.
+//
+// This test uses a store wrapper that fails ListConversations while
+// leaving the marker-writing path (GetHubSetting / UpsertHubSetting)
+// fully functional on a live context. This is critical: a cancelled-
+// context approach would be tautological because the cancelled context
+// also prevents the marker write, making the marker absent because
+// the write was impossible rather than because the guard refused it.
+//
+// Mutation-tested: removing the `return` after the run-level error
+// check in runDMKeyMigration causes this test to fail — the marker
+// IS then written for a pass that did not complete, which is the
+// exact bug AC-2b exists to prevent.
 func TestBootDMKeyMigration_RunLevelFailure_NoMarker(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore(t)
+	realStore := newTestStore(t)
 
-	// We need a run-level failure. The DMMigrationService returns a
-	// non-nil error only when collectDirectConversations fails. We
-	// achieve this by cancelling the context before running.
-	cancelledCtx, cancel := context.WithCancel(ctx)
-	cancel() // immediately cancelled
+	// Seed data that would be migrated if listing worked.
+	seedOldFormatDMConversation(t, ctx, realStore)
 
-	// Seed data that would be migrated normally.
-	// Use the non-cancelled ctx for seeding.
-	seedOldFormatDMConversation(t, ctx, s)
+	// Wrap the store: ListConversations fails, everything else works.
+	failStore := &listConversationsFailStore{Store: realStore}
 
-	// Run with the cancelled context — the listing query should fail.
-	runDMKeyMigration(cancelledCtx, s)
+	// Run with a live context — the listing fails but the marker
+	// write path is fully operational.
+	runDMKeyMigration(ctx, failStore)
 
 	// The marker MUST NOT be written — the pass did not complete.
-	done, err := IsMigrationComplete(ctx, s, MigrationDMKey)
+	// Read from the real store (same underlying DB) on a live context.
+	done, err := IsMigrationComplete(ctx, realStore, MigrationDMKey)
 	require.NoError(t, err)
 	assert.False(t, done,
 		"M-1': run-level failure must NOT write the marker; next boot must retry")

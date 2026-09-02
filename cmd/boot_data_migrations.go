@@ -97,6 +97,15 @@ func runDMKeyMigration(ctx context.Context, s store.Store) {
 
 	// The pass completed. Row-level refusals are a terminal, correct,
 	// permanent outcome — not an error that blocks the marker.
+	//
+	// Defensive nil guard: result should never be nil when err is nil
+	// (DMMigrationService.Run documents this), but guarding it prevents
+	// a nil-deref if the contract is ever violated, and it lets the
+	// AC-2b mutation test (remove the `return` above) expose a clean
+	// assertion failure rather than a crash.
+	if result == nil {
+		result = &messaging.DMMigrationResult{}
+	}
 	residuals := len(result.Errors)
 
 	// Log the result.
