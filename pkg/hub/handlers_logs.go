@@ -304,8 +304,22 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+	// DEF-128b: check manage first, then read. Manage implies read and lets
+	// us skip participant scoping for users who have it — mirroring the
+	// hub-store path in handleAgentMessages (handlers_messages.go:231-239).
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
 		return
+	}
+	res := agentResource(agent)
+	canManage := s.authzService.CheckAccess(ctx, identity, res, ActionManage)
+	if !canManage.Allowed {
+		decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+			return
+		}
 	}
 
 	if s.logQueryService == nil {
@@ -320,6 +334,16 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
 		LogID:     logging.MessageLogID,
+	}
+
+	// DEF-128b: non-manage users see only their own messages, matching the
+	// hub-store path's filter.ParticipantID = user.ID() constraint.
+	// Agent-identity callers are already scoped by project isolation above
+	// and do not need participant filtering.
+	if !canManage.Allowed {
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			opts.ParticipantID = user.ID()
+		}
 	}
 
 	if v := query.Get("tail"); v != "" {

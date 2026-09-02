@@ -523,3 +523,95 @@ func TestConvertProtoLogEntry_Resource(t *testing.T) {
 		t.Errorf("Resource.type = %v, want %q", result.Resource["type"], "gce_instance")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DEF-128b: ParticipantID filter
+// ---------------------------------------------------------------------------
+
+func TestBuildLogFilter_ParticipantID(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      LogQueryOptions
+		projectID string
+		want      string
+		wantIn    string // substring that must be present
+		wantOut   string // substring that must be absent
+	}{
+		{
+			name: "participant filter added for message logs",
+			opts: LogQueryOptions{
+				AgentID:       "agent-123",
+				ParticipantID: "user-456",
+				ProjectID:     "project-abc",
+				LogID:         "scion-messages",
+			},
+			projectID: "my-project",
+			wantIn:    `(labels.recipient_id = "user-456" OR labels.sender_id = "user-456")`,
+		},
+		{
+			name: "participant filter absent when ParticipantID is empty",
+			opts: LogQueryOptions{
+				AgentID:   "agent-123",
+				ProjectID: "project-abc",
+				LogID:     "scion-messages",
+			},
+			projectID: "my-project",
+			wantOut:   "user-456",
+		},
+		{
+			name: "participant filter not added for non-message logs",
+			opts: LogQueryOptions{
+				AgentID:       "agent-123",
+				ParticipantID: "user-456",
+				LogID:         "scion-agents",
+			},
+			projectID: "my-project",
+			wantOut:   "user-456",
+		},
+		{
+			name: "participant and agent filters coexist",
+			opts: LogQueryOptions{
+				AgentID:       "agent-123",
+				ParticipantID: "user-456",
+				LogID:         "scion-messages",
+			},
+			projectID: "my-project",
+			wantIn:    `(labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := BuildLogFilter(tt.opts, tt.projectID)
+			if tt.want != "" && result != tt.want {
+				t.Errorf("BuildLogFilter() = %q, want %q", result, tt.want)
+			}
+			if tt.wantIn != "" && !strings.Contains(result, tt.wantIn) {
+				t.Errorf("BuildLogFilter() = %q, want substring %q", result, tt.wantIn)
+			}
+			if tt.wantOut != "" && strings.Contains(result, tt.wantOut) {
+				t.Errorf("BuildLogFilter() = %q, must NOT contain %q", result, tt.wantOut)
+			}
+		})
+	}
+}
+
+// TestBuildLogFilter_DEF128b_MutationTest verifies that removing the
+// participant constraint causes the test to fail. This is the mutation
+// test required by the DEF-128b spec.
+func TestBuildLogFilter_DEF128b_MutationTest(t *testing.T) {
+	opts := LogQueryOptions{
+		AgentID:       "agent-123",
+		ParticipantID: "user-456",
+		LogID:         "scion-messages",
+	}
+	result := BuildLogFilter(opts, "my-project")
+
+	// The participant filter MUST be present.
+	if !strings.Contains(result, `labels.recipient_id = "user-456"`) {
+		t.Fatalf("DEF-128b mutation: participant recipient_id filter missing from %q", result)
+	}
+	if !strings.Contains(result, `labels.sender_id = "user-456"`) {
+		t.Fatalf("DEF-128b mutation: participant sender_id filter missing from %q", result)
+	}
+}

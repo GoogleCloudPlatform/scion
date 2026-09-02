@@ -180,17 +180,21 @@ func ResolveOrCreateDMConversation(
 }
 
 // ResolveDMConversationForRead looks up a DM conversation without creating it.
-// Returns nil if the conversation does not exist or the lookup fails.
 // This is the read-only counterpart of ResolveOrCreateDMConversation,
 // used by the Phase 8 read-switch to query by ConversationID.
+//
+// DEF-127a: returns (nil, nil) when the conversation does not exist
+// (store.ErrNotFound) and (nil, err) on infrastructure errors. Callers
+// must distinguish the two: absence is a normal first-use state for DMs,
+// while an infrastructure error is a 500.
 func ResolveDMConversationForRead(
 	ctx context.Context,
 	cr ConversationReader,
 	log *slog.Logger,
 	idAKind, idA, idBKind, idB string,
-) *ConversationResult {
+) (*ConversationResult, error) {
 	if idA == "" || idB == "" {
-		return nil
+		return nil, nil
 	}
 
 	extRef, err := messages.DMConversationKey(idAKind, idA, idBKind, idB)
@@ -199,14 +203,22 @@ func ResolveDMConversationForRead(
 			"id_a_kind", idAKind, "id_a", idA,
 			"id_b_kind", idBKind, "id_b", idB,
 			"error", err)
-		return nil
+		return nil, nil
 	}
 
 	conv, err := cr.GetConversationByExternalRef(ctx, "native", extRef)
 	if err != nil {
-		log.Debug("read-switch: DM conversation lookup returned no result",
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("read-switch: DM conversation not found (normal for first-use DMs)",
+				"external_ref", extRef)
+			return nil, nil
+		}
+		// DEF-127a: infrastructure error — log at Error level, not Debug.
+		// A connection failure or query timeout must not masquerade as
+		// "no matching conversation record exists".
+		log.Error("read-switch: DM conversation lookup failed",
 			"external_ref", extRef, "error", err)
-		return nil
+		return nil, fmt.Errorf("DM conversation lookup: %w", err)
 	}
 
 	return &ConversationResult{
@@ -215,7 +227,7 @@ func ResolveDMConversationForRead(
 		Kind:           conv.Kind,
 		Surface:        conv.Surface,
 		DisplayName:    conv.DisplayName,
-	}
+	}, nil
 }
 
 // ResolveOrCreateThreadConversation resolves (or creates) a thread-based

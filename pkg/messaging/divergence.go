@@ -141,6 +141,28 @@ func (c *SwitchBypassCounter) Total() int64 {
 var SwitchBypassMetrics = &SwitchBypassCounter{}
 
 // ---------------------------------------------------------------------------
+// DEF-127: DM-absent-on-read tracking
+// ---------------------------------------------------------------------------
+
+// DMAbsentCounter counts read-path requests that found no conversation row
+// for a DM key. These are normal first-use states, not defects, but the
+// counter preserves the observability that the former 409 provided. Each
+// site that returns empty-200 for an absent DM increments this counter so
+// that drift (if it happens) is still visible in metrics.
+type DMAbsentCounter struct {
+	count atomic.Int64
+}
+
+// Inc records one DM-absent-on-read event.
+func (c *DMAbsentCounter) Inc() { c.count.Add(1) }
+
+// Count returns the total DM-absent events recorded.
+func (c *DMAbsentCounter) Count() int64 { return c.count.Load() }
+
+// DMAbsentMetrics is the package-level counter for DM-absent-on-read events.
+var DMAbsentMetrics = &DMAbsentCounter{}
+
+// ---------------------------------------------------------------------------
 // Write-denial tracking (G2 — write-path enforcement)
 // ---------------------------------------------------------------------------
 

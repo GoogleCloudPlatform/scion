@@ -304,26 +304,32 @@ func TestReadSwitch_S1_DM_FlagOn_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S1_DM_FlagOn_ConversationNotFound(t *testing.T) {
-	// G3: with fallback removed, an unresolvable conversation returns 409
-	// with code "conversation_not_resolved" instead of falling back to the
-	// legacy channel+thread filter. (AC-G3-2)
+	// DEF-127: a never-used DM is a normal first-use state. The handler
+	// returns empty 200 instead of the former 409. Authorization is key-based
+	// and runs before resolution, so returning empty is safe.
 	srv, _ := testServer(t)
 	enableReadSwitch(t, srv)
 
 	agentUUID := tid("s1-agent-notfound")
 	key := makeDMKey(agentUUID, DevUserID)
-	// No conversation seeded → resolve returns nil → typed error.
+	// No conversation seeded → resolve returns (nil, nil) → empty 200.
 
+	before := messaging.DMAbsentMetrics.Count()
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("unmarshal error response: %v", err)
+	// Verify the response is an empty message list.
+	var resp chatHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
 	}
-	if errResp.Error.Code != ErrCodeConversationNotResolved {
-		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
+	if len(resp.Messages) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(resp.Messages))
+	}
+	// DEF-127: counter must increment.
+	if delta := messaging.DMAbsentMetrics.Count() - before; delta != 1 {
+		t.Errorf("expected DMAbsentMetrics delta 1, got %d", delta)
 	}
 }
 
@@ -526,25 +532,21 @@ func TestReadSwitch_S2_FlagOn_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S2_FlagOn_ConversationNotFound(t *testing.T) {
-	// G3: with fallback removed, an unresolvable conversation returns 409
-	// with code "conversation_not_resolved". (AC-G3-2)
+	// DEF-127: a never-used DM returns empty 200 instead of the former 409.
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
 	projectID := rsProject(t, s, "s2-notfound-project")
 	agentID := rsAgent(t, s, "s2-agent-notfound", projectID)
-	// No conversation seeded → resolve returns nil → typed error.
+	// No conversation seeded → resolve returns (nil, nil) → empty 200.
 
+	before := messaging.DMAbsentMetrics.Count()
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("unmarshal error response: %v", err)
-	}
-	if errResp.Error.Code != ErrCodeConversationNotResolved {
-		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
+	if delta := messaging.DMAbsentMetrics.Count() - before; delta != 1 {
+		t.Errorf("expected DMAbsentMetrics delta 1, got %d", delta)
 	}
 }
 
@@ -779,25 +781,21 @@ func TestReadSwitch_S3_FlagOn_DMDefault_ConversationResolved(t *testing.T) {
 }
 
 func TestReadSwitch_S3_FlagOn_DMDefault_ConversationNotFound(t *testing.T) {
-	// G3: with fallback removed, an unresolvable DM conversation returns
-	// 409 with code "conversation_not_resolved". (AC-G3-2)
+	// DEF-127: a never-used DM returns empty 200 instead of the former 409.
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
 	projectID := rsProject(t, s, "s3-dm-notfound-project")
 	agentID := rsAgent(t, s, "s3-agent-dm-notfound", projectID)
-	// No conversation seeded → resolve returns nil → typed error.
+	// No conversation seeded → resolve returns (nil, nil) → empty 200.
 
+	before := messaging.DMAbsentMetrics.Count()
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("unmarshal error response: %v", err)
-	}
-	if errResp.Error.Code != ErrCodeConversationNotResolved {
-		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
+	if delta := messaging.DMAbsentMetrics.Count() - before; delta != 1 {
+		t.Errorf("expected DMAbsentMetrics delta 1, got %d", delta)
 	}
 }
 
@@ -937,13 +935,11 @@ func TestReadSwitch_S3_FlagOn_Manager_WithExistingDM_LosesVisibility(t *testing.
 	}
 }
 
-func TestReadSwitch_S3_FlagOn_Manager_NoDM_Returns409(t *testing.T) {
-	// G3 update of the original NoDM control. With fallback removed, a
-	// manager who has never chatted with the agent (no DM conversation row)
-	// now gets a 409 error instead of silently falling back to the legacy
-	// filter. This is the intended G3 behaviour: the fallback is gone, so
-	// BOTH the "with DM" and "without DM" cases surface an explicit signal
-	// rather than returning potentially wrong results. (AC-G3-2)
+func TestReadSwitch_S3_FlagOn_Manager_NoDM_ReturnsEmpty200(t *testing.T) {
+	// DEF-127: a never-used DM is a normal first-use state. Even for a
+	// manager, the handler returns empty 200 instead of the former 409.
+	// This is safe because authorization is key-based and runs before
+	// conversation resolution.
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
 
@@ -963,19 +959,16 @@ func TestReadSwitch_S3_FlagOn_Manager_NoDM_Returns409(t *testing.T) {
 			"this test requires a manager caller (reason: %s)", manageDecision.Reason)
 	}
 
-	// Do NOT seed a DM conversation for the manager. G3: no DM → nil
-	// resolution → typed 409 error (no more fallback to legacy filter).
+	// Do NOT seed a DM conversation for the manager. DEF-127: no DM →
+	// (nil, nil) resolution → empty 200.
 
+	before := messaging.DMAbsentMetrics.Count()
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("unmarshal error response: %v", err)
-	}
-	if errResp.Error.Code != ErrCodeConversationNotResolved {
-		t.Errorf("expected error code %q, got %q", ErrCodeConversationNotResolved, errResp.Error.Code)
+	if delta := messaging.DMAbsentMetrics.Count() - before; delta != 1 {
+		t.Errorf("expected DMAbsentMetrics delta 1, got %d", delta)
 	}
 }
 

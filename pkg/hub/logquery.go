@@ -63,18 +63,19 @@ type LogSourceLocation struct {
 
 // LogQueryOptions configures a Cloud Logging query.
 type LogQueryOptions struct {
-	AgentID   string
-	ProjectID string
-	BrokerID  string
-	LogID     string // Cloud Logging log ID (e.g. "scion-messages"); empty = default log
-	Tail      int
-	Since     time.Time
-	Until     time.Time
-	Severity  string
-	PageToken string
-	Sources   []string // optional: "hub", "broker", "agent", "messages" — restricts to matching logs/subsystems
-	Search    string   // optional: substring match on jsonPayload.message
-	HubName   string   // optional: filter by hub label to scope logs to this hub instance
+	AgentID       string
+	ProjectID     string
+	BrokerID      string
+	ParticipantID string // DEF-128b: when set, restrict message logs to entries where this user is a participant (sender or recipient)
+	LogID         string // Cloud Logging log ID (e.g. "scion-messages"); empty = default log
+	Tail          int
+	Since         time.Time
+	Until         time.Time
+	Severity      string
+	PageToken     string
+	Sources       []string // optional: "hub", "broker", "agent", "messages" — restricts to matching logs/subsystems
+	Search        string   // optional: substring match on jsonPayload.message
+	HubName       string   // optional: filter by hub label to scope logs to this hub instance
 }
 
 // LogQueryResult contains the result of a log query.
@@ -185,6 +186,15 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			opts.AgentID, opts.AgentID))
 	} else if opts.AgentID != "" {
 		parts = append(parts, fmt.Sprintf(`labels.agent_id = %q`, opts.AgentID))
+	}
+	// DEF-128b: participant scoping for message logs. When a non-manage user
+	// queries message logs, restrict results to entries where that user is
+	// either the sender or the recipient. This mirrors the hub-store
+	// ParticipantID filter (handlers_messages.go:258-260).
+	if opts.ParticipantID != "" && opts.LogID == logging.MessageLogID {
+		parts = append(parts, fmt.Sprintf(
+			`(labels.recipient_id = %q OR labels.sender_id = %q)`,
+			opts.ParticipantID, opts.ParticipantID))
 	}
 	if opts.ProjectID != "" {
 		parts = append(parts, fmt.Sprintf(`labels.project_id = %q`, opts.ProjectID))

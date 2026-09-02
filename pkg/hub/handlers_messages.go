@@ -76,15 +76,23 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		if agentID != "" {
 			if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
-				convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
+				convResult, resolveErr := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
+				if resolveErr != nil {
+					// DEF-127a: infrastructure error — return 500, not 409.
+					slog.Error("read-switch: DM conversation lookup failed",
+						"agent_id", resolvedAgent.ID, "user_id", user.ID(), "error", resolveErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"Failed to look up conversation", nil)
+					return
+				}
 				if convResult != nil {
 					filter.ConversationID = convResult.ConversationID
 				} else {
-					slog.Warn("read-switch: DM conversation not resolved for agent message list",
+					// DEF-127: a never-used DM is normal. Return empty 200.
+					messaging.DMAbsentMetrics.Inc()
+					slog.Warn("read-switch: DM conversation absent for agent message list, returning empty",
 						"agent_id", resolvedAgent.ID, "user_id", user.ID())
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
-						"Conversation could not be resolved for this agent; the read-switch is ON but no matching conversation record exists",
-						nil)
+					writeJSON(w, http.StatusOK, &store.ListResult[store.Message]{Items: []store.Message{}})
 					return
 				}
 			} else {
@@ -322,15 +330,23 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 			// Default: DM conversation between agent and current user.
 			// R-1: Use agent.ID (UUID) not agentID (raw handler param, may be a slug).
 			// The resolved agent is already in scope from GetAgent above.
-			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			convResult, resolveErr := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			if resolveErr != nil {
+				// DEF-127a: infrastructure error — return 500, not 409.
+				slog.Error("read-switch: DM conversation lookup failed",
+					"agent_id", agent.ID, "user_id", user.ID(), "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to look up conversation", nil)
+				return
+			}
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
 			} else {
-				slog.Warn("read-switch: DM conversation not resolved for agent messages",
+				// DEF-127: a never-used DM is normal. Return empty 200.
+				messaging.DMAbsentMetrics.Inc()
+				slog.Warn("read-switch: DM conversation absent for agent messages, returning empty",
 					"agent_id", agent.ID, "user_id", user.ID())
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
-					"Conversation could not be resolved for this agent; the read-switch is ON but no matching conversation record exists",
-					nil)
+				writeJSON(w, http.StatusOK, &store.ListResult[store.Message]{Items: []store.Message{}})
 				return
 			}
 		} else {
