@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -603,4 +604,72 @@ func TestDEF126_UserPrefixStripped(t *testing.T) {
 	// Bare identifier without user: prefix but with @ should still be treated
 	// as email since TrimPrefix("user:") is a no-op on "prefix@example.com".
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+}
+
+// testRawDB extracts the underlying *sql.DB from a store for raw SQL access.
+// The ent-backed store exposes DB() on its concrete type; this uses an
+// interface assertion so the test works without importing the adapter.
+func testRawDB(t *testing.T, s store.Store) *sql.DB {
+	t.Helper()
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	db := dbProvider.DB()
+	if db == nil {
+		t.Fatal("store DB() returned nil")
+	}
+	return db
+}
+
+// ---------------------------------------------------------------------------
+// ADDR_AMBIGUOUS: Two users whose emails differ only in case produce a
+// NotSingular error from GetUserByEmail's Only() call.  The handler must
+// emit addr_ambiguous — not the false "No user exists" that the first
+// revision of DEF-126 produced.
+//
+// This simulates legacy rows written before normalizeEmail existed: the
+// entadapter normalizes on CreateUser, so we bypass it with raw SQL to
+// seed two rows that share a case-folded email but have distinct stored
+// values.  The ent schema's UNIQUE index is case-sensitive (no COLLATE
+// NOCASE), so the insert succeeds.
+// ---------------------------------------------------------------------------
+func TestDEF126_AddrAmbiguous_DuplicateEmailCase(t *testing.T) {
+	srv, s, projectID, _, agentID := def126Setup(t)
+	db := testRawDB(t, s)
+
+	userA := tid("def126-ambig-a")
+	userB := tid("def126-ambig-b")
+
+	// Insert two users with emails that differ only in case, bypassing
+	// normalizeEmail.  This reproduces the legacy-row migration seam.
+	now := time.Now().Format(time.RFC3339Nano)
+	_, err := db.Exec(
+		`INSERT INTO users (id, email, display_name, created, role, status)
+		 VALUES (?, ?, 'Ambig A', ?, 'member', 'active')`,
+		userA, "AMBIG@example.com", now)
+	require.NoError(t, err, "insert user A with upper-case email")
+
+	_, err = db.Exec(
+		`INSERT INTO users (id, email, display_name, created, role, status)
+		 VALUES (?, ?, 'Ambig B', ?, 'member', 'active')`,
+		userB, "ambig@example.com", now)
+	require.NoError(t, err, "insert user B with lower-case email")
+
+	// Send to the shared email — GetUserByEmail will match both via
+	// EmailEqualFold, Only() will return NotSingular, and the handler
+	// must emit addr_ambiguous.
+	rr := postOutboundTo(t, srv, projectID, agentID, "user:ambig@example.com", "should not arrive")
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeAddrAmbiguous, resp.Error.Code,
+		"duplicate-email must produce addr_ambiguous, not addr_unknown")
+	require.Contains(t, resp.Error.Message, "Multiple users match")
+
+	// Neither user must have received a message.
+	assertNoMessagesFor(t, s, userA)
+	assertNoMessagesFor(t, s, userB)
 }

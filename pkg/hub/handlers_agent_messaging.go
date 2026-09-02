@@ -144,30 +144,46 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// constraint and the old LIKE query silently picked the newest row.
 		if _, parseErr := uuid.Parse(identifier); parseErr == nil {
 			// Token is a UUID — direct lookup by primary key.
-			if u, err := s.store.GetUser(ctx, identifier); err == nil {
+			u, err := s.store.GetUser(ctx, identifier)
+			if err == nil {
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
-			} else {
+			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
+				return
+			} else {
+				s.messageLog.Error("user lookup by ID failed", "identifier", identifier, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"user lookup failed due to an internal error", nil)
 				return
 			}
 		} else if strings.Contains(identifier, "@") {
 			// Token contains @ — exact email lookup, case-folded.
-			if u, err := s.store.GetUserByEmail(ctx, identifier); err == nil {
+			u, err := s.store.GetUserByEmail(ctx, identifier)
+			if err == nil {
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
-			} else {
+			} else if errors.Is(err, store.ErrNotSingular) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
+					fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
+				return
+			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that email.", identifier), nil)
+				return
+			} else {
+				s.messageLog.Error("user lookup by email failed", "identifier", identifier, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"user lookup failed due to an internal error", nil)
 				return
 			}
 		} else {
@@ -1492,29 +1508,45 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			// OQ-A2: any member that fails to resolve refuses the whole send.
 			identifier := recip.Name
 			if _, parseErr := uuid.Parse(identifier); parseErr == nil {
-				if u, lookupErr := s.store.GetUser(ctx, identifier); lookupErr == nil {
+				u, lookupErr := s.store.GetUser(ctx, identifier)
+				if lookupErr == nil {
 					userID = u.ID
 					name := u.DisplayName
 					if name == "" {
 						name = u.Email
 					}
 					userRecip = "user:" + name
-				} else {
+				} else if errors.Is(lookupErr, store.ErrNotFound) {
 					writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 						fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
 					return
+				} else {
+					s.messageLog.Error("user lookup by ID failed", "identifier", identifier, "error", lookupErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"user lookup failed due to an internal error", nil)
+					return
 				}
 			} else if strings.Contains(identifier, "@") {
-				if u, lookupErr := s.store.GetUserByEmail(ctx, identifier); lookupErr == nil {
+				u, lookupErr := s.store.GetUserByEmail(ctx, identifier)
+				if lookupErr == nil {
 					userID = u.ID
 					name := u.DisplayName
 					if name == "" {
 						name = u.Email
 					}
 					userRecip = "user:" + name
-				} else {
+				} else if errors.Is(lookupErr, store.ErrNotSingular) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
+						fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
+					return
+				} else if errors.Is(lookupErr, store.ErrNotFound) {
 					writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 						fmt.Sprintf("user:%s is not a valid addressee. No user exists with that email.", identifier), nil)
+					return
+				} else {
+					s.messageLog.Error("user lookup by email failed", "identifier", identifier, "error", lookupErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"user lookup failed due to an internal error", nil)
 					return
 				}
 			} else {
