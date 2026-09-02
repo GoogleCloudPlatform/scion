@@ -53,10 +53,11 @@ type messagingResponse struct {
 }
 
 // handleGetMessaging returns the current messaging switch.
-// When no DB row exists (or OperationalSettings is nil), the compiled
-// default is returned (ON).
+// Reports what enforcement sites would actually do: when OperationalSettings
+// is nil (init failed), enforcement reads `ops != nil && ops.…()` → false,
+// so the GET must report false too — not the compiled default.
 func (s *Server) handleGetMessaging(w http.ResponseWriter) {
-	envelopeSwitch := true // compiled default: ON
+	envelopeSwitch := false // nil ops → same as enforcement: OFF
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		envelopeSwitch = ops.ConversationEnvelopeSwitch()

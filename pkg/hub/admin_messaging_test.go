@@ -317,13 +317,11 @@ func TestHandleAdminMessaging_PutRecordsUpdatedBy(t *testing.T) {
 // route metadata entry exists below.
 
 func TestHandleAdminMessaging_GetNilOperationalSettings(t *testing.T) {
-	// GET with nil OperationalSettings (init failed) → switch ON (compiled default).
-	// This is the fail-closed guard for the nil-ops case: if initOperationalSettings
-	// errors out and the hub boots without OperationalSettings, the GET endpoint
-	// still returns the compiled default. The switch itself defaults ON, but
-	// callers guard with `ops != nil && ops.ConversationEnvelopeSwitch()` so a
-	// nil ops yields false at the call site — the GET response shows the compiled
-	// default regardless.
+	// GET with nil OperationalSettings (init failed) → switch OFF.
+	// Enforcement sites read `ops != nil && ops.ConversationEnvelopeSwitch()`,
+	// which yields false when ops is nil. The GET must report the same value
+	// enforcement would actually use — not the compiled default, which is
+	// unreachable when there is no OperationalSettings to evaluate it.
 	srv := newAdminMessagingServer(t, nil) // nil store = no OperationalSettings
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
@@ -339,9 +337,9 @@ func TestHandleAdminMessaging_GetNilOperationalSettings(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	// The GET handler defaults to true (compiled default ON) when ops is nil.
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != true {
-		t.Errorf("expected conversation_envelope_switch=true (nil ops → compiled default ON), got %v", body.ConversationEnvelopeSwitch)
+	// nil ops → enforcement yields false → GET reports false.
+	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != false {
+		t.Errorf("expected conversation_envelope_switch=false (nil ops → enforcement OFF), got %v", body.ConversationEnvelopeSwitch)
 	}
 }
 

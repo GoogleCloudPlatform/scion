@@ -1079,3 +1079,34 @@ func TestConversationEnvelopeSwitch_AC97b_MalformedLoggedOncePerRefresh(t *testi
 		t.Error("expected Malformed=true on cached messaging section")
 	}
 }
+
+func TestConversationEnvelopeSwitch_TypeMismatch_DetectedAtRefresh(t *testing.T) {
+	// A document like {"conversation_envelope_switch":"yes"} is valid JSON but
+	// fails to unmarshal into *bool. Without the type-mismatch check at ingest
+	// time, this would fall through to the compiled default (ON), silently
+	// enabling the switch on a hub where an operator made a typo.
+	//
+	// With the fix, Refresh detects the unmarshal failure, sets Malformed=true,
+	// and the getter returns OFF.
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":"yes"}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if ops.ConversationEnvelopeSwitch() {
+		t.Error("ConversationEnvelopeSwitch: want false (type-mismatch → fail-closed), got true")
+	}
+
+	// Verify Malformed is set.
+	ops.mu.RLock()
+	state, ok := ops.cache["messaging"]
+	ops.mu.RUnlock()
+	if !ok {
+		t.Fatal("messaging section not in cache after Refresh")
+	}
+	if !state.Malformed {
+		t.Error("expected Malformed=true for type-mismatch document")
+	}
+}

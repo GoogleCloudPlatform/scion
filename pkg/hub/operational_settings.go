@@ -236,6 +236,20 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 				"section", row.Section,
 				"revision", row.Revision,
 			)
+		} else if sec := opsettings.SectionByName(row.Section); sec != nil && sec.New != nil {
+			// Syntactically valid JSON can still be semantically wrong (e.g.
+			// {"conversation_envelope_switch":"yes"} — valid JSON, but "yes"
+			// does not unmarshal into *bool). Detect at ingest so the failure
+			// is logged once per refresh, not silently swallowed per getter.
+			target := sec.New()
+			if err := json.Unmarshal(row.Value, target); err != nil {
+				malformed = true
+				slog.Error("operational settings: section document has type-incompatible fields",
+					"section", row.Section,
+					"revision", row.Revision,
+					"error", err,
+				)
+			}
 		}
 		o.cache[row.Section] = sectionState{
 			Value:     row.Value,
@@ -489,6 +503,16 @@ func (o *OperationalSettings) Update(
 			"section", section,
 			"revision", result.Revision,
 		)
+	} else if sec := opsettings.SectionByName(section); sec != nil && sec.New != nil {
+		target := sec.New()
+		if err := json.Unmarshal(result.Value, target); err != nil {
+			malformed = true
+			slog.Error("operational settings: section document has type-incompatible fields after write",
+				"section", section,
+				"revision", result.Revision,
+				"error", err,
+			)
+		}
 	}
 	o.mu.Lock()
 	o.cache[section] = sectionState{
