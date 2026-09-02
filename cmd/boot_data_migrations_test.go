@@ -172,8 +172,10 @@ func TestBootDMKeyMigration_RowRefusal_MarkerWritten(t *testing.T) {
 	var marker migrationMarker
 	err = unmarshalMigrationMarker(raw, MigrationDMKey, &marker)
 	require.NoError(t, err)
-	assert.Greater(t, marker.Residuals, 0,
-		"residual count must be non-zero when rows were refused")
+	// G3 (M9a): exact value — the fixture seeds one old-format DM with
+	// unresolvable IDs, producing exactly 1 ambiguous row refusal.
+	assert.Equal(t, 1, marker.Residuals,
+		"GATE G3: residual count must be exactly 1 (one unresolvable DM key)")
 
 	// The conversation should be unmodified (kind resolution failed).
 	conv, err := s.GetConversation(ctx, convID)

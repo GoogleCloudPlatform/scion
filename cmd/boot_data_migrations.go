@@ -240,18 +240,27 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 
 	budget := defaultBackfillBudget
 	deadline := time.Now().Add(budget)
-	totalResiduals := marker.Residuals // carry forward from prior boots
 
-	// M9: accumulate the measured permanent residual (design §4.8 second
-	// correction). Reset to zero at the start of a pass beginning with
-	// empty projects_done to prevent double-counting on a repeated pass.
-	// Carry forward only within a pass (resumed from prior boot with
-	// projects already done).
+	// Resume or reset: carry forward accumulators only when genuinely
+	// resuming a partially-completed pass (non-empty ProjectsDone).
+	// On a fresh pass (empty ProjectsDone) — including the pre-M9 marker
+	// upgrade path — reset every accumulator to zero so that a repeated
+	// full pass does not double-count (M9a, design §4.8).
+	resuming := len(marker.ProjectsDone) > 0
+
+	totalResiduals := 0
 	permanentResidual := 0
 	transientFailures := 0
-	if len(marker.ProjectsDone) > 0 && marker.PermanentResidual != nil {
-		permanentResidual = *marker.PermanentResidual
-		transientFailures = marker.TransientFailures
+	if resuming {
+		totalResiduals = marker.Residuals
+		// M9 accumulators additionally require PermanentResidual to exist.
+		// A pre-M9 mid-pass marker has ProjectsDone but no PermanentResidual;
+		// totalResiduals is carried forward while M9 fields start from zero
+		// (they will be measured fresh during this pass's remaining projects).
+		if marker.PermanentResidual != nil {
+			permanentResidual = *marker.PermanentResidual
+			transientFailures = marker.TransientFailures
+		}
 	}
 
 	for _, pid := range projectIDs {

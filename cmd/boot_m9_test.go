@@ -695,8 +695,19 @@ func TestM9_Gate5_PreM9MarkerRerun(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, marker.CompletedAt, "marker must be completed after re-run")
 	require.NotNil(t, marker.PermanentResidual, "marker must have permanent_residual after re-run")
-	assert.Greater(t, *marker.PermanentResidual, 0,
-		"permanent_residual must be non-zero (there are derive-refused messages)")
+	assert.Equal(t, 1, *marker.PermanentResidual,
+		"permanent_residual must be exactly 1 (one derive-refused message in the fixture)")
+
+	// G1 (M9a): exact-value gate on the pre-M9 path. The pre-M9 marker
+	// seeded Residuals=5 from a prior pass. After the reset-and-re-run,
+	// marker.Residuals must equal THIS pass's row_errors exactly (1 derive
+	// refusal). The seeded 5 must be gone — a carried-forward accumulator
+	// would produce 6.
+	assert.Equal(t, 1, marker.Residuals,
+		"GATE G1 (M9a): marker.Residuals must equal this pass's row_errors exactly (1), "+
+			"not the carried-forward value (6 = seeded 5 + this pass's 1). "+
+			"A double-counted accumulator carries forward the seeded Residuals across "+
+			"the pre-M9 marker upgrade re-run.")
 
 	// Verify unknown keys survived byte-for-byte (INVARIANT M-2).
 	_, raw, err = loadMigrationsDoc(ctx, s)
@@ -1185,4 +1196,177 @@ func TestM9_BootLogPerCause(t *testing.T) {
 		strings.Contains(logOutput, "derive_dm_key_parse=")
 	assert.True(t, hasCause,
 		"boot log must include at least one per-cause derive field")
+}
+
+// ---------------------------------------------------------------------------
+// Gate G2 (M9a): Global-vs-partition identity from real log output
+// ---------------------------------------------------------------------------
+//
+// The total_residuals in the "all projects complete" summary line must equal
+// the sum of row_errors across the per-project "project completed" lines
+// from the SAME boot. This is the identity that the M9a carry-forward defect
+// violated: the aggregate was double-counted (prior pass + this pass) while
+// the partitions were correct.
+//
+// This test is deliberately NOT built over synthetic BackfillResult structs.
+// It parses what the boot hook actually logged, so it catches wiring errors
+// between the accumulator and the log line — the class of defect that a
+// fixture-only test is blind to.
+//
+// MUTATION M1: restore the unconditional carry-forward. G2 goes red because
+// the summary total_residuals includes the seeded marker's prior-pass count.
+// MUTATION M3: make one per-project line log a row_errors value that differs
+// from what it accumulates. G2 goes red because the sum of per-project
+// row_errors diverges from total_residuals.
+
+func TestM9a_GateG2_GlobalVsPartitionIdentity(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Pre-seed a completed pre-M9 marker (no PermanentResidual) with a
+	// non-zero Residuals count. This triggers the pre-M9 upgrade path
+	// (line ~204: CompletedAt cleared, full pass re-runs). With the M9a
+	// defect, the seeded Residuals would carry forward into the re-run,
+	// making total_residuals = seeded + this-pass instead of just this-pass.
+	// The partition sum (per-project row_errors) would stay correct, so the
+	// identity fails.
+	priorResiduals := 100
+	now := time.Now().UTC()
+	err := saveBackfillProgress(ctx, s, backfillMarker{
+		CompletedAt: &now,
+		Residuals:   priorResiduals,
+		// PermanentResidual intentionally nil → pre-M9 format → triggers re-run.
+	})
+	require.NoError(t, err)
+
+	// Mark DM key migration as complete so it doesn't interact.
+	err = MarkMigrationComplete(ctx, s, MigrationDMKey, 0)
+	require.NoError(t, err)
+
+	// Seed three projects with different residual shapes to make the
+	// per-project row_errors distinguishable.
+
+	// Project A: two derive-refused messages (row_errors = 2).
+	pidA := uuid.NewString()
+	err = s.CreateProject(ctx, &store.Project{
+		ID:   pidA,
+		Name: "g2-projA",
+		Slug: "g2-projA-" + pidA[:8],
+	})
+	require.NoError(t, err)
+	for i := 0; i < 2; i++ {
+		err = s.CreateMessage(ctx, &store.Message{
+			ID:        uuid.NewString(),
+			ProjectID: pidA,
+			Msg:       fmt.Sprintf("projA derive-refused %d", i),
+			Sender:    "user:alice@example.com",
+			Recipient: "agent:some-bot",
+		})
+		require.NoError(t, err)
+	}
+
+	// Project B: one derive-refused message (row_errors = 1).
+	pidB := uuid.NewString()
+	err = s.CreateProject(ctx, &store.Project{
+		ID:   pidB,
+		Name: "g2-projB",
+		Slug: "g2-projB-" + pidB[:8],
+	})
+	require.NoError(t, err)
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: pidB,
+		Msg:       "projB derive-refused",
+		Sender:    "user:bob@example.com",
+		Recipient: "agent:bot2",
+	})
+	require.NoError(t, err)
+
+	// Project C: one attributable message (row_errors = 0).
+	pidC := uuid.NewString()
+	err = s.CreateProject(ctx, &store.Project{
+		ID:   pidC,
+		Name: "g2-projC",
+		Slug: "g2-projC-" + pidC[:8],
+	})
+	require.NoError(t, err)
+
+	senderC := uuid.NewString()
+	recipientC := uuid.NewString()
+	err = s.CreateUser(ctx, &store.User{
+		ID:    senderC,
+		Email: "g2-c@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        recipientC,
+		Name:      "g2-c-agent",
+		Slug:      "g2-c-agent-" + recipientC[:8],
+		ProjectID: pidC,
+	})
+	require.NoError(t, err)
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   pidC,
+		Msg:         "projC attributable",
+		Sender:      "user:" + senderC,
+		SenderID:    senderC,
+		Recipient:   "agent:" + recipientC,
+		RecipientID: recipientC,
+	})
+	require.NoError(t, err)
+
+	// ---- Run the boot hook ----
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	runBootDataMigrations(ctx, s)
+
+	logOutput := buf.String()
+
+	// ---- Parse the summary line: total_residuals ----
+	var summaryLine string
+	for _, line := range strings.Split(logOutput, "\n") {
+		if strings.Contains(line, "Message backfill: all projects complete") {
+			summaryLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, summaryLine,
+		"must find the 'all projects complete' summary line in boot log")
+
+	totalResiduals, ok := extractLoggedInt(summaryLine, "total_residuals")
+	require.True(t, ok,
+		"summary line must include total_residuals=<int>")
+
+	// ---- Parse per-project lines: sum of row_errors ----
+	sumRowErrors := 0
+	projectCount := 0
+	for _, line := range strings.Split(logOutput, "\n") {
+		if !strings.Contains(line, "Message backfill: project completed") {
+			continue
+		}
+		re, reOK := extractLoggedInt(line, "row_errors")
+		require.True(t, reOK,
+			"per-project log line must include row_errors=<int>")
+		sumRowErrors += re
+		projectCount++
+	}
+	require.Equal(t, 3, projectCount,
+		"must find exactly 3 per-project log lines (one per seeded project)")
+
+	// ---- THE GATE ----
+	assert.Equal(t, sumRowErrors, totalResiduals,
+		"GATE G2 (M9a): total_residuals in summary (%d) must equal sum of "+
+			"per-project row_errors (%d). Divergence means the accumulator is "+
+			"double-counting (carry-forward defect) or the wiring between the "+
+			"per-project accumulation and the summary log line is broken.",
+		totalResiduals, sumRowErrors)
+
+	// Sanity: verify the expected values from the fixture.
+	assert.Equal(t, 3, sumRowErrors,
+		"sanity: expected 2 (projA) + 1 (projB) + 0 (projC) = 3 row_errors")
+	assert.Equal(t, 3, totalResiduals,
+		"sanity: total_residuals must be 3")
 }

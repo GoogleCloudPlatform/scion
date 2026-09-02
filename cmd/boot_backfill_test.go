@@ -291,8 +291,10 @@ func TestBootBackfill_RowRefusal_MarkerWritten(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, marker.CompletedAt,
 		"M-1': row-level refusal must NOT block the marker (would livelock on production data)")
-	assert.Greater(t, marker.Residuals, 0,
-		"residual count must be non-zero when rows were refused")
+	// G3 (M9a): exact value — the fixture seeds one message with non-UUID
+	// principals, producing exactly 1 derive refusal (DeriveErrPrincipalPair).
+	assert.Equal(t, 1, marker.Residuals,
+		"GATE G3: residual count must be exactly 1 (one derive-refused message)")
 }
 
 // TestBootBackfill_RunLevelFailure_NoMarker verifies AC-2b: when the
@@ -454,9 +456,12 @@ func TestBootBackfill_Resumption_MonotonicProgress(t *testing.T) {
 	assert.NotNil(t, marker.CompletedAt,
 		"all projects should be done")
 
-	// Residuals should be carried forward from prior boots.
-	assert.GreaterOrEqual(t, marker.Residuals, 5,
-		"residuals from prior boot should be carried forward")
+	// G3 (M9a): exact value — the fixture pre-seeds Residuals=5 with pid1
+	// already done. pid2 and pid3 each have one attributable message
+	// (UUID principals → derive succeeds, row_errors=0). The carried-forward
+	// 5 plus 0+0 from the two new projects gives exactly 5.
+	assert.Equal(t, 5, marker.Residuals,
+		"GATE G3: residuals must be exactly 5 (carried-forward 5 + 0 from pid2 + 0 from pid3)")
 
 	// Verify all projects were covered.
 	_ = allPIDs
@@ -878,9 +883,11 @@ func TestBootBackfill_PanicPreservesProgress(t *testing.T) {
 	assert.True(t, doneSet[pid2], "pid2 was banked before panic; must survive")
 	assert.False(t, doneSet[pid3], "pid3 panicked; must NOT be in projects_done")
 
-	// Residuals carried forward must survive.
-	assert.GreaterOrEqual(t, marker.Residuals, 3,
-		"residuals from prior boot must survive the panic")
+	// G3 (M9a): exact value — the fixture pre-seeds Residuals=3 with pid1
+	// and pid2 done. pid3 panics before processing, so no new residuals
+	// are added. The carried-forward 3 survives unchanged.
+	assert.Equal(t, 3, marker.Residuals,
+		"GATE G3: residuals must be exactly 3 (carried-forward, no new processing before panic)")
 
 	// Global marker must NOT be written (not all projects done).
 	assert.Nil(t, marker.CompletedAt,
