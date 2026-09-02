@@ -940,10 +940,10 @@ func TestOneShotUnknownEventTypeReturnsError(t *testing.T) {
 	// Fire the event directly
 	s.fireEvent(ctx, evt, false)
 
-	// Verify the event was fired but with an error
+	// Handler error → status must be "failed" (not "fired").
 	e := ms.getEvent("unknown-1")
-	if e.Status != store.ScheduledEventFired {
-		t.Errorf("expected status %q, got %q", store.ScheduledEventFired, e.Status)
+	if e.Status != store.ScheduledEventFailed {
+		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
 	}
 	if e.Error == "" {
 		t.Error("expected error message for unknown event type")
@@ -1052,9 +1052,10 @@ func TestEventHandlerErrorIsCaptured(t *testing.T) {
 
 	s.fireEvent(ctx, evt, false)
 
+	// Handler error → status must be "failed" (not "fired").
 	e := ms.getEvent("handler-err-1")
-	if e.Status != store.ScheduledEventFired {
-		t.Errorf("expected status %q, got %q", store.ScheduledEventFired, e.Status)
+	if e.Status != store.ScheduledEventFailed {
+		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
 	}
 	if e.Error != "handler failed: something went wrong" {
 		t.Errorf("expected error message %q, got %q", "handler failed: something went wrong", e.Error)
@@ -1081,9 +1082,10 @@ func TestUnregisteredEventTypeReturnsError(t *testing.T) {
 
 	s.fireEvent(ctx, evt, false)
 
+	// Handler error → status must be "failed" (not "fired").
 	e := ms.getEvent("no-handler-1")
-	if e.Status != store.ScheduledEventFired {
-		t.Errorf("expected status %q, got %q", store.ScheduledEventFired, e.Status)
+	if e.Status != store.ScheduledEventFailed {
+		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
 	}
 	if e.Error != "unknown event type: some_unregistered_type" {
 		t.Errorf("expected error about unknown event type, got %q", e.Error)
@@ -1228,8 +1230,9 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 
 func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	// When a message event fires for an agent that has been deleted,
-	// the handler should mark the event as failed (not return an error
-	// that would be stored with the wrong status).
+	// the handler returns an error so the enclosing scheduler wrapper
+	// (fireEvent / executeSchedule) records status as "failed" with
+	// the error message. Zero dispatch calls.
 	ms := newMockStore()
 
 	// Create the event in the mock store so UpdateScheduledEventStatus finds it.
@@ -1248,18 +1251,14 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	handler := srv.messageEventHandler()
 
 	err := handler(ctx, evt)
-	if err != nil {
-		t.Fatalf("handler should return nil for deleted agents (handles failure internally), got: %s", err)
+	if err == nil {
+		t.Fatal("handler should return error for deleted agents")
 	}
-
-	// Verify the event was marked as failed.
-	e := ms.getEvent("msg-no-agent-1")
-	if e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
+	if !strings.Contains(err.Error(), "target agent deleted") {
+		t.Errorf("error should reference target agent deletion, got: %v", err)
 	}
-	if e.Error != "target agent deleted" {
-		t.Errorf("expected error %q, got %q", "target agent deleted", e.Error)
-	}
+	// Handler no longer owns status recording — production-wrapper tests
+	// (TestC1_FireEvent_*) verify the final persisted status.
 }
 
 func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
@@ -1279,17 +1278,14 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 	handler := srv.messageEventHandler()
 
 	err := handler(ctx, evt)
-	if err != nil {
-		t.Fatalf("handler should return nil for deleted agents (handles failure internally), got: %s", err)
+	if err == nil {
+		t.Fatal("handler should return error for deleted agents")
 	}
-
-	e := ms.getEvent("msg-no-agent-2")
-	if e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
+	if !strings.Contains(err.Error(), "target agent deleted") {
+		t.Errorf("error should reference target agent deletion, got: %v", err)
 	}
-	if e.Error != "target agent deleted" {
-		t.Errorf("expected error %q, got %q", "target agent deleted", e.Error)
-	}
+	// Handler no longer owns status recording — production-wrapper tests
+	// (TestC1_FireEvent_*) verify the final persisted status.
 }
 
 func TestMultipleEventHandlers(t *testing.T) {

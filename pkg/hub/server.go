@@ -3450,9 +3450,13 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		cancel()
 	}
 
-	// Update event status
+	// Update event status. If the handler returned an error, record as
+	// failed rather than fired — matches fireEvent semantics (O-R3-1).
 	firedAt := time.Now()
 	status := store.ScheduledEventFired
+	if errMsg != "" {
+		status = store.ScheduledEventFailed
+	}
 	_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &firedAt, errMsg)
 
 	// Update schedule run state

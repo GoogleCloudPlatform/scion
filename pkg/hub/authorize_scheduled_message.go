@@ -238,6 +238,7 @@ func (s *Server) authorizeScheduledMessageFire(
 
 // NOTE: markScheduledEventFailed was removed. Authorization denials now return
 // errors directly from the handler, and the enclosing scheduler wrapper
-// (fireEvent / executeSchedule) owns status recording. This eliminates the
-// dual-status-update race where markScheduledEventFailed set "failed" and the
-// wrapper subsequently overwrote it to "fired" (R2 review finding O-R2-1).
+// (fireEvent / executeSchedule) owns status recording — setting
+// ScheduledEventFailed when the handler returns an error (R3 O-R3-1).
+// This eliminates the dual-status-update race where markScheduledEventFailed
+// set "failed" and the wrapper subsequently overwrote it (R2 O-R2-1).
