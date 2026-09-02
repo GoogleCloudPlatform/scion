@@ -273,6 +273,142 @@ func TestDEF128b_NonManageNonUser_Denied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// MUT-A: fail-closed guard — agent identity (not UserIdentity) with read
+// access reaches the guard; removing the guard changes 403 → 501.
+// ---------------------------------------------------------------------------
+
+func TestDEF128b_MutA_AgentNonUser_FailClosed(t *testing.T) {
+	// This test catches MUT-A: reverting the fail-closed guard
+	//   if user == nil { Forbidden(w); return }
+	// to a no-op. An agent identity passes CheckAccess(ActionRead) via
+	// the project read baseline but is NOT a UserIdentity. With the fix,
+	// GetUserIdentityFromContext returns nil → 403. Without the fix, the
+	// handler falls through to logQueryService (nil) → 501. The test
+	// asserts 403, so MUT-A produces a red (501 ≠ 403).
+	//
+	// The Cloud Logging query is never issued because logQueryService is
+	// nil — the distinction is purely between the guard (403) and the
+	// nil service check (501).
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// srv.logQueryService is nil by default from testServer — the
+	// handler's "not_implemented" path returns 501 if the guard is absent.
+
+	// Create a project and agent.
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "def128b-muta-project",
+		Slug: "def128b-muta-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	agent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "def128b-muta-agent",
+		Slug:      "def128b-muta-agent",
+		ProjectID: project.ID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Build an agent identity in the SAME project with ScopeProjectRead.
+	// This passes checkAgentReadScope and, via the "agent project read
+	// baseline" in CheckAccess, passes ActionRead while failing ActionManage.
+	// Crucially, GetUserIdentityFromContext returns nil for an agent.
+	callerAgent := authzHelperAgent(project.ID, ScopeProjectRead)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/agents/"+agent.ID+"/message-logs", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), callerAgent))
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentMessageLogs(rec, req, agent.ID)
+
+	// With the fix: 403 (fail-closed guard fires).
+	// With MUT-A:  501 (logQueryService == nil, guard deleted).
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("MUT-A: expected 403 from fail-closed guard, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MUT-B: logAuthzDenial audit trail — removing the call must fail the test.
+// ---------------------------------------------------------------------------
+
+func TestDEF128b_MutB_DenialAuditLog(t *testing.T) {
+	// This test catches MUT-B: deleting the logAuthzDenial(...) call in
+	// handleAgentMessageLogs. A non-manage user who also fails ActionRead
+	// must produce both a 403 AND a structured "authorization denied" log
+	// record. Removing logAuthzDenial still returns 403 but drops the
+	// audit record — the test's log assertion fails.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	buf := authzHelperCaptureLogs(t)
+
+	// Create a project and agent.
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "def128b-mutb-project",
+		Slug: "def128b-mutb-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	agent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "def128b-mutb-agent",
+		Slug:      "def128b-mutb-agent",
+		ProjectID: project.ID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Use a member user: not admin, not owner, no policies granting read
+	// on this agent. CheckAccess(ActionManage) and CheckAccess(ActionRead)
+	// both deny. The handler should call logAuthzDenial then return 403.
+	member := authzHelperMember()
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/agents/"+agent.ID+"/message-logs", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), member))
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentMessageLogs(rec, req, agent.ID)
+
+	// Assert 403.
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("MUT-B: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Assert the denial audit record was emitted (MUT-B deletes this call).
+	denial := authzHelperDenialRecord(t, buf)
+	if denial == nil {
+		t.Fatalf("MUT-B: expected 'authorization denied' log record, got: %s",
+			buf.String())
+	}
+
+	// Verify the record carries the correct context fields.
+	for key, want := range map[string]any{
+		"resource_type": "agent",
+		"resource_id":   agent.ID,
+		"action":        string(ActionRead),
+	} {
+		if got := denial[key]; got != want {
+			t.Errorf("denial log %q = %v, want %v", key, got, want)
+		}
+	}
+	if _, ok := denial["reason"]; !ok {
+		t.Errorf("denial log missing 'reason' field: %v", denial)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // DEF-128b defect #3: ParticipantID unconditional on LogID
 // ---------------------------------------------------------------------------
 
