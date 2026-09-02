@@ -405,7 +405,7 @@ export class ScionPageAgentCreate extends LitElement {
         await Promise.all([
           fetch('/api/v1/projects?mine=true&limit=200', { credentials: 'include' }),
           fetch('/api/v1/runtime-brokers?limit=200', { credentials: 'include' }),
-          fetch('/api/v1/templates?status=active&limit=200', { credentials: 'include' }),
+          apiFetch('/api/v1/templates?status=active&limit=100'),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
