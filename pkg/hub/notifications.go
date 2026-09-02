@@ -385,6 +385,22 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	structuredMsg.RecipientID = subscriber.ID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
+	// Phase 9f: render delivery envelope for notification dispatches.
+	// No persisted row and no conversation exist for agent-to-agent
+	// state-change notifications, so MessageID and ConvResult are
+	// honestly absent.
+	if nd.writeDenyEnabled != nil && nd.writeDenyEnabled() {
+		var ts time.Time
+		if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
+			ts = t
+		}
+		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			ConvResult: nil,
+			Msg:        structuredMsg,
+			CreatedAt:  ts,
+		})
+	}
+
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
