@@ -23,7 +23,7 @@
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary)
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary)
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
-- [credential.token.revoke](#credentialtokenrevoke) — Revoke a user access token
+- [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
@@ -839,6 +839,9 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestRS4_IssuerAuthority`
+- `pkg/hub:TestRS4_TargetScope`
+- `pkg/hub:TestRS4_Audit_Mint`
 
 ### Exemptions
 
@@ -850,12 +853,13 @@
 
 **Domain:** credential
 
-**Description:** Revoke a user access token
+**Description:** Revoke or delete a user access token
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | POST | `/api/v1/auth/tokens/{id}/revoke` |
 | http_route | DELETE | `/api/v1/auth/tokens/{id}` |
 
 **Principals:** `user`
@@ -877,7 +881,7 @@
 
 - **Event Type:** `credential.token.revoke`
 - **Context Fields:** actor_id
-- **Before Fields:** token_id
+- **Before Fields:** token_id, action
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
@@ -885,6 +889,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestRS4_Audit_Revoke`
+- `pkg/hub:TestRS4_Audit_Delete`
 
 ### Exemptions
 

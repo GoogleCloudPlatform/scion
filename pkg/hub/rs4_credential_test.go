@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"go/parser"
 	"go/token"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +102,51 @@ func rs4ExtractError(resp map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+// doRequestWithCredential makes a direct handler call with a specific
+// CredentialContext and UserIdentity injected into the request context,
+// bypassing auth middleware. This tests that the credential caveat guard
+// rejects credential kinds that would otherwise pass identity-type checks
+// (federation, broker-on-behalf-of, unknown/empty).
+func doRequestWithCredential(t *testing.T, srv *Server, method, path string, body interface{}, identity UserIdentity, cred CredentialContext) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	ctx := req.Context()
+	ctx = contextWithIdentity(ctx, identity)
+	ctx = context.WithValue(ctx, userContextKey{}, identity)
+	ctx = contextWithCredentialContext(ctx, cred)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	// Route to the correct handler directly, bypassing auth middleware.
+	switch {
+	case method == http.MethodGet && path == "/api/v1/auth/tokens":
+		srv.handleListTokens(rec, req)
+	case method == http.MethodPost && path == "/api/v1/auth/tokens":
+		srv.handleCreateToken(rec, req)
+	case method == http.MethodPost && strings.HasSuffix(path, "/revoke"):
+		id := strings.TrimPrefix(strings.TrimSuffix(path, "/revoke"), "/api/v1/auth/tokens/")
+		srv.handleRevokeToken(rec, req, id)
+	case method == http.MethodDelete && strings.HasPrefix(path, "/api/v1/auth/tokens/"):
+		id := strings.TrimPrefix(path, "/api/v1/auth/tokens/")
+		srv.handleDeleteToken(rec, req, id)
+	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/auth/tokens/"):
+		id := strings.TrimPrefix(path, "/api/v1/auth/tokens/")
+		srv.handleGetToken(rec, req, id)
+	default:
+		t.Fatalf("doRequestWithCredential: unsupported route %s %s", method, path)
+	}
+	return rec
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +409,71 @@ func TestRS4_CredentialCaveat(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, "T-C6: UAT must not delete tokens")
 	})
 
+	t.Run("T-C7_federation_credential_denied", func(t *testing.T) {
+		// A federated user implements UserIdentity but carries CredentialKindFederation.
+		// The credential-kind guard must reject it even though the identity type
+		// would pass an identity-type check.
+		srv, s := testServer(t)
+		projectID := tid("rs4-c7-p")
+		ownerID := tid("rs4-c7-o")
+		rs4Project(t, s, projectID, ownerID)
+
+		fedUser := NewAuthenticatedUser(ownerID, ownerID+"@fed.test", "Fed User", "member", string(ClientTypeAPI))
+		fedCred := CredentialContext{Kind: CredentialKindFederation, Type: "federated_user"}
+
+		routes := []struct {
+			name   string
+			method string
+			path   string
+			body   interface{}
+		}{
+			{"create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "projectId": projectID, "scopes": []string{"agent:read"}}},
+			{"list", http.MethodGet, "/api/v1/auth/tokens", nil},
+			{"get", http.MethodGet, "/api/v1/auth/tokens/fake-id", nil},
+			{"revoke", http.MethodPost, "/api/v1/auth/tokens/fake-id/revoke", nil},
+			{"delete", http.MethodDelete, "/api/v1/auth/tokens/fake-id", nil},
+		}
+		for _, rt := range routes {
+			t.Run(rt.name, func(t *testing.T) {
+				rec := doRequestWithCredential(t, srv, rt.method, rt.path, rt.body, fedUser, fedCred)
+				assert.Equal(t, http.StatusForbidden, rec.Code,
+					"T-C7/%s: federation credential must be denied", rt.name)
+			})
+		}
+	})
+
+	t.Run("T-C8_broker_credential_denied", func(t *testing.T) {
+		// Broker HMAC on-behalf-of installs an ordinary user identity with
+		// CredentialKindBroker. The credential-kind guard must reject it.
+		srv, s := testServer(t)
+		projectID := tid("rs4-c8-p")
+		ownerID := tid("rs4-c8-o")
+		rs4Project(t, s, projectID, ownerID)
+
+		brokerUser := NewAuthenticatedUser(ownerID, ownerID+"@broker.test", "Broker User", "member", string(ClientTypeAPI))
+		brokerCred := CredentialContext{Kind: CredentialKindBroker, ID: ownerID, Type: "user"}
+
+		routes := []struct {
+			name   string
+			method string
+			path   string
+			body   interface{}
+		}{
+			{"create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "projectId": projectID, "scopes": []string{"agent:read"}}},
+			{"list", http.MethodGet, "/api/v1/auth/tokens", nil},
+			{"get", http.MethodGet, "/api/v1/auth/tokens/fake-id", nil},
+			{"revoke", http.MethodPost, "/api/v1/auth/tokens/fake-id/revoke", nil},
+			{"delete", http.MethodDelete, "/api/v1/auth/tokens/fake-id", nil},
+		}
+		for _, rt := range routes {
+			t.Run(rt.name, func(t *testing.T) {
+				rec := doRequestWithCredential(t, srv, rt.method, rt.path, rt.body, brokerUser, brokerCred)
+				assert.Equal(t, http.StatusForbidden, rec.Code,
+					"T-C8/%s: broker credential must be denied", rt.name)
+			})
+		}
+	})
+
 	t.Run("T-C9_no_credential", func(t *testing.T) {
 		srv, _ := testServer(t)
 
@@ -370,6 +482,42 @@ func TestRS4_CredentialCaveat(t *testing.T) {
 				"name": "test", "projectId": "x", "scopes": []string{"agent:read"},
 			})
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "T-C9: no credential must be 401")
+	})
+
+	t.Run("T-C10_agent_jwt_credential_denied", func(t *testing.T) {
+		// Agent JWT credentials carry CredentialKindAgentJWT. Even with a
+		// UserIdentity in the context, the credential-kind guard must reject.
+		srv, s := testServer(t)
+		projectID := tid("rs4-c10-p")
+		ownerID := tid("rs4-c10-o")
+		rs4Project(t, s, projectID, ownerID)
+
+		agentUser := NewAuthenticatedUser(ownerID, ownerID+"@agent.test", "Agent User", "member", string(ClientTypeAPI))
+		agentCred := CredentialContext{Kind: CredentialKindAgentJWT, ID: "agent-jwt-id"}
+
+		rec := doRequestWithCredential(t, srv, http.MethodPost, "/api/v1/auth/tokens",
+			map[string]interface{}{"name": "x", "projectId": projectID, "scopes": []string{"agent:read"}},
+			agentUser, agentCred)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"T-C10: agent JWT credential must be denied")
+	})
+
+	t.Run("T-C11_empty_credential_kind_denied", func(t *testing.T) {
+		// An empty credential kind (e.g. legacy test context or missing middleware)
+		// must be rejected (fail closed).
+		srv, s := testServer(t)
+		projectID := tid("rs4-c11-p")
+		ownerID := tid("rs4-c11-o")
+		rs4Project(t, s, projectID, ownerID)
+
+		user := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "User", "member", string(ClientTypeAPI))
+		emptyCred := CredentialContext{} // empty Kind
+
+		rec := doRequestWithCredential(t, srv, http.MethodPost, "/api/v1/auth/tokens",
+			map[string]interface{}{"name": "x", "projectId": projectID, "scopes": []string{"agent:read"}},
+			user, emptyCred)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"T-C11: empty credential kind must be denied (fail closed)")
 	})
 }
 

@@ -672,18 +672,22 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// requireSessionCredential enforces the A1 credential caveat: only session/dev
-// credentials may perform token-management operations. UATs, agent JWTs, broker
-// tokens, and any other non-session identity are rejected.
-func requireSessionCredential(user UserIdentity) error {
-	if _, ok := user.(*ScopedUserIdentity); ok {
+// requireSessionCredential enforces the A1 credential caveat: only interactive
+// session or dev credentials may perform token-management operations.
+//
+// The guard uses the CredentialContext recorded by authentication middleware
+// (not identity type), so broker-on-behalf-of, federation, UAT, and agent JWT
+// credentials are all rejected even when they present a valid UserIdentity.
+// An empty or unknown credential kind is also rejected (fail closed).
+func requireSessionCredential(ctx context.Context) error {
+	credential := GetCredentialContextFromContext(ctx)
+	switch credential.Kind {
+	case CredentialKindInteractive, CredentialKindDev:
+		return nil
+	default:
+		// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
 		return ErrUATCredentialDenied
 	}
-	// Agent identities are also rejected.
-	if _, ok := user.(AgentIdentity); ok {
-		return ErrUATCredentialDenied
-	}
-	return nil
 }
 
 // handleTokens routes user access token requests.
@@ -741,7 +745,7 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(user); err != nil {
+	if err := requireSessionCredential(r.Context()); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
@@ -769,7 +773,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(user); err != nil {
+	if err := requireSessionCredential(r.Context()); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
@@ -822,7 +826,7 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(user); err != nil {
+	if err := requireSessionCredential(r.Context()); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
@@ -846,7 +850,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(user); err != nil {
+	if err := requireSessionCredential(r.Context()); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
@@ -869,7 +873,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(user); err != nil {
+	if err := requireSessionCredential(r.Context()); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
