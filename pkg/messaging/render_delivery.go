@@ -51,13 +51,14 @@ type RenderDeliveryInput struct {
 // conversation context into the fully rendered agent-facing envelope text.
 //
 // Invariants:
-//   - Never fabricates an identifier. Where data is absent, the field is
-//     omitted rather than synthesised.
-//   - reply_to is always omitted in this phase. A genuine reply target
-//     requires work in 9c(iii); until then, absent is correct and a
-//     fabricated thread ID is not.
-//   - When ConvResult is nil, the envelope carries no conversation key
-//     (honest absence per §4.3).
+//   - Never fabricates an identifier. PersistedIdentity carries the real
+//     message ID into MapLegacyEnvelope so that both the Message and its
+//     Addressees share the same genuine identity from the persisted row.
+//   - reply_to is omitted when PersistedIdentity.ReplyToID is empty. In
+//     this phase no genuine reply target exists yet; absent is correct.
+//   - When ConvResult is nil the envelope carries no conversation key
+//     (honest absence per §4.3): convInfo is a nil *ConversationInfo and
+//     the JSON tag omitempty suppresses the field.
 func RenderDeliveryText(in RenderDeliveryInput) string {
 	if in.Msg == nil {
 		return ""
@@ -68,22 +69,19 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 		return in.Msg.Msg
 	}
 
-	// Use MapLegacyEnvelope for the type→kind/intent/event conversion,
-	// PrincipalRef construction, visibility mapping and addressee building.
-	// Then override the three fabricated identifiers with real data.
-	msg, addrs, err := MapLegacyEnvelope(in.Msg)
+	// Pass the real persisted identity into MapLegacyEnvelope so the
+	// message ID reaches both the Message and its Addressees structurally,
+	// rather than overriding after the fact (which left addressees carrying
+	// the fabricated ID while the message carried the real one).
+	msg, addrs, err := MapLegacyEnvelope(in.Msg, PersistedIdentity{
+		MessageID: in.MessageID,
+		// ReplyToID intentionally empty: no genuine reply target exists
+		// yet. Empty means omit, which is correct per the design rule.
+	})
 	if err != nil {
 		// MapLegacyEnvelope only fails on nil input, which we checked.
 		return in.Msg.Msg
 	}
-
-	// Override fabricated message ID with the persisted row's ID.
-	msg.ID = in.MessageID
-
-	// Override fabricated reply_to. In this phase, always omit — a genuine
-	// reply target does not exist yet (9c(iii)). The hard constraint says:
-	// an identifier that dereferences to nothing is worse than absent.
-	msg.ReplyToID = nil
 
 	// Override timestamp if we have a real one from the persisted row.
 	if !in.CreatedAt.IsZero() {
@@ -91,9 +89,10 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 	}
 
 	// Build ConversationInfo from the enriched ConversationResult.
-	var convInfo ConversationInfo
+	// nil when ConvResult is absent — FormatNewDelivery omits the key.
+	var convInfo *ConversationInfo
 	if in.ConvResult != nil {
-		convInfo = ConversationInfo{
+		convInfo = &ConversationInfo{
 			ID:      in.ConvResult.ConversationID,
 			Kind:    in.ConvResult.Kind,
 			Surface: in.ConvResult.Surface,

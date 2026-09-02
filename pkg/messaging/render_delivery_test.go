@@ -79,13 +79,12 @@ func TestRenderDeliveryText_RawBypass(t *testing.T) {
 }
 
 func TestRenderDeliveryText_UsesRealMessageID(t *testing.T) {
-	// RenderDeliveryText sets msg.ID to the real persisted ID (not the
-	// fabricated "legacy-..." from MapLegacyEnvelope). The current
-	// DeliveryEnvelope struct does not serialise msg.ID to JSON yet —
-	// that wire field arrives in Phase 11. This test verifies:
+	// RenderDeliveryText passes the real persisted ID via PersistedIdentity
+	// into MapLegacyEnvelope, so both the Message and its Addressees carry
+	// the genuine identity — no post-hoc override needed. This test verifies:
 	//   1. The fabricated "legacy-" ID pattern does NOT leak into the output.
 	//   2. The output is valid (non-empty, delimitered envelope).
-	//   3. reply_to is omitted (Phase 9b hard constraint).
+	//   3. reply_to is omitted (no genuine reply target in this phase).
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
@@ -112,16 +111,16 @@ func TestRenderDeliveryText_UsesRealMessageID(t *testing.T) {
 		t.Errorf("msg = %q, want %q", env.Msg, "Hello agent")
 	}
 
-	// reply_to must be absent.
+	// reply_to must be absent (PersistedIdentity.ReplyToID is empty → omit).
 	raw := extractRawJSON(t, result)
 	if strings.Contains(raw, `"reply_to"`) {
-		t.Error("envelope contains reply_to, but Phase 9b must always omit it")
+		t.Error("envelope contains reply_to, but no genuine reply target exists")
 	}
 }
 
 func TestRenderDeliveryText_ReplyToAlwaysOmitted(t *testing.T) {
 	// Even if the StructuredMessage has a ThreadID, the render helper
-	// must omit reply_to in Phase 9b (hard constraint: never fabricate).
+	// must omit reply_to (PersistedIdentity.ReplyToID is empty → omit).
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
@@ -140,7 +139,7 @@ func TestRenderDeliveryText_ReplyToAlwaysOmitted(t *testing.T) {
 
 	raw := extractRawJSON(t, result)
 	if strings.Contains(raw, `"reply_to"`) {
-		t.Error("envelope contains reply_to, but Phase 9b must always omit it")
+		t.Error("envelope contains reply_to, but no genuine reply target exists")
 	}
 }
 
@@ -199,10 +198,16 @@ func TestRenderDeliveryText_NilConvResult_OmitsConversation(t *testing.T) {
 		CreatedAt:  now,
 	})
 
+	// The conversation key must be entirely absent from the JSON, not
+	// present with empty fields. This is the §4.3 honest-absence rule.
+	raw := extractRawJSON(t, result)
+	if strings.Contains(raw, `"conversation"`) {
+		t.Error("envelope contains \"conversation\" key, want omitted when ConvResult is nil")
+	}
+
 	env := extractDeliveryEnvelope(t, result)
-	// When ConvResult is nil, conversation should have zero-value fields (honest absence).
-	if env.Conversation.ID != "" {
-		t.Errorf("conversation.id = %q, want empty (nil ConvResult)", env.Conversation.ID)
+	if env.Conversation != nil {
+		t.Errorf("Conversation = %+v, want nil (honest absence)", env.Conversation)
 	}
 }
 
@@ -351,12 +356,16 @@ func TestRenderDeliveryTextWithLookup_LookupFails_OmitsConversation(t *testing.T
 		CreatedAt:  now,
 	})
 
-	// Should still produce a valid envelope (honest absence).
-	env := extractDeliveryEnvelope(t, result)
-	if env.Conversation.ID != "" {
-		t.Errorf("conversation.id = %q, want empty (lookup failure)", env.Conversation.ID)
+	// Should still produce a valid envelope with honest absence.
+	raw := extractRawJSON(t, result)
+	if strings.Contains(raw, `"conversation"`) {
+		t.Error("envelope contains \"conversation\" key, want omitted on lookup failure")
 	}
-	// But the message should still be rendered.
+	env := extractDeliveryEnvelope(t, result)
+	if env.Conversation != nil {
+		t.Errorf("Conversation = %+v, want nil (lookup failure)", env.Conversation)
+	}
+	// Message should still be rendered.
 	if env.Msg != "Test" {
 		t.Errorf("msg = %q, want %q", env.Msg, "Test")
 	}
@@ -384,9 +393,13 @@ func TestRenderDeliveryTextWithLookup_EmptyConversationID_NoLookup(t *testing.T)
 		CreatedAt:  now,
 	})
 
+	raw := extractRawJSON(t, result)
+	if strings.Contains(raw, `"conversation"`) {
+		t.Error("envelope contains \"conversation\" key, want omitted when no ConversationID")
+	}
 	env := extractDeliveryEnvelope(t, result)
-	if env.Conversation.ID != "" {
-		t.Errorf("conversation.id = %q, want empty", env.Conversation.ID)
+	if env.Conversation != nil {
+		t.Errorf("Conversation = %+v, want nil", env.Conversation)
 	}
 	if env.Msg != "No conversation" {
 		t.Errorf("msg = %q, want %q", env.Msg, "No conversation")
