@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -538,7 +540,7 @@ func TestRS4_Lifecycle(t *testing.T) {
 			"T-L1: token for deleted project must be denied (got %d)", rec.Code)
 	})
 
-	t.Run("T-L4_later_grant_does_not_enlarge_token", func(t *testing.T) {
+	t.Run("T-L4_token_scope_caveat_enforced_on_existing_resource", func(t *testing.T) {
 		srv, s := testServer(t)
 		ctx := context.Background()
 
@@ -546,17 +548,24 @@ func TestRS4_Lifecycle(t *testing.T) {
 		ownerID := tid("rs4-l4-o")
 		rs4Project(t, s, projectID, ownerID)
 
+		// Create a real agent in the project so 404 is not the reason for denial.
+		agentID := tid("rs4-l4-agent")
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID:        agentID,
+			Slug:      "rs4-l4-agent",
+			ProjectID: projectID,
+			Name:      "l4-agent",
+			CreatedBy: ownerID,
+			Phase:     "running",
+		}))
+
 		// Mint with only agent:read.
 		uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
 
-		// User now has all owner permissions. But the token is caveated to agent:read only.
-		// Try to use the token for agent:delete — must be denied.
-		rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete, "/api/v1/projects/"+projectID+"/agents/nonexistent", nil)
-		// Should be denied by UAT scope enforcement, not 404.
-		// The enforceUATConstraints check will deny agent:delete since the token only has agent:read.
-		assert.True(t, rec.Code == http.StatusForbidden || rec.Code == http.StatusNotFound,
-			"T-L4: later grant must not enlarge token beyond its scope caveat (got %d)", rec.Code)
-		_ = ctx
+		// Try to delete the known agent using the UAT — scope caveat enforces denial.
+		rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete, "/api/v1/projects/"+projectID+"/agents/"+agentID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"T-L4: token with agent:read scope must not delete an existing agent (got %d)", rec.Code)
 	})
 }
 
@@ -604,13 +613,15 @@ func TestRS4_Concurrency_MintAtCap(t *testing.T) {
 	for range successes {
 		successCount++
 	}
-	// With SQLite serialization, exactly one should succeed.
-	assert.LessOrEqual(t, successCount, 1, "T-X1: at most one concurrent mint at cap should succeed")
+	// With SQLite serialization, exactly one should succeed (all contenders
+	// serialize through LockUserForTokens). Assert == 1 to confirm the
+	// successful mint, not merely at-most-one.
+	assert.Equal(t, 1, successCount, "T-X1: exactly one concurrent mint at cap should succeed")
 
-	// Verify final count <= cap.
+	// Verify final count == cap.
 	count, err := s.CountUserAccessTokens(context.Background(), ownerID)
 	require.NoError(t, err)
-	assert.LessOrEqual(t, count, store.UATMaxPerUser, "T-X1: total count must not exceed cap")
+	assert.Equal(t, store.UATMaxPerUser, count, "T-X1: total count must equal cap")
 }
 
 func TestRS4_DoubleRevoke(t *testing.T) {
@@ -872,3 +883,430 @@ func TestRS4_MutationAudit_CredentialRevocation_Asserting(t *testing.T) {
 	assert.Contains(t, r.BeforeSummary, `"action":"delete"`,
 		"T-A9: audit must distinguish delete from revoke")
 }
+
+// ---------------------------------------------------------------------------
+// R1 Required: A2 negative test — hub-admin + basic project member
+// ---------------------------------------------------------------------------
+
+func TestRS4_A2_SystemPermDoesNotInflateCeiling(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-a2neg-p")
+	ownerID := tid("rs4-a2neg-o")
+	hubAdminID := tid("rs4-a2neg-ha")
+	rs4Project(t, s, projectID, ownerID)
+
+	// Create a user and give them hub-admin (system scope) and basic project member.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com",
+		DisplayName: "HubAdmin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, hubAdminID)
+
+	// Grant system-scoped hub-admin role (includes agent.delete at system level).
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      hubAdminID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Grant project-member role (does NOT include agent.delete).
+	rs4AddProjectRole(t, s, hubAdminID, projectID, store.ProjectRoleMember)
+
+	// Try to mint a token with agent:delete — should fail because the user
+	// only holds agent:delete at system scope, not at project scope (A2).
+	mintCtx := rs4MintContext(hubAdminID)
+	_, _, err = srv.uatService.CreateToken(mintCtx, hubAdminID, "a2-neg", projectID,
+		[]string{"agent:delete"}, nil)
+	assert.ErrorIs(t, err, ErrUATScopeViolation,
+		"A2: hub-admin's system-level agent:delete must not inflate project token ceiling")
+
+	// Confirm they CAN mint scopes they hold at project level.
+	_, _, err = srv.uatService.CreateToken(mintCtx, hubAdminID, "a2-pos", projectID,
+		[]string{"agent:read"}, nil)
+	assert.NoError(t, err, "A2: project-member's project-level agent:read should succeed")
+}
+
+// ---------------------------------------------------------------------------
+// R2 Required: Failure injection (T-A4, T-A5, T-A6, commit failure)
+// ---------------------------------------------------------------------------
+
+// rs4FailingStore extends the RS1 failingStore pattern for UAT operations.
+type rs4FailingStore struct {
+	store.Store
+	createMutationAuditErr   error
+	createUserAccessTokenErr error
+	commitErr                error
+}
+
+func (f *rs4FailingStore) CreateMutationAudit(ctx context.Context, record *store.MutationAuditRecord) error {
+	if f.createMutationAuditErr != nil {
+		return f.createMutationAuditErr
+	}
+	return f.Store.CreateMutationAudit(ctx, record)
+}
+
+func (f *rs4FailingStore) CreateUserAccessToken(ctx context.Context, token *store.UserAccessToken) error {
+	if f.createUserAccessTokenErr != nil {
+		return f.createUserAccessTokenErr
+	}
+	return f.Store.CreateUserAccessToken(ctx, token)
+}
+
+func (f *rs4FailingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		wrappedTx := &rs4FailingStore{
+			Store:                    tx,
+			createMutationAuditErr:   f.createMutationAuditErr,
+			createUserAccessTokenErr: f.createUserAccessTokenErr,
+		}
+		if err := fn(wrappedTx); err != nil {
+			return err
+		}
+		if f.commitErr != nil {
+			return f.commitErr
+		}
+		return nil
+	})
+}
+
+func TestRS4_FailureInjection_AuditFailMintRollback(t *testing.T) {
+	// T-A4: When audit write fails during mint, no token must be created.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-a4-p")
+	ownerID := tid("rs4-a4-o")
+	rs4Project(t, s, projectID, ownerID)
+
+	// Count tokens before.
+	countBefore, err := s.CountUserAccessTokens(ctx, ownerID)
+	require.NoError(t, err)
+
+	// Inject audit failure.
+	fs := &rs4FailingStore{
+		Store:                  s,
+		createMutationAuditErr: errors.New("injected: audit write failure"),
+	}
+	origStore := srv.uatService.store
+	srv.uatService.store = fs
+	defer func() { srv.uatService.store = origStore }()
+
+	mintCtx := rs4MintContext(ownerID)
+	_, _, mintErr := srv.uatService.CreateToken(mintCtx, ownerID, "a4-fail", projectID,
+		[]string{"agent:read"}, nil)
+	assert.Error(t, mintErr, "T-A4: audit failure must cause mint to fail")
+
+	// Verify rollback: no new token.
+	countAfter, err := s.CountUserAccessTokens(ctx, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, countBefore, countAfter,
+		"T-A4: audit failure must roll back token creation (before=%d after=%d)", countBefore, countAfter)
+}
+
+func TestRS4_FailureInjection_CreateFailNoAudit(t *testing.T) {
+	// T-A5: When token creation fails, no audit record must be created.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-a5-p")
+	ownerID := tid("rs4-a5-o")
+	rs4Project(t, s, projectID, ownerID)
+
+	// Count audit records before.
+	auditsBefore, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: "credential_create",
+		Limit:        1000,
+	})
+	require.NoError(t, err)
+	countBefore := len(auditsBefore)
+
+	// Inject token creation failure.
+	fs := &rs4FailingStore{
+		Store:                    s,
+		createUserAccessTokenErr: errors.New("injected: token create failure"),
+	}
+	origStore := srv.uatService.store
+	srv.uatService.store = fs
+	defer func() { srv.uatService.store = origStore }()
+
+	mintCtx := rs4MintContext(ownerID)
+	_, _, mintErr := srv.uatService.CreateToken(mintCtx, ownerID, "a5-fail", projectID,
+		[]string{"agent:read"}, nil)
+	assert.Error(t, mintErr, "T-A5: create failure must surface")
+
+	// Verify: no new audit record.
+	auditsAfter, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: "credential_create",
+		Limit:        1000,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, countBefore, len(auditsAfter),
+		"T-A5: create failure must roll back audit record")
+}
+
+func TestRS4_FailureInjection_AuditFailRevokeUnchanged(t *testing.T) {
+	// T-A6: When audit write fails during revoke, token state must not change.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-a6-p")
+	ownerID := tid("rs4-a6-o")
+	rs4Project(t, s, projectID, ownerID)
+
+	// Mint a token first.
+	mintCtx := rs4MintContext(ownerID)
+	_, token, err := srv.uatService.CreateToken(mintCtx, ownerID, "a6-token", projectID,
+		[]string{"agent:read"}, nil)
+	require.NoError(t, err)
+
+	// Verify token is active.
+	stored, err := s.GetUserAccessToken(ctx, token.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Revoked, "T-A6: token should be active before revoke attempt")
+
+	// Inject audit failure during revoke.
+	fs := &rs4FailingStore{
+		Store:                  s,
+		createMutationAuditErr: errors.New("injected: audit write failure"),
+	}
+	origStore := srv.uatService.store
+	srv.uatService.store = fs
+	defer func() { srv.uatService.store = origStore }()
+
+	revokeErr := srv.uatService.RevokeToken(mintCtx, ownerID, token.ID)
+	assert.Error(t, revokeErr, "T-A6: audit failure must cause revoke to fail")
+
+	// Verify: token is still active (revoke rolled back).
+	stored, err = s.GetUserAccessToken(ctx, token.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Revoked,
+		"T-A6: audit failure must roll back revocation — token must still be active")
+}
+
+func TestRS4_FailureInjection_CommitFailNoResponse(t *testing.T) {
+	// Commit failure: no successful response or persistence.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-commit-p")
+	ownerID := tid("rs4-commit-o")
+	rs4Project(t, s, projectID, ownerID)
+
+	countBefore, err := s.CountUserAccessTokens(ctx, ownerID)
+	require.NoError(t, err)
+
+	fs := &rs4FailingStore{
+		Store:     s,
+		commitErr: errors.New("injected: commit failure"),
+	}
+	origStore := srv.uatService.store
+	srv.uatService.store = fs
+	defer func() { srv.uatService.store = origStore }()
+
+	mintCtx := rs4MintContext(ownerID)
+	_, _, mintErr := srv.uatService.CreateToken(mintCtx, ownerID, "commit-fail", projectID,
+		[]string{"agent:read"}, nil)
+	assert.Error(t, mintErr, "commit failure must not produce success")
+
+	countAfter, err := s.CountUserAccessTokens(ctx, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, countBefore, countAfter, "commit failure must not persist token")
+}
+
+// ---------------------------------------------------------------------------
+// R2 Required: Group-derived authority (T-I5, T-P7)
+// ---------------------------------------------------------------------------
+
+func TestRS4_GroupDerivedPermission(t *testing.T) {
+	// T-I5: Permission granted through group membership is usable for the ceiling.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-i5-p")
+	ownerID := tid("rs4-i5-o")
+	groupUserID := tid("rs4-i5-gu")
+	rs4Project(t, s, projectID, ownerID)
+
+	// Create the user.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: groupUserID, Email: groupUserID + "@test.com",
+		DisplayName: "GroupUser", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, groupUserID)
+
+	// Create a group and add the user.
+	groupID := tid("rs4-i5-g")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID:   groupID,
+		Name: "RS4 I5 Group",
+		Slug: "rs4-i5-group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    groupID,
+		MemberType: "user",
+		MemberID:   groupUserID,
+		Role:       "member",
+	}))
+
+	// Grant the GROUP (not the user directly) a project admin role binding.
+	// project-owner is direct-user-only; project-admin allows group principals.
+	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: adminRD.ID,
+		PrincipalType:    "group",
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Mint a token — should succeed because group-derived admin permissions include agent:create.
+	mintCtx := rs4MintContext(groupUserID)
+	_, _, err = srv.uatService.CreateToken(mintCtx, groupUserID, "i5-group", projectID,
+		[]string{"agent:create"}, nil)
+	assert.NoError(t, err, "T-I5: group-derived project permission should allow minting")
+}
+
+// ---------------------------------------------------------------------------
+// R2 Required: Activation windows (T-I6, T-P8)
+// ---------------------------------------------------------------------------
+
+func TestRS4_FutureBindingDenied(t *testing.T) {
+	// T-I6: A binding with NotBefore in the future must not grant authority.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-i6-p")
+	ownerID := tid("rs4-i6-o")
+	futureUserID := tid("rs4-i6-fu")
+	rs4Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: futureUserID, Email: futureUserID + "@test.com",
+		DisplayName: "FutureUser", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, futureUserID)
+
+	// Create a project role binding that is not yet active (NotBefore in the future).
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	future := time.Now().Add(24 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      futureUserID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+		NotBefore:        &future,
+	})
+	require.NoError(t, err)
+
+	// Attempt to mint — should fail because the binding is not yet active.
+	mintCtx := rs4MintContext(futureUserID)
+	_, _, err = srv.uatService.CreateToken(mintCtx, futureUserID, "i6-future", projectID,
+		[]string{"agent:read"}, nil)
+	assert.Error(t, err, "T-I6: future binding must not grant mint authority")
+}
+
+func TestRS4_ExpiredMembershipDenied(t *testing.T) {
+	// T-P8: An expired project membership must not allow minting.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs4-p8-p")
+	ownerID := tid("rs4-p8-o")
+	expiredUserID := tid("rs4-p8-eu")
+	rs4Project(t, s, projectID, ownerID)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: expiredUserID, Email: expiredUserID + "@test.com",
+		DisplayName: "ExpiredUser", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, expiredUserID)
+
+	// Create a project role binding that has already expired.
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	past := time.Now().Add(-1 * time.Hour)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      expiredUserID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+		ExpiresAt:        &past,
+	})
+	require.NoError(t, err)
+
+	// Attempt to mint — should fail because the binding is expired.
+	mintCtx := rs4MintContext(expiredUserID)
+	_, _, err = srv.uatService.CreateToken(mintCtx, expiredUserID, "p8-expired", projectID,
+		[]string{"agent:read"}, nil)
+	assert.Error(t, err, "T-P8: expired membership must not allow minting")
+}
+
+// ---------------------------------------------------------------------------
+// R2 Required: Cross-project membership
+// ---------------------------------------------------------------------------
+
+func TestRS4_CrossProjectMembershipDenied(t *testing.T) {
+	// A user who is a member of project A but not project B cannot mint for B.
+	srv, s := testServer(t)
+
+	projectA := tid("rs4-xp-a")
+	projectB := tid("rs4-xp-b")
+	ownerA := tid("rs4-xp-oa")
+	ownerB := tid("rs4-xp-ob")
+	memberID := tid("rs4-xp-m")
+
+	rs4Project(t, s, projectA, ownerA)
+	rs4Project(t, s, projectB, ownerB)
+
+	// Member is only in project A.
+	rs4UserWithRole(t, s, memberID, projectA, store.ProjectRoleOwner)
+
+	mintCtx := rs4MintContext(memberID)
+
+	// Can mint for project A.
+	_, _, err := srv.uatService.CreateToken(mintCtx, memberID, "xp-a", projectA,
+		[]string{"agent:read"}, nil)
+	assert.NoError(t, err, "cross-project: member of A should mint for A")
+
+	// Cannot mint for project B.
+	_, _, err = srv.uatService.CreateToken(mintCtx, memberID, "xp-b", projectB,
+		[]string{"agent:read"}, nil)
+	assert.ErrorIs(t, err, ErrUATProjectForbidden, "cross-project: member of A must not mint for B")
+}
+
+// ---------------------------------------------------------------------------
+// O1: Document TOCTOU acceptability
+// ---------------------------------------------------------------------------
+// The authorization checks (IsProjectMember, getProjectScopedPermissions) run
+// outside the WithTx block. Between authorization and commit, membership or
+// permissions could theoretically be revoked. This is acceptable because:
+//
+// 1. The TOCTOU window is microseconds on a single-node SQLite backend.
+// 2. Use-time enforcement (enforceUATConstraints → uatScopeRestriction) narrows
+//    every token request to the intersection of token scopes and the user's
+//    current effective permissions. A token minted during the TOCTOU window is
+//    immediately ineffective if the user's authority was truly revoked.
+// 3. The RS1 pattern (authorization inside tx with LockProjectForMembership) is
+//    designed for mutual-exclusion of membership mutations, which can conflict
+//    structurally. Token minting does not mutate authority state — it only reads
+//    it — so the stronger serialization guarantee is not required.
+// 4. Moving the checks inside the tx would hold LockUserForTokens longer and
+//    widen the serialization window unnecessarily.
+//
+// This is documented here per R1 review O1.

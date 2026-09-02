@@ -540,64 +540,16 @@ func TestMutationAudit_PolicyCreate(t *testing.T) {
 	// credential revocation) is covered by TestMutationAudit_CredentialRevocation.
 }
 
-func TestMutationAudit_CredentialRevocation(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create a UAT for the dev user first
-	project := &store.Project{
-		ID:        tid("revoke-project"),
-		Name:      "Revoke Test",
-		Slug:      "revoke-test",
-		CreatedBy: DevUserID,
-		OwnerID:   DevUserID,
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	// Create a UAT via the API
-	tokenBody := map[string]interface{}{
-		"name":      "test-revoke-token",
-		"projectId": project.ID,
-		"scopes":    []string{"agent:read"},
-	}
-	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/tokens", tokenBody)
-	if createRec.Code != http.StatusCreated && createRec.Code != http.StatusOK {
-		t.Skipf("skipping UAT revocation test - token creation returned %d: %s", createRec.Code, createRec.Body.String())
-	}
-
-	var createResp map[string]interface{}
-	if err := json.Unmarshal(createRec.Body.Bytes(), &createResp); err != nil {
-		t.Fatalf("failed to parse token creation response: %v", err)
-	}
-
-	tokenID, ok := createResp["id"].(string)
-	if !ok || tokenID == "" {
-		t.Skip("skipping - could not get token ID from response")
-	}
-
-	// Revoke the token
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/auth/tokens/"+tokenID, nil)
-	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 200/204 for revocation, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	time.Sleep(100 * time.Millisecond)
-
-	// Check mutation audit
-	records, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
-		MutationType: "credential_revoke",
-		Limit:        10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list mutation audits: %v", err)
-	}
-
-	if len(records) == 0 {
-		t.Log("no credential_revoke mutation audit found (may be expected if handler path differs)")
-	}
-}
+// TestMutationAudit_CredentialRevocation was vacuous pre-RS4: the token ID
+// extraction was wrong (read createResp["id"] instead of createResp["accessToken"]["id"]),
+// so it always hit t.Skip. Post-RS4, the create returns 403 for a DevUser without a
+// project role binding, also hitting t.Skip.
+//
+// Superseded by TestRS4_MutationAudit_CredentialRevocation_Asserting in
+// rs4_credential_test.go, which verifies that DELETE produces exactly one
+// credential_revoke audit record with substantive fields.
+//
+// Deleted per R1 review O2 — do not re-add.
 
 // =============================================================================
 // Audit Queryability Tests

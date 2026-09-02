@@ -403,8 +403,8 @@ Preflight report: `/scion-volumes/scratchpad/projects/policy-refactor/aa-rs6-pre
 | F-RS4-05 | Medium | Token create audit record has no `after_summary` — auditor cannot reconstruct what was minted | `afterSummary` populated with `token_id`, `scopes`, `project_id` inside the transaction. Plaintext key never recorded. | `resolved-rs4` |
 | F-RS4-06 | Medium | Token cap check is not concurrency-safe — concurrent mints can exceed `UATMaxPerUser` | `LockUserForTokens` (SELECT FOR UPDATE on user row) serializes concurrent token transactions inside `WithTx`. | `resolved-rs4` |
 | F-RS4-07 | Medium | Error mapping uses `strings.Contains` pattern matching on error messages | Typed sentinel errors (`ErrUATScopeViolation`, `ErrUATProjectForbidden`, etc.) with `errors.Is` checks replace string matching. | `resolved-rs4` |
-| F-RS4-08 | Low | `GetUATService` is exported with no production callers | Unexported to `getUATService`. | `resolved-rs4` |
-| F-RS4-09 | Low | `TestMutationAudit_CredentialRevocation` is vacuous — skips on non-201, drives DELETE which emitted nothing, logs empty results | Superseded by `TestRS4_MutationAudit_CredentialRevocation_Asserting` which verifies exactly one `credential_revoke` audit record. | `resolved-rs4` |
+| F-RS4-08 | Low | `GetUATService` is exported with no production callers | Removed entirely — no production callers, exported accessor would be a latent bypass door around the bounded service. | `resolved-rs4` |
+| F-RS4-09 | Low | `TestMutationAudit_CredentialRevocation` is vacuous — skips on non-201, drives DELETE which emitted nothing, logs empty results | Deleted (R1/O2); superseded by `TestRS4_MutationAudit_CredentialRevocation_Asserting` which verifies exactly one `credential_revoke` audit record. | `resolved-rs4` |
 
 ### Open product decisions
 

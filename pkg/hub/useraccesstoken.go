@@ -181,27 +181,22 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		return "", nil, ErrUATExpiryTooLong
 	}
 
-	// --- B2: Target-project authorization with oracle resistance ---
-	// Check the actor has a project-scoped role binding in the target project.
-	// If the actor is not a member (or the project does not exist), return the
-	// same error — the caller must not be able to distinguish non-membership
-	// from non-existence.
-	isMember, memberErr := s.store.IsProjectMember(ctx, projectID, userID)
-	if memberErr != nil {
-		s.logger.Warn("RS4: failed to check project membership",
-			"user_id", userID, "project_id", projectID, "error", memberErr)
-		return "", nil, ErrUATProjectForbidden
-	}
-	if !isMember {
-		return "", nil, ErrUATProjectForbidden
-	}
-
-	// --- B1/A2: Issuer ceiling at mint (target-project only) ---
-	// Get only project-scoped permissions — system/hub authority must not
-	// enlarge the token (frozen decision A2). Uses getProjectScopedPermissions
-	// which filters to ScopeType==project && ScopeID==projectID only, while
-	// retaining group-expanded principals, activation windows, and
-	// AccessConstraint reduction.
+	// --- B1/A2/B2: Issuer ceiling at mint (target-project only) with oracle resistance ---
+	// Resolve only project-scoped permissions for the target project. System/hub
+	// authority must not enlarge the token (frozen decision A2).
+	//
+	// getProjectScopedPermissions filters to ScopeType==project && ScopeID==projectID
+	// while retaining group-expanded principals (transitive membership), activation
+	// window filtering (future/expired bindings excluded), and AccessConstraint
+	// reduction. If the result is empty, the user has no project-level authority —
+	// this covers both non-membership and nonexistent projects with the same error
+	// (oracle resistance, G10).
+	//
+	// Note: authorization runs outside WithTx. The TOCTOU window is acceptable
+	// because (1) use-time enforcement narrows every request to the intersection
+	// of token scopes and the user's current permissions, and (2) token minting
+	// only reads authority state, it does not mutate it. See O1 documentation in
+	// rs4_credential_test.go.
 	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
 	if err != nil {
 		s.logger.Warn("RS4: failed to resolve project-scoped permissions",
