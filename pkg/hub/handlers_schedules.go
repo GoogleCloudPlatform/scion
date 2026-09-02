@@ -28,6 +28,12 @@ import (
 )
 
 // CreateScheduleRequest is the API request for creating a recurring schedule.
+//
+// NOTE (O-R2-3): This struct has no AgentID field — message targets are
+// specified via AgentName (convenience) or raw Payload (advanced). The
+// authoring-time validation in authorizeScheduledMessageAuthoring resolves
+// the target from whichever is present. If an AgentID field is added in the
+// future, the authoring call must be updated to forward it.
 type CreateScheduleRequest struct {
 	Name      string `json:"name"`
 	CronExpr  string `json:"cronExpr"`

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -126,10 +125,7 @@ func (d *containmentDispatchSpy) getCalls() []containmentDispatchCall {
 // needed for messaging authorization (GetProjectMembership, etc).
 type containmentMockStore struct {
 	mockScheduledEventStore
-	memberships              map[string]*store.ProjectMembership // key: projectID+":"+userID
-	updateStatusErr          error                               // injected error for UpdateScheduledEventStatus
-	updateStatusCallCount    int                                 // tracks how many times UpdateScheduledEventStatus was called
-	updateStatusErrCallCount int                                 // tracks how many times UpdateScheduledEventStatus returned the injected error
+	memberships map[string]*store.ProjectMembership // key: projectID+":"+userID
 }
 
 func newContainmentMockStore() *containmentMockStore {
@@ -137,19 +133,6 @@ func newContainmentMockStore() *containmentMockStore {
 		mockScheduledEventStore: *newMockStore(),
 		memberships:             make(map[string]*store.ProjectMembership),
 	}
-}
-
-// UpdateScheduledEventStatus overrides the embedded mock to support error injection.
-func (m *containmentMockStore) UpdateScheduledEventStatus(ctx context.Context, id string, status string, firedAt *time.Time, errMsg string) error {
-	m.mu.Lock()
-	m.updateStatusCallCount++
-	if m.updateStatusErr != nil {
-		m.updateStatusErrCallCount++
-		m.mu.Unlock()
-		return m.updateStatusErr
-	}
-	m.mu.Unlock()
-	return m.mockScheduledEventStore.UpdateScheduledEventStatus(ctx, id, status, firedAt, errMsg)
 }
 
 func (m *containmentMockStore) GetProjectMembership(_ context.Context, projectID, userID string) (*store.ProjectMembership, error) {
@@ -227,17 +210,14 @@ func TestC1_ScheduledMessageCrossProjectAgentID(t *testing.T) {
 
 	handler := srv.messageEventHandler()
 	err := handler(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("handler should not return error on authorization denial (fail silently with event status): %v", err)
+	// Handler returns the denial error — the enclosing scheduler wrapper
+	// (fireEvent / executeSchedule) owns status recording.
+	if err == nil {
+		t.Fatal("handler must return error on authorization denial")
 	}
 
 	if len(spy.getCalls()) != 0 {
 		t.Errorf("expected zero dispatch calls for cross-project target, got %d", len(spy.getCalls()))
-	}
-
-	e := ms.getEvent(evt.ID)
-	if e == nil || e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected event status 'failed', got %v", e)
 	}
 }
 
@@ -306,14 +286,13 @@ func TestC1_ScheduledMessageModeNoneDenied(t *testing.T) {
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
-	_ = handler(context.Background(), evt)
+	err := handler(context.Background(), evt)
+	if err == nil {
+		t.Fatal("handler must return error on authorization denial")
+	}
 
 	if len(spy.getCalls()) != 0 {
 		t.Errorf("expected zero dispatch for mode=none target, got %d", len(spy.getCalls()))
-	}
-	e := ms.getEvent(evt.ID)
-	if e == nil || e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected event status 'failed'")
 	}
 }
 
@@ -390,14 +369,13 @@ func TestC1_ScheduledMessageCreatorSuspended(t *testing.T) {
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
-	_ = handler(context.Background(), evt)
+	err := handler(context.Background(), evt)
+	if err == nil {
+		t.Fatal("handler must return error on authorization denial")
+	}
 
 	if len(spy.getCalls()) != 0 {
 		t.Errorf("expected zero dispatch for suspended creator, got %d", len(spy.getCalls()))
-	}
-	e := ms.getEvent(evt.ID)
-	if e == nil || e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected event status 'failed'")
 	}
 }
 
@@ -428,14 +406,13 @@ func TestC1_ScheduledMessageCreatorAgentDeleted(t *testing.T) {
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
-	_ = handler(context.Background(), evt)
+	err := handler(context.Background(), evt)
+	if err == nil {
+		t.Fatal("handler must return error on authorization denial")
+	}
 
 	if len(spy.getCalls()) != 0 {
 		t.Errorf("expected zero dispatch for deleted creator, got %d", len(spy.getCalls()))
-	}
-	e := ms.getEvent(evt.ID)
-	if e == nil || e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected event status 'failed'")
 	}
 }
 
@@ -465,14 +442,13 @@ func TestC1_ScheduledMessageEmptyCreatedBy(t *testing.T) {
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
-	_ = handler(context.Background(), evt)
+	err := handler(context.Background(), evt)
+	if err == nil {
+		t.Fatal("handler must return error on authorization denial")
+	}
 
 	if len(spy.getCalls()) != 0 {
 		t.Errorf("expected zero dispatch for empty CreatedBy, got %d", len(spy.getCalls()))
-	}
-	e := ms.getEvent(evt.ID)
-	if e == nil || e.Status != store.ScheduledEventFailed {
-		t.Errorf("expected event status 'failed'")
 	}
 }
 
@@ -651,11 +627,10 @@ func TestC1_ScheduledMessageCreatorAgentSoftDeleted(t *testing.T) {
 	}
 }
 
-func TestC1_ScheduledMessageMarkFailedErrorPropagates(t *testing.T) {
-	// F4: When markScheduledEventFailed fails to record the denial, the
-	// handler must return an error (not nil) so the scheduler retries
-	// rather than silently leaving the event in a retry loop with an
-	// unrecorded denial.
+func TestC1_ScheduledMessageDenialReturnsError(t *testing.T) {
+	// O-R2-1: handler returns the denial error (not nil) so the enclosing
+	// scheduler wrapper (fireEvent / executeSchedule) records the error
+	// message on the event. Zero dispatch calls regardless.
 	ms := newContainmentMockStore()
 	spy := &containmentDispatchSpy{}
 
@@ -672,10 +647,6 @@ func TestC1_ScheduledMessageMarkFailedErrorPropagates(t *testing.T) {
 		ProjectID: projectB, MessageMode: store.MessageModeProject,
 	}
 
-	// Inject a status update error: the denial will succeed (no dispatch)
-	// but recording the failure status will fail.
-	ms.updateStatusErr = fmt.Errorf("injected: database unavailable")
-
 	srv := containmentTestServer(ms)
 	srv.SetDispatcher(spy)
 
@@ -683,7 +654,7 @@ func TestC1_ScheduledMessageMarkFailedErrorPropagates(t *testing.T) {
 		AgentID: "agent-in-b", Message: "cross-project message",
 	})
 	evt := store.ScheduledEvent{
-		ID: "evt-mark-failed", ProjectID: projectA, EventType: "message",
+		ID: "evt-denial-error", ProjectID: projectA, EventType: "message",
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
@@ -692,19 +663,245 @@ func TestC1_ScheduledMessageMarkFailedErrorPropagates(t *testing.T) {
 	handler := srv.messageEventHandler()
 	err := handler(context.Background(), evt)
 
-	// The handler must return a non-nil error when status recording fails.
+	// Handler must return the denial error.
 	if err == nil {
-		t.Fatal("handler must return error when markScheduledEventFailed fails — " +
-			"otherwise the denied event silently remains retryable")
+		t.Fatal("handler must return error on authorization denial")
 	}
-	if !strings.Contains(err.Error(), "markScheduledEventFailed") {
-		t.Errorf("error should reference markScheduledEventFailed, got: %v", err)
+	// Error must contain the denial reason for the scheduler to record.
+	if !strings.Contains(err.Error(), "scheduled_message_cross_project") {
+		t.Errorf("error should contain denial code, got: %v", err)
 	}
 
-	// Load-bearing: zero dispatch calls even when status recording fails.
+	// Load-bearing: zero dispatch calls.
 	if len(spy.getCalls()) != 0 {
-		t.Errorf("denial must produce zero dispatch calls regardless of status recording: got %d", len(spy.getCalls()))
+		t.Errorf("denial must produce zero dispatch calls: got %d", len(spy.getCalls()))
 	}
+}
+
+func TestC1_ScheduledMessageTargetDeletedReturnsError(t *testing.T) {
+	// F-R2-2: target agent deleted path returns the error (not nil) so the
+	// enclosing scheduler wrapper records it. Zero dispatch calls.
+	ms := newContainmentMockStore()
+	spy := &containmentDispatchSpy{}
+
+	projectID := "project-1"
+	creatorID := "creator-user"
+
+	ms.users[creatorID] = &store.User{
+		ID: creatorID, Email: "creator@test.com",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	// Target agent NOT in store — simulates deletion.
+
+	srv := containmentTestServer(ms)
+	srv.SetDispatcher(spy)
+
+	payload, _ := json.Marshal(MessageEventPayload{
+		AgentID: "deleted-agent", Message: "message to deleted agent",
+	})
+	evt := store.ScheduledEvent{
+		ID: "evt-target-deleted", ProjectID: projectID, EventType: "message",
+		Payload: string(payload), CreatedBy: creatorID,
+		FireAt: time.Now(), Status: store.ScheduledEventPending,
+	}
+	ms.events[evt.ID] = &evt
+
+	handler := srv.messageEventHandler()
+	err := handler(context.Background(), evt)
+
+	if err == nil {
+		t.Fatal("handler must return error when target agent is deleted")
+	}
+	if !strings.Contains(err.Error(), "target agent deleted") {
+		t.Errorf("error should reference target agent deletion, got: %v", err)
+	}
+
+	if len(spy.getCalls()) != 0 {
+		t.Errorf("deleted target must produce zero dispatch calls: got %d", len(spy.getCalls()))
+	}
+}
+
+// =============================================================================
+// Production-wrapper tests: fireEvent and executeSchedule
+//
+// These tests exercise the real scheduler wrappers to verify that denial
+// errors propagate through the production status-recording path, not just
+// the handler in isolation (O-R2-1).
+// =============================================================================
+
+func TestC1_FireEvent_DenialRecordsErrorOnEvent(t *testing.T) {
+	// O-R2-1: when the message handler returns a denial error, fireEvent
+	// must record it on the event (status "fired" with error message).
+	// Zero dispatch calls.
+	ms := newContainmentMockStore()
+	spy := &containmentDispatchSpy{}
+
+	projectA := "project-a"
+	projectB := "project-b"
+	creatorID := "creator-user"
+
+	ms.users[creatorID] = &store.User{
+		ID: creatorID, Email: "creator@test.com",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	ms.agents["agent-in-b"] = &store.Agent{
+		ID: "agent-in-b", Name: "agent-b", Slug: "agent-b",
+		ProjectID: projectB, MessageMode: store.MessageModeProject,
+	}
+
+	srv := containmentTestServer(ms)
+	srv.SetDispatcher(spy)
+
+	// Create a Scheduler and register the message handler.
+	sched := NewScheduler(ms, slog.Default())
+	sched.RegisterEventHandler("message", srv.messageEventHandler())
+
+	payload, _ := json.Marshal(MessageEventPayload{
+		AgentID: "agent-in-b", Message: "cross-project message",
+	})
+	evt := store.ScheduledEvent{
+		ID: "evt-fire-denial", ProjectID: projectA, EventType: "message",
+		Payload: string(payload), CreatedBy: creatorID,
+		FireAt: time.Now(), Status: store.ScheduledEventPending,
+	}
+	require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
+
+	// Fire through the real scheduler wrapper.
+	sched.fireEvent(context.Background(), evt, false)
+
+	// Status must be "fired" (not "failed") — fireEvent owns status.
+	e := ms.getEvent(evt.ID)
+	require.NotNil(t, e, "event must exist after fireEvent")
+	assert.Equal(t, store.ScheduledEventFired, e.Status,
+		"fireEvent sets status to 'fired' — the error message field carries the denial reason")
+	assert.Contains(t, e.Error, "scheduled_message_cross_project",
+		"event error field must contain the denial reason")
+
+	// Zero dispatch calls.
+	assert.Empty(t, spy.getCalls(), "denial must produce zero dispatch calls through fireEvent")
+}
+
+func TestC1_FireEvent_SuccessRecordsFiredNoError(t *testing.T) {
+	// Complementary: a successful message event through fireEvent must
+	// record status "fired" with no error, and dispatch exactly once.
+	ms := newContainmentMockStore()
+	spy := &containmentDispatchSpy{}
+
+	projectID := "project-1"
+	creatorID := "creator-user"
+
+	ms.users[creatorID] = &store.User{
+		ID: creatorID, Email: "creator@test.com",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	ms.agents["target"] = &store.Agent{
+		ID: "target", Name: "target", Slug: "target",
+		ProjectID: projectID, MessageMode: store.MessageModeProject,
+	}
+	ms.roleDefinitions["member-role"] = &store.RoleDefinition{
+		ID:          "member-role",
+		Name:        "Member",
+		Permissions: []string{"agent.message"},
+		ScopeType:   "project",
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID:               "binding-success",
+		RoleDefinitionID: "member-role",
+		PrincipalType:    "user",
+		PrincipalID:      creatorID,
+		ScopeType:        "project",
+		ScopeID:          projectID,
+	})
+
+	srv := containmentTestServer(ms)
+	srv.SetDispatcher(spy)
+
+	sched := NewScheduler(ms, slog.Default())
+	sched.RegisterEventHandler("message", srv.messageEventHandler())
+
+	payload, _ := json.Marshal(MessageEventPayload{
+		AgentID: "target", Message: "hello",
+	})
+	evt := store.ScheduledEvent{
+		ID: "evt-fire-success", ProjectID: projectID, EventType: "message",
+		Payload: string(payload), CreatedBy: creatorID,
+		FireAt: time.Now(), Status: store.ScheduledEventPending,
+	}
+	require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
+
+	sched.fireEvent(context.Background(), evt, false)
+
+	e := ms.getEvent(evt.ID)
+	require.NotNil(t, e, "event must exist after fireEvent")
+	assert.Equal(t, store.ScheduledEventFired, e.Status, "success event should be 'fired'")
+	assert.Empty(t, e.Error, "success event should have no error message")
+
+	calls := spy.getCalls()
+	assert.Len(t, calls, 1, "success event should dispatch exactly once")
+}
+
+func TestC1_ExecuteSchedule_DenialRecordsErrorOnEvent(t *testing.T) {
+	// O-R2-1 (recurring path): when the message handler denies, executeSchedule
+	// must record the error on the created event. Zero dispatch calls.
+	srv, s := testServer(t)
+	ctx := context.Background()
+	spy := &containmentDispatchSpy{}
+	srv.SetDispatcher(spy)
+
+	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
+
+	projectA := &store.Project{
+		ID: tid("exec-sched-a"), Name: "Project A", Slug: "exec-sched-a",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+
+	projectB := &store.Project{
+		ID: tid("exec-sched-b"), Name: "Project B", Slug: "exec-sched-b",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+
+	crossAgent := &store.Agent{
+		ID: tid("exec-cross-agent"), Name: "cross-agent", Slug: "cross-agent",
+		ProjectID: projectB.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, crossAgent))
+
+	// Create a schedule in project A that targets agent in project B.
+	crossPayload, _ := json.Marshal(MessageEventPayload{
+		AgentID: crossAgent.ID, Message: "cross-project recurring",
+	})
+	schedule := store.Schedule{
+		ID:        tid("exec-cross-sched"),
+		ProjectID: projectA.ID,
+		Name:      "cross-project-recurring",
+		CronExpr:  "0 * * * *",
+		EventType: "message",
+		Payload:   string(crossPayload),
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: "dev",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateSchedule(ctx, &schedule))
+
+	// Execute the schedule through the real production wrapper.
+	srv.executeSchedule(ctx, schedule, time.Now())
+
+	// Zero dispatch calls.
+	assert.Empty(t, spy.getCalls(), "recurring denial must produce zero dispatch calls")
+
+	// Find the event created by executeSchedule and verify its error.
+	result, err := s.ListScheduledEvents(ctx,
+		store.ScheduledEventFilter{ProjectID: projectA.ID},
+		store.ListOptions{})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Items, "executeSchedule must create an event")
+	latestEvt := result.Items[len(result.Items)-1]
+	assert.Equal(t, store.ScheduledEventFired, latestEvt.Status,
+		"recurring event status must be 'fired' — the error message carries the denial")
+	assert.Contains(t, latestEvt.Error, "cross_project",
+		"event error field must contain the denial reason")
 }
 
 // =============================================================================

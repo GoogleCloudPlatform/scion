@@ -2943,15 +2943,17 @@ func (s *Server) messageEventHandler() EventHandler {
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				slog.Warn("Scheduler: target agent no longer exists, marking event as failed",
+				slog.Warn("Scheduler: target agent no longer exists",
 					"eventID", evt.ID,
 					"agentName", payload.AgentName,
 					"agent_id", payload.AgentID,
 					"projectID", evt.ProjectID,
 					"message", payload.Message)
-				now := time.Now()
-				_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFailed, &now, "target agent deleted")
-				return nil
+				// Return the error — the enclosing scheduler wrapper
+				// (fireEvent / executeSchedule) owns status recording and
+				// will persist the error message on the event.
+				return fmt.Errorf("target agent deleted: agent %q not found in project %q",
+					targetName, evt.ProjectID)
 			}
 			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
 		}
@@ -2959,17 +2961,11 @@ func (s *Server) messageEventHandler() EventHandler {
 		// ---- C1 containment: fire-time authorization ----
 		// Re-resolve the creator identity and authorize the message through
 		// the production choke point (authorizeAgentMessage, isSystemPlane=false).
-		// Denial records event failure and performs NO external effect.
+		// Denial returns an error — the enclosing scheduler wrapper owns
+		// status recording. No external effect occurs on denial.
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
-			if markErr := s.markScheduledEventFailed(ctx, evt, authErr.Error()); markErr != nil {
-				// Status update failed — return an error so the scheduler
-				// retries (the authorization will deny again, but the event
-				// must eventually be marked failed rather than silently left
-				// in a retry loop).
-				return markErr
-			}
-			return nil // event status recorded as failed — do not retry
+			return authErr
 		}
 
 		dispatcher := s.GetDispatcher()

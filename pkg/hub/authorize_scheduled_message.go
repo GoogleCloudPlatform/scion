@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -237,27 +236,8 @@ func (s *Server) authorizeScheduledMessageFire(
 	return creatorIdentity, nil
 }
 
-// markScheduledEventFailed records a fire-time denial on a scheduled event.
-// It updates the event status to failed and logs the denial reason.
-//
-// Returns an error when the status update itself fails. The caller must
-// propagate the error to the scheduler so that the event is not silently
-// left in a retry loop — the authorization denial already prevented any
-// external effect, but the status must be recorded so the event does not
-// re-enter the fire queue.
-func (s *Server) markScheduledEventFailed(ctx context.Context, evt store.ScheduledEvent, reason string) error {
-	now := time.Now()
-	err := s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFailed, &now, reason)
-	slog.Warn("Scheduler: message event authorization denied at fire time",
-		"eventID", evt.ID,
-		"projectID", evt.ProjectID,
-		"createdBy", evt.CreatedBy,
-		"reason", reason,
-		"status_update_error", err,
-	)
-	if err != nil {
-		return fmt.Errorf("markScheduledEventFailed: denied event %s could not be marked failed (denial reason: %s): %w",
-			evt.ID, reason, err)
-	}
-	return nil
-}
+// NOTE: markScheduledEventFailed was removed. Authorization denials now return
+// errors directly from the handler, and the enclosing scheduler wrapper
+// (fireEvent / executeSchedule) owns status recording. This eliminates the
+// dual-status-update race where markScheduledEventFailed set "failed" and the
+// wrapper subsequently overwrote it to "fired" (R2 review finding O-R2-1).
