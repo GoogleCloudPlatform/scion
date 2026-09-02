@@ -24,6 +24,7 @@ import (
 // Common errors returned by store implementations.
 var (
 	ErrNotFound         = errors.New("not found")
+	ErrNotSingular      = errors.New("not singular") // query matched more than one row
 	ErrAlreadyExists    = errors.New("already exists")
 	ErrVersionConflict  = errors.New("version conflict")
 	ErrInvalidInput     = errors.New("invalid input")

@@ -105,6 +105,22 @@ const (
 	// missing". Without this, the request would silently fall through to the
 	// DM branch and serve wrong data (G3-f).
 	ErrCodeThreadProjectRequired = "thread_project_required"
+
+	// Addressee resolution error codes (DEF-126).
+
+	// ErrCodeAddrUnknown is returned when a user: addressee resolves to zero
+	// users — no row matches the supplied email or UUID.
+	ErrCodeAddrUnknown = "addr_unknown"
+
+	// ErrCodeAddrAmbiguous is returned when a user: addressee resolves to
+	// more than one user. This can only happen when TotalCount > 1 for a
+	// ListUsers query (the old len(Items)==1 check was masked by LIMIT 1).
+	ErrCodeAddrAmbiguous = "addr_ambiguous"
+
+	// ErrCodeAddrMalformed is returned when a user: addressee token is
+	// neither a UUID nor an email address. Display-name resolution is no
+	// longer supported because display_name has no uniqueness constraint.
+	ErrCodeAddrMalformed = "addr_malformed"
 )
 
 // writeError writes a JSON error response.

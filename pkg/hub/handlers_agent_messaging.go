@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // OutboundMessageRequest is the request body for POST /api/v1/agents/{id}/outbound-message.
@@ -138,34 +139,57 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// Accept "user:<identifier>" or bare "<identifier>".
 		identifier := strings.TrimPrefix(recipient, "user:")
 
-		// Try email lookup first (identifier contains @).
-		if strings.Contains(identifier, "@") {
-			if u, err := s.store.GetUserByEmail(ctx, identifier); err == nil {
+		// DEF-126 P2: exact resolution only — UUID or email. Display-name
+		// substring matching is removed because display_name has no uniqueness
+		// constraint and the old LIKE query silently picked the newest row.
+		if _, parseErr := uuid.Parse(identifier); parseErr == nil {
+			// Token is a UUID — direct lookup by primary key.
+			u, err := s.store.GetUser(ctx, identifier)
+			if err == nil {
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
+			} else if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
+				return
+			} else {
+				s.messageLog.Error("user lookup by ID failed", "identifier", identifier, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"user lookup failed due to an internal error", nil)
+				return
 			}
-		}
-
-		// Fall back to display-name search if email lookup didn't match.
-		if recipientID == "" {
-			result, err := s.store.ListUsers(ctx, store.UserFilter{Search: identifier}, store.ListOptions{Limit: 1})
-			if err == nil && len(result.Items) == 1 {
-				u := result.Items[0]
+		} else if strings.Contains(identifier, "@") {
+			// Token contains @ — exact email lookup, case-folded.
+			u, err := s.store.GetUserByEmail(ctx, identifier)
+			if err == nil {
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
+			} else if errors.Is(err, store.ErrNotSingular) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
+					fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
+				return
+			} else if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that email.", identifier), nil)
+				return
+			} else {
+				s.messageLog.Error("user lookup by email failed", "identifier", identifier, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"user lookup failed due to an internal error", nil)
+				return
 			}
-		}
-
-		if recipientID == "" {
-			ValidationError(w, fmt.Sprintf("recipient %q could not be resolved to a known user", req.Recipient), nil)
+		} else {
+			// Token is neither a UUID nor an email — refuse.
+			writeError(w, http.StatusBadRequest, ErrCodeAddrMalformed,
+				fmt.Sprintf("user:%s is not a valid addressee. Address a user by exact email (user:name@example.com) or by id. Names are not unique and cannot be resolved.", identifier), nil)
 			return
 		}
 	}
@@ -1479,34 +1503,56 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			userRecip := "user:" + recip.Name
 			userID := ""
 
-			// Try to resolve user by email or display name.
+			// DEF-126 P2: exact resolution only — UUID or email.
+			// Display-name substring matching removed (no uniqueness constraint).
+			// OQ-A2: any member that fails to resolve refuses the whole send.
 			identifier := recip.Name
-			if strings.Contains(identifier, "@") {
-				if u, err := s.store.GetUserByEmail(ctx, identifier); err == nil {
+			if _, parseErr := uuid.Parse(identifier); parseErr == nil {
+				u, lookupErr := s.store.GetUser(ctx, identifier)
+				if lookupErr == nil {
 					userID = u.ID
 					name := u.DisplayName
 					if name == "" {
 						name = u.Email
 					}
 					userRecip = "user:" + name
+				} else if errors.Is(lookupErr, store.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+						fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
+					return
+				} else {
+					s.messageLog.Error("user lookup by ID failed", "identifier", identifier, "error", lookupErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"user lookup failed due to an internal error", nil)
+					return
 				}
-			}
-			if userID == "" {
-				result, lookupErr := s.store.ListUsers(ctx, store.UserFilter{Search: identifier}, store.ListOptions{Limit: 1})
-				if lookupErr == nil && len(result.Items) == 1 {
-					u := result.Items[0]
+			} else if strings.Contains(identifier, "@") {
+				u, lookupErr := s.store.GetUserByEmail(ctx, identifier)
+				if lookupErr == nil {
 					userID = u.ID
 					name := u.DisplayName
 					if name == "" {
 						name = u.Email
 					}
 					userRecip = "user:" + name
+				} else if errors.Is(lookupErr, store.ErrNotSingular) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
+						fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
+					return
+				} else if errors.Is(lookupErr, store.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+						fmt.Sprintf("user:%s is not a valid addressee. No user exists with that email.", identifier), nil)
+					return
+				} else {
+					s.messageLog.Error("user lookup by email failed", "identifier", identifier, "error", lookupErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"user lookup failed due to an internal error", nil)
+					return
 				}
-			}
-
-			if userID == "" {
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "user not found: " + recip.Name}
-				continue
+			} else {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrMalformed,
+					fmt.Sprintf("user:%s is not a valid addressee. Address a user by exact email (user:name@example.com) or by id. Names are not unique and cannot be resolved.", identifier), nil)
+				return
 			}
 
 			userMsg := *msg
