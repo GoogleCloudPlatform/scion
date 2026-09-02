@@ -337,33 +337,76 @@ func TestDEF135_AC2_Thread_EnvelopeMatchesPersisted(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
-	f := setupDEF135(t)
+	t.Run("no_surface", func(t *testing.T) {
+		f := setupDEF135(t)
 
-	msg := &messages.StructuredMessage{
-		Version:     messages.Version,
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		Channel:     "discord",
-		Sender:      f.senderRef,
-		Recipient:   "agent:" + f.agent.Slug,
-		Msg:         "broadcast message",
-		Type:        messages.TypeInstruction,
-		Broadcasted: true,
-	}
+		msg := &messages.StructuredMessage{
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Channel:     "discord",
+			Sender:      f.senderRef,
+			Recipient:   "agent:" + f.agent.Slug,
+			Msg:         "broadcast message",
+			Type:        messages.TypeInstruction,
+			Broadcasted: true,
+		}
 
-	rec := f.sendBrokerInbound(t, msg, "", "", "")
-	require.Equal(t, http.StatusOK, rec.Code, "expected 200, got %d: %s", rec.Code, rec.Body.String())
+		rec := f.sendBrokerInbound(t, msg, "", "", "")
+		require.Equal(t, http.StatusOK, rec.Code, "expected 200, got %d: %s", rec.Code, rec.Body.String())
 
-	calls := f.dispatcher.getCalls()
-	require.Equal(t, 1, len(calls))
-	require.NotNil(t, calls[0].StructuredMessage)
+		calls := f.dispatcher.getCalls()
+		require.Equal(t, 1, len(calls))
+		require.NotNil(t, calls[0].StructuredMessage)
 
-	deliveryText := calls[0].StructuredMessage.DeliveryText
-	require.NotEmpty(t, deliveryText)
+		deliveryText := calls[0].StructuredMessage.DeliveryText
+		require.NotEmpty(t, deliveryText)
 
-	// The envelope must NOT contain a conversation key.
-	_, hasConv := extractConversationID(t, deliveryText)
-	assert.False(t, hasConv,
-		"AC-3: broadcast envelope must not contain a conversation key")
+		_, hasConv := extractConversationID(t, deliveryText)
+		assert.False(t, hasConv,
+			"AC-3: broadcast envelope must not contain a conversation key")
+	})
+
+	// F3 regression guard: a broadcast with surface + external_ref must
+	// still carry no conversation in either the envelope or the row.
+	// Phase 11 creates the conversation row, but effectiveConv must be
+	// forced to nil for broadcasts.
+	t.Run("with_surface_and_external_ref", func(t *testing.T) {
+		f := setupDEF135(t)
+
+		msg := &messages.StructuredMessage{
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Channel:     "discord",
+			Sender:      f.senderRef,
+			Recipient:   "agent:" + f.agent.Slug,
+			Msg:         "broadcast with surface",
+			Type:        messages.TypeInstruction,
+			Broadcasted: true,
+		}
+
+		rec := f.sendBrokerInbound(t, msg, "discord", "broadcast-ref-42", "parent-1")
+		require.Equal(t, http.StatusOK, rec.Code, "expected 200, got %d: %s", rec.Code, rec.Body.String())
+
+		calls := f.dispatcher.getCalls()
+		require.Equal(t, 1, len(calls))
+		require.NotNil(t, calls[0].StructuredMessage)
+
+		deliveryText := calls[0].StructuredMessage.DeliveryText
+		require.NotEmpty(t, deliveryText)
+
+		_, hasConv := extractConversationID(t, deliveryText)
+		assert.False(t, hasConv,
+			"AC-3/F3: broadcast envelope must not contain a conversation key even with surface+external_ref")
+
+		// Also verify the persisted row has no conversation_id.
+		msgs, err := f.store.ListMessages(context.Background(), store.MessageFilter{
+			AgentID: f.agent.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(msgs.Items), 1)
+		assert.Empty(t, msgs.Items[0].ConversationID,
+			"AC-3/F3: broadcast persisted row must not carry a conversation_id")
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -425,44 +468,14 @@ func TestDEF135_AC4_Phase11PrecedenceOverPhase5(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
-	// Send a message with a malformed thread_id that will cause
-	// ResolveOrCreateThreadConversation to fail. The thread: key derivation
-	// path requires projectID to be non-empty and the thread to be valid.
-	// A DM key with an invalid format will be caught by validation above,
-	// so instead we use an empty sender to trigger a DM resolution failure.
-	//
-	// Strategy: Create a new fixture with a sender that does NOT resolve to
-	// any user, so SenderID stays empty. But wait — the authorization check
-	// would fail first. Instead, use a user whose SenderID is already set
-	// but make the DM resolution fail.
-	//
-	// Actually, the simplest approach: send a message where the sender
-	// resolves (so auth passes) but override the sender's SenderID to empty
-	// so that the DM resolution path (senderUserID != "" && agent.ID != "")
-	// is skipped. That gives convFromPhase5 = nil, which is not an error.
-	//
-	// Better approach: We need a genuine resolution FAILURE. Thread resolution
-	// fails when DeriveConversationKey fails. An empty projectID would do it,
-	// but projectID comes from the agent. Let's use a thread_id that triggers
-	// a derivation error.
-	//
-	// Looking at DeriveConversationKey: case 2 (thread:) requires non-empty
-	// projectID. But our test agent has a projectID. The derivation would
-	// succeed. We need the upsert itself to fail.
-	//
-	// Simplest: set webChatStore to a stub that returns an error for
-	// GetTopicConversationIDIncludingDeleted, and use a thread_id that
-	// looks like a native topic UUID (so the sink intercepts it).
-	//
-	// Actually even simpler: the DM resolution path calls
-	// ResolveOrCreateDMConversation which calls UpsertConversationByExternalRef.
-	// For a test with a store that works, this should succeed. I need to
-	// make it fail.
-	//
-	// Let me reconsider. The most robust approach for AC-5: use a custom
-	// store wrapper that makes UpsertConversationByExternalRef fail.
-
-	// Create a separate fixture with a failing store for conversation ops.
+	// Inject a store wrapper that fails UpsertConversationByExternalRef so
+	// DM conversation resolution returns an error. The wrapper is swapped
+	// in after all setup (user, project, agent) completes against the real
+	// store, so auth and agent lookup succeed but conversation resolution
+	// fails. With write-deny ON, the handler must return 409 BEFORE calling
+	// the dispatcher — asserting the dispatcher was never called is what
+	// distinguishes the pre-dispatch 409 (the hoist) from the old
+	// post-dispatch 409.
 	srv2, s2 := testServer(t)
 	ctx := context.Background()
 
