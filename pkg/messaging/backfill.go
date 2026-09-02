@@ -42,6 +42,15 @@ type BackfillConfig struct {
 }
 
 // BackfillResult summarises what a backfill run did (or would do in dry-run).
+//
+// Errors are recorded exclusively through the addDeriveFailure,
+// addWriteFailure, and addResolutionFailure methods. This enforces the
+// invariant by construction: every Errors entry is classified into
+// exactly one bucket, so
+//
+//	sum(DeriveFailures) + WriteFailures + ResolutionFailures == len(Errors)
+//
+// holds by design, not by discipline.
 type BackfillResult struct {
 	TotalProcessed       int `json:"totalProcessed"`
 	Attributed           int `json:"attributed"`
@@ -53,18 +62,40 @@ type BackfillResult struct {
 	// DeriveFailures counts refused messages by cause (DEF-114). Keys are
 	// DeriveErr* constants from derive_key.go. This is the per-cause
 	// breakdown that makes the dominant failure mode diagnosable.
-	DeriveFailures       map[string]int `json:"deriveFailures,omitempty"`
+	DeriveFailures map[string]int `json:"deriveFailures,omitempty"`
 	// WriteFailures counts errors that occur AFTER key derivation succeeds —
-	// e.g. participant-validation failures during persistGroup. These are
-	// distinct from DeriveFailures: derive succeeded, but persisting the
-	// result failed. The honest invariant is:
-	//   sum(DeriveFailures) + WriteFailures == len(Errors)
+	// e.g. participant-validation failures during persistGroup.
 	WriteFailures int `json:"writeFailures,omitempty"`
+	// ResolutionFailures counts errors from agent-ref resolution in
+	// resolveGroup — store/database errors that are neither ErrNotFound
+	// nor ErrInvalidInput.
+	ResolutionFailures int `json:"resolutionFailures,omitempty"`
 	// LastCheckpoint is the pagination cursor of the last completed page.
 	// Pass this value as BackfillConfig.Checkpoint to resume from this position.
 	// Empty when the backfill completed in a single page (no more data to process).
 	LastCheckpoint string   `json:"lastCheckpoint,omitempty"`
 	Errors         []string `json:"errors,omitempty"`
+}
+
+// addDeriveFailure records a key-derivation refusal with its cause.
+func (r *BackfillResult) addDeriveFailure(cause, msg string) {
+	r.Errors = append(r.Errors, msg)
+	if r.DeriveFailures == nil {
+		r.DeriveFailures = make(map[string]int)
+	}
+	r.DeriveFailures[cause]++
+}
+
+// addWriteFailure records a post-derivation persistence error.
+func (r *BackfillResult) addWriteFailure(msg string) {
+	r.Errors = append(r.Errors, msg)
+	r.WriteFailures++
+}
+
+// addResolutionFailure records an agent-ref resolution error.
+func (r *BackfillResult) addResolutionFailure(msg string) {
+	r.Errors = append(r.Errors, msg)
+	r.ResolutionFailures++
 }
 
 // conversationGroup collects messages that belong to the same conversation.
@@ -147,18 +178,11 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 
 			g, deriveErr := s.groupForMessage(msg, cfg.ProjectID, groups)
 			if deriveErr != nil {
-				// Propagate the real error so the dominant failure mode is
-				// diagnosable (DEF-114). Each entry names the actual cause.
-				result.Errors = append(result.Errors,
-					fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
-
-				// Aggregate per-cause counter (DEF-114).
-				if result.DeriveFailures == nil {
-					result.DeriveFailures = make(map[string]int)
-				}
+				// Classify and record the derive failure (DEF-114).
 				var de *DeriveError
 				if errors.As(deriveErr, &de) {
-					result.DeriveFailures[de.Cause]++
+					result.addDeriveFailure(de.Cause,
+						fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
 
 					// Hazard (a) fix: non-UUID principals are exactly what
 					// makes principal-pair derivation fail, so the hazardA
@@ -172,7 +196,8 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 						}
 					}
 				} else {
-					result.DeriveFailures["unclassified"]++
+					result.addDeriveFailure("unclassified",
+						fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
 				}
 				continue
 			}
@@ -207,9 +232,8 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 	// Phase 3: Create conversations and stamp messages.
 	for _, g := range groups {
 		if err := s.persistGroup(ctx, g, result); err != nil {
-			result.Errors = append(result.Errors,
+			result.addWriteFailure(
 				fmt.Sprintf("group %s: %v", g.key, err))
-			result.WriteFailures++
 		}
 	}
 
@@ -304,7 +328,7 @@ func (s *BackfillService) resolveGroup(ctx context.Context, g *conversationGroup
 			result.HazardBSlugCount += len(g.messageIDs)
 			g.hazardB = true
 		} else {
-			result.Errors = append(result.Errors,
+			result.addResolutionFailure(
 				fmt.Sprintf("resolving agent ref %q: %v", g.agentRef, err))
 		}
 		return
@@ -363,9 +387,8 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 			// AddParticipant may return ErrAlreadyExists for re-joins;
 			// the ent adapter handles this, but guard against other impls.
 			if !errors.Is(err, store.ErrAlreadyExists) {
-				result.Errors = append(result.Errors,
+				result.addWriteFailure(
 					fmt.Sprintf("adding participant %s:%s to %s: %v", p.kind, p.id, actualConvID, err))
-				result.WriteFailures++
 			}
 		}
 	}
@@ -373,9 +396,8 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 	// Stamp messages.
 	for _, msgID := range g.messageIDs {
 		if err := s.msgStore.SetMessageConversationID(ctx, msgID, actualConvID); err != nil {
-			result.Errors = append(result.Errors,
+			result.addWriteFailure(
 				fmt.Sprintf("stamping message %s: %v", msgID, err))
-			result.WriteFailures++
 			continue
 		}
 

@@ -394,6 +394,7 @@ func TestBackfillMergeResult(t *testing.T) {
 		HazardAEmailCount:    1,
 		HazardBSlugCount:     0,
 		WriteFailures:        1,
+		ResolutionFailures:   1,
 		DeriveFailures:       map[string]int{"principal_pair": 2},
 		LastCheckpoint:       "old-cp",
 		Errors:               []string{"err1"},
@@ -407,6 +408,7 @@ func TestBackfillMergeResult(t *testing.T) {
 		HazardAEmailCount:    2,
 		HazardBSlugCount:     1,
 		WriteFailures:        3,
+		ResolutionFailures:   2,
 		DeriveFailures:       map[string]int{"principal_pair": 1, "dm_key_parse": 5},
 		LastCheckpoint:       "new-cp",
 		Errors:               []string{"err2", "err3"},
@@ -422,6 +424,7 @@ func TestBackfillMergeResult(t *testing.T) {
 	assert.Equal(t, 3, dst.HazardAEmailCount)
 	assert.Equal(t, 1, dst.HazardBSlugCount)
 	assert.Equal(t, 4, dst.WriteFailures)
+	assert.Equal(t, 3, dst.ResolutionFailures)
 	assert.Equal(t, "new-cp", dst.LastCheckpoint)
 	assert.Equal(t, []string{"err1", "err2", "err3"}, dst.Errors)
 

@@ -229,6 +229,7 @@ func mergeBackfillResult(dst, src *messaging.BackfillResult) {
 	dst.HazardAEmailCount += src.HazardAEmailCount
 	dst.HazardBSlugCount += src.HazardBSlugCount
 	dst.WriteFailures += src.WriteFailures
+	dst.ResolutionFailures += src.ResolutionFailures
 	if src.LastCheckpoint != "" {
 		dst.LastCheckpoint = src.LastCheckpoint
 	}
@@ -271,6 +272,7 @@ func printBackfillReport(out io.Writer, r *messaging.BackfillResult, projectIDs 
 	_, _ = fmt.Fprintf(out, "Hazard-b (slug refs):  %d\n", r.HazardBSlugCount)
 	_, _ = fmt.Fprintf(out, "Errors:                %d\n", len(r.Errors))
 	_, _ = fmt.Fprintf(out, "Write failures:        %d\n", r.WriteFailures)
+	_, _ = fmt.Fprintf(out, "Resolution failures:   %d\n", r.ResolutionFailures)
 	if r.LastCheckpoint != "" {
 		_, _ = fmt.Fprintf(out, "Last checkpoint:       %s\n", r.LastCheckpoint)
 	}

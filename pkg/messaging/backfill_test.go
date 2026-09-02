@@ -1436,28 +1436,25 @@ func TestBackfill_DEF114_AttributedMessageIDs_Pinned(t *testing.T) {
 		"exactly one message has non-UUID principals")
 }
 
-// assertErrorInvariant checks the honest relation between the three error
-// populations: sum(DeriveFailures) + WriteFailures == len(Errors).
+// assertErrorInvariant checks the structural invariant:
 //
-// DeriveFailures counts messages refused at key-derivation time.
-// WriteFailures counts errors that occur after derivation succeeds
-// (e.g. participant-validation or stamping failures in persistGroup).
-// Together they must account for every entry in Errors.
+//	sum(DeriveFailures) + WriteFailures + ResolutionFailures == len(Errors)
 //
-// The previous assertion (sum(DeriveFailures) == len(Errors)) was false
-// on production-shaped data because write failures land in Errors but
-// belong in no derive bucket.
+// Every Errors entry is recorded through one of addDeriveFailure,
+// addWriteFailure, or addResolutionFailure, which enforces this by
+// construction. This assertion verifies the invariant holds in tests.
 func assertErrorInvariant(t *testing.T, result *BackfillResult) {
 	t.Helper()
 	deriveTotal := 0
 	for _, count := range result.DeriveFailures {
 		deriveTotal += count
 	}
-	assert.Equal(t, len(result.Errors), deriveTotal+result.WriteFailures,
-		"sum(DeriveFailures) + WriteFailures must equal len(Errors); "+
+	classified := deriveTotal + result.WriteFailures + result.ResolutionFailures
+	assert.Equal(t, len(result.Errors), classified,
+		"sum(DeriveFailures) + WriteFailures + ResolutionFailures must equal len(Errors); "+
 			"a mismatch means an error escaped classification. "+
-			"DeriveFailures=%v (sum=%d), WriteFailures=%d, len(Errors)=%d",
-		result.DeriveFailures, deriveTotal, result.WriteFailures, len(result.Errors))
+			"DeriveFailures=%v (sum=%d), WriteFailures=%d, ResolutionFailures=%d, len(Errors)=%d",
+		result.DeriveFailures, deriveTotal, result.WriteFailures, result.ResolutionFailures, len(result.Errors))
 }
 
 // TestBackfill_DEF114_ErrorInvariant is the standalone self-checking
@@ -1596,5 +1593,116 @@ func TestBackfill_WriteFailure_OnlyWriteFailures(t *testing.T) {
 	assert.Equal(t, 1, len(result.Errors))
 
 	// Invariant: 0 + 1 == 1.
+	assertErrorInvariant(t, result)
+}
+
+// ---------------------------------------------------------------------------
+// Resolution-failure invariant tests
+// ---------------------------------------------------------------------------
+
+// failingAgentLookup returns a generic store error (not ErrNotFound, not
+// ErrInvalidInput) for any slug lookup, simulating a database/infra error
+// in NormalizeAgentRef.
+type failingAgentLookup struct {
+	err error
+}
+
+func (f *failingAgentLookup) GetAgentBySlug(_ context.Context, _, _ string) (*store.Agent, error) {
+	return nil, f.err
+}
+
+// TestBackfill_ResolutionFailure_CountedSeparately verifies that a generic
+// error from NormalizeAgentRef in resolveGroup is counted in
+// ResolutionFailures (not DeriveFailures or WriteFailures) and that the
+// structural invariant holds.
+//
+// This is the error path that was uncounted before the structural fix:
+// resolveGroup appended to Errors without incrementing any bucket.
+func TestBackfill_ResolutionFailure_CountedSeparately(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	// A derivable message with a non-UUID AgentID (slug) that triggers
+	// NormalizeAgentRef in resolveGroup.
+	msg := newTestMessage(projectID, "user:alice", userID,
+		"agent:bot", agentID, time.Now())
+	msg.AgentID = "some-agent-slug" // slug, not UUID — triggers resolution
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+
+	// Agent lookup returns a generic error — not ErrNotFound, not ErrInvalidInput.
+	agents := &failingAgentLookup{err: fmt.Errorf("database connection timeout")}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.TotalProcessed)
+	assert.Equal(t, 1, result.Attributed, "message is attributed despite resolution failure")
+	assert.Equal(t, 0, len(result.DeriveFailures), "no derive failures")
+	assert.Equal(t, 0, result.WriteFailures, "no write failures")
+	assert.Equal(t, 1, result.ResolutionFailures, "one resolution failure")
+	assert.Equal(t, 1, len(result.Errors))
+	assert.Contains(t, result.Errors[0], "resolving agent ref")
+	assert.Contains(t, result.Errors[0], "database connection timeout")
+
+	// The structural invariant must hold.
+	assertErrorInvariant(t, result)
+}
+
+// TestBackfill_MixedFailures_AllThreeBuckets verifies the invariant when
+// derive, write, AND resolution failures are all present simultaneously.
+func TestBackfill_MixedFailures_AllThreeBuckets(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	// Message 1: derivable, with slug AgentID → resolution failure.
+	userID1 := uuid.NewString()
+	msgResolveFail := newTestMessage(projectID, "user:alice", userID1,
+		"agent:bot", agentID, now.Add(-3*time.Minute))
+	msgResolveFail.AgentID = "broken-slug-1"
+
+	// Message 2: non-derivable → derive failure.
+	msgDeriveFail := newTestMessage(projectID, "user:alice@example.com",
+		"alice@example.com", "agent:bot", agentID, now.Add(-2*time.Minute))
+
+	// Message 3: derivable, different pair (so different group), with slug
+	// AgentID → resolution failure + write failure from AddParticipant.
+	userID3 := uuid.NewString()
+	agentID3 := uuid.NewString()
+	msgWriteFail := newTestMessage(projectID, "user:bob", userID3,
+		"agent:helper", agentID3, now.Add(-1*time.Minute))
+	msgWriteFail.AgentID = "broken-slug-2"
+
+	msgStore := &mockMessageStore{messages: []store.Message{
+		msgResolveFail, msgDeriveFail, msgWriteFail,
+	}}
+	// Write failure on AddParticipant for "agent" kind.
+	convStore := &failingAddParticipantStore{failKind: "agent"}
+	// Resolution failure on all slug lookups.
+	agents := &failingAgentLookup{err: fmt.Errorf("store unavailable")}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, result.TotalProcessed)
+
+	// One derive failure (principal_pair).
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrPrincipalPair])
+
+	// Two resolution failures (both slug messages trigger it in resolveGroup).
+	assert.Equal(t, 2, result.ResolutionFailures)
+
+	// Write failures from AddParticipant (agent kind fails for each group).
+	assert.True(t, result.WriteFailures > 0, "should have write failures")
+
+	// The structural invariant must hold across all three buckets.
 	assertErrorInvariant(t, result)
 }
