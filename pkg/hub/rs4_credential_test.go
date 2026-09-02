@@ -872,4 +872,3 @@ func TestRS4_MutationAudit_CredentialRevocation_Asserting(t *testing.T) {
 	assert.Contains(t, r.BeforeSummary, `"action":"delete"`,
 		"T-A9: audit must distinguish delete from revoke")
 }
-

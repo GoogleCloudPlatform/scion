@@ -2277,14 +2277,9 @@ func (s *Server) GetUserTokenService() *UserTokenService {
 	return s.userTokenService
 }
 
-// getUATService returns the user access token service.
-// RS4/G13: unexported — no production in-repo caller exists and an exported
-// accessor would be a latent bypass door around the bounded service.
-func (s *Server) getUATService() *UserAccessTokenService {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.uatService
-}
+// RS4/G13: getUATService accessor removed — no production caller exists and
+// an exported accessor would be a latent bypass door around the bounded service.
+// The uatService field is accessed directly within Server methods.
 
 // GetOAuthService returns the OAuth service.
 func (s *Server) GetOAuthService() *OAuthService {
