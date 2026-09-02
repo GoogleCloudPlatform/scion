@@ -1731,6 +1731,105 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 	return result, nil
 }
 
+// getProjectScopedPermissions returns only the permissions that the principal
+// holds through project-scoped role bindings for the given project. System-
+// scoped bindings are excluded. This is the A2 issuer-ceiling resolver: hub
+// or system authority must not enlarge a project-scoped token.
+//
+// The method retains group-expanded principals, activation-window filtering,
+// and AccessConstraint reduction — exactly as getEffectivePermissions does —
+// but only considers bindings where ScopeType == "project" && ScopeID == projectID.
+func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
+	normalizedType := NormalizePrincipalType(principalType)
+
+	// Build principals: direct + group-expanded.
+	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
+	var groupIDs []string
+	var err error
+	switch normalizedType {
+	case store.RoleBindingPrincipalUser:
+		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
+	case store.RoleBindingPrincipalAgent:
+		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		a.logger.Warn("failed to get effective groups for project-scoped permission resolution (fail-closed)",
+			"principalType", principalType, "principalID", principalID, "error", err)
+		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
+	}
+	for _, gid := range groupIDs {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+	}
+
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	seen := make(map[string]bool)
+	var result []string
+	for _, b := range bindings {
+		// A2: Only project-scoped bindings for the target project.
+		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+
+		// Activation window filtering (R-2 pattern).
+		cb := &CandidateBinding{BindingID: b.ID}
+		if b.NotBefore != nil {
+			cb.NotBefore = *b.NotBefore
+		}
+		if b.ExpiresAt != nil {
+			cb.ExpiresAt = *b.ExpiresAt
+		}
+		if activation := evaluateActivation(cb, now); !activation.Active {
+			continue
+		}
+
+		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if rdErr != nil {
+			a.logger.Warn("failed to resolve role definition for project-scoped binding",
+				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
+			continue
+		}
+		for _, permID := range rd.Permissions {
+			if !seen[permID] {
+				seen[permID] = true
+				result = append(result, permID)
+			}
+		}
+	}
+
+	// Apply AccessConstraint intersection (same pattern as getEffectivePermissions).
+	if len(result) > 0 {
+		closure := make(map[string]struct{}, len(principals))
+		for _, p := range principals {
+			closure[p.Type+":"+p.ID] = struct{}{}
+		}
+		resourceCtx := ResourceContext{ProjectID: projectID}
+		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
+		if len(restrictions) > 0 {
+			var filtered []string
+			for _, permID := range result {
+				blocked := false
+				for _, r := range restrictions {
+					if r.Check == nil || !r.Check(permID) {
+						blocked = true
+						break
+					}
+				}
+				if !blocked {
+					filtered = append(filtered, permID)
+				}
+			}
+			result = filtered
+		}
+	}
+
+	return result, nil
+}
+
 // makeAllowed creates a slice of n true values.
 func makeAllowed(n int) []bool {
 	allowed := make([]bool, n)

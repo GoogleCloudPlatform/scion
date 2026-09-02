@@ -196,11 +196,15 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		return "", nil, ErrUATProjectForbidden
 	}
 
-	// Get the full effective permissions (project + system-scoped) for the
-	// issuer ceiling check below.
-	actorPerms, err := s.authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeProject, projectID)
+	// --- B1/A2: Issuer ceiling at mint (target-project only) ---
+	// Get only project-scoped permissions — system/hub authority must not
+	// enlarge the token (frozen decision A2). Uses getProjectScopedPermissions
+	// which filters to ScopeType==project && ScopeID==projectID only, while
+	// retaining group-expanded principals, activation windows, and
+	// AccessConstraint reduction.
+	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
 	if err != nil {
-		s.logger.Warn("RS4: failed to resolve actor permissions for target project",
+		s.logger.Warn("RS4: failed to resolve project-scoped permissions",
 			"user_id", userID, "project_id", projectID, "error", err)
 		return "", nil, ErrUATProjectForbidden
 	}
@@ -208,10 +212,15 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		return "", nil, ErrUATProjectForbidden
 	}
 
-	// --- B1: Issuer ceiling at mint ---
 	// Convert requested scopes to permission IDs and verify the issuer holds
-	// each one in the target project.
+	// each one in the target project. Fail closed if any valid scope does not
+	// map to exactly one registered permission (F1 defense).
 	requiredPermIDs := scopeToPermissionIDs(expanded)
+	if len(requiredPermIDs) < len(expanded) {
+		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scopes have no registered permission",
+			"expanded_count", len(expanded), "mapped_count", len(requiredPermIDs))
+		return "", nil, ErrUATScopeViolation
+	}
 	actorPermSet := make(map[string]bool, len(actorPerms))
 	for _, p := range actorPerms {
 		actorPermSet[p] = true
