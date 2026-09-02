@@ -1773,6 +1773,9 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab slot="nav" panel="general" ?active=${this.activeConfigTab === 'general'}
             >General</sl-tab
           >
+          <sl-tab slot="nav" panel="auth-security" ?active=${this.activeConfigTab === 'auth-security'}
+            >Auth &amp; Security</sl-tab
+          >
           <sl-tab slot="nav" panel="limits" ?active=${this.activeConfigTab === 'limits'}
             >Limits</sl-tab
           >
@@ -1853,38 +1856,6 @@ export class ScionPageProjectSettings extends LitElement {
                 </sl-select>
                 <span class="field-help"
                   >Harness configuration used by default for new agents.</span
-                >
-              </div>
-
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-harness-auth')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Harness Auth
-                  ${this.renderHubIndicator('scion.io/default-harness-auth')}</label
-                >
-                <sl-select
-                  placeholder=${this.hubSelectLabel(
-                    'scion.io/default-harness-auth',
-                    'None (use server default)'
-                  )}
-                  clearable
-                  value=${this.configDefaultHarnessAuth}
-                  ?disabled=${!canEdit}
-                  @sl-change=${(e: Event) => {
-                    this.configDefaultHarnessAuth = (e.target as HTMLSelectElement).value;
-                  }}
-                >
-                  <sl-option value="api-key">Provider API Key</sl-option>
-                  <sl-option value="oauth-token">OAuth Token</sl-option>
-                  <sl-option value="auth-file">Harness credential file</sl-option>
-                  <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
-                  <sl-option value="none">No Authentication</sl-option>
-                </sl-select>
-                <span class="field-help"
-                  >Default authentication type for new agents in this project.</span
                 >
               </div>
 
@@ -2059,6 +2030,43 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help"
                   >Automatically detect and expose listening TCP ports in agent containers. "Use hub
                   default" inherits the server-level setting.</span
+                >
+              </div>
+
+            </div>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="auth-security">
+            <div class="config-form">
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-harness-auth')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Harness Auth
+                  ${this.renderHubIndicator('scion.io/default-harness-auth')}</label
+                >
+                <sl-select
+                  placeholder=${this.hubSelectLabel(
+                    'scion.io/default-harness-auth',
+                    'None (use server default)'
+                  )}
+                  clearable
+                  value=${this.configDefaultHarnessAuth}
+                  ?disabled=${!canEdit}
+                  @sl-change=${(e: Event) => {
+                    this.configDefaultHarnessAuth = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="api-key">Provider API Key</sl-option>
+                  <sl-option value="oauth-token">OAuth Token</sl-option>
+                  <sl-option value="auth-file">Harness credential file</sl-option>
+                  <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
+                  <sl-option value="none">No Authentication</sl-option>
+                </sl-select>
+                <span class="field-help"
+                  >Default authentication type for new agents in this project.</span
                 >
               </div>
 
