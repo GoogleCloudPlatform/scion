@@ -1010,8 +1010,16 @@ func (s *pgWebChatStore) GetTopicConversationIDIncludingDeleted(ctx context.Cont
 // A Postgres session-level advisory lock prevents concurrent replicas from
 // racing through the check-then-mark migration pattern.
 func (s *pgWebChatStore) runMigrations() error {
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("webchat migration conn: %w", err)
+	}
+	defer conn.Close()
+
 	var acquired bool
-	if err := s.db.QueryRow("SELECT pg_try_advisory_lock($1)", int64(store.LockWebchatMigration)).Scan(&acquired); err != nil {
+	if err := conn.QueryRowContext(context.Background(),
+		"SELECT pg_try_advisory_lock($1)", int64(store.LockWebchatMigration),
+	).Scan(&acquired); err != nil {
 		return fmt.Errorf("webchat advisory lock: %w", err)
 	}
 	if !acquired {
@@ -1019,7 +1027,10 @@ func (s *pgWebChatStore) runMigrations() error {
 		return nil
 	}
 	defer func() {
-		_, _ = s.db.Exec("SELECT pg_advisory_unlock($1)", int64(store.LockWebchatMigration))
+		if _, err := conn.ExecContext(context.Background(),
+			"SELECT pg_advisory_unlock($1)", int64(store.LockWebchatMigration)); err != nil {
+			slog.Warn("Failed to release webchat migration lock", "error", err)
+		}
 	}()
 
 	if err := s.migrateThreadIDs(DefaultMigrationBatchSize); err != nil {
