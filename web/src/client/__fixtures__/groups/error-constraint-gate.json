@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "forbidden",
+    "message": "group is referenced by an access constraint; access_constraint.admin permission required"
+  }
+}

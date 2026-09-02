@@ -1,0 +1,40 @@
+{
+  "members": [
+    {
+      "groupId": "g-00000000-0000-0000-0000-000000000001",
+      "memberType": "user",
+      "memberId": "u-00000000-0000-0000-0000-000000000001",
+      "displayName": "Alice Admin",
+      "role": "owner",
+      "addedAt": "2026-01-15T10:00:00Z",
+      "addedBy": "u-00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "groupId": "g-00000000-0000-0000-0000-000000000001",
+      "memberType": "user",
+      "memberId": "u-00000000-0000-0000-0000-000000000002",
+      "displayName": "Bob Builder",
+      "role": "admin",
+      "addedAt": "2026-02-01T08:30:00Z",
+      "addedBy": "u-00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "groupId": "g-00000000-0000-0000-0000-000000000001",
+      "memberType": "group",
+      "memberId": "g-00000000-0000-0000-0000-000000000002",
+      "displayName": "Frontend Team",
+      "role": "member",
+      "addedAt": "2026-03-10T11:00:00Z",
+      "addedBy": "u-00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "groupId": "g-00000000-0000-0000-0000-000000000001",
+      "memberType": "agent",
+      "memberId": "a-00000000-0000-0000-0000-000000000001",
+      "displayName": "deploy-bot",
+      "role": "member",
+      "addedAt": "2026-04-05T15:00:00Z",
+      "addedBy": "u-00000000-0000-0000-0000-000000000002"
+    }
+  ]
+}
