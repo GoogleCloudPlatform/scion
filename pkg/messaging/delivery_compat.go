@@ -45,7 +45,8 @@ func FormatLegacyAsNewDelivery(
 	}
 
 	// Convert legacy message to new types via Phase 6 mapper.
-	newMsg, addrs, err := MapLegacyEnvelope(msg)
+	// No persisted identity available on this compat path; fields are omitted.
+	newMsg, addrs, err := MapLegacyEnvelope(msg, PersistedIdentity{})
 	if err != nil {
 		// If conversion fails, fall back to raw text.
 		return msg.Msg

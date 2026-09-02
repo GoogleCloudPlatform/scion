@@ -117,13 +117,18 @@ func MapLegacyDeliveryArtifact(oldType string) *AddressedVia {
 	}
 }
 
+// PersistedIdentity carries real identifiers from the persisted message row.
+// Empty string means the value is absent and must be omitted, never fabricated.
+type PersistedIdentity struct {
+	MessageID string // the persisted store row's ID; "" means OMIT
+	ReplyToID string // a real reply target; "" means OMIT
+}
+
 // MapLegacyEnvelope converts a legacy StructuredMessage into the new Message
-// and Addressee types. The conversion is best-effort: fields that have no
-// direct equivalent are mapped to the closest semantic match.
-//
-// The returned message ID is synthesised from the timestamp if no other
-// identifier is available in the old format.
-func MapLegacyEnvelope(old *messages.StructuredMessage) (*Message, []Addressee, error) {
+// and Addressee types. The ident parameter supplies real identifiers from the
+// persisted message row; empty strings are treated as absent and the
+// corresponding fields are omitted rather than fabricated.
+func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity) (*Message, []Addressee, error) {
 	if old == nil {
 		return nil, nil, fmt.Errorf("cannot convert nil StructuredMessage")
 	}
@@ -164,18 +169,15 @@ func MapLegacyEnvelope(old *messages.StructuredMessage) (*Message, []Addressee, 
 	// Map visibility.
 	vis := mapLegacyVisibility(old.Visibility)
 
-	// Synthesise a message ID from the timestamp (old format has no ID field).
-	msgID := fmt.Sprintf("legacy-%s", old.Timestamp)
-
-	// Map thread to reply-to (best-effort).
+	// Use real identifiers from the persisted row. Empty means omit.
 	var replyToID *string
-	if old.ThreadID != "" {
-		tid := old.ThreadID
-		replyToID = &tid
+	if ident.ReplyToID != "" {
+		r := ident.ReplyToID
+		replyToID = &r
 	}
 
 	msg := &Message{
-		ID:          msgID,
+		ID:          ident.MessageID,
 		ReplyToID:   replyToID,
 		From:        from,
 		Kind:        kind,
@@ -188,7 +190,7 @@ func MapLegacyEnvelope(old *messages.StructuredMessage) (*Message, []Addressee, 
 	}
 
 	// Build addressees.
-	addrs := buildAddressees(old, msgID)
+	addrs := buildAddressees(old, ident.MessageID)
 
 	return msg, addrs, nil
 }

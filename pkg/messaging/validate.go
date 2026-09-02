@@ -37,9 +37,40 @@ func validateMessageContent(msg *Message) error {
 	if msg == nil {
 		return fmt.Errorf("message must not be nil")
 	}
-	// Delegate structural checks to the type's own Validate.
-	if err := msg.Validate(); err != nil {
+	// Run structural checks that do not depend on persistence identity.
+	// Message.ID is a persisted row identifier set after persistence, not
+	// a content invariant — omit that check here. The full Validate()
+	// remains for contexts that require a complete message.
+	if err := ValidatePrincipalRef(msg.From); err != nil {
+		return fmt.Errorf("invalid from: %w", err)
+	}
+	if err := ValidateMessageKind(msg.Kind); err != nil {
 		return err
+	}
+	if err := ValidateVisibility(msg.Visibility); err != nil {
+		return err
+	}
+	switch msg.Kind {
+	case KindText:
+		if msg.Intent == nil {
+			return fmt.Errorf("text message must have intent set")
+		}
+		if err := ValidateTextIntent(*msg.Intent); err != nil {
+			return err
+		}
+		if msg.Event != nil {
+			return fmt.Errorf("text message must not have event body")
+		}
+	case KindEvent:
+		if msg.Event == nil {
+			return fmt.Errorf("event message must have event body set")
+		}
+		if err := msg.Event.Validate(); err != nil {
+			return fmt.Errorf("invalid event body: %w", err)
+		}
+		if msg.Intent != nil {
+			return fmt.Errorf("event message must not have intent")
+		}
 	}
 	// Body size limits (reuse constants from messages package).
 	if len([]rune(msg.Body)) > messages.MaxMessageLength {
