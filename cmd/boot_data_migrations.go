@@ -184,6 +184,10 @@ func runDMKeyMigration(ctx context.Context, s store.Store) {
 // context cancelled) means the pass did not happen — log ERROR, do not
 // record that project as done. Row-level refusals are terminal, correct,
 // permanent outcomes — they do NOT block progress.
+//
+// M9 (design §4.8): a completed marker lacking the PermanentResidual key
+// (pre-M9 format) is treated as incomplete and triggers a one-time re-run.
+// The backfill is idempotent; the re-run writes the new marker format.
 func runMessageBackfill(ctx context.Context, s store.Store) {
 	// Fast path: already complete. O(1) with respect to data volume.
 	marker, err := loadBackfillMarker(ctx, s)
@@ -192,8 +196,21 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 			"error", err)
 		// Fall through: attempting the migration is safer than skipping it.
 	} else if marker.CompletedAt != nil {
-		slog.Debug("Message backfill: already complete, skipping")
-		return
+		// M9: a completed marker lacking PermanentResidual was written
+		// before M9 and does not have the measured permanent count. Treat
+		// it as incomplete so the idempotent backfill re-runs once and
+		// writes the new format. Reading absent-as-zero would make the
+		// entire reachable population look actionable (design §4.8).
+		if marker.PermanentResidual == nil {
+			slog.Info("Message backfill: pre-M9 marker detected (no permanent_residual); re-running to upgrade marker format")
+			// Clear CompletedAt so the pass runs. ProjectsDone was already
+			// cleared by markBackfillComplete, so the full project list
+			// will be re-enumerated.
+			marker.CompletedAt = nil
+		} else {
+			slog.Debug("Message backfill: already complete, skipping")
+			return
+		}
 	}
 
 	slog.Info("Message backfill: starting")
@@ -224,6 +241,18 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 	budget := defaultBackfillBudget
 	deadline := time.Now().Add(budget)
 	totalResiduals := marker.Residuals // carry forward from prior boots
+
+	// M9: accumulate the measured permanent residual (design §4.8 second
+	// correction). Reset to zero at the start of a pass beginning with
+	// empty projects_done to prevent double-counting on a repeated pass.
+	// Carry forward only within a pass (resumed from prior boot with
+	// projects already done).
+	permanentResidual := 0
+	transientFailures := 0
+	if len(marker.ProjectsDone) > 0 && marker.PermanentResidual != nil {
+		permanentResidual = *marker.PermanentResidual
+		transientFailures = marker.TransientFailures
+	}
 
 	for _, pid := range projectIDs {
 		if doneSet[pid] {
@@ -260,14 +289,51 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		residuals := len(result.Errors)
 		totalResiduals += residuals
 
-		slog.Info("Message backfill: project completed",
+		// M9: measure the permanent residual for this project (design §4.8
+		// second correction). After the backfill pass, CountUnbackfilledMessages(pid)
+		// gives the number of messages still unbackfilled — a pure measurement
+		// with no tally subtraction. Transient failures are accumulated
+		// separately and reported as their own WARN line.
+		projectPermanent, countErr := measureProjectPermanentResidual(ctx, s, pid)
+		if countErr != nil {
+			slog.Error("Message backfill: failed to measure permanent residual for project; will retry next boot",
+				"project", pid,
+				"error", countErr,
+			)
+			// Cannot persist an accurate permanent count. Stop and retry
+			// on the next boot to avoid persisting incorrect data.
+			return
+		}
+		permanentResidual += projectPermanent
+
+		// M9: tally transient failures separately. These are write and
+		// resolution failures — retryable, reported as their own WARN line.
+		// Never subtracted from the measurement (design §4.8 second correction).
+		projectTransient := result.WriteFailures + result.ResolutionFailures
+		transientFailures += projectTransient
+
+		// M9 / DEF-114: log the per-cause breakdown so the dominant failure
+		// mode is diagnosable from boot logs. The boot hook is now the
+		// primary caller; without these fields, diagnosing "what were the
+		// 11,597?" requires a separate investigation round trip.
+		logArgs := []any{
 			"project", pid,
 			"processed", result.TotalProcessed,
 			"attributed", result.Attributed,
+			"inferred", result.Inferred,
 			"skipped", result.Skipped,
 			"row_errors", residuals,
+			"derive_failures", sumDeriveFailures(result.DeriveFailures),
+			"write_failures", result.WriteFailures,
+			"resolution_failures", result.ResolutionFailures,
+			"permanent_residual", projectPermanent,
 			"elapsed", time.Since(projectStart).Round(time.Millisecond).String(),
-		)
+		}
+		// Append per-cause derive failure counts.
+		for cause, count := range result.DeriveFailures {
+			logArgs = append(logArgs, "derive_"+cause, count)
+		}
+		slog.Info("Message backfill: project completed", logArgs...)
 
 		if residuals > 0 {
 			logBoundedErrors("Message backfill ("+pid+")", result.Errors, maxBootLogErrors)
@@ -277,6 +343,8 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		// progress survives a crash between projects.
 		marker.ProjectsDone = append(marker.ProjectsDone, pid)
 		marker.Residuals = totalResiduals
+		marker.PermanentResidual = &permanentResidual
+		marker.TransientFailures = transientFailures
 		doneSet[pid] = true
 
 		if saveErr := saveBackfillProgress(ctx, s, marker); saveErr != nil {
@@ -311,7 +379,40 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 	slog.Info("Message backfill: all projects complete",
 		"projects", len(projectIDs),
 		"total_residuals", totalResiduals,
+		"permanent_residual", permanentResidual,
+		"transient_failures", transientFailures,
 	)
+}
+
+// measureProjectPermanentResidual measures the number of messages that
+// remain unbackfilled for a project after its backfill pass completes.
+//
+// Design §4.8 second correction: the permanent count is a pure measurement
+// — CountUnbackfilledMessages(pid) taken after the pass — with NO tally
+// subtraction. Transient failures (write/resolution) are reported as their
+// own separate count, never subtracted from the measurement. This prevents
+// the tally/measurement mixing that caused the off-by-24 in the first
+// correction: rows that are both errored and stamped are inside the
+// measurement and never cause a gap.
+//
+// The measured term is drawn from the same population the global live counter
+// measures (CountUnbackfilledMessages("")), so at steady state the two agree
+// by construction and actionable reaches zero exactly — not via the clamp.
+func measureProjectPermanentResidual(ctx context.Context, s store.Store, pid string) (int, error) {
+	stillUnbackfilled, err := s.CountUnbackfilledMessages(ctx, pid)
+	if err != nil {
+		return 0, fmt.Errorf("counting unbackfilled messages for project %s: %w", pid, err)
+	}
+	return stillUnbackfilled, nil
+}
+
+// sumDeriveFailures totals the per-cause derive failure counts.
+func sumDeriveFailures(m map[string]int) int {
+	total := 0
+	for _, v := range m {
+		total += v
+	}
+	return total
 }
 
 // listAllProjectIDs enumerates all projects, paginating as the CLI does.
@@ -345,11 +446,13 @@ func runBackfillForProject(ctx context.Context, s store.Store, projectID string)
 }
 
 // markBackfillComplete sets completed_at and clears projects_done to bound
-// the marker's growth (design §4.5). The residual count is preserved.
+// the marker's growth (design §4.5). The residual count and the permanent
+// residual (M9) are preserved.
 func markBackfillComplete(ctx context.Context, s store.Store, m backfillMarker) error {
 	now := time.Now().UTC()
 	m.CompletedAt = &now
 	m.ProjectsDone = nil // clear for bounded growth
+	// m.Residuals and m.PermanentResidual are preserved across completion.
 	return saveBackfillProgress(ctx, s, m)
 }
 
@@ -391,25 +494,28 @@ func logBoundedErrors(prefix string, errors []string, limit int) {
 }
 
 // reportResidualUnattributed splits the residual unattributed-message count
-// into reachable (actionable) and unreachable (stable) buckets (design §4.6).
+// into three buckets (design §4.6, §4.8):
 //
-// - INFO, always: reports attributed count and unreachable count, with a
-//   detail string explaining that unreachable messages reference hard-deleted
-//   projects and cannot be attributed by per-project backfill (DEF-111).
-// - WARN, only when the reachable count is non-zero: reports the actionable
-//   count of messages that remain unattributed in listed projects.
+//   - unreachable (INFO): messages whose project_id references a hard-deleted
+//     project. Stable and permanent (DEF-111).
+//   - permanent (INFO): messages in listed projects that are permanently
+//     unbackfillable — derive refusals and intentionally skipped messages.
+//     Measured during the backfill pass and persisted in the marker (M9).
+//   - actionable (WARN): messages that re-running the backfill could fix.
+//     WARN fires only when this count is non-zero.
 //
-// This replaces the old maybeWarnUnbackfilledMessages which advertised
-// "scion server backfill --execute" — that remedy is stale after auto-run
-// and is not emitted anywhere.
+// The arithmetic:
 //
-// The reachable count is derived from an anti-join query
-// (CountUnreachableUnbackfilledMessages) rather than summing per-project
-// backfill results, because on a steady-state boot — every project in
-// projects_done, zero backfill work performed — there are no per-project
-// counts to sum. The sum approach yields zero in the state the hub occupies
-// almost all its life, which silently suppresses the WARN. See the LEAD
-// CONSTRAINT discussion in the design doc §4.6 correction.
+//	total       = CountUnbackfilledMessages("")           // live
+//	unreachable = CountUnreachableUnbackfilledMessages()  // live, nests under total
+//	reachable   = total - unreachable                     // nests, cannot go negative
+//	permanent   = marker.PermanentResidual                // persisted, survives completion
+//	actionable  = max(0, reachable - permanent)
+//
+// The clamp on actionable is a drift guard, not the mechanism that produces
+// zero. At steady state actionable reaches zero exactly because the measured
+// permanent term is drawn from the same population the live counter measures
+// (design §4.8 correction).
 //
 // CONSEQUENCE: the DEF-112 drift concern is now live. The counter's
 // predicate ("project_id NOT IN projects") and the backfill's skip predicate
@@ -451,10 +557,53 @@ func reportResidualUnattributed(ctx context.Context, s store.Store) {
 		)
 	}
 
-	// WARN only when reachable > 0: these are actionable.
-	if reachable > 0 {
+	// M9: load the backfill marker to get the persisted permanent residual.
+	marker, markerErr := loadBackfillMarker(tCtx, s)
+	permanent := 0
+	if markerErr != nil {
+		slog.Warn("Failed to load backfill marker for residual report; treating permanent as 0",
+			"error", markerErr)
+		// Fall through with permanent=0: conservative direction (may over-warn).
+	} else if marker.PermanentResidual != nil {
+		permanent = *marker.PermanentResidual
+	}
+
+	// M9: compute actionable = max(0, reachable - permanent).
+	// The clamp is a drift guard; at steady state actionable reaches zero
+	// exactly because permanent is measured from the same population.
+	actionable := reachable - permanent
+	if actionable < 0 {
+		actionable = 0
+	}
+
+	// INFO for permanent count (stable, no operator action possible).
+	if permanent > 0 {
+		slog.Info("Permanently unattributable messages in listed projects",
+			"permanent", permanent,
+			"detail", "derive refusals and intentionally skipped messages; no operator action can attribute these",
+		)
+	}
+
+	// WARN only when actionable > 0: these are messages that arrived after
+	// the backfill pass completed — new drift that a re-run could fix.
+	if actionable > 0 {
 		slog.Warn("Messages remain unattributed in listed projects",
-			"count", reachable,
+			"count", actionable,
+		)
+	}
+
+	// M9: report transient failures (write + resolution) as a separate
+	// WARN with the retry remedy. These are tallied during the pass and
+	// never subtracted from the measured permanent count.
+	transient := 0
+	if marker.TransientFailures > 0 {
+		transient = marker.TransientFailures
+	}
+	if transient > 0 {
+		slog.Warn("Transient backfill failures detected",
+			"count", transient,
+			"detail", "write or resolution failures during the backfill pass; these may resolve on retry",
+			"remedy", "scion server backfill --execute",
 		)
 	}
 }

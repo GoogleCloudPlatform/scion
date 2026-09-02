@@ -386,18 +386,16 @@ func TestBootDMKeyMigration_EmptyRefUntouched(t *testing.T) {
 // Warning still fires
 // ---------------------------------------------------------------------------
 
-// TestBootDataMigrations_ReachableWarnFires verifies that the residual
-// report emits a WARN for messages that remain unattributed in listed
-// projects (M6 §4.6). The message is unattributable: it has no ThreadID
-// and non-UUID principals, so key derivation fails (DeriveErrPrincipalPair).
-// The backfill processes it, refuses it as a row-level refusal, and the
-// WARN fires because conversation_id is still NULL and the project exists.
+// TestBootDataMigrations_PermanentUnattributableNoWarn verifies that after
+// M9, permanently unattributable messages (derive refusals) are classified
+// as permanent and do NOT trigger the WARN. The WARN fires only for
+// actionable messages — those that could be fixed by re-running the backfill
+// or addressing a transient failure (design §4.8).
 //
-// Replaces the old TestBootDataMigrations_WarningStillFires whose
-// precondition expired: it asserted "Messages without conversation
-// attribution detected" which was the old maybeWarnUnbackfilledMessages
-// message. M6 replaced that with the split reachable/unreachable report.
-func TestBootDataMigrations_ReachableWarnFires(t *testing.T) {
+// Previously (pre-M9) this test asserted that the WARN fires for
+// permanently unattributable messages. M9 intentionally changes that:
+// the permanent population is subtracted from the reachable count.
+func TestBootDataMigrations_PermanentUnattributableNoWarn(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
@@ -434,8 +432,13 @@ func TestBootDataMigrations_ReachableWarnFires(t *testing.T) {
 	runBootDataMigrations(ctx, s)
 
 	logOutput := buf.String()
-	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
-		"WARN must fire for reachable unattributed messages")
+
+	// M9: the message is permanently unattributable, so it should be
+	// reported at INFO as permanent, not at WARN as actionable.
+	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
+		"INFO must report permanent count for derive-refused messages")
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"WARN must NOT fire when all reachable messages are permanently unattributable (M9)")
 	assert.NotContains(t, logOutput, "scion server backfill",
 		"remediation string must not appear (M6 removed it)")
 }
@@ -501,9 +504,12 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	assert.NotNil(t, backfillDone.CompletedAt,
 		"backfill marker should be written after backfill pass")
 
-	// Reachable WARN should fire for the unattributable message
-	// (it's in a valid project, so it's reachable but unattributed).
-	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects")
+	// M9: the unattributable message is now classified as permanent,
+	// so WARN should NOT fire. Instead, the permanent INFO should appear.
+	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
+		"M9: permanent messages must be reported at INFO")
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"M9: WARN must not fire when all unattributed messages are permanent")
 
 	// Verify the conversation was re-keyed.
 	convs, err := s.ListConversations(ctx, store.ConversationFilter{Kind: "direct"}, store.ListOptions{Limit: 100})
@@ -682,24 +688,21 @@ func TestResidualReport_AC9(t *testing.T) {
 // Steady-state reachable WARN gate
 // ---------------------------------------------------------------------------
 
-// TestResidualReport_SteadyStateReachableWarn gates the specific defect that
-// caused M6 to be re-specified: a reachable count that reads 0 on a
-// steady-state boot because the count was derived from work the backfill
-// performed and a steady-state boot performs none.
+// TestResidualReport_SteadyStatePermanentInfo verifies that on a steady-
+// state boot (backfill already complete, no work performed), the permanent
+// residual is correctly reported at INFO — not as a WARN and not silently
+// suppressed.
 //
-// This test is distinct from AC-9's steady-state case. AC-9 seeds an
-// attributable message: it gets attributed on boot 1, so boot 2's reachable
-// count is legitimately 0 and the WARN correctly does not fire. That test
-// cannot distinguish "reachable is correctly 0" from "reachable reads 0
-// because the counter is broken." This test seeds an UNATTRIBUTABLE reachable
-// message (non-UUID principals in a listed project) so the reachable count
-// is non-zero on both boots.
+// M9 reclassified permanently unattributable messages from the actionable
+// (WARN) bucket into the permanent (INFO) bucket. This test verifies that
+// the persisted PermanentResidual survives across boots and is correctly
+// read by the residual report on steady-state boots where no backfill work
+// is performed.
 //
-// Mutation-tested: replacing the anti-join count with a sum-of-per-project-
-// counts approach (reachable derived from backfill work performed) makes
-// the second-boot assertion fail — the sum yields 0 because no work was
-// performed, and the WARN is silently suppressed.
-func TestResidualReport_SteadyStateReachableWarn(t *testing.T) {
+// The M6-era test (TestResidualReport_SteadyStateReachableWarn) asserted
+// that the WARN fires on the second boot. M9 intentionally changes that:
+// the permanent count is subtracted and the WARN fires only for actionable.
+func TestResidualReport_SteadyStatePermanentInfo(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
@@ -737,22 +740,24 @@ func TestResidualReport_SteadyStateReachableWarn(t *testing.T) {
 
 	logOutput := buf.String()
 
-	// Sanity: the WARN must fire on the first boot. The message is
-	// unattributable but reachable — reachable count is 1.
-	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
-		"first boot: WARN must fire for reachable unattributable message")
+	// M9: the permanent message should be classified as permanent (INFO),
+	// not actionable (WARN).
+	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
+		"first boot: INFO must report permanent count")
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"first boot: WARN must NOT fire when all unattributed are permanent (M9)")
 
-	// Verify the backfill completed and the project is in projects_done.
+	// Verify the backfill completed and PermanentResidual is set.
 	marker, err := loadBackfillMarker(ctx, s)
 	require.NoError(t, err)
 	require.NotNil(t, marker.CompletedAt,
 		"first boot: backfill marker must be complete after processing all projects")
+	require.NotNil(t, marker.PermanentResidual,
+		"first boot: PermanentResidual must be set in the marker (M9)")
+	assert.Equal(t, 1, *marker.PermanentResidual,
+		"first boot: PermanentResidual must be 1 (one permanently unattributable message)")
 
 	// ---- Second boot (steady state) ----
-	// Every project is in projects_done. The backfill's fast path fires:
-	// "already complete, skipping." No runBackfillForProject call, no
-	// per-project counts. If reachable were derived from work performed,
-	// the sum would be 0 and the WARN would be silently suppressed.
 	buf.Reset()
 	runBootDataMigrations(ctx, s)
 
@@ -762,13 +767,13 @@ func TestResidualReport_SteadyStateReachableWarn(t *testing.T) {
 	assert.Contains(t, logOutput, "already complete, skipping",
 		"steady-state: backfill must be skipped on second boot")
 
-	// THE GATE: the WARN must STILL fire on the second boot.
-	// This is the assertion that catches the sum-of-per-project-counts
-	// approach. On a steady-state boot no work is performed, the naive
-	// sum yields 0, and this assertion fails.
-	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
-		"steady-state: WARN must still fire for reachable unattributable messages "+
-			"even when no backfill work was performed on this boot")
+	// THE GATE: the permanent count must still be reported at INFO on
+	// steady-state boot. The persisted PermanentResidual is read from
+	// the marker and correctly subtracted from the live reachable count.
+	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
+		"steady-state: permanent INFO must still appear on second boot")
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"steady-state: WARN must not fire when all unattributed are permanent (M9)")
 }
 
 // ---------------------------------------------------------------------------

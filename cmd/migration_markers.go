@@ -68,6 +68,32 @@ type backfillMarker struct {
 	CompletedAt  *time.Time `json:"completed_at"`            // nil => not yet complete
 	Residuals    int        `json:"residuals,omitempty"`      // aggregate row-level refusals
 	ProjectsDone []string   `json:"projects_done,omitempty"`  // projects whose pass completed
+
+	// PermanentResidual is the measured count of messages that remain
+	// unbackfilled after a complete pass. It is accumulated per-project
+	// during the pass:
+	//
+	//   PermanentResidual += CountUnbackfilledMessages(pid)
+	//
+	// This is a pure measurement — no tallies are subtracted. The measured
+	// term is drawn from the same population the global live counter
+	// measures (CountUnbackfilledMessages("")), so at steady state the two
+	// agree by construction and actionable reaches zero exactly, not via
+	// the clamp (design §4.8 second correction).
+	//
+	// M9: a nil pointer means the field is absent (pre-M9 marker format).
+	// A completed marker with PermanentResidual == nil is treated as
+	// incomplete and triggers a one-time re-run (design §4.8, pre-M9
+	// marker handling).
+	PermanentResidual *int `json:"permanent_residual,omitempty"`
+
+	// TransientFailures is the tallied count of write and resolution
+	// failures observed during the backfill pass. These are transient
+	// (retryable) and reported as a separate WARN line with the remedy
+	// "scion server backfill". They are never subtracted from the
+	// measured PermanentResidual — mixing tallies and measurements was
+	// the root cause of the off-by-24 (design §4.8 second correction).
+	TransientFailures int `json:"transient_failures,omitempty"`
 }
 
 // IsMigrationComplete returns true if the named migration has a completion

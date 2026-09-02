@@ -200,11 +200,13 @@ func TestBootBackfill_AlreadyComplete(t *testing.T) {
 	// Seed a project with an unattributed message.
 	seedBackfillProjectWithMessage(t, ctx, s, "skip-test")
 
-	// Manually mark backfill complete.
+	// Manually mark backfill complete (M9 format: includes PermanentResidual).
 	now := time.Now().UTC()
+	zero := 0
 	err := saveBackfillProgress(ctx, s, backfillMarker{
-		CompletedAt: &now,
-		Residuals:   0,
+		CompletedAt:       &now,
+		Residuals:         0,
+		PermanentResidual: &zero,
 	})
 	require.NoError(t, err)
 
@@ -675,17 +677,13 @@ func TestBackfillMarker_PreservesSiblingKeys(t *testing.T) {
 // Warning still fires after backfill
 // ---------------------------------------------------------------------------
 
-// TestBootBackfill_ReachableWarnFires verifies that the split residual
-// report emits a WARN for reachable unattributed messages after the
-// backfill completes (M6 re-pointed the old warning). The message is
-// unattributable (non-UUID principals) but in a listed project, so it
-// is reachable and counted in the actionable bucket.
-//
-// Precondition update (M6): the old test asserted "Messages without
-// conversation attribution detected" which was the old
-// maybeWarnUnbackfilledMessages message. M6 replaced that with the
-// split reachable/unreachable report per design §4.6.
-func TestBootBackfill_ReachableWarnFires(t *testing.T) {
+// TestBootBackfill_PermanentInfoFires verifies that after M9, permanently
+// unattributable messages (derive refusals) are reported at INFO as
+// permanent, not at WARN as actionable. The message is unattributable
+// (non-UUID principals) but in a listed project; M9 classifies it as
+// permanent because the derive refusal is a deterministic property of the
+// row.
+func TestBootBackfill_PermanentInfoFires(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
@@ -715,8 +713,11 @@ func TestBootBackfill_ReachableWarnFires(t *testing.T) {
 	runBootDataMigrations(ctx, s)
 
 	logOutput := buf.String()
-	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
-		"reachable WARN must fire after backfill for unattributed messages in listed projects")
+	// M9: permanent messages are INFO, not WARN.
+	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
+		"permanent INFO must fire after backfill for permanently unattributable messages")
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"WARN must NOT fire when all unattributed messages are permanent (M9)")
 	assert.NotContains(t, logOutput, "scion server backfill",
 		"remediation string must not appear (M6 removed it)")
 }
