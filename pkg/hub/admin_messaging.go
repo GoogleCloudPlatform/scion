@@ -24,12 +24,17 @@ import (
 
 // handleAdminMessaging handles GET/PUT /api/v1/admin/messaging.
 //
-// GET returns the current messaging switches (merged with compiled defaults).
+// GET returns the current messaging switch (merged with compiled default).
 // PUT accepts a partial update to the messaging opsettings section.
 //
 // Both endpoints are admin-gated (same auth check as handleAdminMaintenance).
 // The section follows the maintenance pattern: DB-only, no settings.yaml
 // representation, with a dedicated admin API endpoint.
+//
+// Phase 9a: the two former switches (conversation_read_switch and
+// conversation_write_deny_switch) are consolidated into a single
+// conversation_envelope_switch that defaults ON. Stale keys self-clean
+// on first PUT.
 func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -41,26 +46,31 @@ func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleGetMessaging returns the current messaging switches.
-// When no DB row exists, the compiled defaults are returned (both switches OFF).
+// messagingResponse is the GET/PUT response shape for the admin messaging
+// endpoint. It exposes only the consolidated switch.
+type messagingResponse struct {
+	ConversationEnvelopeSwitch *bool `json:"conversation_envelope_switch"`
+}
+
+// handleGetMessaging returns the current messaging switch.
+// When no DB row exists (or OperationalSettings is nil), the compiled
+// default is returned (ON).
 func (s *Server) handleGetMessaging(w http.ResponseWriter) {
-	readSwitch := false
-	writeDenySwitch := false
+	envelopeSwitch := true // compiled default: ON
 
 	if ops := s.GetOperationalSettings(); ops != nil {
-		readSwitch = ops.ConversationReadSwitch()
-		writeDenySwitch = ops.ConversationWriteDenySwitch()
+		envelopeSwitch = ops.ConversationEnvelopeSwitch()
 	}
 
-	writeJSON(w, http.StatusOK, opsettings.MessagingSettings{
-		ConversationReadSwitch:      &readSwitch,
-		ConversationWriteDenySwitch: &writeDenySwitch,
+	writeJSON(w, http.StatusOK, messagingResponse{
+		ConversationEnvelopeSwitch: &envelopeSwitch,
 	})
 }
 
 // handlePutMessaging accepts a presence-aware partial update to the messaging
 // section. An omitted field leaves the current value unchanged; only an
-// explicitly sent field updates.
+// explicitly sent field updates. An explicit null resets to the compiled
+// default (ON) by deleting the section so the absent→default path runs.
 func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
@@ -81,36 +91,38 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the messaging section doc. Start from the current snapshot values
-	// to preserve fields not being updated (partial update semantics).
-	currentRead := ops.ConversationReadSwitch()
-	currentWriteDeny := ops.ConversationWriteDenySwitch()
-
-	ms := opsettings.MessagingSettings{
-		ConversationReadSwitch:      &currentRead,
-		ConversationWriteDenySwitch: &currentWriteDeny,
-	}
-
-	// Presence-aware: only update fields that were explicitly sent.
+	// Presence-aware: detect explicit null for the reset path.
 	fp, fpErr := parseFieldPresence(rawBody)
 	if fpErr != nil {
 		slog.Warn("parseFieldPresence failed in messaging handler, falling back to omitted-semantics", "error", fpErr)
 	}
 
-	if body.ConversationReadSwitch != nil {
-		ms.ConversationReadSwitch = body.ConversationReadSwitch
-	} else if fp != nil && fp.has("conversation_read_switch") {
-		// Explicitly sent as null → reset to compiled default (false).
-		f := false
-		ms.ConversationReadSwitch = &f
+	// Check for explicit-null reset: if the key was sent as null, delete the
+	// section entirely so the absent→compiled-default (ON) path runs.
+	if body.ConversationEnvelopeSwitch == nil && fp != nil && fp.has("conversation_envelope_switch") {
+		if err := ops.DeleteSection(r.Context(), "messaging"); err != nil {
+			slog.Error("PUT messaging: failed to delete section for null reset", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to reset messaging settings", nil)
+			return
+		}
+		// Read back the compiled default (ON).
+		result := ops.ConversationEnvelopeSwitch()
+		writeJSON(w, http.StatusOK, messagingResponse{
+			ConversationEnvelopeSwitch: &result,
+		})
+		return
 	}
 
-	if body.ConversationWriteDenySwitch != nil {
-		ms.ConversationWriteDenySwitch = body.ConversationWriteDenySwitch
-	} else if fp != nil && fp.has("conversation_write_deny_switch") {
-		// Explicitly sent as null → reset to compiled default (false).
-		f := false
-		ms.ConversationWriteDenySwitch = &f
+	// Build the messaging section doc from the current value.
+	current := ops.ConversationEnvelopeSwitch()
+	ms := opsettings.MessagingSettings{
+		ConversationEnvelopeSwitch: &current,
+	}
+
+	// Apply the explicit value if sent.
+	if body.ConversationEnvelopeSwitch != nil {
+		ms.ConversationEnvelopeSwitch = body.ConversationEnvelopeSwitch
 	}
 
 	doc, err := json.Marshal(ms)
@@ -145,10 +157,8 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read back the applied state.
-	readSwitch := ops.ConversationReadSwitch()
-	writeDenySwitch := ops.ConversationWriteDenySwitch()
-	writeJSON(w, http.StatusOK, opsettings.MessagingSettings{
-		ConversationReadSwitch:      &readSwitch,
-		ConversationWriteDenySwitch: &writeDenySwitch,
+	result := ops.ConversationEnvelopeSwitch()
+	writeJSON(w, http.StatusOK, messagingResponse{
+		ConversationEnvelopeSwitch: &result,
 	})
 }

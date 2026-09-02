@@ -55,7 +55,7 @@ func enableReadSwitch(t *testing.T, srv *Server) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_read_switch":true}`))
+	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("ops.Refresh failed: %v", err)
 	}
@@ -63,8 +63,8 @@ func enableReadSwitch(t *testing.T, srv *Server) {
 	// Canary: verify the switch is actually on. Without this, a silent
 	// failure in enableReadSwitch makes every delta==0 assertion pass
 	// trivially — the handler never enters the read-switch block at all.
-	if !srv.GetOperationalSettings().ConversationReadSwitch() {
-		t.Fatalf("enableReadSwitch: ConversationReadSwitch() is still false after setup — " +
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableReadSwitch: ConversationEnvelopeSwitch() is still false after setup — " +
 			"every FlagOn test in this file is vacuous without this guard")
 	}
 }

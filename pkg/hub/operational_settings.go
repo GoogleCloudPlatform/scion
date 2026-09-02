@@ -1189,50 +1189,37 @@ func (o *OperationalSettings) ProjectDefaultScratchpad() bool {
 	return true // field omitted in doc → compiled default
 }
 
-// ConversationReadSwitch returns whether the Phase 8 conversation read-switch
-// is enabled. Returns false (compiled default) when the messaging section is
-// absent from the DB. Hot-reloadable: reads from the DB-backed cache.
-func (o *OperationalSettings) ConversationReadSwitch() bool {
+// ConversationEnvelopeSwitch returns whether the consolidated conversation
+// envelope switch is enabled. This replaces ConversationReadSwitch and
+// ConversationWriteDenySwitch with a single switch that:
+//   - defaults ON when the section is absent from the DB (compiled default)
+//   - defaults ON when the section is present but the key is omitted
+//   - returns OFF when the document is malformed (fail-closed, DEF-92)
+//   - returns the explicit value when the key is present
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 
 	state, ok := o.cache["messaging"]
 	if !ok {
-		return false // compiled default: OFF
+		return true // section absent → compiled default → ON
+	}
+
+	if state.Malformed {
+		return false // unreadable → pre-refactor behaviour → OFF
 	}
 
 	var ms opsettings.MessagingSettings
 	if err := json.Unmarshal(state.Value, &ms); err != nil {
-		return false // parse error → fall back to compiled default
+		return false // parse error → fail closed → OFF
 	}
 
-	if ms.ConversationReadSwitch != nil {
-		return *ms.ConversationReadSwitch
+	if ms.ConversationEnvelopeSwitch != nil {
+		return *ms.ConversationEnvelopeSwitch
 	}
-	return false // field omitted in doc → compiled default
-}
-
-// ConversationWriteDenySwitch returns whether the G2 write-deny switch
-// is enabled. Returns false (compiled default) when the messaging section is
-// absent from the DB. Hot-reloadable: reads from the DB-backed cache.
-func (o *OperationalSettings) ConversationWriteDenySwitch() bool {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-
-	state, ok := o.cache["messaging"]
-	if !ok {
-		return false // compiled default: OFF
-	}
-
-	var ms opsettings.MessagingSettings
-	if err := json.Unmarshal(state.Value, &ms); err != nil {
-		return false // parse error → fall back to compiled default
-	}
-
-	if ms.ConversationWriteDenySwitch != nil {
-		return *ms.ConversationWriteDenySwitch
-	}
-	return false // field omitted in doc → compiled default
+	return true // field omitted in doc → compiled default → ON
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

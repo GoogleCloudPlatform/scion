@@ -3441,19 +3441,19 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // enableWriteDenySwitch configures OperationalSettings on the server with the
-// ConversationWriteDenySwitch flag ON. After this call, handlers that check
-// s.writeDenyEnabled() will deny writes when conversation resolution fails.
+// consolidated ConversationEnvelopeSwitch ON. After this call, handlers that
+// check s.writeDenyEnabled() will deny writes when conversation resolution fails.
 func enableWriteDenySwitch(t *testing.T, srv *Server) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_write_deny_switch":true}`))
+	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("ops.Refresh failed: %v", err)
 	}
 	srv.SetOperationalSettings(ops)
-	if !srv.GetOperationalSettings().ConversationWriteDenySwitch() {
-		t.Fatalf("enableWriteDenySwitch: ConversationWriteDenySwitch() is still false after setup")
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableWriteDenySwitch: ConversationEnvelopeSwitch() is still false after setup")
 	}
 }
 

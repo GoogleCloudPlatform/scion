@@ -73,7 +73,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// does not, return a typed 409 error instead of silently using the old
 	// filter. Agent lookup failures still skip the block (R-9 discipline)
 	// but are now counted by SwitchBypassMetrics for coverage visibility.
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		if agentID != "" {
 			if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
 				convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
@@ -284,7 +284,7 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	// G3: fallback REMOVED at both sub-paths. When the switch is ON and
 	// resolution fails, return a typed 409 error. Non-web channels still
 	// skip the block (no conversation model for external surfaces).
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		threadID := q.Get("thread_id")
 		// G3-f: threadID is the primary discriminator. A thread request must
 		// never fall through to the DM branch — that serves wrong data with a

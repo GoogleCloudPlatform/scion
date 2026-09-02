@@ -314,14 +314,16 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
-		// messaging schema is hand-written — conversation_read_switch and
-		// conversation_write_deny_switch are runtime/DB state with no $defs in
-		// settings-v1.schema.json.
+		// messaging schema is hand-written — conversation_envelope_switch is
+		// runtime/DB state with no $defs in settings-v1.schema.json.
+		// The stale keys (conversation_read_switch, conversation_write_deny_switch)
+		// are deliberately absent: additionalProperties:false rejects them on
+		// write, and existing rows carrying them are never validated (Validate
+		// runs only on write paths). They self-clean on first PUT.
 		"messaging": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"conversation_read_switch":       map[string]interface{}{"type": "boolean"},
-				"conversation_write_deny_switch": map[string]interface{}{"type": "boolean"},
+				"conversation_envelope_switch": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},

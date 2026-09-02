@@ -2155,11 +2155,12 @@ func (s *Server) GetOperationalSettings() *OperationalSettings {
 	return s.operationalSettings.Load()
 }
 
-// writeDenyEnabled returns whether the G2 conversation write-deny switch is ON.
+// writeDenyEnabled returns whether the consolidated conversation envelope
+// switch is ON (which subsumes the former write-deny behaviour).
 // Safe for concurrent use. Returns false when operational settings are absent.
 func (s *Server) writeDenyEnabled() bool {
 	ops := s.GetOperationalSettings()
-	return ops != nil && ops.ConversationWriteDenySwitch()
+	return ops != nil && ops.ConversationEnvelopeSwitch()
 }
 
 // logMessage logs a message dispatch event to the dedicated message logger
@@ -2495,7 +2496,7 @@ func (s *Server) StartNotificationDispatcher() {
 	nd.channelRegistry = s.channelRegistry
 	nd.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
-		return ops != nil && ops.ConversationWriteDenySwitch()
+		return ops != nil && ops.ConversationEnvelopeSwitch()
 	}
 	s.notificationDispatcher = nd
 	s.notificationDispatcher.Start()
@@ -2559,7 +2560,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
 	proxy.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
-		return ops != nil && ops.ConversationWriteDenySwitch()
+		return ops != nil && ops.ConversationEnvelopeSwitch()
 	}
 	s.messageBrokerProxy = proxy
 	proxy.Start()

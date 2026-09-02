@@ -1807,7 +1807,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if wcs == nil {
 			// G3-e: switch ON + non-DM key + no webChatStore → bypass.
 			// Track before returning so the VM run can see uncovered traffic.
-			if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+			if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 				messaging.SwitchBypassMetrics.IncWcsNil()
 			}
 			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
@@ -1842,7 +1842,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
 	// return a typed 409 error so failures are observable, not silent.
 	var filter store.MessageFilter
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		var convResult *messaging.ConversationResult
 		if isDM {
 			// DM key format: dm:<kind>:<id>:<kind>:<id> — exactly 5 parts.
