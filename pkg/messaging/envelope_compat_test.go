@@ -1024,16 +1024,23 @@ func TestRoundTrip_OldToNewToOld(t *testing.T) {
 }
 
 func TestRoundTrip_NewToOldToNew(t *testing.T) {
+	// Every Message field is populated non-zero so the round trip can
+	// detect a silent drop. A field left at its zero value survives even
+	// when the mapper omits it, hiding the bug.
 	intent := IntentRequest
+	replyTo := "reply-99"
 	original := &Message{
-		ID:          "msg-1",
-		From:        "user:alice",
-		Kind:        KindText,
-		Intent:      &intent,
-		Body:        "Build it",
-		Attachments: []AttachmentRef{{Path: "/tmp/a.go"}},
-		Visibility:  VisibilityVerbose,
-		CreatedAt:   time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+		ID:             "msg-1",
+		ConversationID: "conv-123",
+		ReplyToID:      &replyTo,
+		From:           "user:alice",
+		Kind:           KindText,
+		Intent:         &intent,
+		Body:           "Build it",
+		Attachments:    []AttachmentRef{{Path: "/tmp/a.go", Name: "a.go"}},
+		Visibility:     VisibilityVerbose,
+		Urgent:         true,
+		CreatedAt:      time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
 	originalAddrs := []Addressee{{
 		MessageID:     "msg-1",
@@ -1043,16 +1050,25 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 		DeliveryState: DeliveryPending,
 	}}
 
-	// Convert new → old.
+	// ---- new → old ----
 	legacy := NewEnvelopeToLegacy(original, originalAddrs)
 
-	// Convert old → new.
+	// Verify the intermediate StructuredMessage carries the fields that
+	// have a direct legacy equivalent.
+	if !legacy.Urgent {
+		t.Error("new→old: Urgent not mapped to StructuredMessage")
+	}
+	if legacy.ConversationID != "conv-123" {
+		t.Errorf("new→old: ConversationID = %q, want %q", legacy.ConversationID, "conv-123")
+	}
+
+	// ---- old → new ----
 	restored, restoredAddrs, err := MapLegacyEnvelope(legacy, PersistedIdentity{})
 	if err != nil {
 		t.Fatalf("MapLegacyEnvelope failed: %v", err)
 	}
 
-	// Check preserved semantics.
+	// Fields that survive the full round trip (new → old → new):
 	if restored.Kind != original.Kind {
 		t.Errorf("kind: got %q, want %q", restored.Kind, original.Kind)
 	}
@@ -1065,12 +1081,33 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 	if len(restored.Attachments) != len(original.Attachments) {
 		t.Errorf("attachments count: got %d, want %d", len(restored.Attachments), len(original.Attachments))
 	}
+	if restored.Attachments[0].Path != original.Attachments[0].Path {
+		t.Errorf("attachment path: got %q, want %q", restored.Attachments[0].Path, original.Attachments[0].Path)
+	}
 	if restored.Visibility != original.Visibility {
 		t.Errorf("visibility: got %q, want %q", restored.Visibility, original.Visibility)
+	}
+	if restored.Urgent != original.Urgent {
+		t.Errorf("urgent: got %v, want %v", restored.Urgent, original.Urgent)
 	}
 	if len(restoredAddrs) != len(originalAddrs) {
 		t.Errorf("addressees count: got %d, want %d", len(restoredAddrs), len(originalAddrs))
 	}
+
+	// Fields with expected loss in the round trip — documented here so a
+	// future reader knows the omission is intentional, not overlooked.
+	//
+	// ID: StructuredMessage has no ID field. Restored msg.ID comes from
+	//     PersistedIdentity, which is empty in this test.
+	//
+	// ConversationID: NewEnvelopeToLegacy maps it to old.ConversationID,
+	//     but MapLegacyEnvelope does not read old.ConversationID back
+	//     (conversation context is handled separately via ConversationInfo).
+	//
+	// ReplyToID: no clean legacy equivalent. ThreadID is semantically
+	//     different (DEF-103); mapping would re-introduce fabrication.
+	//
+	// AttachmentRef.Name: old format carries only paths.
 }
 
 // ---------- buildPrincipalRef ----------

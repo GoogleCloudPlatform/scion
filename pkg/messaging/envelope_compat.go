@@ -313,9 +313,11 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 	}
 
 	old := &messages.StructuredMessage{
-		Version:   messages.Version,
-		Timestamp: msg.CreatedAt.UTC().Format(time.RFC3339),
-		Msg:       msg.Body,
+		Version:        messages.Version,
+		Timestamp:      msg.CreatedAt.UTC().Format(time.RFC3339),
+		Msg:            msg.Body,
+		ConversationID: msg.ConversationID,
+		Urgent:         msg.Urgent,
 	}
 
 	// Map From to sender fields.
