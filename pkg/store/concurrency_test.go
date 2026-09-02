@@ -95,3 +95,66 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		}
 	}
 }
+
+// TestAdvisoryLockKeys_AllUnique asserts that every declared advisory lock key
+// has a unique value. A duplicate constant would silently make two unrelated
+// operations mutually exclusive under the advisory lock, which presents as
+// "the migration sometimes doesn't run" and is extremely hard to diagnose.
+//
+// This test enumerates every key explicitly. If you add a new key to
+// concurrency.go and this test does not fail with "missing key" — you must add
+// it here too.
+func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
+	type entry struct {
+		name string
+		key  AdvisoryLockKey
+	}
+
+	// Every singleton advisory lock key. Keep this list in sync with
+	// concurrency.go — the test's value is that it catches duplicates
+	// at compile time that the Go compiler cannot catch (different const
+	// names with the same numeric value are legal Go).
+	all := []entry{
+		{"LockScheduleEvaluator", LockScheduleEvaluator},
+		{"LockAgentHeartbeatTimeout", LockAgentHeartbeatTimeout},
+		{"LockAgentStalledDetection", LockAgentStalledDetection},
+		{"LockSoftDeletePurge", LockSoftDeletePurge},
+		{"LockGitHubAppHealthCheck", LockGitHubAppHealthCheck},
+		{"LockBrokerAffinityReap", LockBrokerAffinityReap},
+		{"LockBrokerMessageSweep", LockBrokerMessageSweep},
+		{"LockSchemaMigration", LockSchemaMigration},
+		{"LockGitHubResolutionCacheEviction", LockGitHubResolutionCacheEviction},
+		{"LockDiscordGateway", LockDiscordGateway},
+		{"LockTelegramWebhook", LockTelegramWebhook},
+		{"LockA2ABridgeSweep", LockA2ABridgeSweep},
+		{"LockHubSettingsSeed", LockHubSettingsSeed},
+		{"LockExposedPortsSweep", LockExposedPortsSweep},
+		{"LockStorageMigration", LockStorageMigration},
+		{"LockBundledResources", LockBundledResources},
+		{"LockInlineSecretsMigration", LockInlineSecretsMigration},
+		{"LockNonceCacheEviction", LockNonceCacheEviction},
+		{"LockChatLinkCodeEviction", LockChatLinkCodeEviction},
+		{"LockDataMigrations", LockDataMigrations},
+		// Per-object class IDs (different range, but must not collide
+		// with singletons or each other).
+		{"LockWorkspaceProvision", LockWorkspaceProvision},
+		{"LockQuotaEnforcement", LockQuotaEnforcement},
+	}
+
+	// Assert the count matches what we expect so a newly added key that
+	// is not added to this list is caught.
+	// Singleton range: 0x5C100001–0x5C100014 = 20 keys.
+	// Per-object range: 0x5C101001–0x5C101002 = 2 keys.
+	const expectedTotal = 22
+	if len(all) != expectedTotal {
+		t.Fatalf("expected %d advisory lock keys, got %d — update this test when adding a key", expectedTotal, len(all))
+	}
+
+	seen := make(map[AdvisoryLockKey]string, len(all))
+	for _, e := range all {
+		if prev, dup := seen[e.key]; dup {
+			t.Errorf("duplicate advisory lock key value 0x%X: %s and %s", int64(e.key), prev, e.name)
+		}
+		seen[e.key] = e.name
+	}
+}

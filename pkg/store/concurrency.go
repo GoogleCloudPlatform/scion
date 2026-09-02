@@ -109,6 +109,13 @@ const (
 	// that deletes expired entries from the chat_link_codes table.
 	LockChatLinkCodeEviction AdvisoryLockKey = 0x5C100013
 
+	// LockDataMigrations guards boot-time conversation-model data
+	// migrations (DM key re-key, message backfill) so that concurrent
+	// replicas do not duplicate work. On SQLite the lock is a no-op
+	// (single-writer), so the guarded code must also be conflict-safe
+	// on its own merits.
+	LockDataMigrations AdvisoryLockKey = 0x5C100014
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant
