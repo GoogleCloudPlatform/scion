@@ -319,22 +319,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 		}
-		if convFromPhase5 != nil {
-			if err := messaging.ValidateAttributed(convFromPhase5.ConversationID); err != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("broker.validate")
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
-					return
-				}
-				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
-			}
-		}
 	}
 
 	// DEF-135 precedence rule: Phase 11 (explicit surface + external_ref)
 	// wins over Phase 5 (inferred DM/thread) when both produce a result.
 	// A single effectiveConv is used for both the envelope and the persisted
 	// row, eliminating the prior split where they could silently disagree.
+	//
+	// F3 fix: broadcasts carry no conversation — not from Phase 5 (already
+	// skipped above) and not from Phase 11 either. A broadcast with
+	// surface + external_ref set creates the conversation row (Phase 11
+	// above) but does NOT stamp it on the envelope or the persisted message.
+	// This matches the documented invariant at handlers_agent_messaging.go:1898.
 	effectiveConv := convFromPhase5
 	if preDispatchConvResult != nil {
 		if convFromPhase5 != nil && convFromPhase5.ConversationID != preDispatchConvResult.ConversationID {
@@ -348,6 +344,24 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 		effectiveConv = preDispatchConvResult
+	}
+	if req.Message.Broadcasted {
+		effectiveConv = nil
+	}
+
+	// F2 fix: validate the value that will actually be persisted, not just
+	// the Phase 5 result. When Phase 11 wins, effectiveConv differs from
+	// convFromPhase5, and the persisted conversation id must still pass
+	// the empty-string gate.
+	if effectiveConv != nil {
+		if err := messaging.ValidateAttributed(effectiveConv.ConversationID); err != nil {
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("broker.validate")
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+				return
+			}
+			s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+		}
 	}
 
 	// Phase 9b(ii): render the delivery envelope before dispatch when the
