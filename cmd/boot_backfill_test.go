@@ -441,10 +441,13 @@ func TestBootBackfill_Resumption_MonotonicProgress(t *testing.T) {
 	pid3, _ := seedBackfillProjectWithMessage(t, ctx, s, "resume-p3")
 	allPIDs := map[string]bool{pid1: true, pid2: true, pid3: true}
 
-	// Pre-seed one project as already done.
+	// Pre-seed one project as already done (M9-format: includes
+	// PermanentResidual so the marker is not promoted to a fresh pass).
+	priorPermanent := 0
 	err := saveBackfillProgress(ctx, s, backfillMarker{
-		ProjectsDone: []string{pid1},
-		Residuals:    5,
+		ProjectsDone:      []string{pid1},
+		Residuals:         5,
+		PermanentResidual: &priorPermanent,
 	})
 	require.NoError(t, err)
 
@@ -457,9 +460,9 @@ func TestBootBackfill_Resumption_MonotonicProgress(t *testing.T) {
 		"all projects should be done")
 
 	// G3 (M9a): exact value — the fixture pre-seeds Residuals=5 with pid1
-	// already done. pid2 and pid3 each have one attributable message
-	// (UUID principals → derive succeeds, row_errors=0). The carried-forward
-	// 5 plus 0+0 from the two new projects gives exactly 5.
+	// already done (M9-format). pid2 and pid3 each have one attributable
+	// message (UUID principals → derive succeeds, row_errors=0). The
+	// carried-forward 5 plus 0+0 from the two new projects gives exactly 5.
 	assert.Equal(t, 5, marker.Residuals,
 		"GATE G3: residuals must be exactly 5 (carried-forward 5 + 0 from pid2 + 0 from pid3)")
 
@@ -849,10 +852,14 @@ func TestBootBackfill_PanicPreservesProgress(t *testing.T) {
 	pid2, _ := seedBackfillProjectWithMessage(t, ctx, realStore, "panic-progress-p2")
 	pid3, _ := seedBackfillProjectWithMessage(t, ctx, realStore, "panic-progress-p3")
 
-	// Pre-seed pid1 and pid2 as done (simulating earlier boot progress).
+	// Pre-seed pid1 and pid2 as done (M9-format: includes PermanentResidual
+	// so the marker is not promoted to a fresh pass by the pre-M9 mid-pass
+	// detection).
+	priorPermanent := 0
 	err := saveBackfillProgress(ctx, realStore, backfillMarker{
-		ProjectsDone: []string{pid1, pid2},
-		Residuals:    3,
+		ProjectsDone:      []string{pid1, pid2},
+		Residuals:         3,
+		PermanentResidual: &priorPermanent,
 	})
 	require.NoError(t, err)
 

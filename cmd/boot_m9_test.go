@@ -1370,3 +1370,158 @@ func TestM9a_GateG2_GlobalVsPartitionIdentity(t *testing.T) {
 	assert.Equal(t, 3, totalResiduals,
 		"sanity: total_residuals must be 3")
 }
+
+// ---------------------------------------------------------------------------
+// Gate G4 (M9a): Pre-M9 mid-pass marker promotion
+// ---------------------------------------------------------------------------
+//
+// A pre-M9 marker that never finished (CompletedAt nil, ProjectsDone non-empty,
+// PermanentResidual nil) must be promoted to a fresh pass. Resuming it would
+// skip the already-done projects without measuring their permanent residual,
+// producing a short permanent count and a spurious actionable WARN — DEF-111's
+// exact shape.
+//
+// This test seeds two projects, each with one derive-refused message, marks
+// project 0 as already done in a pre-M9 mid-pass marker, then runs the boot
+// hook. With the promotion, all projects are re-run and the permanent count
+// equals the true still-NULL count.
+//
+// MUTATION N1: revert the promotion. The gate goes red on the permanent value
+// AND on the spurious WARN.
+
+func TestM9a_GateG4_PreM9MidPassPromotion(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Seed two projects, each with one derive-refused message.
+	pid0 := uuid.NewString()
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   pid0,
+		Name: "g4-proj0",
+		Slug: "g4-proj0-" + pid0[:8],
+	})
+	require.NoError(t, err)
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: pid0,
+		Msg:       "proj0 derive-refused",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
+	})
+	require.NoError(t, err)
+
+	pid1 := uuid.NewString()
+	err = s.CreateProject(ctx, &store.Project{
+		ID:   pid1,
+		Name: "g4-proj1",
+		Slug: "g4-proj1-" + pid1[:8],
+	})
+	require.NoError(t, err)
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: pid1,
+		Msg:       "proj1 derive-refused",
+		Sender:    "user:bob@example.com",
+		Recipient: "agent:bot2",
+	})
+	require.NoError(t, err)
+
+	// Seed a pre-M9 mid-pass marker: pid0 already done, no PermanentResidual.
+	// This simulates a pre-M9 build that exhausted its budget mid-pass.
+	err = saveBackfillProgress(ctx, s, backfillMarker{
+		ProjectsDone: []string{pid0},
+		Residuals:    1,
+		// PermanentResidual intentionally nil → pre-M9 format.
+	})
+	require.NoError(t, err)
+
+	// Mark DM key migration as complete so it doesn't interact.
+	err = MarkMigrationComplete(ctx, s, MigrationDMKey, 0)
+	require.NoError(t, err)
+
+	// ---- Run the boot hook ----
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	runBootDataMigrations(ctx, s)
+
+	logOutput := buf.String()
+
+	// ---- Assert promotion happened ----
+	assert.Contains(t, logOutput, "pre-M9 mid-pass marker detected",
+		"must log pre-M9 mid-pass marker promotion")
+
+	// ---- Assert permanent equals the TRUE still-NULL count ----
+	// Cross-check against CountUnbackfilledMessages rather than a literal,
+	// so the gate cannot drift from reality.
+	trueStillNull, err := s.CountUnbackfilledMessages(ctx, "")
+	require.NoError(t, err)
+	require.Equal(t, 2, trueStillNull,
+		"sanity: both messages are derive-refused and still NULL")
+
+	marker, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+	require.NotNil(t, marker.CompletedAt, "marker must be completed after promotion re-run")
+	require.NotNil(t, marker.PermanentResidual, "marker must have PermanentResidual after re-run")
+
+	assert.Equal(t, trueStillNull, *marker.PermanentResidual,
+		"GATE G4: permanent must equal the true still-NULL count (%d), not the "+
+			"partial count from resuming without re-measuring the already-done project. "+
+			"N1 MUTATION: reverting the promotion produces permanent=%d (only the "+
+			"remaining project's contribution).",
+		trueStillNull, trueStillNull-1)
+
+	// ---- Assert the actionable WARN is ABSENT ----
+	// All messages are permanently underivable. None are actionable.
+	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
+		"GATE G4: actionable WARN must NOT fire; all messages are permanently "+
+			"underivable. N1 MUTATION: the short permanent count makes actionable > 0, "+
+			"producing a spurious WARN that no operator action can clear (DEF-111)")
+
+	// ---- Assert per-project log lines for ALL projects ----
+	// Including the previously-done one, proving the re-run actually happened.
+	for _, pid := range []string{pid0, pid1} {
+		found := false
+		for _, line := range strings.Split(logOutput, "\n") {
+			if strings.Contains(line, "Message backfill: project completed") &&
+				strings.Contains(line, pid) {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found,
+			"GATE G4: must find per-project log line for project %s "+
+				"(proves the previously-done project was re-run)", pid[:8])
+	}
+
+	// ---- Assert total_residuals == sum of per-project row_errors ----
+	var summaryLine string
+	for _, line := range strings.Split(logOutput, "\n") {
+		if strings.Contains(line, "Message backfill: all projects complete") {
+			summaryLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, summaryLine, "must find summary line")
+
+	loggedTotal, ok := extractLoggedInt(summaryLine, "total_residuals")
+	require.True(t, ok, "summary must include total_residuals")
+
+	sumRowErrors := 0
+	for _, line := range strings.Split(logOutput, "\n") {
+		if !strings.Contains(line, "Message backfill: project completed") {
+			continue
+		}
+		re, reOK := extractLoggedInt(line, "row_errors")
+		require.True(t, reOK, "per-project line must include row_errors")
+		sumRowErrors += re
+	}
+
+	assert.Equal(t, sumRowErrors, loggedTotal,
+		"GATE G4: total_residuals (%d) must equal sum of per-project row_errors (%d)",
+		loggedTotal, sumRowErrors)
+
+	// Sanity: both projects have 1 derive-refused message each.
+	assert.Equal(t, 2, loggedTotal,
+		"sanity: total_residuals must be 2 (1 per project)")
+}

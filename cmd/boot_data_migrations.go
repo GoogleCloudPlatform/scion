@@ -232,6 +232,20 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		return
 	}
 
+	// M9a: a pre-M9 mid-pass marker (ProjectsDone non-empty but
+	// PermanentResidual absent) must be promoted to a fresh pass.
+	// Resuming it would skip the already-done projects without ever
+	// measuring their permanent residual, producing a permanent count
+	// that is short by exactly the skipped projects' contribution.
+	// That shortfall shows up as a spurious actionable WARN — DEF-111's
+	// exact shape. Re-running is safe: the backfill is idempotent and
+	// already-stamped messages are skipped before persistGroup.
+	if len(marker.ProjectsDone) > 0 && marker.PermanentResidual == nil {
+		slog.Info("Message backfill: pre-M9 mid-pass marker detected (no permanent_residual with projects_done); promoting to fresh pass")
+		marker.ProjectsDone = nil
+		marker.Residuals = 0
+	}
+
 	// Build the set of already-done projects for O(1) lookup.
 	doneSet := make(map[string]bool, len(marker.ProjectsDone))
 	for _, pid := range marker.ProjectsDone {
@@ -242,10 +256,12 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 	deadline := time.Now().Add(budget)
 
 	// Resume or reset: carry forward accumulators only when genuinely
-	// resuming a partially-completed pass (non-empty ProjectsDone).
+	// resuming a partially-completed pass (non-empty ProjectsDone with
+	// PermanentResidual present — i.e. an M9-format mid-pass marker).
 	// On a fresh pass (empty ProjectsDone) — including the pre-M9 marker
-	// upgrade path — reset every accumulator to zero so that a repeated
-	// full pass does not double-count (M9a, design §4.8).
+	// upgrade path and the mid-pass promotion above — reset every
+	// accumulator to zero so that a repeated full pass does not
+	// double-count (M9a, design §4.8).
 	resuming := len(marker.ProjectsDone) > 0
 
 	totalResiduals := 0
@@ -253,10 +269,10 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 	transientFailures := 0
 	if resuming {
 		totalResiduals = marker.Residuals
-		// M9 accumulators additionally require PermanentResidual to exist.
-		// A pre-M9 mid-pass marker has ProjectsDone but no PermanentResidual;
-		// totalResiduals is carried forward while M9 fields start from zero
-		// (they will be measured fresh during this pass's remaining projects).
+		// At this point, PermanentResidual is guaranteed non-nil: the
+		// pre-M9 mid-pass case (ProjectsDone non-empty, PermanentResidual
+		// nil) was promoted to a fresh pass above, clearing ProjectsDone.
+		// Only M9-format markers reach here.
 		if marker.PermanentResidual != nil {
 			permanentResidual = *marker.PermanentResidual
 			transientFailures = marker.TransientFailures
