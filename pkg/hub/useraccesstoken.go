@@ -182,12 +182,24 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 	}
 
 	// --- B2: Target-project authorization with oracle resistance ---
-	// Check the actor's permissions in the target project. If the actor has no
-	// authority (or the project does not exist), return the same error — the
-	// caller must not be able to distinguish non-membership from non-existence.
+	// Check the actor has a project-scoped role binding in the target project.
+	// If the actor is not a member (or the project does not exist), return the
+	// same error — the caller must not be able to distinguish non-membership
+	// from non-existence.
+	isMember, memberErr := s.store.IsProjectMember(ctx, projectID, userID)
+	if memberErr != nil {
+		s.logger.Warn("RS4: failed to check project membership",
+			"user_id", userID, "project_id", projectID, "error", memberErr)
+		return "", nil, ErrUATProjectForbidden
+	}
+	if !isMember {
+		return "", nil, ErrUATProjectForbidden
+	}
+
+	// Get the full effective permissions (project + system-scoped) for the
+	// issuer ceiling check below.
 	actorPerms, err := s.authz.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, store.RoleScopeProject, projectID)
 	if err != nil {
-		// Fail closed: if we cannot resolve permissions, deny.
 		s.logger.Warn("RS4: failed to resolve actor permissions for target project",
 			"user_id", userID, "project_id", projectID, "error", err)
 		return "", nil, ErrUATProjectForbidden

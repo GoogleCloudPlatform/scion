@@ -196,11 +196,22 @@ func doRequestWithUAT(t *testing.T, srv *Server, uatKey, method, path string, bo
 	return rec
 }
 
+// rs4MintContext returns a context with the actor identity and credential
+// context required by the RS4 bounded UAT service for audit record creation.
+func rs4MintContext(userID string) context.Context {
+	identity := NewAuthenticatedUser(userID, userID+"@test.com", "Test User", "member", string(ClientTypeAPI))
+	ctx := contextWithIdentity(context.Background(), identity)
+	return contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+}
+
 // mintScopedUAT mints a real scoped UAT through the production token service.
+// RS4: The issuer must have role bindings with the requested scopes in the
+// target project; the context must carry the actor identity for audit.
 func mintScopedUAT(t *testing.T, srv *Server, userID, projectID string, scopes []string) string {
 	t.Helper()
+	ctx := rs4MintContext(userID)
 	key, _, err := srv.uatService.CreateToken(
-		context.Background(), userID, "test-uat", projectID, scopes, nil,
+		ctx, userID, "test-uat", projectID, scopes, nil,
 	)
 	require.NoError(t, err, "failed to mint scoped UAT")
 	return key
@@ -411,13 +422,15 @@ func TestRS1_ScopedUAT_RevokedTokenDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	// Mint a real project:manage UAT and then revoke it.
+	// RS4: use rs4MintContext so the audit record has actor identity.
+	mintCtx := rs4MintContext(ownerID)
 	uatKey, token, err := srv.uatService.CreateToken(
-		ctx, ownerID, "test-uat-revoke", projectID, []string{"project:manage"}, nil,
+		mintCtx, ownerID, "test-uat-revoke", projectID, []string{"project:manage"}, nil,
 	)
 	require.NoError(t, err)
 
 	// Revoke the token.
-	require.NoError(t, srv.uatService.RevokeToken(ctx, ownerID, token.ID))
+	require.NoError(t, srv.uatService.RevokeToken(mintCtx, ownerID, token.ID))
 
 	// Attempt to use the revoked token for a mutation (DELETE member) — denied 401.
 	// The auth middleware detects the revoked status during identity resolution.
@@ -467,9 +480,11 @@ func TestRS1_ScopedUAT_ExpiredTokenDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	// Mint a real project:manage UAT with a future expiry.
+	// RS4: use rs4MintContext so the audit record has actor identity.
+	mintCtx := rs4MintContext(ownerID)
 	futureExpiry := time.Now().Add(24 * time.Hour)
 	uatKey, token, err := srv.uatService.CreateToken(
-		ctx, ownerID, "test-uat-expire", projectID,
+		mintCtx, ownerID, "test-uat-expire", projectID,
 		[]string{"project:manage"}, &futureExpiry,
 	)
 	require.NoError(t, err)
