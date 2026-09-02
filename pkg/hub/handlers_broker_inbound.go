@@ -337,13 +337,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// but req.Message.SenderID may still be empty if the originating plugin
 	// didn't populate it.  Resolving early guarantees that both the persisted
 	// storeMsg and the webChatStore calls below use a valid ID.
-	senderUserID := req.Message.SenderID
-	if senderUserID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
-		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil && u != nil {
-			senderUserID = u.ID
-		}
-	}
+	senderUserID := resolveSenderUserID(r.Context(), s.store, req.Message.SenderID, req.Message.Sender)
 
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
 	// so that messages from external channels (Discord, Telegram) appear in
@@ -375,38 +369,19 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !storeMsg.Broadcasted {
-		var convResult *messaging.ConversationResult
-		if storeMsg.ThreadID != "" {
-			var threadOpts []messaging.ThreadConversationOption
-			s.mu.RLock()
-			wcs := s.webChatStore
-			s.mu.RUnlock()
-			if wcs != nil {
-				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
+		convResult, convErr := s.resolvePhase5Conversation(r.Context(), storeMsg.ThreadID, agent.ProjectID, senderUserID, agent.ID)
+		if convErr != nil {
+			metricKey := "broker.dm"
+			if storeMsg.ThreadID != "" {
+				metricKey = "broker.thread"
 			}
-			var convErr error
-			convResult, convErr = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
-			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("broker.thread")
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-					return
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc(metricKey)
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
 			}
-		} else if senderUserID != "" && agent.ID != "" {
-			var convErr error
-			convResult, convErr = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
-			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("broker.dm")
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-					return
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
-			}
+			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
@@ -507,4 +482,51 @@ func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err erro
 		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages")
 	}
 	return parsed.ProjectID, parsed.Actor, nil
+}
+
+// resolveSenderUserID resolves the sender's user ID from the message fields.
+// If senderID is already set, it is returned as-is. Otherwise, if sender has
+// a "user:" prefix, the user is looked up by email. Returns the empty string
+// when the sender cannot be resolved (non-user sender, or user not found).
+func resolveSenderUserID(ctx context.Context, st store.Store, senderID, sender string) string {
+	if senderID != "" {
+		return senderID
+	}
+	if strings.HasPrefix(sender, "user:") {
+		senderEmail := strings.TrimPrefix(sender, "user:")
+		if u, err := st.GetUserByEmail(ctx, senderEmail); err == nil && u != nil {
+			return u.ID
+		}
+	}
+	return ""
+}
+
+// resolvePhase5Conversation resolves or creates a conversation for a
+// broker-inbound message using the Phase 5 dual-write path. Thread-based
+// messages are resolved via ResolveOrCreateThreadConversation; non-thread
+// messages resolve as DM conversations between the sender and agent.
+//
+// Returns (nil, nil) when resolution is inapplicable (e.g. missing
+// senderUserID for a DM, or empty agentID).
+// Returns (result, nil) on success.
+// Returns (nil, err) when resolution fails — the caller must handle
+// write-deny semantics.
+func (s *Server) resolvePhase5Conversation(
+	ctx context.Context,
+	threadID, projectID, senderUserID, agentID string,
+) (*messaging.ConversationResult, error) {
+	if threadID != "" {
+		var threadOpts []messaging.ThreadConversationOption
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
+		}
+		return messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, threadID, projectID, threadOpts...)
+	}
+	if senderUserID != "" && agentID != "" {
+		return messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", senderUserID, "agent", agentID)
+	}
+	return nil, nil
 }
