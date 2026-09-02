@@ -522,6 +522,58 @@ func TestRS4_CredentialCaveat(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// T-SB: Service-boundary credential enforcement
+// Proves that the A1 caveat is enforced in the service methods themselves,
+// not only in the HTTP handler layer. A direct caller using the exported
+// methods with a non-session context must be rejected.
+// ---------------------------------------------------------------------------
+
+func TestRS4_ServiceBoundaryCredentialEnforcement(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("rs4-sb-p")
+	ownerID := tid("rs4-sb-o")
+	rs4Project(t, s, projectID, ownerID)
+	rs4AddProjectRole(t, s, ownerID, projectID, store.ProjectRoleOwner)
+
+	// Mint a token via session context for use in later subtests.
+	sessionCtx := rs4MintContext(ownerID)
+	key, token, err := srv.uatService.CreateToken(sessionCtx, ownerID, "sb-token", projectID, []string{"agent:read"}, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, key)
+
+	// Build a broker-credential context (non-session) for the same user.
+	brokerCtx := contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", string(ClientTypeAPI)))
+	brokerCtx = contextWithCredentialContext(brokerCtx,
+		CredentialContext{Kind: CredentialKindBroker, ID: ownerID})
+
+	t.Run("CreateToken_rejected", func(t *testing.T) {
+		_, _, err := srv.uatService.CreateToken(brokerCtx, ownerID, "bad", projectID, []string{"agent:read"}, nil)
+		assert.ErrorIs(t, err, ErrUATCredentialDenied)
+	})
+
+	t.Run("ListTokens_rejected", func(t *testing.T) {
+		_, err := srv.uatService.ListTokens(brokerCtx, ownerID)
+		assert.ErrorIs(t, err, ErrUATCredentialDenied)
+	})
+
+	t.Run("GetToken_rejected", func(t *testing.T) {
+		_, err := srv.uatService.GetToken(brokerCtx, ownerID, token.ID)
+		assert.ErrorIs(t, err, ErrUATCredentialDenied)
+	})
+
+	t.Run("RevokeToken_rejected", func(t *testing.T) {
+		err := srv.uatService.RevokeToken(brokerCtx, ownerID, token.ID)
+		assert.ErrorIs(t, err, ErrUATCredentialDenied)
+	})
+
+	t.Run("DeleteToken_rejected", func(t *testing.T) {
+		err := srv.uatService.DeleteToken(brokerCtx, ownerID, token.ID)
+		assert.ErrorIs(t, err, ErrUATCredentialDenied)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // T-A: Audit and atomicity (G3, G4)
 // ---------------------------------------------------------------------------
 

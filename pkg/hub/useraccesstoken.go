@@ -145,10 +145,30 @@ func scopeToPermissionIDs(scopes []string) []string {
 	return ids
 }
 
+// enforceSessionCredential enforces the A1 credential caveat at the service
+// boundary: only interactive or dev credentials may call token-management
+// methods. This mirrors ProjectDeletionService.Delete's credential ceiling
+// and ensures the invariant holds even if a caller bypasses the HTTP handler.
+func (s *UserAccessTokenService) enforceSessionCredential(ctx context.Context) error {
+	credential := GetCredentialContextFromContext(ctx)
+	switch credential.Kind {
+	case CredentialKindInteractive, CredentialKindDev:
+		return nil
+	default:
+		// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
+		return ErrUATCredentialDenied
+	}
+}
+
 // CreateToken generates a new user access token with issuer ceiling,
 // target-project authorization, atomic audit, and concurrency-safe cap.
 // Returns the plaintext token (shown only once) and the stored metadata.
 func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
+	// A1: Credential caveat at service boundary.
+	if err := s.enforceSessionCredential(ctx); err != nil {
+		return "", nil, err
+	}
+
 	// --- Input validation (typed errors) ---
 	if name == "" {
 		return "", nil, ErrUATNameRequired
@@ -344,11 +364,19 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 
 // ListTokens returns all tokens for a user.
 func (s *UserAccessTokenService) ListTokens(ctx context.Context, userID string) ([]store.UserAccessToken, error) {
+	// A1: Credential caveat at service boundary.
+	if err := s.enforceSessionCredential(ctx); err != nil {
+		return nil, err
+	}
 	return s.tokens.ListUserAccessTokens(ctx, userID)
 }
 
 // GetToken retrieves a single token by ID, verifying ownership.
 func (s *UserAccessTokenService) GetToken(ctx context.Context, userID, tokenID string) (*store.UserAccessToken, error) {
+	// A1: Credential caveat at service boundary.
+	if err := s.enforceSessionCredential(ctx); err != nil {
+		return nil, err
+	}
 	token, err := s.tokens.GetUserAccessToken(ctx, tokenID)
 	if err != nil {
 		return nil, err
@@ -363,6 +391,10 @@ func (s *UserAccessTokenService) GetToken(ctx context.Context, userID, tokenID s
 // Mutation and audit are atomic within a transaction (B3/G4).
 // The operation ID is credential.token.revoke with action:revoke (A5).
 func (s *UserAccessTokenService) RevokeToken(ctx context.Context, userID, tokenID string) error {
+	// A1: Credential caveat at service boundary.
+	if err := s.enforceSessionCredential(ctx); err != nil {
+		return err
+	}
 	return s.store.WithTx(ctx, func(tx store.Store) error {
 		token, err := tx.GetUserAccessToken(ctx, tokenID)
 		if err != nil {
@@ -391,6 +423,10 @@ func (s *UserAccessTokenService) RevokeToken(ctx context.Context, userID, tokenI
 // Mutation and audit are atomic within a transaction (B3/G4).
 // The operation ID is credential.token.revoke with action:delete (A5).
 func (s *UserAccessTokenService) DeleteToken(ctx context.Context, userID, tokenID string) error {
+	// A1: Credential caveat at service boundary.
+	if err := s.enforceSessionCredential(ctx); err != nil {
+		return err
+	}
 	return s.store.WithTx(ctx, func(tx store.Store) error {
 		token, err := tx.GetUserAccessToken(ctx, tokenID)
 		if err != nil {
