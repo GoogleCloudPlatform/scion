@@ -160,8 +160,8 @@ func ResolveOrCreateConversationByKey(
 				"external_ref", extRef, "conversation_id", convID)
 			return &ConversationResult{
 				ConversationID: convID,
-				Kind:           kind,    // from DeriveConversationKey
-				Surface:        "native", // topic lookup only applies to native topics
+				Kind:           kind,        // from DeriveConversationKey
+				Surface:        cfg.surface, // caller-supplied or default "native"
 			}, nil
 		}
 		if lookupErr == nil && convID == "" {

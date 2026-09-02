@@ -364,7 +364,7 @@ func ResolveThreadConversationForRead(
 				return &ConversationResult{
 					ConversationID: convID,
 					Kind:           kind,     // from DeriveConversationKey
-					Surface:        "native", // topic lookup only applies to native topics
+					Surface:        "native", // native topics write external_ref='' so the external_ref lookup below never matches them; this topic-lookup path is the only resolution route, and it only exists for native topics (readThreadConfig carries no surface option)
 				}
 			}
 			if lookupErr == nil && convID == "" {
