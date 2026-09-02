@@ -1331,6 +1331,13 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		if err := s.store.CreateUser(ctx, user); err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
+		// Cold-start fix: when a new user is provisioned as admin,
+		// immediately create the system-scoped super-admin RoleBinding.
+		// ReconcileSuperAdminBindings already ran at startup against an
+		// empty store and won't run again until the next restart.
+		if user.Role == "admin" {
+			s.ensureSuperAdminBinding(ctx, user.ID)
+		}
 	} else {
 		// Reject suspended users (covers both OAuth and proxy auth paths)
 		if user.Status == "suspended" {
@@ -1353,6 +1360,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			user.Role = s.getUserRole(info.Email, user.Role)
 			if oldRole == "admin" && user.Role != "admin" {
 				s.deleteSuperAdminBinding(ctx, user.ID)
+			} else if user.Role == "admin" && oldRole != "admin" {
+				s.ensureSuperAdminBinding(ctx, user.ID)
 			}
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
 		} else {
@@ -1376,6 +1385,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				user.Role = newRole
 				if oldRole == "admin" {
 					s.deleteSuperAdminBinding(ctx, user.ID)
+				} else if newRole == "admin" {
+					s.ensureSuperAdminBinding(ctx, user.ID)
 				}
 			}
 		}
@@ -1736,5 +1747,37 @@ func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 					"user_id", userID, "binding_id", b.ID)
 			}
 		}
+	}
+}
+
+// ensureSuperAdminBinding idempotently creates a system-scoped super-admin
+// RoleBinding for the given user. This closes the cold-start gap where
+// provisionUser assigns Role="admin" but ReconcileSuperAdminBindings has
+// already run against an empty user store and will not run again until the
+// next restart. Without this, AuthzService.IsSystemAdmin returns false for
+// the first admin until the hub is restarted.
+func (s *Server) ensureSuperAdminBinding(ctx context.Context, userID string) {
+	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		slog.Warn("ensureSuperAdminBinding: super-admin role definition not found — "+
+			"binding will be created on next restart by ReconcileSuperAdminBindings",
+			"user_id", userID, "error", err)
+		return
+	}
+
+	_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.Error("ensureSuperAdminBinding: failed to create super-admin binding",
+			"user_id", userID, "error", err)
+	} else if err == nil {
+		slog.Info("created super-admin binding at login-time provisioning",
+			"user_id", userID)
 	}
 }

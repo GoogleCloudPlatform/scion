@@ -1117,6 +1117,94 @@ func TestProvisionUser(t *testing.T) {
 	})
 }
 
+// TestColdStartSuperAdminBinding verifies that when the first admin user logs
+// in on a fresh hub (empty user store), provisionUser creates both the
+// User.Role="admin" AND the system-scoped super-admin RoleBinding immediately.
+// Without the fix, ReconcileSuperAdminBindings runs at startup against an empty
+// store, finds no matching users, and the binding is never created until the
+// next restart.
+func TestColdStartSuperAdminBinding(t *testing.T) {
+	ctx := context.Background()
+
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		if strings.Contains(err.Error(), "sqlite driver not registered") {
+			t.Skip("Skipping test because sqlite driver is not registered")
+		}
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = "test-token"
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	}
+	// Configure the admin email BEFORE server creation. On a fresh start
+	// ReconcileSuperAdminBindings will find zero users and create nothing.
+	cfg.AdminEmails = []string{"first-admin@example.com"}
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	srv.SetHubID("test-hub-id")
+	t.Cleanup(func() {
+		_ = srv.Shutdown(ctx)
+		_ = s.Close()
+	})
+
+	// Simulate the cold-start scenario: the admin user does not exist yet.
+	// ReconcileSuperAdminBindings already ran at server startup and found no
+	// matching users. Now the admin logs in for the first time.
+	user, err := srv.provisionUser(ctx, &ExternalUserInfo{
+		Email:       "first-admin@example.com",
+		DisplayName: "First Admin",
+	})
+	if err != nil {
+		t.Fatalf("provisionUser: %v", err)
+	}
+
+	// The user should have been assigned the admin role.
+	if user.Role != "admin" {
+		t.Fatalf("expected role 'admin', got %q", user.Role)
+	}
+
+	// Key assertion: the super-admin RoleBinding must exist IMMEDIATELY,
+	// without requiring a second ReconcileSuperAdminBindings call or a hub
+	// restart. This is the cold-start deadlock that this fix addresses.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("super-admin role definition not found: %v", err)
+	}
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	if err != nil {
+		t.Fatalf("failed to list bindings: %v", err)
+	}
+
+	var found bool
+	for _, b := range bindings {
+		if b.RoleDefinitionID == rd.ID && b.ScopeType == store.RoleScopeSystem {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("cold-start deadlock: super-admin RoleBinding was NOT created at first login — " +
+			"IsSystemAdmin will return false until the next hub restart")
+	}
+
+	// Double-check via AuthzService to confirm the full auth stack works.
+	if !srv.authzService.IsSystemAdmin(ctx, user.ID) {
+		t.Fatal("IsSystemAdmin must return true for the first admin immediately after provisioning")
+	}
+}
+
 // D11-fix2: After login-time demotion (admin removed from AdminEmails),
 // IsSystemAdmin must return false because the super-admin binding is deleted.
 func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
