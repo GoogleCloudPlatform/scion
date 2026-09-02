@@ -48,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -2959,6 +2960,21 @@ func (s *Server) messageEventHandler() EventHandler {
 		structuredMsg.RecipientID = agent.ID
 		structuredMsg.Plain = payload.Plain
 		structuredMsg.Urgent = payload.Interrupt
+
+		// Phase 9f: render delivery envelope for scheduler messages.
+		// No persisted row and no conversation exist for scheduled
+		// deliveries, so MessageID and ConvResult are honestly absent.
+		if s.writeDenyEnabled() {
+			var ts time.Time
+			if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
+				ts = t
+			}
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				ConvResult: nil,
+				Msg:        structuredMsg,
+				CreatedAt:  ts,
+			})
+		}
 
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer retryCancel()
