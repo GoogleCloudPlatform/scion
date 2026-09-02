@@ -1427,7 +1427,70 @@ func TestBackfill_DEF114_AttributedMessageIDs_Pinned(t *testing.T) {
 	assert.Equal(t, 1, result.DeriveFailures[DeriveErrDMKeyCanonical])
 	assert.Equal(t, 0, result.DeriveFailures[DeriveErrThreadNoProject])
 
+	// --- Self-checking: sum(DeriveFailures) == len(Errors) ---
+	assertDeriveFailuresTotalEqualsErrors(t, result)
+
 	// --- Pin hazardA ---
 	assert.Equal(t, 1, result.HazardAEmailCount,
 		"exactly one message has non-UUID principals")
+}
+
+// assertDeriveFailuresTotalEqualsErrors checks that the sum of all
+// DeriveFailures values equals len(result.Errors). This makes the
+// per-cause breakdown self-checking: if a future failure branch returns
+// a plain error rather than *DeriveError, the "unclassified" bucket
+// catches it rather than silently dropping it from the totals.
+func assertDeriveFailuresTotalEqualsErrors(t *testing.T, result *BackfillResult) {
+	t.Helper()
+	total := 0
+	for _, count := range result.DeriveFailures {
+		total += count
+	}
+	assert.Equal(t, len(result.Errors), total,
+		"sum(DeriveFailures) must equal len(Errors); "+
+			"a mismatch means a derive failure escaped classification. "+
+			"DeriveFailures=%v, len(Errors)=%d", result.DeriveFailures, len(result.Errors))
+}
+
+// TestBackfill_DEF114_DeriveFailuresTotalEqualsErrors is the standalone
+// self-checking assertion: the per-cause breakdown must sum to the total
+// error count, always.
+func TestBackfill_DEF114_DeriveFailuresTotalEqualsErrors(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	now := time.Now()
+
+	// Mix of derivable and non-derivable messages.
+	msgs := []store.Message{
+		// Derivable.
+		newTestMessage(projectID, "user:alice", userID,
+			"agent:bot", agentID, now.Add(-3*time.Minute)),
+		// Non-derivable: non-UUID sender (principal_pair).
+		newTestMessage(projectID, "user:alice@example.com", "alice@example.com",
+			"agent:bot", agentID, now.Add(-2*time.Minute)),
+		// Non-derivable: malformed dm: key (dm_key_parse).
+		func() store.Message {
+			m := newTestMessage(projectID, "user:alice", userID,
+				"agent:bot", agentID, now.Add(-1*time.Minute))
+			m.ThreadID = "dm:agent:" + agentID // wrong segment count
+			return m
+		}(),
+	}
+
+	msgStore := &mockMessageStore{messages: msgs}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Attributed)
+	assert.Len(t, result.Errors, 2)
+
+	// The self-checking invariant.
+	assertDeriveFailuresTotalEqualsErrors(t, result)
 }

@@ -147,11 +147,11 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 					fmt.Sprintf("message %s: %v", msg.ID, deriveErr))
 
 				// Aggregate per-cause counter (DEF-114).
+				if result.DeriveFailures == nil {
+					result.DeriveFailures = make(map[string]int)
+				}
 				var de *DeriveError
 				if errors.As(deriveErr, &de) {
-					if result.DeriveFailures == nil {
-						result.DeriveFailures = make(map[string]int)
-					}
 					result.DeriveFailures[de.Cause]++
 
 					// Hazard (a) fix: non-UUID principals are exactly what
@@ -165,6 +165,8 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 							result.HazardAEmailCount++
 						}
 					}
+				} else {
+					result.DeriveFailures["unclassified"]++
 				}
 				continue
 			}
