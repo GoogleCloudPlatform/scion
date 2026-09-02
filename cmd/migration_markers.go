@@ -88,11 +88,19 @@ type backfillMarker struct {
 	PermanentResidual *int `json:"permanent_residual,omitempty"`
 
 	// TransientFailures is the tallied count of write and resolution
-	// failures observed during the backfill pass. These are transient
-	// (retryable) and reported as a separate WARN line with the remedy
-	// "scion server backfill". They are never subtracted from the
-	// measured PermanentResidual — mixing tallies and measurements was
-	// the root cause of the off-by-24 (design §4.8 second correction).
+	// failures observed during the backfill pass. Despite the field name,
+	// these are NOT transient — they include deterministic authorization
+	// refusals (e.g. participant validation on direct conversations).
+	// The JSON field name is preserved for marker format compatibility.
+	//
+	// Reported as a separate WARN line ("Post-derivation failures") with
+	// NO remedy string: advertising "scion server backfill" for a
+	// deterministic refusal is DEF-111's exact shape (a warning whose
+	// remedy cannot reduce it).
+	//
+	// Never subtracted from the measured PermanentResidual — mixing
+	// tallies and measurements was the root cause of the off-by-24
+	// (design §4.8 second correction).
 	TransientFailures int `json:"transient_failures,omitempty"`
 }
 

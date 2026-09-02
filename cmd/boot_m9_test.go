@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,34 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// extractLoggedInt extracts the integer value of a key from slog text output.
+// slog text format uses key=value pairs. Returns (value, true) if found.
+func extractLoggedInt(logOutput, key string) (int, bool) {
+	// Match key=<integer> in slog text output.
+	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(key) + `=(\d+)\b`)
+	m := pattern.FindStringSubmatch(logOutput)
+	if m == nil {
+		return 0, false
+	}
+	v, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// extractLoggedIntOnLine extracts the integer value of a key from the specific
+// log line containing lineMarker. This prevents cross-line value confusion
+// when multiple log lines use the same key name (e.g. "count").
+func extractLoggedIntOnLine(logOutput, lineMarker, key string) (int, bool) {
+	for _, line := range strings.Split(logOutput, "\n") {
+		if strings.Contains(line, lineMarker) {
+			return extractLoggedInt(line, key)
+		}
+	}
+	return 0, false
+}
 
 // ---------------------------------------------------------------------------
 // Gate 1: Steady state — no WARN, actionable == 0 pre-clamp
@@ -137,20 +167,29 @@ func TestM9_Gate1_SteadyStateNoWarn(t *testing.T) {
 	require.NotNil(t, marker.CompletedAt)
 	require.NotNil(t, marker.PermanentResidual)
 
-	// THE GATE: verify actionable == 0 pre-clamp.
-	// Reproduce the exact arithmetic the report uses.
+	// THE GATE: call the SAME function production calls. One formula, not two.
 	total, err := s.CountUnbackfilledMessages(ctx, "")
 	require.NoError(t, err)
 	unreachable, err := s.CountUnreachableUnbackfilledMessages(ctx)
 	require.NoError(t, err)
-	reachable := total - unreachable
 	permanent := *marker.PermanentResidual
-	actionablePreClamp := reachable - permanent
+
+	_, actionablePreClamp, actionable := computeResidualBuckets(total, unreachable, permanent)
 
 	assert.Equal(t, 0, actionablePreClamp,
-		"GATE 1: actionable must be 0 BEFORE the clamp (reachable=%d, permanent=%d); "+
+		"GATE 1: actionable must be 0 BEFORE the clamp (total=%d, unreachable=%d, permanent=%d); "+
 			"a non-zero value means the classification is incomplete or the clamp is doing the work",
-		reachable, permanent)
+		total, unreachable, permanent)
+	assert.Equal(t, 0, actionable,
+		"GATE 1: actionable must be 0 after clamp")
+
+	// Assert the logged VALUE, not just presence/absence. The mutation
+	// (logging reachable instead of actionable) must go red here.
+	loggedPermanent, ok := extractLoggedIntOnLine(logOutput,
+		"Permanently unattributable messages in listed projects", "permanent")
+	assert.True(t, ok, "permanent INFO must include permanent=<int>")
+	assert.Equal(t, permanent, loggedPermanent,
+		"GATE 1: logged permanent value must match computed permanent")
 
 	// ---- Second boot (steady state) ----
 	buf.Reset()
@@ -171,21 +210,76 @@ func TestM9_Gate1_SteadyStateNoWarn(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestM9_Gate2_NewMessageTriggersWarn verifies that a new unattributed
-// message arriving in an already-completed project triggers the WARN.
-// This is the detection property — M9 must not suppress it.
+// message arriving in an already-completed project triggers the WARN and
+// logs the correct count VALUE (actionable, not reachable).
+//
+// The baseline includes derive-refused messages so permanent > 0. This
+// makes actionable != reachable after the new message arrives, which is
+// the mutation guard for item H (swapping the logged variable).
+//
+// MUTATION H: change `"count", actionable` to `"count", reachable` in
+// the WARN line. With permanent > 0, reachable > actionable, so the
+// value assertion fails.
 func TestM9_Gate2_NewMessageTriggersWarn(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	// Seed and run the backfill to completion.
-	projectID, _ := seedBackfillProjectWithMessage(t, ctx, s, "gate2-project")
+	// Seed a project with BOTH derive-refused and attributable messages.
+	// The derive-refused message makes permanent > 0 after the pass.
+	projectID := uuid.NewString()
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "gate2-project",
+		Slug: "gate2-project-" + projectID[:8],
+	})
+	require.NoError(t, err)
 
+	// Derive-refused message (non-UUID principals → principal_pair).
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: projectID,
+		Msg:       "derive-refused message",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
+	})
+	require.NoError(t, err)
+
+	// Attributable message.
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	err = s.CreateUser(ctx, &store.User{
+		ID:    senderID,
+		Email: "gate2-user@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        recipientID,
+		Name:      "gate2-agent",
+		Slug:      "gate2-agent-" + recipientID[:8],
+		ProjectID: projectID,
+	})
+	require.NoError(t, err)
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Msg:         "attributable message",
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+	})
+	require.NoError(t, err)
+
+	// First boot: backfill runs, permanent > 0 from derive-refused message.
 	runBootDataMigrations(ctx, s)
 
-	// Verify the backfill completed.
 	marker, err := loadBackfillMarker(ctx, s)
 	require.NoError(t, err)
 	require.NotNil(t, marker.CompletedAt)
+	require.NotNil(t, marker.PermanentResidual)
+	require.Greater(t, *marker.PermanentResidual, 0,
+		"baseline must have permanent > 0 for the mutation to be distinguishable")
 
 	// Now inject a NEW unattributed message into the completed project.
 	// This simulates a message arriving after the backfill pass.
@@ -230,6 +324,30 @@ func TestM9_Gate2_NewMessageTriggersWarn(t *testing.T) {
 	// grown by 1 since then.
 	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
 		"WARN must fire when a new unattributed message arrives after backfill completion")
+
+	// Assert the logged count VALUE. reachable includes the permanent
+	// messages + the new one; actionable is just the new one.
+	loggedCount, ok := extractLoggedIntOnLine(logOutput,
+		"Messages remain unattributed in listed projects", "count")
+	require.True(t, ok, "actionable WARN must include count=<int>")
+
+	// Use computeResidualBuckets for expected value — same function as production.
+	total2, err := s.CountUnbackfilledMessages(ctx, "")
+	require.NoError(t, err)
+	unreachable2, err := s.CountUnreachableUnbackfilledMessages(ctx)
+	require.NoError(t, err)
+	reachable, _, expectedActionable := computeResidualBuckets(total2, unreachable2, *marker.PermanentResidual)
+
+	// The key assertion: actionable must differ from reachable because
+	// permanent > 0. This is what makes the mutation detectable.
+	require.NotEqual(t, reachable, expectedActionable,
+		"test setup error: reachable and actionable must differ for the mutation to be detectable (permanent=%d)",
+		*marker.PermanentResidual)
+
+	assert.Equal(t, expectedActionable, loggedCount,
+		"GATE 2 / ITEM H: logged count must equal actionable (%d), not reachable (%d); "+
+			"MUTATION: logging reachable instead of actionable changes this value",
+		expectedActionable, reachable)
 }
 
 // ---------------------------------------------------------------------------
@@ -333,11 +451,13 @@ func TestM9_Gate3_TransientFailureWarn(t *testing.T) {
 
 	logOutput := buf.String()
 
-	// The transient WARN must fire.
-	assert.Contains(t, logOutput, "Transient backfill failures detected",
-		"transient WARN must fire when there are write failures")
-	assert.Contains(t, logOutput, "scion server backfill",
-		"transient WARN must include the retry remedy")
+	// The post-derivation WARN must fire (renamed from "Transient" per
+	// item A: write/resolution failures are deterministic, not transient).
+	assert.Contains(t, logOutput, "Post-derivation failures during last backfill pass",
+		"post-derivation WARN must fire when there are write failures")
+	// The remedy string must NOT be present (item D: DEF-111 shape).
+	assert.NotContains(t, logOutput, "scion server backfill",
+		"post-derivation WARN must NOT include the backfill remedy (DEF-111)")
 
 	// The actionable WARN must NOT fire. The write-failed message stays
 	// unstamped (no conversation_id), so it's counted in reachable AND in
@@ -345,20 +465,27 @@ func TestM9_Gate3_TransientFailureWarn(t *testing.T) {
 	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
 		"actionable WARN must not fire; the write-failed message is in permanent (measured)")
 
-	// Verify the arithmetic pre-clamp.
+	// Assert the post-derivation count VALUE, not just presence.
+	loggedPostDerive, ok := extractLoggedIntOnLine(logOutput,
+		"Post-derivation failures during last backfill pass", "count")
+	assert.True(t, ok, "post-derivation WARN must include count=<int>")
+	assert.Equal(t, marker.TransientFailures, loggedPostDerive,
+		"GATE 3: logged post-derivation count must match marker.TransientFailures")
+
+	// Verify the arithmetic pre-clamp using the SAME function production calls.
 	total, err := realStore.CountUnbackfilledMessages(ctx, "")
 	require.NoError(t, err)
 	unreachable, err := realStore.CountUnreachableUnbackfilledMessages(ctx)
 	require.NoError(t, err)
-	reachable := total - unreachable
 	permanent := *marker.PermanentResidual
-	actionablePreClamp := reachable - permanent
+
+	_, actionablePreClamp, _ := computeResidualBuckets(total, unreachable, permanent)
 
 	assert.Equal(t, 0, actionablePreClamp,
 		"GATE 3: actionable must be 0 pre-clamp; the write-failed message is "+
-			"measured into permanent (reachable=%d, permanent=%d). "+
+			"measured into permanent (total=%d, unreachable=%d, permanent=%d). "+
 			"MUTATION: subtracting writeFailures from permanent makes this non-zero.",
-		reachable, permanent)
+		total, unreachable, permanent)
 }
 
 // ---------------------------------------------------------------------------
@@ -464,11 +591,11 @@ func TestM9_Gate4_PerCauseCoverage(t *testing.T) {
 	require.NoError(t, err)
 	unreachable, err := s.CountUnreachableUnbackfilledMessages(ctx)
 	require.NoError(t, err)
-	reachable := total - unreachable
 
-	assert.Equal(t, reachable, *marker.PermanentResidual,
-		"all derive-refused messages must be in permanent (reachable=%d, permanent=%d)",
-		reachable, *marker.PermanentResidual)
+	_, actionablePreClamp, _ := computeResidualBuckets(total, unreachable, *marker.PermanentResidual)
+	assert.Equal(t, 0, actionablePreClamp,
+		"GATE 4: all derive-refused messages must be in permanent (total=%d, unreachable=%d, permanent=%d)",
+		total, unreachable, *marker.PermanentResidual)
 
 	// Verify per-cause fields are logged.
 	assert.Contains(t, logOutput, "derive_failures=",
@@ -479,6 +606,13 @@ func TestM9_Gate4_PerCauseCoverage(t *testing.T) {
 		"WARN must not fire when all causes are permanent")
 	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
 		"permanent INFO must fire")
+
+	// Assert the logged permanent VALUE matches the marker.
+	loggedPermanent, ok := extractLoggedIntOnLine(logOutput,
+		"Permanently unattributable messages in listed projects", "permanent")
+	assert.True(t, ok, "permanent INFO must include permanent=<int>")
+	assert.Equal(t, *marker.PermanentResidual, loggedPermanent,
+		"GATE 4: logged permanent must match marker")
 }
 
 // ---------------------------------------------------------------------------
@@ -596,7 +730,13 @@ func TestM9_Gate5_PreM9MarkerRerun(t *testing.T) {
 
 // TestM9_Gate6_AccumulatorResetOnRepeatedPass verifies that a repeated
 // full pass does not double-count the permanent residual. When projects_done
-// is empty at the start of a pass, the accumulator resets to zero.
+// is empty at the start of a pass, the accumulator resets to zero even if
+// PermanentResidual is non-nil in the marker.
+//
+// MUTATION: remove the `len(marker.ProjectsDone) > 0` check from the
+// carry-forward condition. With the mutation, the accumulator starts at
+// the marker's PermanentResidual (1) and then adds the project measurement
+// (1), producing permanent=2 (doubled). The test expects permanent=1.
 func TestM9_Gate6_AccumulatorResetOnRepeatedPass(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -627,15 +767,25 @@ func TestM9_Gate6_AccumulatorResetOnRepeatedPass(t *testing.T) {
 	require.NotNil(t, marker1.CompletedAt)
 	require.NotNil(t, marker1.PermanentResidual)
 	firstPermanent := *marker1.PermanentResidual
-	assert.Equal(t, 1, firstPermanent, "first pass: permanent should be 1")
+	require.Equal(t, 1, firstPermanent, "first pass: permanent should be 1")
 
-	// Simulate a pre-M9 marker upgrade: clear CompletedAt to trigger re-run,
-	// but leave PermanentResidual nil (pre-M9) so the accumulator starts fresh.
+	// Simulate a forced re-run: clear CompletedAt and ProjectsDone, but
+	// KEEP PermanentResidual set. This is the critical scenario for the
+	// mutation: if the code doesn't check for empty ProjectsDone, it will
+	// carry forward the stale PermanentResidual and double-count.
 	marker1.CompletedAt = nil
-	marker1.PermanentResidual = nil
-	marker1.ProjectsDone = nil // empty → fresh pass → accumulator resets
+	marker1.ProjectsDone = nil // empty → fresh pass → accumulator should reset
+	// PermanentResidual intentionally KEPT at 1
 	err = saveBackfillProgress(ctx, s, marker1)
 	require.NoError(t, err)
+
+	// Verify setup: marker has PermanentResidual=1 but empty ProjectsDone.
+	setupMarker, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+	require.NotNil(t, setupMarker.PermanentResidual,
+		"setup: PermanentResidual must be non-nil for the mutation to be testable")
+	require.Empty(t, setupMarker.ProjectsDone,
+		"setup: ProjectsDone must be empty (fresh pass)")
 
 	// Second pass (repeated).
 	runMessageBackfill(ctx, s)
@@ -645,10 +795,13 @@ func TestM9_Gate6_AccumulatorResetOnRepeatedPass(t *testing.T) {
 	require.NotNil(t, marker2.CompletedAt)
 	require.NotNil(t, marker2.PermanentResidual)
 
-	// THE GATE: permanent must be the same as the first pass, NOT doubled.
+	// THE GATE: permanent must be the same as the first pass (1), NOT doubled (2).
+	// With the mutation (carrying forward stale PermanentResidual=1 plus
+	// fresh measurement=1), permanent would be 2.
 	assert.Equal(t, firstPermanent, *marker2.PermanentResidual,
 		"GATE 6: repeated pass must not double-count permanent residual "+
-			"(first=%d, second=%d)", firstPermanent, *marker2.PermanentResidual)
+			"(first=%d, second=%d); MUTATION: removing ProjectsDone check doubles it",
+		firstPermanent, *marker2.PermanentResidual)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +884,7 @@ func TestM9_SteadyStateNonNegative(t *testing.T) {
 	// Run the backfill.
 	runBootDataMigrations(ctx, s)
 
-	// Verify arithmetic.
+	// Verify arithmetic using the SAME function production calls.
 	marker, err := loadBackfillMarker(ctx, s)
 	require.NoError(t, err)
 	require.NotNil(t, marker.PermanentResidual)
@@ -740,16 +893,17 @@ func TestM9_SteadyStateNonNegative(t *testing.T) {
 	require.NoError(t, err)
 	unreachable, err := s.CountUnreachableUnbackfilledMessages(ctx)
 	require.NoError(t, err)
-	reachable := total - unreachable
-	permanent := *marker.PermanentResidual
-	actionablePreClamp := reachable - permanent
+
+	_, actionablePreClamp, actionable := computeResidualBuckets(total, unreachable, *marker.PermanentResidual)
 
 	assert.GreaterOrEqual(t, actionablePreClamp, 0,
 		"pre-clamp actionable must never be negative at steady state "+
-			"(reachable=%d, permanent=%d, actionable=%d)",
-		reachable, permanent, actionablePreClamp)
+			"(total=%d, unreachable=%d, permanent=%d)",
+		total, unreachable, *marker.PermanentResidual)
 	assert.Equal(t, 0, actionablePreClamp,
 		"at steady state actionable must be exactly 0, not merely non-negative")
+	assert.Equal(t, 0, actionable,
+		"at steady state actionable must be exactly 0 after clamp")
 }
 
 // ---------------------------------------------------------------------------

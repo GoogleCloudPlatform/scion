@@ -312,20 +312,27 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		projectTransient := result.WriteFailures + result.ResolutionFailures
 		transientFailures += projectTransient
 
-		// M9 / DEF-114: log the per-cause breakdown so the dominant failure
-		// mode is diagnosable from boot logs. The boot hook is now the
-		// primary caller; without these fields, diagnosing "what were the
-		// 11,597?" requires a separate investigation round trip.
+		// M9 / DEF-114: log two identities so a reader can verify each
+		// from the log without touching the database:
+		//
+		//   processed  = attributed + inferred + skipped + derive_failures
+		//   row_errors = derive_failures + write_failures + resolution_failures
+		//
+		// These are DIFFERENT equations. The boot hook previously logged
+		// row_errors (the second) in the field where a reader expects the
+		// first (message disposition). That conflation hid the +4/-4
+		// cancellation on gteam. Log both explicitly.
+		deriveCount := sumDeriveFailures(result.DeriveFailures)
 		logArgs := []any{
 			"project", pid,
 			"processed", result.TotalProcessed,
 			"attributed", result.Attributed,
 			"inferred", result.Inferred,
 			"skipped", result.Skipped,
-			"row_errors", residuals,
-			"derive_failures", sumDeriveFailures(result.DeriveFailures),
+			"derive_failures", deriveCount,
 			"write_failures", result.WriteFailures,
 			"resolution_failures", result.ResolutionFailures,
+			"row_errors", residuals,
 			"permanent_residual", projectPermanent,
 			"elapsed", time.Since(projectStart).Round(time.Millisecond).String(),
 		}
@@ -493,6 +500,30 @@ func logBoundedErrors(prefix string, errors []string, limit int) {
 	}
 }
 
+// computeResidualBuckets is the single source of truth for the three-bucket
+// residual arithmetic (design §4.8). Production logs what this returns;
+// tests call this function — there is one formula, not two.
+//
+// The arithmetic:
+//
+//	reachable        = total - unreachable
+//	actionablePreClamp = reachable - permanent
+//	actionable       = max(0, actionablePreClamp)
+//
+// The clamp on actionable is a drift guard, not the mechanism that produces
+// zero. At steady state actionable reaches zero exactly because the measured
+// permanent term is drawn from the same population the live counter measures
+// (design §4.8 correction).
+func computeResidualBuckets(total, unreachable, permanent int) (reachable, actionablePreClamp, actionable int) {
+	reachable = total - unreachable
+	actionablePreClamp = reachable - permanent
+	actionable = actionablePreClamp
+	if actionable < 0 {
+		actionable = 0
+	}
+	return reachable, actionablePreClamp, actionable
+}
+
 // reportResidualUnattributed splits the residual unattributed-message count
 // into three buckets (design §4.6, §4.8):
 //
@@ -504,18 +535,8 @@ func logBoundedErrors(prefix string, errors []string, limit int) {
 //   - actionable (WARN): messages that re-running the backfill could fix.
 //     WARN fires only when this count is non-zero.
 //
-// The arithmetic:
-//
-//	total       = CountUnbackfilledMessages("")           // live
-//	unreachable = CountUnreachableUnbackfilledMessages()  // live, nests under total
-//	reachable   = total - unreachable                     // nests, cannot go negative
-//	permanent   = marker.PermanentResidual                // persisted, survives completion
-//	actionable  = max(0, reachable - permanent)
-//
-// The clamp on actionable is a drift guard, not the mechanism that produces
-// zero. At steady state actionable reaches zero exactly because the measured
-// permanent term is drawn from the same population the live counter measures
-// (design §4.8 correction).
+// All arithmetic is delegated to computeResidualBuckets so that production
+// and tests share one formula. The report logs what the function returns.
 //
 // CONSEQUENCE: the DEF-112 drift concern is now live. The counter's
 // predicate ("project_id NOT IN projects") and the backfill's skip predicate
@@ -547,16 +568,6 @@ func reportResidualUnattributed(ctx context.Context, s store.Store) {
 		unreachable = 0
 	}
 
-	reachable := totalUnbackfilled - unreachable
-
-	// INFO always: report the stable unreachable count.
-	if unreachable > 0 {
-		slog.Info("Message attribution complete",
-			"unreachable", unreachable,
-			"detail", "unreachable messages reference hard-deleted projects and cannot be attributed by per-project backfill (DEF-111); this count is expected to be stable",
-		)
-	}
-
 	// M9: load the backfill marker to get the persisted permanent residual.
 	marker, markerErr := loadBackfillMarker(tCtx, s)
 	permanent := 0
@@ -568,12 +579,15 @@ func reportResidualUnattributed(ctx context.Context, s store.Store) {
 		permanent = *marker.PermanentResidual
 	}
 
-	// M9: compute actionable = max(0, reachable - permanent).
-	// The clamp is a drift guard; at steady state actionable reaches zero
-	// exactly because permanent is measured from the same population.
-	actionable := reachable - permanent
-	if actionable < 0 {
-		actionable = 0
+	// Single source of truth for the three-bucket arithmetic.
+	_, _, actionable := computeResidualBuckets(totalUnbackfilled, unreachable, permanent)
+
+	// INFO always: report the stable unreachable count.
+	if unreachable > 0 {
+		slog.Info("Message attribution complete",
+			"unreachable", unreachable,
+			"detail", "unreachable messages reference hard-deleted projects and cannot be attributed by per-project backfill (DEF-111); this count is expected to be stable",
+		)
 	}
 
 	// INFO for permanent count (stable, no operator action possible).
@@ -592,18 +606,24 @@ func reportResidualUnattributed(ctx context.Context, s store.Store) {
 		)
 	}
 
-	// M9: report transient failures (write + resolution) as a separate
-	// WARN with the retry remedy. These are tallied during the pass and
-	// never subtracted from the measured permanent count.
-	transient := 0
+	// M9: report post-derivation failures (write + resolution) as a
+	// separate WARN. These are NOT transient — they include deterministic
+	// authorization refusals (e.g. participant validation on direct
+	// conversations). They are also NOT unattributed messages — the
+	// associated messages were stamped successfully; only a secondary
+	// operation (e.g. AddParticipant) was refused.
+	//
+	// No remedy string: advertising "scion server backfill" for a
+	// deterministic refusal is DEF-111's exact shape (a warning whose
+	// advertised remedy cannot reduce it).
+	postDerive := 0
 	if marker.TransientFailures > 0 {
-		transient = marker.TransientFailures
+		postDerive = marker.TransientFailures
 	}
-	if transient > 0 {
-		slog.Warn("Transient backfill failures detected",
-			"count", transient,
-			"detail", "write or resolution failures during the backfill pass; these may resolve on retry",
-			"remedy", "scion server backfill --execute",
+	if postDerive > 0 {
+		slog.Warn("Post-derivation failures during last backfill pass",
+			"count", postDerive,
+			"detail", "write or resolution failures after key derivation succeeded; not retried automatically; may indicate a data or authorization anomaly; see per-cause breakdown in backfill logs",
 		)
 	}
 }
