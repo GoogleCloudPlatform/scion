@@ -2962,8 +2962,14 @@ func (s *Server) messageEventHandler() EventHandler {
 		// Denial records event failure and performs NO external effect.
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
-			s.markScheduledEventFailed(ctx, evt, authErr.Error())
-			return nil // event failed, not a handler error — do not retry
+			if markErr := s.markScheduledEventFailed(ctx, evt, authErr.Error()); markErr != nil {
+				// Status update failed — return an error so the scheduler
+				// retries (the authorization will deny again, but the event
+				// must eventually be marked failed rather than silently left
+				// in a retry loop).
+				return markErr
+			}
+			return nil // event status recorded as failed — do not retry
 		}
 
 		dispatcher := s.GetDispatcher()

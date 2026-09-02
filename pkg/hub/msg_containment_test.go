@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,7 +126,10 @@ func (d *containmentDispatchSpy) getCalls() []containmentDispatchCall {
 // needed for messaging authorization (GetProjectMembership, etc).
 type containmentMockStore struct {
 	mockScheduledEventStore
-	memberships map[string]*store.ProjectMembership // key: projectID+":"+userID
+	memberships              map[string]*store.ProjectMembership // key: projectID+":"+userID
+	updateStatusErr          error                               // injected error for UpdateScheduledEventStatus
+	updateStatusCallCount    int                                 // tracks how many times UpdateScheduledEventStatus was called
+	updateStatusErrCallCount int                                 // tracks how many times UpdateScheduledEventStatus returned the injected error
 }
 
 func newContainmentMockStore() *containmentMockStore {
@@ -132,6 +137,19 @@ func newContainmentMockStore() *containmentMockStore {
 		mockScheduledEventStore: *newMockStore(),
 		memberships:             make(map[string]*store.ProjectMembership),
 	}
+}
+
+// UpdateScheduledEventStatus overrides the embedded mock to support error injection.
+func (m *containmentMockStore) UpdateScheduledEventStatus(ctx context.Context, id string, status string, firedAt *time.Time, errMsg string) error {
+	m.mu.Lock()
+	m.updateStatusCallCount++
+	if m.updateStatusErr != nil {
+		m.updateStatusErrCallCount++
+		m.mu.Unlock()
+		return m.updateStatusErr
+	}
+	m.mu.Unlock()
+	return m.mockScheduledEventStore.UpdateScheduledEventStatus(ctx, id, status, firedAt, errMsg)
 }
 
 func (m *containmentMockStore) GetProjectMembership(_ context.Context, projectID, userID string) (*store.ProjectMembership, error) {
@@ -633,6 +651,62 @@ func TestC1_ScheduledMessageCreatorAgentSoftDeleted(t *testing.T) {
 	}
 }
 
+func TestC1_ScheduledMessageMarkFailedErrorPropagates(t *testing.T) {
+	// F4: When markScheduledEventFailed fails to record the denial, the
+	// handler must return an error (not nil) so the scheduler retries
+	// rather than silently leaving the event in a retry loop with an
+	// unrecorded denial.
+	ms := newContainmentMockStore()
+	spy := &containmentDispatchSpy{}
+
+	projectA := "project-a"
+	projectB := "project-b"
+	creatorID := "creator-user"
+
+	ms.users[creatorID] = &store.User{
+		ID: creatorID, Email: "creator@test.com",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	ms.agents["agent-in-b"] = &store.Agent{
+		ID: "agent-in-b", Name: "agent-b", Slug: "agent-b",
+		ProjectID: projectB, MessageMode: store.MessageModeProject,
+	}
+
+	// Inject a status update error: the denial will succeed (no dispatch)
+	// but recording the failure status will fail.
+	ms.updateStatusErr = fmt.Errorf("injected: database unavailable")
+
+	srv := containmentTestServer(ms)
+	srv.SetDispatcher(spy)
+
+	payload, _ := json.Marshal(MessageEventPayload{
+		AgentID: "agent-in-b", Message: "cross-project message",
+	})
+	evt := store.ScheduledEvent{
+		ID: "evt-mark-failed", ProjectID: projectA, EventType: "message",
+		Payload: string(payload), CreatedBy: creatorID,
+		FireAt: time.Now(), Status: store.ScheduledEventPending,
+	}
+	ms.events[evt.ID] = &evt
+
+	handler := srv.messageEventHandler()
+	err := handler(context.Background(), evt)
+
+	// The handler must return a non-nil error when status recording fails.
+	if err == nil {
+		t.Fatal("handler must return error when markScheduledEventFailed fails — " +
+			"otherwise the denied event silently remains retryable")
+	}
+	if !strings.Contains(err.Error(), "markScheduledEventFailed") {
+		t.Errorf("error should reference markScheduledEventFailed, got: %v", err)
+	}
+
+	// Load-bearing: zero dispatch calls even when status recording fails.
+	if len(spy.getCalls()) != 0 {
+		t.Errorf("denial must produce zero dispatch calls regardless of status recording: got %d", len(spy.getCalls()))
+	}
+}
+
 // =============================================================================
 // C2 tests: synthesized-user lifecycle checks
 // =============================================================================
@@ -723,6 +797,194 @@ func TestC1_AuthorizeScheduledMessageAuthoring_UATDenied(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for UAT-scoped authoring, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestC1_AuthorizeScheduledMessageAuthoring_ConflictingTarget(t *testing.T) {
+	// O1: When both rawPayload and convenience fields specify targets that
+	// disagree, authoring must reject with 400 to prevent validating one
+	// target while storing another.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: tid("conflict-proj"), Name: "Conflict Project", Slug: "conflict-proj",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	user := &store.User{
+		ID: tid("conflict-user"), Email: "conflict@test.com", DisplayName: "Conflict User",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	sameProjectAgent := &store.Agent{
+		ID: tid("same-agent"), Name: "same-agent", Slug: "same-agent",
+		ProjectID: project.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, sameProjectAgent))
+
+	// Construct payload with a different agentId than the convenience field.
+	payloadJSON, _ := json.Marshal(MessageEventPayload{
+		AgentID: "different-agent-id",
+		Message: "message in payload",
+	})
+
+	reqBody := CreateScheduledEventRequest{
+		EventType: "message",
+		FireIn:    "30m",
+		AgentID:   sameProjectAgent.ID, // convenience field: same-project agent
+		Payload:   string(payloadJSON), // payload: different agent
+	}
+	rec := doRequest(t, srv, "POST", "/api/v1/projects/"+project.ID+"/scheduled-events", reqBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for conflicting targets, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestC1_RecurringScheduleCreate_CrossProjectDenied(t *testing.T) {
+	// O2: recurring schedule create with a cross-project target must be denied.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
+
+	projectA := &store.Project{
+		ID: tid("sched-create-a"), Name: "Project A", Slug: "sched-create-a",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+
+	projectB := &store.Project{
+		ID: tid("sched-create-b"), Name: "Project B", Slug: "sched-create-b",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+
+	agent := &store.Agent{
+		ID: tid("cross-sched-agent"), Name: "cross-agent", Slug: "cross-agent",
+		ProjectID: projectB.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Create a recurring schedule in project A targeting agent in project B via payload.
+	payloadJSON, _ := json.Marshal(MessageEventPayload{
+		AgentID: agent.ID, Message: "cross-project msg",
+	})
+	reqBody := CreateScheduleRequest{
+		Name:      "cross-project-sched",
+		CronExpr:  "0 * * * *",
+		EventType: "message",
+		Payload:   string(payloadJSON),
+	}
+	rec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectA.ID+"/schedules", reqBody)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"recurring create must deny cross-project target: %s", rec.Body.String())
+}
+
+func TestC1_RecurringScheduleUpdate_CrossProjectDenied(t *testing.T) {
+	// O2/O3: recurring schedule update that changes the payload to target a
+	// cross-project agent must be denied.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
+
+	projectA := &store.Project{
+		ID: tid("sched-update-a"), Name: "Project A", Slug: "sched-update-a",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+
+	projectB := &store.Project{
+		ID: tid("sched-update-b"), Name: "Project B", Slug: "sched-update-b",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+
+	crossAgent := &store.Agent{
+		ID: tid("cross-update-agent"), Name: "cross-update-agent", Slug: "cross-update-agent",
+		ProjectID: projectB.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, crossAgent))
+
+	// First create a valid schedule in project A (target unresolvable at authoring
+	// time, which is allowed — fire-time will catch it).
+	createRec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectA.ID+"/schedules",
+		CreateScheduleRequest{
+			Name:      "update-me",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			AgentName: "some-agent",
+			Message:   "hello",
+		})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&sched))
+
+	// Now update the payload to target the cross-project agent.
+	crossPayload, _ := json.Marshal(MessageEventPayload{
+		AgentID: crossAgent.ID, Message: "cross-project update",
+	})
+	updateRec := doRequest(t, srv, "PATCH", "/api/v1/projects/"+projectA.ID+"/schedules/"+sched.ID,
+		UpdateScheduleRequest{
+			Payload: string(crossPayload),
+		})
+	assert.Equal(t, http.StatusForbidden, updateRec.Code,
+		"recurring update must deny cross-project target: %s", updateRec.Body.String())
+}
+
+func TestC1_RecurringScheduleUpdate_ExistingPayloadDenied(t *testing.T) {
+	// O3: When the existing schedule's payload targets a cross-project agent
+	// (stored before containment) and the update changes only non-payload fields,
+	// the authoring check must re-validate the existing payload and deny.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
+
+	projectA := &store.Project{
+		ID: tid("sched-existing-a"), Name: "Project A", Slug: "sched-existing-a",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+
+	projectB := &store.Project{
+		ID: tid("sched-existing-b"), Name: "Project B", Slug: "sched-existing-b",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+
+	crossAgent := &store.Agent{
+		ID: tid("cross-existing-agent"), Name: "cross-existing", Slug: "cross-existing",
+		ProjectID: projectB.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, crossAgent))
+
+	// Directly insert a schedule with a cross-project payload (simulating
+	// a record stored before containment was deployed).
+	crossPayload, _ := json.Marshal(MessageEventPayload{
+		AgentID: crossAgent.ID, Message: "pre-containment payload",
+	})
+	schedule := &store.Schedule{
+		ID:        tid("legacy-cross-sched"),
+		ProjectID: projectA.ID,
+		Name:      "legacy-schedule",
+		CronExpr:  "0 * * * *",
+		EventType: "message",
+		Payload:   string(crossPayload),
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: "dev",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateSchedule(ctx, schedule))
+
+	// Update only the name — the existing payload should be re-validated.
+	updateRec := doRequest(t, srv, "PATCH", "/api/v1/projects/"+projectA.ID+"/schedules/"+schedule.ID,
+		UpdateScheduleRequest{Name: "updated-name"})
+	assert.Equal(t, http.StatusForbidden, updateRec.Code,
+		"update must re-validate existing cross-project payload: %s", updateRec.Body.String())
 }
 
 func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {

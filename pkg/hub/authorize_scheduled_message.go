@@ -56,13 +56,36 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 		return false
 	}
 
-	// Resolve target from convenience fields or raw payload.
-	targetAgentID, targetAgentName := agentID, agentName
-	if targetAgentID == "" && targetAgentName == "" && rawPayload != "" {
+	// Resolve the target from the raw payload first, since that is what gets
+	// persisted and fired. Fall back to convenience fields only when the
+	// payload is empty or does not contain a target. This matches the
+	// storage priority in handlers_scheduled_events.go.
+	var targetAgentID, targetAgentName string
+	if rawPayload != "" {
 		var p MessageEventPayload
 		if err := json.Unmarshal([]byte(rawPayload), &p); err == nil {
 			targetAgentID = p.AgentID
 			targetAgentName = p.AgentName
+		}
+	}
+	// If the payload didn't yield a target, use convenience fields.
+	if targetAgentID == "" && targetAgentName == "" {
+		targetAgentID = agentID
+		targetAgentName = agentName
+	}
+	// Reject conflicting representations: if both the payload and
+	// convenience fields specify targets that disagree, the request is
+	// ambiguous and must be denied. Validating one target while storing
+	// another would create a false sense of authorization.
+	if rawPayload != "" && (agentID != "" || agentName != "") {
+		var p MessageEventPayload
+		if err := json.Unmarshal([]byte(rawPayload), &p); err == nil {
+			if (p.AgentID != "" && agentID != "" && p.AgentID != agentID) ||
+				(p.AgentName != "" && agentName != "" && p.AgentName != agentName) {
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					"conflicting target: payload and convenience fields specify different agents", nil)
+				return false
+			}
 		}
 	}
 
@@ -216,13 +239,25 @@ func (s *Server) authorizeScheduledMessageFire(
 
 // markScheduledEventFailed records a fire-time denial on a scheduled event.
 // It updates the event status to failed and logs the denial reason.
-func (s *Server) markScheduledEventFailed(ctx context.Context, evt store.ScheduledEvent, reason string) {
+//
+// Returns an error when the status update itself fails. The caller must
+// propagate the error to the scheduler so that the event is not silently
+// left in a retry loop — the authorization denial already prevented any
+// external effect, but the status must be recorded so the event does not
+// re-enter the fire queue.
+func (s *Server) markScheduledEventFailed(ctx context.Context, evt store.ScheduledEvent, reason string) error {
 	now := time.Now()
-	_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFailed, &now, reason)
+	err := s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFailed, &now, reason)
 	slog.Warn("Scheduler: message event authorization denied at fire time",
 		"eventID", evt.ID,
 		"projectID", evt.ProjectID,
 		"createdBy", evt.CreatedBy,
 		"reason", reason,
+		"status_update_error", err,
 	)
+	if err != nil {
+		return fmt.Errorf("markScheduledEventFailed: denied event %s could not be marked failed (denial reason: %s): %w",
+			evt.ID, reason, err)
+	}
+	return nil
 }

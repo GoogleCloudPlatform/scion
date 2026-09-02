@@ -389,6 +389,7 @@ Preflight report: `/scion-volumes/scratchpad/projects/policy-refactor/aa-rs6-pre
 | F-RS6-18 | Low | Message outbox is vestigial (`deliverMsg` seam never invoked) | open-rs6 |
 | F-RS6-20 | Low | `TestCreateMessageEnumeration` skips subdirectories and enumerates persistence, not authorization | open-rs6 |
 | F-RS6-30 | Medium | Deleted users retain working sessions (`auth.go` falls through on `ErrNotFound`) | open-rs6 |
+| F-RS6-33 | **High** | Runtime-broker HMAC can assert any active user identity without user consent (arbitrary identity impersonation via `X-Scion-On-Behalf-Of`); see product decisions A-5, C2c | open-rs6 |
 | F-RS6-36 | Low | `authzop.MutationClassifications` contains no messaging symbol | open-rs6 |
 
 ### Open product decisions
