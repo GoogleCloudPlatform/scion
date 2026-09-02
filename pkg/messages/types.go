@@ -150,6 +150,12 @@ type StructuredMessage struct {
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
 	// Empty defaults to VisibilityNormal for backward compatibility.
 	Visibility string `json:"visibility,omitempty"`
+
+	// DeliveryText is the fully rendered agent-facing envelope, produced by
+	// the hub. When set, the broker delivers it verbatim and performs no
+	// formatting. Phase 13 deletes this field along with the rest of
+	// StructuredMessage.
+	DeliveryText string `json:"delivery_text,omitempty"`
 }
 
 // ValidateType returns an error if the message type is not in the closed enum.
