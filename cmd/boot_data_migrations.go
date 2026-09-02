@@ -57,14 +57,42 @@ var defaultBackfillBudget = 10 * time.Minute
 // that warning is M6, not this commit.
 func runBootDataMigrations(ctx context.Context, s store.Store) {
 	runWithAdvisoryLock(ctx, s, store.LockDataMigrations, "conversation data migrations", func() {
-		runDMKeyMigration(ctx, s)      // §4.4 — repair, unbudgeted
-		runMessageBackfill(ctx, s)     // §4.5 — attribution, budgeted
+		// Each migration is wrapped in its own deferred recover so that a
+		// panic in one does not prevent the other from running, and neither
+		// can kill the process during boot. Design alternative A2 rejected
+		// blocking boot on a data-migration failure; an unrecovered panic
+		// is a harder version of that same outcome. The marker is NOT
+		// written on panic — a panicking pass did not complete, which is
+		// a run-level failure under M-1'.
+		//
+		// runWithAdvisoryLock has an early fn() path (no-op locker) that
+		// returns before its deferred release, so it cannot be relied on
+		// for containment.
+		runMigrationSafe(ctx, s, "DM key migration", runDMKeyMigration)      // §4.4
+		runMigrationSafe(ctx, s, "Message backfill", runMessageBackfill)     // §4.5
 	})
 
 	// The backfill warning must still fire. Re-pointing it to a split
 	// reachable/unreachable report is M6; for now, preserve the existing
 	// behaviour exactly.
 	maybeWarnUnbackfilledMessages(ctx, s)
+}
+
+// runMigrationSafe calls fn inside a deferred recover. A panic is logged at
+// ERROR and the function returns normally, so the caller can proceed to the
+// next migration and the hub can continue booting. The marker is never
+// written: fn is responsible for its own marker write, and a panic aborts
+// fn before it can reach that write — which is the correct M-1' outcome
+// (a panicking pass is a run-level failure).
+func runMigrationSafe(ctx context.Context, s store.Store, label string, fn func(context.Context, store.Store)) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error(fmt.Sprintf("%s: recovered from panic; migration did not complete, will retry next boot", label),
+				"panic", r,
+			)
+		}
+	}()
+	fn(ctx, s)
 }
 
 // runDMKeyMigration runs the DM key migration with M-1' marker semantics.

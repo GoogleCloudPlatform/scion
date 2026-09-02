@@ -66,6 +66,43 @@ func (s *listMessagesFailStore) ListMessages(ctx context.Context, filter store.M
 	return s.Store.ListMessages(ctx, filter, opts)
 }
 
+// listProjectsPanicStore wraps a real store.Store and panics on
+// ListProjects, simulating an unexpected nil deref or similar crash
+// inside the backfill migration path. All other methods pass through.
+type listProjectsPanicStore struct {
+	store.Store
+}
+
+func (s *listProjectsPanicStore) ListProjects(_ context.Context, _ store.ProjectFilter, _ store.ListOptions) (*store.ListResult[store.Project], error) {
+	panic("injected panic in ListProjects")
+}
+
+// listConversationsPanicStore wraps a real store.Store and panics on
+// ListConversations, simulating an unexpected crash inside the DM key
+// migration path. All other methods pass through.
+type listConversationsPanicStore struct {
+	store.Store
+}
+
+func (s *listConversationsPanicStore) ListConversations(_ context.Context, _ store.ConversationFilter, _ store.ListOptions) (*store.ListResult[store.Conversation], error) {
+	panic("injected panic in ListConversations")
+}
+
+// listMessagesPanicStore wraps a real store.Store and panics on
+// ListMessages for a specific project, simulating an unexpected crash
+// partway through the per-project backfill loop.
+type listMessagesPanicStore struct {
+	store.Store
+	panicProjectID string
+}
+
+func (s *listMessagesPanicStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
+	if filter.ProjectID == s.panicProjectID {
+		panic("injected panic in ListMessages for project " + s.panicProjectID)
+	}
+	return s.Store.ListMessages(ctx, filter, opts)
+}
+
 // saveBackfillFailStore wraps a real store.Store and overrides
 // UpsertHubSetting to fail after a configurable number of successful calls,
 // simulating a marker-persist failure mid-migration.
@@ -672,4 +709,177 @@ func TestBootBackfill_WarningStillFires(t *testing.T) {
 	logOutput := buf.String()
 	assert.Contains(t, logOutput, "Messages without conversation attribution detected",
 		"warning must still fire after backfill (re-pointing is M6)")
+}
+
+// ---------------------------------------------------------------------------
+// Panic containment — design A2: boot is never blocked
+// ---------------------------------------------------------------------------
+
+// TestBootDataMigrations_BackfillPanic_Contained verifies that a panic in
+// the message backfill migration is recovered and does not kill the process.
+// The hub must still complete the boot hook. The backfill marker must NOT
+// be written — a panicking pass is a run-level failure under M-1'.
+//
+// Mutation-tested: removing the recover in runMigrationSafe causes this
+// test to fail (panic propagates). See mutation results in commit message.
+func TestBootDataMigrations_BackfillPanic_Contained(t *testing.T) {
+	ctx := context.Background()
+	realStore := newTestStore(t)
+
+	// Seed data so the backfill would attempt work.
+	seedBackfillProjectWithMessage(t, ctx, realStore, "panic-test")
+
+	// Also seed DM data so the DM migration runs and proves it's unaffected.
+	seedOldFormatDMConversation(t, ctx, realStore)
+
+	// Wrap: ListProjects panics, everything else works.
+	panicStore := &listProjectsPanicStore{Store: realStore}
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	// Must not panic — the recover catches it.
+	assert.NotPanics(t, func() {
+		runBootDataMigrations(ctx, panicStore)
+	}, "panic in backfill must be contained; boot must complete")
+
+	logOutput := buf.String()
+
+	// The DM migration should have run BEFORE the panic.
+	assert.Contains(t, logOutput, "DM key migration: starting",
+		"DM migration must still run even when backfill panics")
+	assert.Contains(t, logOutput, "DM key migration: pass completed",
+		"DM migration must complete even when backfill panics")
+
+	// The panic should be logged.
+	assert.Contains(t, logOutput, "recovered from panic",
+		"panic must be logged at ERROR")
+
+	// The backfill marker MUST NOT be written.
+	marker, err := loadBackfillMarker(ctx, realStore)
+	require.NoError(t, err)
+	assert.Nil(t, marker.CompletedAt,
+		"M-1': panic is a run-level failure; marker must NOT be written")
+
+	// The DM key marker should be written (panic in backfill doesn't
+	// affect the DM migration that already completed).
+	done, err := IsMigrationComplete(ctx, realStore, MigrationDMKey)
+	require.NoError(t, err)
+	assert.True(t, done,
+		"DM key marker must be written despite backfill panic")
+}
+
+// TestBootDataMigrations_DMKeyPanic_BackfillStillRuns verifies that a
+// panic in the DM key migration does not prevent the backfill from running.
+// Each migration is wrapped in its own recover.
+func TestBootDataMigrations_DMKeyPanic_BackfillStillRuns(t *testing.T) {
+	ctx := context.Background()
+	realStore := newTestStore(t)
+
+	// Seed a project with a message for the backfill.
+	seedBackfillProjectWithMessage(t, ctx, realStore, "dm-panic-test")
+
+	// Wrap: ListConversations panics (DM migration path),
+	// but backfill path (ListProjects, ListMessages) works fine.
+	panicStore := &listConversationsPanicStore{Store: realStore}
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	assert.NotPanics(t, func() {
+		runBootDataMigrations(ctx, panicStore)
+	}, "panic in DM migration must be contained")
+
+	logOutput := buf.String()
+
+	// DM migration panic should be logged.
+	assert.Contains(t, logOutput, "recovered from panic",
+		"DM migration panic must be logged")
+
+	// Backfill should have run AFTER the DM panic.
+	assert.Contains(t, logOutput, "Message backfill: starting",
+		"backfill must run even when DM migration panics")
+	assert.Contains(t, logOutput, "Message backfill: all projects complete",
+		"backfill must complete even when DM migration panics")
+
+	// DM key marker must NOT be written (panic = run-level failure).
+	done, err := IsMigrationComplete(ctx, realStore, MigrationDMKey)
+	require.NoError(t, err)
+	assert.False(t, done,
+		"DM key marker must NOT be written on panic")
+
+	// Backfill marker SHOULD be written (backfill succeeded).
+	marker, err := loadBackfillMarker(ctx, realStore)
+	require.NoError(t, err)
+	assert.NotNil(t, marker.CompletedAt,
+		"backfill marker should be written when backfill succeeds despite DM panic")
+}
+
+// TestBootBackfill_PanicPreservesProgress verifies that a panic mid-way
+// through the project list does not roll back already-persisted progress.
+// The recover is a scoped abort, not a rollback: projects that completed
+// full passes and were persisted before the panic remain in projects_done.
+// A subsequent boot resumes from where it left off.
+//
+// Uses runBootDataMigrations (not runMessageBackfill directly) because the
+// recover lives in runMigrationSafe, which wraps each migration at the
+// runBootDataMigrations level.
+func TestBootBackfill_PanicPreservesProgress(t *testing.T) {
+	ctx := context.Background()
+	realStore := newTestStore(t)
+
+	// Create three projects.
+	pid1, _ := seedBackfillProjectWithMessage(t, ctx, realStore, "panic-progress-p1")
+	pid2, _ := seedBackfillProjectWithMessage(t, ctx, realStore, "panic-progress-p2")
+	pid3, _ := seedBackfillProjectWithMessage(t, ctx, realStore, "panic-progress-p3")
+
+	// Pre-seed pid1 and pid2 as done (simulating earlier boot progress).
+	err := saveBackfillProgress(ctx, realStore, backfillMarker{
+		ProjectsDone: []string{pid1, pid2},
+		Residuals:    3,
+	})
+	require.NoError(t, err)
+
+	// Also mark DM key migration as done so it doesn't interact.
+	err = MarkMigrationComplete(ctx, realStore, MigrationDMKey, 0)
+	require.NoError(t, err)
+
+	// Wrap: ListMessages panics for pid3 (the only remaining project).
+	panicOnPid3Store := &listMessagesPanicStore{
+		Store:          realStore,
+		panicProjectID: pid3,
+	}
+
+	// Run through the full boot hook — runMigrationSafe provides the recover.
+	assert.NotPanics(t, func() {
+		runBootDataMigrations(ctx, panicOnPid3Store)
+	}, "panic mid-list must be contained by runMigrationSafe")
+
+	// Already-persisted progress must survive the panic.
+	marker, err := loadBackfillMarker(ctx, realStore)
+	require.NoError(t, err)
+
+	doneSet := make(map[string]bool)
+	for _, pid := range marker.ProjectsDone {
+		doneSet[pid] = true
+	}
+	assert.True(t, doneSet[pid1], "pid1 was banked before panic; must survive")
+	assert.True(t, doneSet[pid2], "pid2 was banked before panic; must survive")
+	assert.False(t, doneSet[pid3], "pid3 panicked; must NOT be in projects_done")
+
+	// Residuals carried forward must survive.
+	assert.GreaterOrEqual(t, marker.Residuals, 3,
+		"residuals from prior boot must survive the panic")
+
+	// Global marker must NOT be written (not all projects done).
+	assert.Nil(t, marker.CompletedAt,
+		"global marker must not be written when a project panicked")
+
+	// Second boot (no panic): should resume and complete.
+	runBootDataMigrations(ctx, realStore)
+
+	marker, err = loadBackfillMarker(ctx, realStore)
+	require.NoError(t, err)
+	assert.NotNil(t, marker.CompletedAt,
+		"second boot should complete after panic recovery")
 }
