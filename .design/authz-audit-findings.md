@@ -350,3 +350,51 @@ Each containment change is marked in code with a `// C0-CONTAINMENT:` comment
 identifying the finding, the restriction, and the contract decision required to relax
 it. These markers are searchable and must not be removed without the corresponding
 Phase 1 contract decision and regression tests.
+
+---
+
+## RS6 Preflight — External-Effect Containment Findings
+
+Discovered by `agent:aa-rs6-preflight` and contained by `agent:aa-msg-containment-dev`.
+Preflight report: `/scion-volumes/scratchpad/projects/policy-refactor/aa-rs6-preflight-report.md`.
+
+### Contained findings
+
+| ID | Severity | Title | Status |
+|---|---|---|---|
+| F-RS6-01 | **High** | Scheduled `message` events bypass `authorizeAgentMessage` entirely and permit cross-project targeting (`handlers_scheduled_events.go`, `server.go:messageEventHandler`) | **contained** — C1: authoring-time project-scope validation and fire-time `authorizeScheduledMessageFire` gate in `authorize_scheduled_message.go` |
+| F-RS6-03 | **High** | Broker inbound synthesizes an `AuthenticatedUser` from payload-supplied email with no status check (`handlers_broker_inbound.go`) | **contained** — C2a: `Status != store.UserStatusActive` check before identity construction |
+| F-RS6-27 | Low | `authorize_message.go` doc comment lists "scheduled events" as legitimate system-plane, which is the origin of F-RS6-01 | **contained** — comment corrected to state scheduled events are NOT system-plane |
+| F-RS6-29 | **High** | `X-Scion-On-Behalf-Of` (`brokerauth.go:resolveOnBehalfOf`) suspension check uses string literal "suspended" instead of `store.UserStatusSuspended`; any non-active status other than "suspended" passes | **contained** — C2b: replaced with fail-closed `!= store.UserStatusActive` |
+| F-RS6-19 | Low | `TestAuthorizeAgentMessage_IngressParity` asserts parity by comment; the claim is incomplete | **contained** — C3: `TestExternalEffectCallSiteClassification` is a bidirectional AST-based guard over all dispatch call sites |
+
+### Open findings (deferred to RS6 or AH)
+
+| ID | Severity | Title | Status |
+|---|---|---|---|
+| F-RS6-02 | **High** | No audit record is written for any message send, contradicting the declared `AuditObligation` (`catalog.go:911-917`) | open-rs6 |
+| F-RS6-04 | Medium | `agent.message.send` declares an entry point that does not exist and omits 9 real ingresses | open-rs6 |
+| F-RS6-05 | Medium | `agent.message.send` `ExternalEffectPolicy` contradicts runtime: `fire_and_forget`/"no retry" versus `dispatchWithBrokerRetry` | open-rs6 |
+| F-RS6-06 | Medium | `AuthBeforeEmit: true` is false for `messagebroker.go`, `notifications.go`, `server.go` (pre-containment) | open-rs6 |
+| F-RS6-07 | Medium | `MessageBrokerProxy.deliverToAgent` persists and emits with no authorization | open-rs6 |
+| F-RS6-08 | Medium | Notification fan-out delivers into containers with subscription-only authorization; revocation never re-evaluated | open-rs6 |
+| F-RS6-09 | Medium | Attachment bytes staged before authorization with no compensation | open-rs6 |
+| F-RS6-10 | Medium | Broker inbound emits before commit | open-rs6 |
+| F-RS6-11 | Medium | Scheduled dispatch orphans agent row when no dispatcher available | open-rs6 |
+| F-RS6-12 | Medium | Successful scheduled dispatch writes no audit record | open-rs6 |
+| F-RS6-13 | Medium | `authorizeScheduledAgentCreate` checks user creator status but not agent creator status | open-rs6 |
+| F-RS6-14 | Medium | Recurring schedules bypass `ClaimScheduledEvent` | open-rs6 |
+| F-RS6-16 | Medium | `handleAgentMessage` performs no messaging authorization; depends on its two routers | open-rs6 |
+| F-RS6-17 | Low | No stable lower_snake_case denial vocabulary for messaging | open-rs6 |
+| F-RS6-18 | Low | Message outbox is vestigial (`deliverMsg` seam never invoked) | open-rs6 |
+| F-RS6-20 | Low | `TestCreateMessageEnumeration` skips subdirectories and enumerates persistence, not authorization | open-rs6 |
+| F-RS6-30 | Medium | Deleted users retain working sessions (`auth.go` falls through on `ErrNotFound`) | open-rs6 |
+| F-RS6-36 | Low | `authzop.MutationClassifications` contains no messaging symbol | open-rs6 |
+
+### Open product decisions
+
+| ID | Question | Recommendation |
+|---|---|---|
+| A-3 | What happens to pre-existing scheduled events when C1 lands? | Fail closed + one-time cancel-and-notify sweep |
+| A-5 | Is broker identity synthesis an accepted design? Per-broker allow-list needed? | Land C2a/C2b now; treat per-broker allow-list as a separate item |
+| C2c | Per-broker on-behalf-of allow-list | Deferred — requires product decision on bridge trust model |

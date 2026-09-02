@@ -2898,6 +2898,11 @@ type MessageEventPayload struct {
 
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
+//
+// C1 containment: this handler now performs fire-time authorization via
+// authorizeScheduledMessageFire before any dispatch. Scheduled messages are
+// request-derived (not system-plane) and must pass the production
+// authorizeAgentMessage choke point with isSystemPlane=false.
 func (s *Server) messageEventHandler() EventHandler {
 	return func(ctx context.Context, evt store.ScheduledEvent) error {
 		var payload MessageEventPayload
@@ -2949,6 +2954,16 @@ func (s *Server) messageEventHandler() EventHandler {
 				return nil
 			}
 			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
+		}
+
+		// ---- C1 containment: fire-time authorization ----
+		// Re-resolve the creator identity and authorize the message through
+		// the production choke point (authorizeAgentMessage, isSystemPlane=false).
+		// Denial records event failure and performs NO external effect.
+		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
+		if authErr != nil {
+			s.markScheduledEventFailed(ctx, evt, authErr.Error())
+			return nil // event failed, not a handler error — do not retry
 		}
 
 		dispatcher := s.GetDispatcher()
