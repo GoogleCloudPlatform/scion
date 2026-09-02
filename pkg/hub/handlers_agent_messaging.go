@@ -1420,10 +1420,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			// recipients. Gated on persistence success (matching the
 			// processMentions pattern, not the looser broadcastDirect one)
 			// so unpersisted messages never carry fabricated envelope data.
-			// Stamped before dispatch so the agent receives the new format;
-			// the observer copy below (`observerMsg := agentMsg`) inherits
-			// DeliveryText intentionally — observers need the same rendered
-			// content for audit fidelity.
+			// Stamped before dispatch so the agent receives the new format.
+			//
+			// The observer copy below (`observerMsg := agentMsg`) inherits
+			// DeliveryText, which newly exposes the per-recipient DM
+			// conversation identity (id, kind, surface, display name) to
+			// project-scoped plugin observers. This is acceptable because
+			// those observers already receive the message body itself via
+			// bp.PublishMessage — conversation metadata discloses strictly
+			// less than the content they already hold. Across a group[]
+			// fan-out to N agent recipients, observers receive N envelopes,
+			// each naming a different DM conversation.
 			if s.writeDenyEnabled() && persisted {
 				agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:  storeMsg.ID,
