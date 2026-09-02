@@ -414,6 +414,9 @@ func logBoundedErrors(prefix string, errors []string, limit int) {
 // CONSEQUENCE: the DEF-112 drift concern is now live. The counter's
 // predicate ("project_id NOT IN projects") and the backfill's skip predicate
 // must share one expression. This makes M7 required, not optional.
+//
+// GATE (M7, DEF-112): TestReachableCountConsistency_DEF112 enforces the
+// invariant that these two predicates agree.
 func reportResidualUnattributed(ctx context.Context, s store.Store) {
 	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

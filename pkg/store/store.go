@@ -1351,6 +1351,12 @@ type MessageStore interface {
 	// applies no unconditional filter, so it returns every row in projects
 	// and NOT EXISTS is its exact complement. An unconditional filter added
 	// to ListProjects would silently break this invariant.
+	//
+	// GATE (M7, DEF-112): TestReachableCountConsistency_DEF112 enforces
+	// this invariant by asserting the counter's reachable count equals
+	// the sum of per-project counts over ListProjects. A divergence
+	// (e.g. an unconditional filter added to ListProjects) turns that
+	// test red.
 	CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error)
 }
 
