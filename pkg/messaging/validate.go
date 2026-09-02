@@ -37,40 +37,14 @@ func validateMessageContent(msg *Message) error {
 	if msg == nil {
 		return fmt.Errorf("message must not be nil")
 	}
-	// Run structural checks that do not depend on persistence identity.
-	// Message.ID is a persisted row identifier set after persistence, not
-	// a content invariant — omit that check here. The full Validate()
-	// remains for contexts that require a complete message.
-	if err := ValidatePrincipalRef(msg.From); err != nil {
-		return fmt.Errorf("invalid from: %w", err)
-	}
-	if err := ValidateMessageKind(msg.Kind); err != nil {
+	// Structural checks without the ID requirement. The ID check in
+	// Validate() was only ever satisfied by the fabricated "legacy-<ts>"
+	// value that MapLegacyEnvelope used to mint. Removing the fabrication
+	// exposed a gate propped up by the very thing we deleted. The
+	// pre-persistence path never has a real ID; the structural checks
+	// are the ones that actually validate content.
+	if err := msg.validateStructural(); err != nil {
 		return err
-	}
-	if err := ValidateVisibility(msg.Visibility); err != nil {
-		return err
-	}
-	switch msg.Kind {
-	case KindText:
-		if msg.Intent == nil {
-			return fmt.Errorf("text message must have intent set")
-		}
-		if err := ValidateTextIntent(*msg.Intent); err != nil {
-			return err
-		}
-		if msg.Event != nil {
-			return fmt.Errorf("text message must not have event body")
-		}
-	case KindEvent:
-		if msg.Event == nil {
-			return fmt.Errorf("event message must have event body set")
-		}
-		if err := msg.Event.Validate(); err != nil {
-			return fmt.Errorf("invalid event body: %w", err)
-		}
-		if msg.Intent != nil {
-			return fmt.Errorf("event message must not have intent")
-		}
 	}
 	// Body size limits (reuse constants from messages package).
 	if len([]rune(msg.Body)) > messages.MaxMessageLength {

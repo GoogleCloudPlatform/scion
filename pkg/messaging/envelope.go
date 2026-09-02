@@ -287,11 +287,10 @@ type Message struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
-// Validate checks internal consistency of a Message.
-func (m *Message) Validate() error {
-	if m.ID == "" {
-		return fmt.Errorf("message id is required")
-	}
+// validateStructural checks every Message invariant that does not depend on
+// persistence identity: From, Kind, Visibility, kind/intent mutual exclusivity.
+// This is the shared core; Validate() adds the ID requirement on top.
+func (m *Message) validateStructural() error {
 	if err := ValidatePrincipalRef(m.From); err != nil {
 		return fmt.Errorf("invalid from: %w", err)
 	}
@@ -327,6 +326,20 @@ func (m *Message) Validate() error {
 	}
 
 	return nil
+}
+
+// Validate checks internal consistency of a Message, including that a
+// persisted ID is set. This is the post-persistence entry point.
+//
+// NOTE: Validate() currently has zero non-test callers. The only call path
+// through the structural checks is validateMessageContent →
+// validateStructural. Validate is retained as the type's public contract
+// for post-persistence contexts; its dead-code state is tracked.
+func (m *Message) Validate() error {
+	if m.ID == "" {
+		return fmt.Errorf("message id is required")
+	}
+	return m.validateStructural()
 }
 
 // ---------- Addressee ----------
