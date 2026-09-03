@@ -1340,7 +1340,6 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
         >
           <sl-option value="exact_user">User</sl-option>
           <sl-option value="exact_agent">Agent</sl-option>
-          <sl-option value="exact_group">Exact group</sl-option>
           <sl-option value="group_closure">Group closure</sl-option>
           <sl-option value="all_principals">All principals</sl-option>
         </sl-select>

@@ -2792,9 +2792,16 @@ const (
 	ConstraintSubjectAllPrincipals = "all_principals"
 )
 
-// AccessConstraint subject principal types
+// AccessConstraint subject principal types.
+// Groups are collection resources with no identity and cannot be targeted
+// as individual principals — use group_closure instead. The "group" constant
+// is retained solely for reading legacy rows.
 const (
 	ConstraintPrincipalTypeUser  = "user"
 	ConstraintPrincipalTypeAgent = "agent"
+
+	// Deprecated: ConstraintPrincipalTypeGroup is retained only for reading
+	// legacy rows. New constraints must not use principal-kind subjects with
+	// type "group". Legacy rows are marked Degraded and evaluated fail-closed.
 	ConstraintPrincipalTypeGroup = "group"
 )

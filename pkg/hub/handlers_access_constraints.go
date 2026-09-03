@@ -1374,8 +1374,9 @@ func (s *Server) userBlockedByConstraints(_ context.Context, user adminUserInfo,
 				c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == user.userID {
 				return true
 			}
-			// A principal-kind constraint targeting a group also blocks users
-			// whose closure includes that group.
+			// Legacy: a principal-kind constraint targeting a group (deprecated —
+			// groups have no identity) still blocks users whose closure includes
+			// that group, preserving fail-closed semantics.
 			if c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == "group" &&
 				c.SubjectPrincipalID != nil {
 				if _, ok := closure[*c.SubjectPrincipalID]; ok {

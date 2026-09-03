@@ -123,15 +123,10 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 				return fmt.Errorf("agent %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
 			}
 		case store.ConstraintPrincipalTypeGroup:
-			exists, err := tx.Group.Query().Where(func(sel *entsql.Selector) {
-				sel.Where(entsql.EQ("id", principalID))
-			}).Exist(ctx)
-			if err != nil {
-				return fmt.Errorf("check group existence: %w", err)
-			}
-			if !exists {
-				return fmt.Errorf("group %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
-			}
+			// Groups are collection resources with no identity. Exact-group
+			// principal subjects are no longer accepted — use group_closure
+			// instead. Legacy rows are handled fail-closed at read time.
+			return fmt.Errorf("principalType %q is not valid for new constraints — groups are collection resources, use group_closure instead: %w", *c.SubjectPrincipalType, store.ErrInvalidInput)
 		default:
 			return fmt.Errorf("invalid principal type %q: %w", *c.SubjectPrincipalType, store.ErrInvalidInput)
 		}

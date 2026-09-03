@@ -45,7 +45,7 @@ func (AccessConstraint) Fields() []ent.Field {
 		field.String("subject_principal_type").
 			Optional().
 			Nillable().
-			Comment("user, agent, or group — required when subject_kind=principal"),
+			Comment("user or agent — required when subject_kind=principal. Legacy rows may contain 'group' (deprecated; use group_closure instead)"),
 		field.String("subject_principal_id").
 			Optional().
 			Nillable().

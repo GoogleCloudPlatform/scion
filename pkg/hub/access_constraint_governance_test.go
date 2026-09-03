@@ -1199,35 +1199,35 @@ func TestGovernance_ErrorCodeConstants(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 16. Group principal constraint triggers review
+// 16. Group closure constraint triggers review
 // ---------------------------------------------------------------------------
 
-func TestGovernance_GroupPrincipalConstraint_TriggersReview(t *testing.T) {
+func TestGovernance_GroupClosureConstraint_TriggersReview(t *testing.T) {
 	gs, _, _, s := govTestSetup(t)
 	ctx := context.Background()
 
-	adminID := govSeedAdminUser(t, s, "gov-admin-grp-principal")
-	groupID := pvSeedGroup(t, s, "gov-group-principal-constraint")
+	adminID := govSeedAdminUser(t, s, "gov-admin-grp-closure-trigger")
+	groupID := pvSeedGroup(t, s, "gov-group-closure-constraint-trigger")
 	pvSeedGroupMember(t, s, groupID, "user", adminID)
 
-	// Create a constraint with principal kind targeting the group.
-	principalType := "group"
+	// Create a constraint with group_closure kind targeting the group.
+	// (exact-group principal subjects are no longer accepted — groups are
+	// collection resources with no identity.)
 	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "principal-group-constraint",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &principalType,
-		SubjectPrincipalID:   pvStrPtr(groupID),
-		ScopeType:            store.RoleScopeSystem,
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "group principal test",
-		CreatedBy:            adminID,
+		Name:               "closure-group-constraint",
+		SubjectKind:        store.ConstraintSubjectGroupClosure,
+		SubjectGroupID:     pvStrPtr(groupID),
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "group closure review test",
+		CreatedBy:          adminID,
 	})
 	require.NoError(t, err)
 
 	// Check group member removal.
 	check, err := gs.CheckGroupMemberRemoval(ctx, groupID, "user", adminID)
 	require.NoError(t, err)
-	assert.True(t, check.ReviewRequired, "group referenced as principal subject should trigger review")
+	assert.True(t, check.ReviewRequired, "group referenced as closure subject should trigger review")
 }
 
 // ---------------------------------------------------------------------------

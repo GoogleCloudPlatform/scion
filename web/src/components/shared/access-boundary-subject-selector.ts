@@ -17,12 +17,15 @@
 /**
  * Access Boundary Subject Selector (Step 2)
  *
- * Radio card selection for the five subject kinds:
+ * Radio card selection for the four subject kinds:
  * - Exact user (search autocomplete)
  * - Exact agent (search autocomplete)
- * - Exact group (search autocomplete, group identity only)
  * - Group closure (search autocomplete, direct and nested members)
  * - All principals (no search needed)
+ *
+ * Groups are collection resources with no identity and cannot be targeted as
+ * individual principals. The removed "exact group" option was semantically
+ * invalid — use group closure instead.
  *
  * Changing subject kind MUST clear any previously selected ID.
  * Always shows a visible summary sentence of the current selection.
@@ -70,14 +73,6 @@ const SUBJECT_OPTIONS: SubjectOption[] = [
     icon: 'robot',
     needsSearch: true,
     searchType: 'agent',
-  },
-  {
-    value: 'exact_group',
-    label: 'Exact group',
-    description: 'Group identity only. Members are not included.',
-    icon: 'people',
-    needsSearch: true,
-    searchType: 'group',
   },
   {
     value: 'group_closure',
@@ -282,10 +277,6 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
         return this.selectedId
           ? { kind: 'principal', principal: { type: 'agent', id: this.selectedId } }
           : null;
-      case 'exact_group':
-        return this.selectedId
-          ? { kind: 'principal', principal: { type: 'group', id: this.selectedId } }
-          : null;
       case 'group_closure':
         return this.selectedId ? { kind: 'group_closure', groupId: this.selectedId } : null;
       case 'all_principals':
@@ -317,7 +308,7 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
     }
 
     if (!this.selectedId) {
-      return `Select ${option.label === 'Group closure' ? 'a group' : option.label === 'Exact group' ? 'a group' : option.label === 'Exact user' ? 'a user' : 'an agent'} to continue.`;
+      return `Select ${option.label === 'Group closure' ? 'a group' : option.label === 'Exact user' ? 'a user' : 'an agent'} to continue.`;
     }
 
     const label = this.selectedLabel || this.selectedId;
@@ -326,8 +317,6 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
         return `This access constraint will apply to user "${label}".`;
       case 'exact_agent':
         return `This access constraint will apply to agent "${label}".`;
-      case 'exact_group':
-        return `This access constraint will apply to group "${label}" (identity only, not members).`;
       case 'group_closure':
         return `This access constraint will apply to all direct and nested members of group "${label}".`;
       default:
