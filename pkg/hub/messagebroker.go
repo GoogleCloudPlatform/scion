@@ -463,7 +463,25 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !msg.Broadcasted {
 		var convResult *messaging.ConversationResult
-		if msg.ThreadID != "" {
+
+		// DEF-138 P-3: honour a pre-resolved ConversationID from the
+		// upstream handler instead of re-deriving. The handler already
+		// authorized the assertion (P-2) and stamped structuredMsg
+		// before publishing to the broker. Re-deriving here produced the
+		// inbound/outbound conversation split: the handler resolved a
+		// thread conversation, then the broker re-derived a DM because
+		// the agent's reply carries no ThreadID.
+		if msg.ConversationID != "" {
+			storeMsg.ConversationID = msg.ConversationID
+			// Build a minimal ConversationResult for divergence logging.
+			// We do not re-fetch the conversation row — the handler
+			// already looked it up (explicit path) or created it
+			// (derivation path), and re-querying would add latency for
+			// information we have.
+			convResult = &messaging.ConversationResult{
+				ConversationID: msg.ConversationID,
+			}
+		} else if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
@@ -497,7 +515,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
 			}
 		}
-		if convResult != nil {
+		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.

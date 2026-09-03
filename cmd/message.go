@@ -100,8 +100,8 @@ Recipients:
   group[a,b,...]     Send to multiple recipients (Hub mode only)
   @<agent-name>      Send to an agent's conversation (preferred)
   @<email>           Send to a user by email (global DM)
-  conv:<uuid>        Send to a conversation by ID (not yet supported — errors)
-  #<thread>          Send to a named thread (not yet supported — errors)
+  conv:<uuid>        Send to a conversation by ID
+  #<thread>          Send to a named thread
 
 If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
 
@@ -148,12 +148,11 @@ Examples:
 			// Try parsing as an S4 conversation reference first.
 			// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
 			if ref, err := messaging.ParseReference(recipient); err == nil {
-				// Only @<agent> conversation references are fully supported in the CLI today.
-				// conv:<id> and #<thread> resolve correctly but delivery routing is not yet
-				// implemented -- accepting them would silently drop the message.
-				if ref.Kind == messaging.RefConversation || ref.Kind == messaging.RefThread {
-					return fmt.Errorf("conversation reference %q is not yet supported in the CLI; use @<agent-name> to message an agent", ref.Raw)
-				}
+				// DEF-138: conv:<uuid> and #<thread> are now fully supported.
+				// Delivery routing through explicit conversation assertion
+				// (P-1..P-3) means the conversation_id survives to the
+				// persisting writer. The gate that previously rejected these
+				// two kinds is removed.
 				convRef = ref
 			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
 				// Looks like a conversation reference but failed to parse.
@@ -792,9 +791,45 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return nil
 	}
 
-	// conv:<uuid> and #<thread> are gated at the CLI entry point and never
-	// reach this function. @<agent> and @<email> are handled above and return.
-	// This point is unreachable.
+	// DEF-138: conv:<uuid> and #<thread> — send an outbound message with
+	// the resolved conversation_id. The agent is addressing a conversation
+	// directly; the hub's authorization (P-2) validates the assertion.
+	if ref.Kind == messaging.RefConversation || ref.Kind == messaging.RefThread {
+		senderAgent := os.Getenv("SCION_AGENT_NAME")
+		if senderAgent == "" {
+			return fmt.Errorf("sending messages via %s is only supported from within an agent container (SCION_AGENT_NAME not set)", ref.Raw)
+		}
+
+		outMsg := &hubclient.OutboundMessageRequest{
+			Msg:            message,
+			Type:           "instruction",
+			Urgent:         interrupt,
+			ConversationID: resolveResp.ConversationID,
+		}
+		// Validate through the legacy choke point before sending.
+		probe := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    senderAgent,
+			Msg:       outMsg.Msg,
+			Type:      outMsg.Type,
+		}
+		if err := messaging.ValidateLegacyMessage(probe); err != nil {
+			return fmt.Errorf("message validation failed: %w", err)
+		}
+
+		agentSvc := hubCtx.Client.ProjectAgents(projectID)
+		if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+			return wrapHubError(fmt.Errorf("failed to send message to conversation %s: %w", resolveResp.ConversationID, err))
+		}
+		if !isJSONOutput() {
+			fmt.Printf("Message sent to conversation %s.\n", resolveResp.ConversationID)
+		}
+		return nil
+	}
+
+	// @<agent> and @<email> are handled above and return.
+	// Future reference kinds may not be, so this is a defensive fallback.
 	return fmt.Errorf("unsupported conversation reference kind: %s", ref.Raw)
 }
 
