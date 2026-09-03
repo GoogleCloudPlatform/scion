@@ -20,6 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1143,5 +1148,408 @@ func TestDEF100_ReadResolveSoftDeletedTopic(t *testing.T) {
 	}
 	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
 		t.Errorf("expected GetTopicConversationIDIncludingDeleted, got %q", lookup.calledMethod)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-140: WithThreadSurface tests
+// ---------------------------------------------------------------------------
+
+func TestResolveOrCreateThreadConversation_WithThreadSurface_Discord(t *testing.T) {
+	// DEF-140: When a channel plugin supplies "discord", the upserted
+	// conversation row must carry surface="discord", not the default "native".
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1",
+		WithThreadSurface("discord"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "discord" {
+		t.Errorf("expected surface 'discord', got %q", mock.lastConv.Surface)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_WithThreadSurface_Slack(t *testing.T) {
+	// DEF-140: Verify "slack" channel is forwarded correctly.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1",
+		WithThreadSurface("slack"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "slack" {
+		t.Errorf("expected surface 'slack', got %q", mock.lastConv.Surface)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_DefaultSurfaceIsNative(t *testing.T) {
+	// DEF-140/R3: Without WithThreadSurface the default "native" must survive.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "native" {
+		t.Errorf("expected default surface 'native', got %q", mock.lastConv.Surface)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_EmptyChannelKeepsNative(t *testing.T) {
+	// DEF-140/R3: An empty channel must NOT override the default. The
+	// WithThreadSurface guard checks for non-empty, but verify the invariant
+	// end-to-end.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1",
+		WithThreadSurface(""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "native" {
+		t.Errorf("expected surface 'native' when channel is empty, got %q", mock.lastConv.Surface)
+	}
+}
+
+// surfaceTrackingUpserter records every upsert call keyed by (surface, externalRef)
+// and returns a different conversation ID for each unique pair — mirroring the
+// real (surface, external_ref) unique index behaviour. Validates the surface
+// against the production validSurfaces whitelist (which is itself cross-checked
+// against the ent enum by TestValidSurfaces_MatchesEntEnum).
+type surfaceTrackingUpserter struct {
+	rows map[string]*store.Conversation // key = surface + "|" + externalRef
+	seq  int
+}
+
+func newSurfaceTrackingUpserter() *surfaceTrackingUpserter {
+	return &surfaceTrackingUpserter{rows: make(map[string]*store.Conversation)}
+}
+
+func (s *surfaceTrackingUpserter) UpsertConversationByExternalRef(
+	_ context.Context, conv *store.Conversation,
+) (*store.Conversation, error) {
+	// Validate surface against the production whitelist — reject values that
+	// the real store would reject, so the test double cannot hide write denials.
+	if !validSurfaces[conv.Surface] {
+		return nil, fmt.Errorf("surface validation failed: invalid enum value %q (test double uses production validSurfaces whitelist)", conv.Surface)
+	}
+	key := conv.Surface + "|" + conv.ExternalRef
+	if existing, ok := s.rows[key]; ok {
+		return existing, nil
+	}
+	s.seq++
+	created := *conv
+	created.ID = fmt.Sprintf("conv-%d", s.seq)
+	s.rows[key] = &created
+	return &created, nil
+}
+
+func TestDEF140_DiscordThreadCreatesSeparateConversation(t *testing.T) {
+	// DEF-140 split test: an existing (native, thread:P:T) row and a new
+	// (discord, thread:P:T) inbound must resolve to DIFFERENT conversation ids.
+	// The old row must remain untouched.
+	upsert := newSurfaceTrackingUpserter()
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Step 1: Create the native conversation (simulates historical web-chat usage).
+	nativeResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P")
+	if err != nil {
+		t.Fatalf("native resolve: %v", err)
+	}
+	if nativeResult == nil {
+		t.Fatal("native resolve: expected non-nil result")
+	}
+
+	// Step 2: Resolve the same thread from discord — must get a different ID.
+	discordResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P",
+		WithThreadSurface("discord"))
+	if err != nil {
+		t.Fatalf("discord resolve: %v", err)
+	}
+	if discordResult == nil {
+		t.Fatal("discord resolve: expected non-nil result")
+	}
+
+	if nativeResult.ConversationID == discordResult.ConversationID {
+		t.Fatalf("DEF-140 violation: native and discord resolved to same conversation %q — "+
+			"expected different conversations under the (surface, external_ref) index",
+			nativeResult.ConversationID)
+	}
+
+	// Step 3: Verify the native row is untouched — re-resolve and confirm same ID.
+	nativeAgain, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P")
+	if err != nil {
+		t.Fatalf("native re-resolve: %v", err)
+	}
+	if nativeAgain.ConversationID != nativeResult.ConversationID {
+		t.Errorf("native row mutated: expected %q, got %q",
+			nativeResult.ConversationID, nativeAgain.ConversationID)
+	}
+
+	// Step 4: Verify surfaces are correct on the stored rows.
+	nativeRow := upsert.rows["native|thread:proj-P:thread-T"]
+	if nativeRow == nil {
+		t.Fatal("expected native row in store")
+	}
+	if nativeRow.Surface != "native" {
+		t.Errorf("native row surface: expected 'native', got %q", nativeRow.Surface)
+	}
+
+	discordRow := upsert.rows["discord|thread:proj-P:thread-T"]
+	if discordRow == nil {
+		t.Fatal("expected discord row in store")
+	}
+	if discordRow.Surface != "discord" {
+		t.Errorf("discord row surface: expected 'discord', got %q", discordRow.Surface)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-140: ChannelToSurface mapping tests
+// ---------------------------------------------------------------------------
+
+func TestChannelToSurface_ValidChannels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	tests := []struct {
+		channel string
+		want    string
+	}{
+		{"discord", "discord"},
+		{"slack", "slack"},
+		{"telegram", "telegram"},
+		{"gchat", "gchat"},
+		{"teams", "teams"},
+		{"native", "native"},
+	}
+	for _, tt := range tests {
+		got := ChannelToSurface(tt.channel, logger)
+		if got != tt.want {
+			t.Errorf("ChannelToSurface(%q) = %q, want %q", tt.channel, got, tt.want)
+		}
+	}
+}
+
+func TestChannelToSurface_WebMapsToNative(t *testing.T) {
+	// "web" is the web-chat channel; its surface is "native".
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ChannelToSurface("web", logger)
+	if got != "native" {
+		t.Errorf("ChannelToSurface(\"web\") = %q, want \"native\"", got)
+	}
+}
+
+func TestChannelToSurface_EmptyFallsBackToNative(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ChannelToSurface("", logger)
+	if got != "native" {
+		t.Errorf("ChannelToSurface(\"\") = %q, want \"native\"", got)
+	}
+}
+
+func TestChannelToSurface_UnknownFallsBackToNative(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	got := ChannelToSurface("irc", logger)
+	if got != "native" {
+		t.Errorf("ChannelToSurface(\"irc\") = %q, want \"native\"", got)
+	}
+	// Verify a warning was logged.
+	if !strings.Contains(buf.String(), "unmapped channel") {
+		t.Errorf("expected warning log for unmapped channel, got: %s", buf.String())
+	}
+}
+
+func TestDEF140_UnknownChannelResolvesConversationSuccessfully(t *testing.T) {
+	// DEF-140/R3: A message whose channel is NOT a valid surface must still
+	// resolve a conversation successfully and land on "native". This is the
+	// end-to-end proof that ChannelToSurface prevents write denials from
+	// unknown channels.
+	upsert := newSurfaceTrackingUpserter()
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Map the unknown channel through ChannelToSurface, as callers do.
+	surface := ChannelToSurface("irc", logger)
+
+	var opts []ThreadConversationOption
+	if surface != "native" {
+		opts = append(opts, WithThreadSurface(surface))
+	}
+
+	result, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P", opts...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Must have landed on "native", not on "irc".
+	row := upsert.rows["native|thread:proj-P:thread-T"]
+	if row == nil {
+		t.Fatal("expected native row in store — unknown channel should map to native")
+	}
+	if row.Surface != "native" {
+		t.Errorf("expected surface 'native', got %q", row.Surface)
+	}
+
+	// Verify that passing "irc" directly WOULD fail the enum validation.
+	_, directErr := upsert.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
+		Surface:     "irc",
+		ExternalRef: "thread:proj-P:thread-T",
+		Kind:        "group",
+	})
+	if directErr == nil {
+		t.Fatal("expected enum validation error for raw 'irc' surface — test double should reject invalid enum values")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-140: validSurfaces ↔ schema cross-check (source-scanning)
+//
+// Precedent: pkg/hub/consistency_check_guard_test.go (DEF-139 structural guard).
+// ---------------------------------------------------------------------------
+
+// surfaceSchemaRelPath is the path from the repo root to the ent schema file
+// that declares the surface enum. Used by the cross-check test.
+const surfaceSchemaRelPath = "pkg/ent/schema/conversation.go"
+
+// parseSurfaceValuesFromSchema reads the ent schema source file and extracts
+// the Values(...) arguments for the "surface" enum field. Returns the set of
+// values and any error. Callers MUST treat an empty set as a failure — the
+// schema is known to have values, and an empty parse means the scanner missed.
+func parseSurfaceValuesFromSchema(schemaPath string) (map[string]bool, error) {
+	data, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read schema file %s: %w", schemaPath, err)
+	}
+
+	// Match the surface enum declaration:
+	//   field.Enum("surface").
+	//       Values("native", "discord", ...),
+	// The Values(...) call may be on the same line or the next.
+	// We scan for field.Enum("surface") then capture the Values(...) args.
+	surfaceEnumRe := regexp.MustCompile(
+		`field\.Enum\("surface"\)\.\s*\n?\s*Values\(([^)]+)\)`,
+	)
+	match := surfaceEnumRe.FindSubmatch(data)
+	if match == nil {
+		return nil, fmt.Errorf("cannot find field.Enum(\"surface\").Values(...) declaration in %s", schemaPath)
+	}
+
+	// Extract individual quoted values from the captured group.
+	valueRe := regexp.MustCompile(`"([^"]+)"`)
+	valueMatches := valueRe.FindAllSubmatch(match[1], -1)
+	if len(valueMatches) == 0 {
+		return nil, fmt.Errorf("found surface Values() declaration but extracted zero values from %s", schemaPath)
+	}
+
+	result := make(map[string]bool, len(valueMatches))
+	for _, vm := range valueMatches {
+		result[string(vm[1])] = true
+	}
+	return result, nil
+}
+
+// repoRoot returns the repository root by walking up from the test file's
+// directory until it finds go.mod. This avoids hard-coding an absolute path
+// and works regardless of where `go test` is invoked.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	// runtime.Caller(0) gives us this test file's path.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed — cannot locate test file")
+	}
+	dir := filepath.Dir(thisFile)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find go.mod walking up from %s", thisFile)
+		}
+		dir = parent
+	}
+}
+
+func TestValidSurfaces_MatchesSchemaEnum(t *testing.T) {
+	// This test scans the ent schema source file — the single source of truth
+	// for the surface enum — and asserts that validSurfaces matches it exactly
+	// in both directions. Unlike a hand-written list of constants, this test
+	// cannot silently pass when a value is added to the schema.
+	//
+	// Fail-closed: if the file cannot be found, the pattern cannot be matched,
+	// or zero values are extracted, the test FAILS with a clear message.
+
+	root := repoRoot(t)
+	schemaPath := filepath.Join(root, surfaceSchemaRelPath)
+
+	schemaValues, err := parseSurfaceValuesFromSchema(schemaPath)
+	if err != nil {
+		t.Fatalf("schema scan failed (fail-closed): %v", err)
+	}
+	if len(schemaValues) == 0 {
+		t.Fatal("schema scan returned zero values — the schema is known to declare surface values; this means the scanner is broken")
+	}
+
+	// Direction 1: every schema value must be in validSurfaces.
+	for sv := range schemaValues {
+		if !validSurfaces[sv] {
+			t.Errorf("schema declares surface %q but validSurfaces does not contain it — add it to pkg/messaging/conversation.go validSurfaces", sv)
+		}
+	}
+
+	// Direction 2: every validSurfaces key must be in the schema.
+	for vs := range validSurfaces {
+		if !schemaValues[vs] {
+			t.Errorf("validSurfaces contains %q but the schema does not declare it — remove it from pkg/messaging/conversation.go validSurfaces or add it to the schema", vs)
+		}
+	}
+
+	// Cardinality check.
+	if len(validSurfaces) != len(schemaValues) {
+		var vsKeys []string
+		for k := range validSurfaces {
+			vsKeys = append(vsKeys, k)
+		}
+		sort.Strings(vsKeys)
+		var svKeys []string
+		for k := range schemaValues {
+			svKeys = append(svKeys, k)
+		}
+		sort.Strings(svKeys)
+		t.Errorf("cardinality mismatch: validSurfaces=%v (%d), schema=%v (%d)",
+			vsKeys, len(vsKeys), svKeys, len(svKeys))
 	}
 }

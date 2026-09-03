@@ -273,11 +273,15 @@ func ResolveOrCreateThreadConversation(
 		return nil, fmt.Errorf("conversation key derivation refused: %w", err)
 	}
 
-	// Forward topic lookup to the shared sink so all paths benefit from
-	// the sink-level guard (DEF-20 unify).
+	// Forward topic lookup and surface to the shared sink so all paths
+	// benefit from the sink-level guard (DEF-20 unify) and carry the
+	// originating channel (DEF-140).
 	var keyOpts []ConversationByKeyOption
 	if cfg.topicLookup != nil {
 		keyOpts = append(keyOpts, WithKeyTopicLookup(cfg.topicLookup))
+	}
+	if cfg.surface != "" {
+		keyOpts = append(keyOpts, WithSurface(cfg.surface))
 	}
 	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID, keyOpts...)
 }
@@ -285,6 +289,7 @@ func ResolveOrCreateThreadConversation(
 // threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.
 type threadConversationConfig struct {
 	topicLookup TopicConversationLookup
+	surface     string // override for the conversation surface; empty keeps the default ("native")
 }
 
 // ThreadConversationOption is a functional option for ResolveOrCreateThreadConversation.
@@ -297,6 +302,61 @@ func WithTopicLookup(tl TopicConversationLookup) ThreadConversationOption {
 	return func(c *threadConversationConfig) {
 		c.topicLookup = tl
 	}
+}
+
+// WithThreadSurface overrides the default surface ("native") for thread
+// conversations. The value must be a valid surface string as returned by
+// ChannelToSurface — callers MUST NOT pass raw channel strings.
+func WithThreadSurface(s string) ThreadConversationOption {
+	return func(c *threadConversationConfig) {
+		c.surface = s
+	}
+}
+
+// validSurfaces is the whitelist of channel strings that map 1:1 to surface
+// enum values. This must match the SurfaceValidator enum in
+// pkg/ent/conversation/conversation.go:129-136.
+var validSurfaces = map[string]bool{
+	"native":   true,
+	"discord":  true,
+	"slack":    true,
+	"telegram": true,
+	"gchat":    true,
+	"teams":    true,
+}
+
+// channelToSurface maps channel names that are not 1:1 with a surface enum
+// value. "web" is the web-chat channel; its surface is "native".
+var channelToSurface = map[string]string{
+	"web": "native",
+}
+
+// ChannelToSurface maps a channel name to a valid surface enum value. Channels
+// that are valid surface names pass through directly. Known aliases (e.g.
+// "web" → "native") are mapped explicitly. Unknown or empty channels fall back
+// to "native" and log a warning so unmapped channels are visible in telemetry.
+//
+// This is the ONLY place where channel→surface mapping occurs. All call sites
+// that thread a channel into conversation creation must use this function
+// rather than passing the raw channel string.
+func ChannelToSurface(channel string, log *slog.Logger) string {
+	if channel == "" {
+		return "native"
+	}
+	// Direct match — channel is itself a valid surface.
+	if validSurfaces[channel] {
+		return channel
+	}
+	// Known alias.
+	if mapped, ok := channelToSurface[channel]; ok {
+		return mapped
+	}
+	// Unknown channel — fall back to "native" to avoid write denial.
+	if log != nil {
+		log.Warn("unmapped channel falling back to native surface",
+			"channel", channel)
+	}
+	return "native"
 }
 
 // readThreadConfig holds optional parameters for ResolveThreadConversationForRead.
