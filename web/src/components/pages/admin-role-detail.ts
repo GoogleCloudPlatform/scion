@@ -480,6 +480,18 @@ export class ScionPageAdminRoleDetail extends LitElement {
       justify-content: flex-end;
     }
 
+    .agent-scope-note {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 0.75rem 0;
+      padding: 0.5rem 0.75rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -1190,6 +1202,11 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
   private renderAddBindingForm() {
     const scopeType = this.roleData?.scopeType ?? 'system';
+    const isSystemScope = scopeType === 'system';
+    // Agents are project-bound; system-scope bindings on agents are
+    // ineffective due to credential scope/ceiling constraints.
+    const agentDisabled = isSystemScope;
+
     return html`
       <div class="add-binding-form">
         <h3>Add Binding</h3>
@@ -1202,13 +1219,19 @@ export class ScionPageAdminRoleDetail extends LitElement {
             }}
           >
             <sl-option value="user">User</sl-option>
-            <sl-option value="agent">Agent</sl-option>
+            <sl-option value="agent" ?disabled=${agentDisabled}
+              >Agent${agentDisabled ? ' (project-scoped roles only)' : ''}</sl-option
+            >
             <sl-option value="group">Group</sl-option>
           </sl-select>
 
           <sl-input
             label="Principal ID"
-            placeholder="Enter user/agent/group ID"
+            placeholder=${this.addBindingPrincipalType === 'agent'
+              ? 'Enter agent ID'
+              : this.addBindingPrincipalType === 'group'
+                ? 'Enter group ID or slug'
+                : 'Enter user ID or email'}
             value=${this.addBindingPrincipalId}
             @sl-input=${(e: Event) => {
               this.addBindingPrincipalId = (e.target as HTMLInputElement).value;
@@ -1230,6 +1253,13 @@ export class ScionPageAdminRoleDetail extends LitElement {
               `
             : nothing}
         </div>
+
+        ${this.addBindingPrincipalType === 'agent' && !agentDisabled
+          ? html`<p class="agent-scope-note">
+              <sl-icon name="info-circle"></sl-icon>
+              Agents are project-bound. This binding is effective only within the specified project scope.
+            </p>`
+          : nothing}
 
         <div class="add-binding-actions">
           <sl-button

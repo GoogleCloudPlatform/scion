@@ -987,6 +987,14 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
+	// Agents are project-bound; system-scope bindings on agents are
+	// ineffective because agent credentials are scoped to their project
+	// and the live delegation ceiling prevents hub-level privilege.
+	if req.PrincipalType == store.RoleBindingPrincipalAgent && req.ScopeType == store.RoleScopeSystem {
+		BadRequest(w, "agent principals are project-bound and cannot hold system-scoped role bindings")
+		return
+	}
+
 	// Validate lifecycle fields.
 	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
 		BadRequest(w, "expiresAt must be in the future")

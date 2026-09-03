@@ -1910,3 +1910,58 @@ func TestRolesAPI_NonAdmin_DuplicateRole_WithHeldPermissions(t *testing.T) {
 	assert.Equal(t, "dup-held-target", dup.Name)
 	assert.False(t, dup.System)
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Agent principal scope constraints
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_CreateRoleBinding_AgentSystemScope_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+
+	agentID := tid("rb-agent-sys")
+	projectID := tid("rb-agent-sys-proj")
+	seedRolesTestAgent(t, s, agentID, projectID)
+
+	// Create a system-scoped custom role.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "agent-sys-scope-test",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Agent + system scope should be rejected.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "agent",
+		PrincipalID:      agentID,
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "project-bound")
+}
+
+func TestRolesAPI_CreateRoleBinding_AgentProjectScope_Allowed(t *testing.T) {
+	srv, s := testServer(t)
+
+	agentID := tid("rb-agent-proj")
+	projectID := tid("rb-agent-proj-proj")
+	seedRolesTestAgent(t, s, agentID, projectID)
+
+	// Create a project-scoped custom role.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "agent-proj-scope-test",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Agent + project scope should succeed.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "agent",
+		PrincipalID:      agentID,
+		ScopeType:        "project",
+		ScopeID:          projectID,
+	})
+	assert.Equal(t, "agent", binding.PrincipalType)
+	assert.Equal(t, "project", binding.ScopeType)
+}
