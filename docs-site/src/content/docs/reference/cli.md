@@ -143,6 +143,36 @@ Sends a message to a running agent or user.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
+- **Message Body Formatting:**
+  The command delivers the `<message>` argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient receives.
+  
+  To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n (`\n`) sequences — those will appear as literal characters in the delivered message.
+
+  * **Correct (real newlines in a quoted string):**
+    ```bash
+    scion message --non-interactive @reviewer "PR #42 is ready for review.
+
+    Branch: fix/auth-bug
+    CI: all green"
+    ```
+
+  * **Correct (heredoc for longer messages):**
+    ```bash
+    scion message --non-interactive @reviewer "$(cat <<'EOF'
+    PR #42 is ready for review.
+
+    Branch: fix/auth-bug
+    CI: all green
+    EOF
+    )"
+    ```
+
+  * **Wrong (JSON-encoded body with literal `\n`):**
+    ```bash
+    # BAD: literal \n chars appear in the delivered message
+    scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
+    ```
+
 ### `scion broadcast`
 
 Sends a message to all running agents in the current project (or across all projects).

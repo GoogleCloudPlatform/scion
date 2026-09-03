@@ -154,6 +154,37 @@ scion message @tech-lead "See the test results." --attach ./results.json
 scion message @tech-lead "Debug trace attached." --visibility verbose
 ```
 
+### Message Formatting
+
+The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient sees.
+
+To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n (`\n`) sequences — those will appear as literal characters in the delivered message.
+
+**Correct** — real newlines in a quoted string:
+```bash
+scion message --non-interactive @reviewer "PR #42 is ready for review.
+
+Branch: fix/auth-bug
+CI: all green"
+```
+
+**Correct** — heredoc for longer messages:
+```bash
+scion message --non-interactive @reviewer "$(cat <<'EOF'
+PR #42 is ready for review.
+
+Branch: fix/auth-bug
+CI: all green
+EOF
+)"
+```
+
+**Wrong** — JSON-encoded body with literal `\n`:
+```bash
+# BAD: literal \n chars appear in the delivered message
+scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
+```
+
 ### Related Commands
 
 - **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. This replaces the old `--broadcast` flag on `scion message`.
