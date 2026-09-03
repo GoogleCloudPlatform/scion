@@ -18,6 +18,23 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { AccessDeniedDetail } from '../client/api.js';
 import { formatAccessDenied, showAccessDeniedToast } from './access-denied.js';
 
+/**
+ * Stub sl-alert.toast() on any sl-alert elements created during a test.
+ * Returns a restore function.
+ */
+function stubAlertToast() {
+  const origCreate = document.createElement.bind(document);
+  vi.spyOn(document, 'createElement').mockImplementation(
+    (tag: string, options?: ElementCreationOptions) => {
+      const el = origCreate(tag, options);
+      if (tag === 'sl-alert') {
+        (el as unknown as Record<string, unknown>).toast = vi.fn();
+      }
+      return el;
+    }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // formatAccessDenied — two-line rendering
 // ---------------------------------------------------------------------------
@@ -83,7 +100,6 @@ describe('formatAccessDenied', () => {
   });
 
   it('omits secondary when action is just "forbidden" with no resource', () => {
-    // Legacy 403 where action = error code "forbidden"
     const detail: AccessDeniedDetail = { action: 'forbidden', reason: 'Insufficient permissions' };
     const result = formatAccessDenied(detail);
     expect(result.primary).toBe("You don't have permission to perform this action.");
@@ -97,17 +113,52 @@ describe('formatAccessDenied', () => {
   });
 
   it('does not leak resource ID (only resource type is used)', () => {
-    // The backend never sends resource ID in details, but verify the formatter
-    // only uses the fields it should.
     const detail: AccessDeniedDetail = {
       action: 'delete',
       resource: 'agent',
       reason: 'Insufficient permissions',
     };
     const result = formatAccessDenied(detail);
-    // Neither primary nor secondary should contain anything beyond the type.
     expect(result.primary).not.toContain('secret');
     expect(result.secondary).not.toContain('secret');
+  });
+
+  // ----- R2: hostile / surprising input sanitization -----
+
+  it('treats <script> payload in action as literal text', () => {
+    const detail: AccessDeniedDetail = {
+      action: '<script>alert("xss")</script>',
+      resource: 'agent',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.secondary).toContain('<script>');
+    // The string itself is literal text, not stripped or interpreted.
+    expect(result.secondary).toBe(
+      'Permission needed: <script>alert("xss")</script> on agent'
+    );
+  });
+
+  it('treats <img onerror> payload in resource as literal text', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'delete',
+      resource: '<img src=x onerror=alert(1)>',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.secondary).toBe(
+      'Permission needed: delete on <img src=x onerror=alert(1)>'
+    );
+  });
+
+  it('treats hostile strings in reason as literal text', () => {
+    const hostile = '"><svg onload=alert(document.cookie)>';
+    const result = formatAccessDenied({ reason: hostile });
+    expect(result.primary).toBe(hostile);
+  });
+
+  it('handles extremely long action/resource without error', () => {
+    const long = 'x'.repeat(10000);
+    const result = formatAccessDenied({ action: long, resource: long });
+    expect(result.secondary).toContain(long);
   });
 });
 
@@ -117,28 +168,18 @@ describe('formatAccessDenied', () => {
 
 describe('showAccessDeniedToast', () => {
   afterEach(() => {
-    // Clean up any alerts appended to the DOM.
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    vi.restoreAllMocks();
   });
 
   it('creates an sl-alert with two-line content for structured detail', () => {
-    const detail: AccessDeniedDetail = {
+    stubAlertToast();
+
+    showAccessDeniedToast({
       action: 'delete',
       resource: 'agent',
       reason: 'Insufficient permissions',
-    };
-
-    // Mock toast() to prevent Shoelace runtime errors in test env.
-    const origCreate = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string, options?: ElementCreationOptions) => {
-      const el = origCreate(tag, options);
-      if (tag === 'sl-alert') {
-        (el as unknown as Record<string, unknown>).toast = vi.fn();
-      }
-      return el;
     });
-
-    showAccessDeniedToast(detail);
 
     const alert = document.querySelector('sl-alert');
     expect(alert).not.toBeNull();
@@ -146,28 +187,48 @@ describe('showAccessDeniedToast', () => {
     expect(spans.length).toBe(2);
     expect(spans[0].textContent).toBe("You don't have permission to perform this action.");
     expect(spans[1].textContent).toBe('Permission needed: delete on agent');
-
-    vi.restoreAllMocks();
   });
 
   it('creates a single-line toast for legacy 403 with no detail', () => {
-    // For legacy 403, showAccessDeniedToast delegates to showToast (single line).
-    const toastModule = vi.hoisted(() => ({ showToast: vi.fn() }));
-    // We can't easily mock the import, so verify the DOM path instead:
-    // with no secondary, it should produce a standard toast via showToast.
-    // Just verify no crash and the alert is created.
-    const origCreate = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string, options?: ElementCreationOptions) => {
-      const el = origCreate(tag, options);
-      if (tag === 'sl-alert') {
-        (el as unknown as Record<string, unknown>).toast = vi.fn();
-      }
-      return el;
-    });
-
+    stubAlertToast();
     // Should not throw.
     showAccessDeniedToast({});
+    // showToast creates an sl-alert too; verify one was appended.
+    const alert = document.querySelector('sl-alert');
+    expect(alert).not.toBeNull();
+  });
 
-    vi.restoreAllMocks();
+  // R2: hostile payloads are textContent, never innerHTML
+  it('renders hostile action/resource as textContent, not markup', () => {
+    stubAlertToast();
+
+    showAccessDeniedToast({
+      action: '<script>alert(1)</script>',
+      resource: '<img src=x onerror=alert(1)>',
+    });
+
+    const alert = document.querySelector('sl-alert');
+    expect(alert).not.toBeNull();
+    const secondarySpan = alert!.querySelectorAll('span')[1];
+    // Must be textContent (literal), not parsed HTML. If it were innerHTML,
+    // the DOM would contain a <script> or <img> element.
+    expect(alert!.querySelector('script')).toBeNull();
+    expect(alert!.querySelector('img')).toBeNull();
+    expect(secondarySpan.textContent).toContain('<script>');
+    expect(secondarySpan.textContent).toContain('<img');
+  });
+
+  it('renders hostile reason as textContent in single-line toast', () => {
+    stubAlertToast();
+
+    showAccessDeniedToast({
+      reason: '<img src=x onerror=alert(document.cookie)>',
+    });
+
+    const alert = document.querySelector('sl-alert');
+    expect(alert).not.toBeNull();
+    expect(alert!.querySelector('img')).toBeNull();
+    const span = alert!.querySelector('span');
+    expect(span!.textContent).toContain('<img');
   });
 });
