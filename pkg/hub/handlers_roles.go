@@ -193,9 +193,10 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 	}
 	_ = r.Body.Close()
 
-	// Lightweight peek: unmarshal just enough to know scope.
+	// Lightweight peek: unmarshal just enough to know scope and role.
 	var peek struct {
-		ScopeType string `json:"scopeType"`
+		ScopeType        string `json:"scopeType"`
+		RoleDefinitionID string `json:"roleDefinitionId"`
 	}
 	if err := json.Unmarshal(bodyBytes, &peek); err != nil {
 		BadRequest(w, "invalid request body: "+err.Error())
@@ -214,10 +215,25 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Project-scoped requests are authorized by the membership service
-	// (project.manage + governance matrix). System-scoped requests require
-	// hub-level role_binding.create.
-	if peek.ScopeType != store.RoleScopeProject {
+	// Authorization routing:
+	// - Built-in project roles (owner/admin/member) are authorized by the
+	//   membership service (project.manage + governance matrix) — no hub-level
+	//   role_binding.create needed. This allows project owners to manage
+	//   members via the admin API.
+	// - Custom project-scoped roles and system-scoped requests require
+	//   hub-level role_binding.create permission.
+	requireHubAuth := peek.ScopeType != store.RoleScopeProject
+	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
+		// Check if this is a built-in project role.
+		roleDef, err := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
+		if err == nil && !validProjectRoles[roleDef.Name] {
+			// Custom project role — require hub-level auth.
+			requireHubAuth = true
+		}
+		// If role lookup fails, createRoleBinding will handle the error.
+	}
+
+	if requireHubAuth {
 		if s.authzService != nil {
 			decision := s.authzService.Decide(r.Context(), AuthzRequest{
 				Principal:  principalContextForIdentity(user),
@@ -636,39 +652,51 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
-	// R4 brief item 2: project-scoped role-binding create MUST route through
+	// R4 brief item 2: project-scoped role-binding create for built-in
+	// project roles (owner/admin/member) MUST route through
 	// ProjectMembershipService for typed governance, delegation, lock,
 	// last-owner protection, transactional audit, and D4 enforcement.
-	// System-scoped operations remain generic.
-	// R5-1: fail-closed — if membershipService is nil, return 500. Never fall
-	// through to direct store mutation for project scope.
+	// Custom project-scoped roles (e.g. agent delegation bindings) fall
+	// through to the generic CanDelegate path below.
+	// R5-1: fail-closed — if membershipService is nil for built-in roles,
+	// return 500. Never fall through to direct store mutation.
 	if req.ScopeType == store.RoleScopeProject {
-		if s.membershipService == nil {
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"membership service unavailable — project-scope mutations require governance", nil)
+		// Resolve the role definition to check if it's a built-in project role.
+		roleDef, err := s.store.GetRoleDefinition(r.Context(), req.RoleDefinitionID)
+		if err != nil {
+			BadRequest(w, "role definition not found")
 			return
 		}
-		mReq := MembershipRequest{
-			Op:            MembershipOpAdd,
-			ProjectID:     req.ScopeID,
-			Actor:         user,
-			PrincipalType: req.PrincipalType,
-			PrincipalID:   req.PrincipalID,
-			RoleDefID:     req.RoleDefinitionID,
-			NotBefore:     req.NotBefore,
-			ExpiresAt:     req.ExpiresAt,
-		}
-		result, denial := s.membershipService.AddMember(r.Context(), mReq)
-		if denial != nil && !denial.Allowed {
-			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, nil)
+		if validProjectRoles[roleDef.Name] {
+			// Built-in project role — route through membership service.
+			if s.membershipService == nil {
+				writeError(w, http.StatusInternalServerError, "internal_error",
+					"membership service unavailable — project-scope mutations require governance", nil)
+				return
+			}
+			mReq := MembershipRequest{
+				Op:            MembershipOpAdd,
+				ProjectID:     req.ScopeID,
+				Actor:         user,
+				PrincipalType: req.PrincipalType,
+				PrincipalID:   req.PrincipalID,
+				RoleDefID:     req.RoleDefinitionID,
+				NotBefore:     req.NotBefore,
+				ExpiresAt:     req.ExpiresAt,
+			}
+			result, denial := s.membershipService.AddMember(r.Context(), mReq)
+			if denial != nil && !denial.Allowed {
+				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, nil)
+				return
+			}
+			writeJSON(w, http.StatusCreated, result.Binding)
 			return
 		}
-		writeJSON(w, http.StatusCreated, result.Binding)
-		return
+		// Custom project-scoped role — fall through to CanDelegate path.
 	}
 
 	// CanDelegate check: security invariant — the actor must hold all
-	// permissions granted by the target role (system-scoped only at this point).
+	// permissions granted by the target role.
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
 			Type:             GrantTypeRoleBinding,
