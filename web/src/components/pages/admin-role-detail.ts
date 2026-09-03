@@ -34,6 +34,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { downloadJsonFile } from '../../client/download.js';
 import { navigateTo } from '../../client/main.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import {
@@ -855,17 +856,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
       ],
     };
 
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `scion-role-${role.name}-export.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadJsonFile(exportData, `scion-role-${role.name}-export.json`);
 
     this.actionFeedback = {
       message: `Exported role "${role.name}"`,

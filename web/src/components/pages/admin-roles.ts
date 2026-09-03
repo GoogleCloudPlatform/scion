@@ -25,6 +25,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { downloadJsonFile } from '../../client/download.js';
 import { navigateTo } from '../../client/main.js';
 
 // ---------------------------------------------------------------------------
@@ -693,31 +694,21 @@ export class ScionPageAdminRoles extends LitElement {
       return;
     }
 
-    let exportJson: string;
+    let exportData: unknown;
 
     try {
       const res = await apiFetch('/api/v1/admin/roles/export');
       if (res.ok) {
-        const data = await res.json();
-        exportJson = JSON.stringify(data, null, 2);
+        exportData = await res.json();
       } else {
-        // Fall back to client-side export
-        exportJson = this.buildClientExport(customRoles);
+        exportData = JSON.parse(this.buildClientExport(customRoles));
       }
     } catch {
-      // Fall back to client-side export
-      exportJson = this.buildClientExport(customRoles);
+      exportData = JSON.parse(this.buildClientExport(customRoles));
     }
 
-    const blob = new Blob([exportJson], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `scion-roles-export-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const filename = `scion-roles-export-${new Date().toISOString().slice(0, 10)}.json`;
+    downloadJsonFile(exportData, filename);
 
     this.actionFeedback = {
       message: `Exported ${customRoles.length} custom role${customRoles.length !== 1 ? 's' : ''}`,
