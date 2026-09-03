@@ -312,6 +312,8 @@ var Catalog = []OperationSpec{
 		Description: "Create a custom role definition",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/import", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/{id}/duplicate", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -2056,6 +2058,7 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/export", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/permissions", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -2462,6 +2465,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_roles.go", Function: "createRoleBinding", Symbol: "CreateRoleBinding", OperationID: "role.binding.create"},
 	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleBinding", Symbol: "DeleteRoleBinding", OperationID: "role.binding.delete"},
 	{File: "pkg/hub/handlers_roles.go", Function: "createRoleDefinition", Symbol: "CreateRoleDefinition", OperationID: "role.definition.create"},
+	{File: "pkg/hub/handlers_roles.go", Function: "importRoleDefinitions", Symbol: "CreateRoleDefinition", OperationID: "role.definition.create"},
+	{File: "pkg/hub/handlers_roles.go", Function: "duplicateRoleDefinition", Symbol: "CreateRoleDefinition", OperationID: "role.definition.create"},
 	{File: "pkg/hub/handlers_roles.go", Function: "updateRoleDefinition", Symbol: "UpdateRoleDefinition", OperationID: "role.definition.update"},
 	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleDefinition", Symbol: "DeleteRoleDefinition", OperationID: "role.definition.delete"},
 

@@ -300,12 +300,13 @@ describe('admin-role-detail', () => {
     expect(labels).toContain('Delete');
   });
 
-  it('hides Edit and Delete buttons for system roles', async () => {
+  it('hides Edit and Delete but allows Duplicate for system roles', async () => {
     const handler = createFetchHandler({ role: SYSTEM_ROLE });
     el = await createElement(handler, '/admin/roles/role-system-1');
 
     const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
-    expect(buttons?.length ?? 0).toBe(0);
+    const labels = [...(buttons ?? [])].map((b) => b.textContent?.trim());
+    expect(labels).toEqual(['Duplicate']);
   });
 
   // -- Error / not found --
