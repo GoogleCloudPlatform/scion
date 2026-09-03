@@ -486,8 +486,8 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
-			if msg.Channel != "" {
-				threadOpts = append(threadOpts, messaging.WithThreadSurface(msg.Channel))
+			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
@@ -704,8 +704,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
-			if msg.Channel != "" {
-				threadOpts = append(threadOpts, messaging.WithThreadSurface(msg.Channel))
+			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)

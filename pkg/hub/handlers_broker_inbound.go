@@ -564,8 +564,8 @@ func (s *Server) resolvePhase5Conversation(
 		if wcs != nil {
 			threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 		}
-		if channel != "" {
-			threadOpts = append(threadOpts, messaging.WithThreadSurface(channel))
+		if surface := messaging.ChannelToSurface(channel, s.messageLog); surface != "native" {
+			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 		}
 		return messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, threadID, projectID, threadOpts...)
 	}

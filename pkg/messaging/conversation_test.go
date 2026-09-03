@@ -1230,10 +1230,24 @@ func TestResolveOrCreateThreadConversation_EmptyChannelKeepsNative(t *testing.T)
 
 // surfaceTrackingUpserter records every upsert call keyed by (surface, externalRef)
 // and returns a different conversation ID for each unique pair — mirroring the
-// real (surface, external_ref) unique index behaviour.
+// real (surface, external_ref) unique index behaviour. Unlike the prior version,
+// it validates the surface against the production enum to catch invalid values
+// that the real store would reject (BLOCKER 2 fix).
 type surfaceTrackingUpserter struct {
 	rows map[string]*store.Conversation // key = surface + "|" + externalRef
 	seq  int
+}
+
+// validSurfaceEnum mirrors the SurfaceValidator enum from
+// pkg/ent/conversation/conversation.go:129-136. Kept in sync manually;
+// a mismatch is a test bug, not a production bug.
+var validSurfaceEnum = map[string]bool{
+	"native":   true,
+	"discord":  true,
+	"slack":    true,
+	"telegram": true,
+	"gchat":    true,
+	"teams":    true,
 }
 
 func newSurfaceTrackingUpserter() *surfaceTrackingUpserter {
@@ -1243,6 +1257,11 @@ func newSurfaceTrackingUpserter() *surfaceTrackingUpserter {
 func (s *surfaceTrackingUpserter) UpsertConversationByExternalRef(
 	_ context.Context, conv *store.Conversation,
 ) (*store.Conversation, error) {
+	// Validate surface against the production enum — reject values that the
+	// real store would reject, so the test double cannot hide write denials.
+	if !validSurfaceEnum[conv.Surface] {
+		return nil, fmt.Errorf("surface validation failed: invalid enum value %q (test double mirrors production SurfaceValidator)", conv.Surface)
+	}
 	key := conv.Surface + "|" + conv.ExternalRef
 	if existing, ok := s.rows[key]; ok {
 		return existing, nil
@@ -1314,5 +1333,109 @@ func TestDEF140_DiscordThreadCreatesSeparateConversation(t *testing.T) {
 	}
 	if discordRow.Surface != "discord" {
 		t.Errorf("discord row surface: expected 'discord', got %q", discordRow.Surface)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-140: ChannelToSurface mapping tests
+// ---------------------------------------------------------------------------
+
+func TestChannelToSurface_ValidChannels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	tests := []struct {
+		channel string
+		want    string
+	}{
+		{"discord", "discord"},
+		{"slack", "slack"},
+		{"telegram", "telegram"},
+		{"gchat", "gchat"},
+		{"teams", "teams"},
+		{"native", "native"},
+	}
+	for _, tt := range tests {
+		got := ChannelToSurface(tt.channel, logger)
+		if got != tt.want {
+			t.Errorf("ChannelToSurface(%q) = %q, want %q", tt.channel, got, tt.want)
+		}
+	}
+}
+
+func TestChannelToSurface_WebMapsToNative(t *testing.T) {
+	// "web" is the web-chat channel; its surface is "native".
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ChannelToSurface("web", logger)
+	if got != "native" {
+		t.Errorf("ChannelToSurface(\"web\") = %q, want \"native\"", got)
+	}
+}
+
+func TestChannelToSurface_EmptyFallsBackToNative(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	got := ChannelToSurface("", logger)
+	if got != "native" {
+		t.Errorf("ChannelToSurface(\"\") = %q, want \"native\"", got)
+	}
+}
+
+func TestChannelToSurface_UnknownFallsBackToNative(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	got := ChannelToSurface("irc", logger)
+	if got != "native" {
+		t.Errorf("ChannelToSurface(\"irc\") = %q, want \"native\"", got)
+	}
+	// Verify a warning was logged.
+	if !strings.Contains(buf.String(), "unmapped channel") {
+		t.Errorf("expected warning log for unmapped channel, got: %s", buf.String())
+	}
+}
+
+func TestDEF140_UnknownChannelResolvesConversationSuccessfully(t *testing.T) {
+	// DEF-140/R3: A message whose channel is NOT a valid surface must still
+	// resolve a conversation successfully and land on "native". This is the
+	// end-to-end proof that ChannelToSurface prevents write denials from
+	// unknown channels.
+	upsert := newSurfaceTrackingUpserter()
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Map the unknown channel through ChannelToSurface, as callers do.
+	surface := ChannelToSurface("irc", logger)
+
+	var opts []ThreadConversationOption
+	if surface != "native" {
+		opts = append(opts, WithThreadSurface(surface))
+	}
+
+	result, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P", opts...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Must have landed on "native", not on "irc".
+	row := upsert.rows["native|thread:proj-P:thread-T"]
+	if row == nil {
+		t.Fatal("expected native row in store — unknown channel should map to native")
+	}
+	if row.Surface != "native" {
+		t.Errorf("expected surface 'native', got %q", row.Surface)
+	}
+
+	// Verify that passing "irc" directly WOULD fail the enum validation.
+	_, directErr := upsert.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
+		Surface:     "irc",
+		ExternalRef: "thread:proj-P:thread-T",
+		Kind:        "group",
+	})
+	if directErr == nil {
+		t.Fatal("expected enum validation error for raw 'irc' surface — test double should reject invalid enum values")
 	}
 }
