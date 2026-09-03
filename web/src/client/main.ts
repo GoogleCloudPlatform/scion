@@ -297,6 +297,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/admin-role-bindings.js'),
   },
   {
+    pattern: /^\/admin\/roles\/[^/]+$/,
+    tag: 'scion-page-admin-role-detail',
+    load: () => import('../components/pages/admin-role-detail.js'),
+  },
+  {
     pattern: /^\/admin\/access-boundaries$/,
     tag: 'scion-page-admin-access-boundaries',
     load: () => import('../components/pages/admin-access-boundaries.js'),
@@ -607,6 +612,7 @@ const ADMIN_ROUTES = new Set([
   'scion-page-admin-users',
   'scion-page-admin-groups',
   'scion-page-admin-roles',
+  'scion-page-admin-role-detail',
   'scion-page-admin-role-bindings',
   'scion-page-admin-access-boundaries',
   'scion-page-admin-access-boundary-detail',

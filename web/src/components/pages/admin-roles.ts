@@ -25,6 +25,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { navigateTo } from '../../client/main.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,12 +62,8 @@ export class ScionPageAdminRoles extends LitElement {
 
   // Dialog state
   @state() private showCreateDialog = false;
-  @state() private showEditDialog = false;
-  @state() private showDeleteDialog = false;
-  @state() private editingRole: RoleDefinition | null = null;
-  @state() private deletingRole: RoleDefinition | null = null;
-  @state() private showViewDialog = false;
-  @state() private viewingRole: RoleDefinition | null = null;
+
+
 
   // Form fields
   @state() private formName = '';
@@ -146,6 +143,16 @@ export class ScionPageAdminRoles extends LitElement {
 
     .role-name {
       font-weight: 500;
+    }
+
+    .role-link {
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .role-link:hover {
+      text-decoration: underline;
     }
 
     .role-description {
@@ -451,24 +458,6 @@ export class ScionPageAdminRoles extends LitElement {
     this.showCreateDialog = true;
   }
 
-  private openEditDialog(role: RoleDefinition): void {
-    this.editingRole = role;
-    this.formName = role.name;
-    this.formDescription = role.description;
-    this.formScopeType = role.scopeType;
-    this.formPermissions = new Set(role.permissions);
-    this.showEditDialog = true;
-  }
-
-  private openDeleteDialog(role: RoleDefinition): void {
-    this.deletingRole = role;
-    this.showDeleteDialog = true;
-  }
-
-  private openViewDialog(role: RoleDefinition): void {
-    this.viewingRole = role;
-    this.showViewDialog = true;
-  }
 
   private togglePermission(permId: string): void {
     const next = new Set(this.formPermissions);
@@ -518,70 +507,8 @@ export class ScionPageAdminRoles extends LitElement {
     }
   }
 
-  private async updateRole(): Promise<void> {
-    if (!this.editingRole) return;
-    this.actionInProgress = true;
-    this.actionFeedback = null;
-    try {
-      const res = await apiFetch(`/api/v1/admin/roles/${this.editingRole.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: this.formName.trim(),
-          description: this.formDescription.trim(),
-          permissions: [...this.formPermissions],
-        }),
-      });
 
-      if (!res.ok) {
-        const msg = await extractApiError(res, `HTTP ${res.status}`);
-        this.actionFeedback = { message: msg, variant: 'danger' };
-        return;
-      }
 
-      this.showEditDialog = false;
-      this.editingRole = null;
-      this.actionFeedback = { message: `Role "${this.formName}" updated`, variant: 'success' };
-      void this.loadData();
-    } catch (err) {
-      this.actionFeedback = {
-        message: err instanceof Error ? err.message : 'Failed to update role',
-        variant: 'danger',
-      };
-    } finally {
-      this.actionInProgress = false;
-    }
-  }
-
-  private async deleteRole(): Promise<void> {
-    if (!this.deletingRole) return;
-    this.actionInProgress = true;
-    this.actionFeedback = null;
-    try {
-      const res = await apiFetch(`/api/v1/admin/roles/${this.deletingRole.id}`, {
-        method: 'DELETE',
-      });
-
-      if (!res.ok) {
-        const msg = await extractApiError(res, `HTTP ${res.status}`);
-        this.actionFeedback = { message: msg, variant: 'danger' };
-        return;
-      }
-
-      const roleName = this.deletingRole.name;
-      this.showDeleteDialog = false;
-      this.deletingRole = null;
-      this.actionFeedback = { message: `Role "${roleName}" deleted`, variant: 'success' };
-      void this.loadData();
-    } catch (err) {
-      this.actionFeedback = {
-        message: err instanceof Error ? err.message : 'Failed to delete role',
-        variant: 'danger',
-      };
-    } finally {
-      this.actionInProgress = false;
-    }
-  }
 
   // ---------------------------------------------------------------------------
   // Render
@@ -628,8 +555,7 @@ export class ScionPageAdminRoles extends LitElement {
       </div>
 
       ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderRoles()}
-      ${this.renderCreateDialog()} ${this.renderEditDialog()} ${this.renderDeleteDialog()}
-      ${this.renderViewPermissionsDialog()}
+      ${this.renderCreateDialog()}
     `;
   }
 
@@ -678,7 +604,6 @@ export class ScionPageAdminRoles extends LitElement {
               <th class="hide-mobile">Permissions</th>
               <th>Type</th>
               <th class="hide-mobile">Updated</th>
-              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -689,11 +614,22 @@ export class ScionPageAdminRoles extends LitElement {
     `;
   }
 
+  private navigateToRole(roleId: string): void {
+    navigateTo(`/admin/roles/${encodeURIComponent(roleId)}`);
+  }
+
   private renderRoleRow(role: RoleDefinition) {
     return html`
       <tr>
         <td>
-          <div class="role-name">${role.name}</div>
+          <a
+            class="role-name role-link"
+            href="/admin/roles/${encodeURIComponent(role.id)}"
+            @click=${(e: Event) => {
+              e.preventDefault();
+              this.navigateToRole(role.id);
+            }}
+          >${role.name}</a>
           <div class="role-description">${role.description || '—'}</div>
         </td>
         <td><span class="scope-badge">${role.scopeType}</span></td>
@@ -707,29 +643,6 @@ export class ScionPageAdminRoles extends LitElement {
         </td>
         <td class="hide-mobile">
           <span class="perm-count">${this.formatRelativeTime(role.updatedAt)}</span>
-        </td>
-        <td>
-          <div class="actions">
-            <sl-icon-button
-              name="eye"
-              label="View permissions"
-              @click=${() => this.openViewDialog(role)}
-            ></sl-icon-button>
-            ${role.system
-              ? nothing
-              : html`
-                  <sl-icon-button
-                    name="pencil"
-                    label="Edit role"
-                    @click=${() => this.openEditDialog(role)}
-                  ></sl-icon-button>
-                  <sl-icon-button
-                    name="trash"
-                    label="Delete role"
-                    @click=${() => this.openDeleteDialog(role)}
-                  ></sl-icon-button>
-                `}
-          </div>
         </td>
       </tr>
     `;
@@ -842,171 +755,6 @@ export class ScionPageAdminRoles extends LitElement {
     `;
   }
 
-  private renderEditDialog() {
-    if (!this.showEditDialog || !this.editingRole) return nothing;
-
-    return html`
-      <sl-dialog
-        label="Edit Role"
-        open
-        @sl-request-close=${() => {
-          if (!this.actionInProgress) {
-            this.showEditDialog = false;
-            this.editingRole = null;
-          }
-        }}
-      >
-        <div class="form-group">
-          <sl-input
-            label="Name"
-            .value=${this.formName}
-            @sl-input=${(e: Event) => {
-              this.formName = (e.target as HTMLInputElement).value;
-            }}
-            required
-          ></sl-input>
-        </div>
-        <div class="form-group">
-          <sl-input
-            label="Description"
-            .value=${this.formDescription}
-            @sl-input=${(e: Event) => {
-              this.formDescription = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
-        </div>
-        <div class="form-group">
-          <sl-select label="Scope Type" .value=${this.formScopeType} disabled>
-            <sl-option value="system">System</sl-option>
-            <sl-option value="project">Project</sl-option>
-          </sl-select>
-        </div>
-        ${this.renderPermissionSelector()}
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.actionInProgress}
-          @click=${() => {
-            this.showEditDialog = false;
-            this.editingRole = null;
-          }}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.actionInProgress}
-          ?disabled=${!this.formName.trim()}
-          @click=${() => this.updateRole()}
-          >Save Changes</sl-button
-        >
-      </sl-dialog>
-    `;
-  }
-
-  private renderDeleteDialog() {
-    if (!this.showDeleteDialog || !this.deletingRole) return nothing;
-
-    return html`
-      <sl-dialog
-        label="Delete Role"
-        open
-        @sl-request-close=${() => {
-          if (!this.actionInProgress) {
-            this.showDeleteDialog = false;
-            this.deletingRole = null;
-          }
-        }}
-      >
-        <p>
-          Are you sure you want to delete the role
-          <strong>${this.deletingRole.name}</strong>?
-        </p>
-        <p class="delete-warning">
-          Any active role bindings using this role will also be removed. This action cannot be
-          undone.
-        </p>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.actionInProgress}
-          @click=${() => {
-            this.showDeleteDialog = false;
-            this.deletingRole = null;
-          }}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="danger"
-          ?loading=${this.actionInProgress}
-          @click=${() => this.deleteRole()}
-          >Delete Role</sl-button
-        >
-      </sl-dialog>
-    `;
-  }
-
-  private renderViewPermissionsDialog() {
-    if (!this.showViewDialog || !this.viewingRole) return nothing;
-
-    const rolePermIds = new Set(this.viewingRole.permissions ?? []);
-    const rolePerms = this.permissions.filter((p) => rolePermIds.has(p.ID));
-
-    // Group the filtered permissions by resource (reuses shared helper)
-    const groups = this.groupPermissions(rolePerms);
-
-    const permCount = rolePerms.length;
-    const resourceCount = groups.size;
-
-    return html`
-      <sl-dialog
-        label="Permissions: ${this.viewingRole.name}"
-        open
-        @sl-request-close=${() => {
-          this.showViewDialog = false;
-          this.viewingRole = null;
-        }}
-      >
-        ${permCount === 0
-          ? html`<p>This role has no permissions assigned.</p>`
-          : html`
-              <div class="permissions-scroll">
-                ${[...groups.entries()].map(
-                  ([resource, perms]) => html`
-                    <div class="permission-group">
-                      <div class="permission-group-title">${this.resourceLabel(resource)}</div>
-                      ${perms.map(
-                        (perm) => html`
-                          <div class="permission-item">
-                            <div>
-                              <div class="permission-label">${perm.ID}</div>
-                              <div class="permission-desc">${perm.Description}</div>
-                            </div>
-                          </div>
-                        `
-                      )}
-                    </div>
-                  `
-                )}
-              </div>
-              <p>
-                ${permCount} permission${permCount !== 1 ? 's' : ''} across ${resourceCount}
-                resource${resourceCount !== 1 ? 's' : ''}
-              </p>
-            `}
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${() => {
-            this.showViewDialog = false;
-            this.viewingRole = null;
-          }}
-          >Close</sl-button
-        >
-      </sl-dialog>
-    `;
-  }
 }
 
 declare global {
