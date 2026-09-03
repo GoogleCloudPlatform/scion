@@ -42,7 +42,7 @@ import type {
   PageToken,
 } from '../../shared/access-boundaries.js';
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
-import { isFeatureEnabled, ACCESS_BOUNDARIES_AUTHORING_FLAG } from '../../utils/feature-flags.js';
+
 
 // Import sub-components
 import '../shared/access-boundary-status.js';
@@ -681,7 +681,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   }
 
   private get canEdit(): boolean {
-    if (!isFeatureEnabled(ACCESS_BOUNDARIES_AUTHORING_FLAG)) return false;
     if (this.isRecoveryDisabled) return false;
     const caps = this.boundary?._capabilities;
     // Edit requires at least one preview capability
@@ -689,7 +688,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   }
 
   private get canDelete(): boolean {
-    if (!isFeatureEnabled(ACCESS_BOUNDARIES_AUTHORING_FLAG)) return false;
     if (this.isRecoveryDisabled) return false;
     return canAccessBoundary(this.boundary?._capabilities, 'delete');
   }

@@ -49,7 +49,7 @@ import type {
   PageToken,
 } from '../../shared/access-boundaries.js';
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
-import { isFeatureEnabled, ACCESS_BOUNDARIES_AUTHORING_FLAG } from '../../utils/feature-flags.js';
+
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1238,8 +1238,6 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   }
 
   private get canCreate(): boolean {
-    // Visible only when authoring flag is enabled AND list-level capabilities include previewCreate
-    if (!isFeatureEnabled(ACCESS_BOUNDARIES_AUTHORING_FLAG)) return false;
     return canAccessBoundary(this.listCapabilities ?? undefined, 'previewCreate');
   }
 

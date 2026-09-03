@@ -31,12 +31,7 @@ import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
-import {
-  isFeatureEnabled,
-  setFeatureFlag,
-  ACCESS_BOUNDARIES_READ_FLAG,
-  ACCESS_BOUNDARIES_AUTHORING_FLAG,
-} from '../utils/feature-flags.js';
+import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -603,23 +598,6 @@ const PROFILE_ROUTES = new Set([
 const CHAT_ROUTES = new Set(['scion-page-chat']);
 
 /**
- * Routes gated by the access_boundaries_read feature flag.
- * When the flag is off, all access boundary routes render an unavailable page.
- */
-const ACCESS_BOUNDARY_ROUTES = new Set([
-  'scion-page-admin-access-boundaries',
-  'scion-page-admin-access-boundary-detail',
-  'scion-page-admin-access-boundary-editor',
-]);
-
-/**
- * Routes gated by the access_boundaries_authoring feature flag.
- * When the flag is off, authoring routes render an unavailable page
- * but inventory/detail still work (if the read flag is on).
- */
-const ACCESS_BOUNDARY_AUTHORING_ROUTES = new Set(['scion-page-admin-access-boundary-editor']);
-
-/**
  * Routes that require admin role. Non-admin users are redirected to dashboard.
  */
 const ADMIN_ROUTES = new Set([
@@ -826,50 +804,6 @@ let activeShell: { type: ShellType; element: HTMLElement } | null = null;
 let navigationId = 0;
 
 /**
- * Renders a minimal "feature unavailable" page inside the app shell.
- * Used when a feature flag gates a route — renders inline so operators
- * see rollout diagnostics instead of a misleading redirect.
- */
-function renderFeatureUnavailable(path: string, featureName: string): void {
-  const appContainer = document.getElementById('app');
-  if (!appContainer) return;
-
-  setDocumentTitle('Feature Unavailable');
-
-  // Build a minimal unavailable message inside a fresh div.
-  const wrapper = document.createElement('div');
-  wrapper.setAttribute(
-    'style',
-    'text-align:center;padding:4rem 2rem;color:var(--scion-text-muted, #64748b);'
-  );
-  wrapper.innerHTML = `
-    <h1 style="font-size:1.5rem;font-weight:700;color:var(--scion-text, #1e293b);margin:0 0 0.5rem 0;">
-      Feature Unavailable
-    </h1>
-    <p>${featureName} is not enabled on this hub.</p>
-    <p style="font-size:0.8125rem;margin-top:1rem;">
-      Contact your administrator to enable this feature.
-    </p>
-  `;
-
-  // If the current shell is already an app shell, replace its page content.
-  if (activeShell && activeShell.type === 'app') {
-    const shell = activeShell.element as HTMLElement & { currentPath: string; user: User | null };
-    shell.currentPath = path;
-    shell.user = currentUser;
-    const oldPage = shell.querySelector('[data-scion-page]');
-    if (oldPage) oldPage.remove();
-    wrapper.setAttribute('data-scion-page', '');
-    shell.appendChild(wrapper);
-  } else {
-    // Fall back to a standalone render.
-    appContainer.innerHTML = '';
-    activeShell = null;
-    appContainer.appendChild(wrapper);
-  }
-}
-
-/**
  * Renders the page component for the given path into #app.
  * Lazily imports the page module before creating the element.
  * Reuses the shell element (sidebar, header, etc.) when possible
@@ -935,25 +869,6 @@ async function renderRoute(path: string): Promise<void> {
     return;
   }
 
-  // Block access boundary routes when the read flag is disabled.
-  // Render an unavailable page (not a redirect) so operators get rollout
-  // diagnostics instead of a misleading redirect.
-  if (ACCESS_BOUNDARY_ROUTES.has(tag) && !isFeatureEnabled(ACCESS_BOUNDARIES_READ_FLAG)) {
-    ++navigationId;
-    renderFeatureUnavailable(path, 'Access Boundaries');
-    return;
-  }
-
-  // Block authoring routes when the authoring flag is disabled.
-  // Inventory and detail pages remain accessible when the read flag is on.
-  if (
-    ACCESS_BOUNDARY_AUTHORING_ROUTES.has(tag) &&
-    !isFeatureEnabled(ACCESS_BOUNDARIES_AUTHORING_FLAG)
-  ) {
-    ++navigationId;
-    renderFeatureUnavailable(path, 'Access Boundary Authoring');
-    return;
-  }
 
   const shellType = getShellType(tag);
 
