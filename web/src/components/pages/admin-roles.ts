@@ -708,7 +708,16 @@ export class ScionPageAdminRoles extends LitElement {
     }
 
     const filename = `scion-roles-export-${new Date().toISOString().slice(0, 10)}.json`;
-    downloadJsonFile(exportData, filename);
+
+    try {
+      downloadJsonFile(exportData, filename);
+    } catch (err) {
+      this.actionFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to download export file',
+        variant: 'danger',
+      };
+      return;
+    }
 
     this.actionFeedback = {
       message: `Exported ${customRoles.length} custom role${customRoles.length !== 1 ? 's' : ''}`,

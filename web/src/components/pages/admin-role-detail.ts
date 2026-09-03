@@ -856,7 +856,15 @@ export class ScionPageAdminRoleDetail extends LitElement {
       ],
     };
 
-    downloadJsonFile(exportData, `scion-role-${role.name}-export.json`);
+    try {
+      downloadJsonFile(exportData, `scion-role-${role.name}-export.json`);
+    } catch (err) {
+      this.actionFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to download export file',
+        variant: 'danger',
+      };
+      return;
+    }
 
     this.actionFeedback = {
       message: `Exported role "${role.name}"`,

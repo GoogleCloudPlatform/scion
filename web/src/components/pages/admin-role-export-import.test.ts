@@ -405,6 +405,24 @@ describe('admin-roles: export', () => {
     const alert = el.shadowRoot?.querySelector('.feedback-alert');
     expect(alert?.textContent).toContain('No custom roles to export');
   });
+
+  it('shows error feedback and no success when download helper throws', async () => {
+    const handler = createRolesListFetchHandler();
+    el = await createRolesPage(handler);
+
+    // Make createObjectURL throw to simulate a download failure
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
+      throw new Error('Blob URL creation failed');
+    });
+
+    await (el as any).exportRoles();
+    await el.updateComplete;
+
+    const feedback = (el as any).actionFeedback;
+    expect(feedback).not.toBeNull();
+    expect(feedback.variant).toBe('danger');
+    expect(feedback.message).toContain('Blob URL creation failed');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -768,5 +786,22 @@ describe('admin-role-detail: single role export', () => {
     expect(data.roles).toHaveLength(1);
     expect(data.roles[0].name).toBe('test-editor');
     expect(data.roles[0].id).toBeUndefined(); // No server fields
+  });
+
+  it('shows error feedback and no success when download helper throws', async () => {
+    el = await createRoleDetailPage();
+
+    // Make createObjectURL throw to simulate a download failure
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
+      throw new Error('Download blocked');
+    });
+
+    (el as any).exportSingleRole();
+    await el.updateComplete;
+
+    const feedback = (el as any).actionFeedback;
+    expect(feedback).not.toBeNull();
+    expect(feedback.variant).toBe('danger');
+    expect(feedback.message).toContain('Download blocked');
   });
 });

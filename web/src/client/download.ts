@@ -28,7 +28,9 @@
  *
  * @param data - Any JSON-serialisable value.
  * @param filename - The suggested filename for the download.
- * @throws If Blob creation or object-URL generation fails.
+ * @throws If Blob creation, object-URL generation, or anchor interaction
+ *         fails. DOM removal and URL revocation are guaranteed even when
+ *         an error is thrown.
  */
 export function downloadJsonFile(data: unknown, filename: string): void {
   const json = JSON.stringify(data, null, 2);
@@ -39,13 +41,29 @@ export function downloadJsonFile(data: unknown, filename: string): void {
   anchor.href = url;
   anchor.download = filename;
 
-  // Append to body so the click works in all browsers (Firefox
-  // requires the anchor to be in the DOM).
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
+  // Track whether the click succeeded so we can choose between
+  // deferred revocation (happy path) and immediate revocation (error).
+  let clicked = false;
 
-  // Revoke after a short delay so the browser can start the download
-  // before the object URL is invalidated.
-  setTimeout(() => URL.revokeObjectURL(url), 150);
+  try {
+    // Append to body so the click works in all browsers (Firefox
+    // requires the anchor to be in the DOM).
+    document.body.appendChild(anchor);
+    anchor.click();
+    clicked = true;
+  } finally {
+    // Always remove the anchor from the DOM if it was appended.
+    if (anchor.parentNode) {
+      anchor.parentNode.removeChild(anchor);
+    }
+
+    if (clicked) {
+      // Happy path: revoke after a short delay so the browser can
+      // start the download before the object URL is invalidated.
+      setTimeout(() => URL.revokeObjectURL(url), 150);
+    } else {
+      // Error path: revoke immediately since no download started.
+      URL.revokeObjectURL(url);
+    }
+  }
 }

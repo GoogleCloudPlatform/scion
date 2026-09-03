@@ -40,8 +40,10 @@ describe('downloadJsonFile', () => {
   beforeEach(() => {
     createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-url');
     revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-    appendChildSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node);
-    removeChildSpy = vi.spyOn(document.body, 'removeChild').mockImplementation((node) => node);
+    const realAppendChild = document.body.appendChild.bind(document.body);
+    const realRemoveChild = document.body.removeChild.bind(document.body);
+    appendChildSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => realAppendChild(node));
+    removeChildSpy = vi.spyOn(document.body, 'removeChild').mockImplementation((node) => realRemoveChild(node));
 
     clickSpy = vi.fn();
     const originalCreateElement = document.createElement.bind(document);
@@ -129,5 +131,35 @@ describe('downloadJsonFile', () => {
     });
 
     expect(() => downloadJsonFile({}, 'file.json')).toThrow('Blob URL creation failed');
+  });
+
+  it('removes anchor and revokes URL immediately when click throws', () => {
+    clickSpy.mockImplementation(() => {
+      throw new Error('click failed');
+    });
+
+    expect(() => downloadJsonFile({}, 'file.json')).toThrow('click failed');
+
+    // Anchor should still be removed from the DOM
+    expect(removeChildSpy).toHaveBeenCalledOnce();
+
+    // URL should be revoked immediately (not deferred) on error path
+    expect(revokeObjectURLSpy).toHaveBeenCalledOnce();
+    expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:mock-url');
+  });
+
+  it('removes anchor and revokes URL when appendChild throws', () => {
+    appendChildSpy.mockImplementation(() => {
+      throw new Error('appendChild failed');
+    });
+
+    expect(() => downloadJsonFile({}, 'file.json')).toThrow('appendChild failed');
+
+    // Click should not have been called
+    expect(clickSpy).not.toHaveBeenCalled();
+
+    // URL should still be revoked immediately
+    expect(revokeObjectURLSpy).toHaveBeenCalledOnce();
+    expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:mock-url');
   });
 });
