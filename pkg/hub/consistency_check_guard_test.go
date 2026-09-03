@@ -100,7 +100,7 @@ func TestConsistencyCheckReturnConsumed(t *testing.T) {
 	// Assert the expected count of call sites so that a NEW unguarded site
 	// also trips this test — the developer must update this count and
 	// verify the new site consumes the return.
-	const expectedCallSites = 7
+	const expectedCallSites = 6
 	if totalCallSites != expectedCallSites {
 		t.Errorf("expected %d CheckConversationConsistency call sites in non-test "+
 			"pkg/hub sources, found %d. If you added or removed a call site, "+

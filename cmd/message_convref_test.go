@@ -226,52 +226,82 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 	assert.Equal(t, "conv-test-12345", (*sent)[0].StructuredMsg.ConversationID)
 }
 
-// TestConvRef_ThreadRefGated verifies that #<thread> references are gated
-// at the CLI entry point. The gate returns a non-zero exit with a clear
-// error, and zero messages are sent.
-func TestConvRef_ThreadRefGated(t *testing.T) {
+// TestConvRef_ThreadRefAccepted verifies that #<thread> references are
+// accepted and routed through sendMessageViaConversation.
+// DEF-138 P-4 opened the gate that previously rejected these.
+func TestConvRef_ThreadRefAccepted(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
-	restore := resetMessageFlags()
-	defer restore()
 
-	// Stand up a mock so we can verify zero sends AFTER the invocation.
-	projectID := "proj-convref-thread-gated"
-	server, sent, _, outbound := newConvRefMockHubServer(t, projectID)
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-thread-accepted"
+	server, _, resolves, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
-	// Execute the command path — the gate fires before any hub connection.
-	err := messageCmd.RunE(messageCmd, []string{"#general", "hello thread"})
-	require.Error(t, err, "thread reference must be rejected by the gate")
-	assert.Contains(t, err.Error(), "not yet supported")
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
 
-	// Zero sends — the gate prevented any message delivery.
-	assert.Len(t, *sent, 0, "no agent messages should be sent for gated ref")
-	assert.Len(t, *outbound, 0, "no outbound messages should be sent for gated ref")
+	ref := &messaging.Reference{
+		Kind:  messaging.RefThread,
+		Value: "general",
+		Raw:   "#general",
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "hello thread", false, false)
+	require.NoError(t, err, "thread reference should be accepted after DEF-138")
+
+	// The conversation should have been resolved.
+	assert.Len(t, *resolves, 1, "one resolve call expected")
+	assert.Equal(t, "#general", (*resolves)[0].Reference)
+
+	// The message should have been sent via the outbound path.
+	assert.Len(t, *outbound, 1, "one outbound message expected")
+	assert.Equal(t, "hello thread", (*outbound)[0].Message)
 }
 
-// TestConvRef_ConvIDGated verifies that conv:<uuid> references are gated
-// at the CLI entry point. The gate returns a non-zero exit with a clear
-// error, and zero messages are sent.
-func TestConvRef_ConvIDGated(t *testing.T) {
+// TestConvRef_ConvIDAccepted verifies that conv:<uuid> references are
+// accepted and routed through sendMessageViaConversation.
+// DEF-138 P-4 opened the gate that previously rejected these.
+func TestConvRef_ConvIDAccepted(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
-	restore := resetMessageFlags()
-	defer restore()
 
-	// Stand up a mock so we can verify zero sends AFTER the invocation.
-	projectID := "proj-convref-convid-gated"
-	server, sent, _, outbound := newConvRefMockHubServer(t, projectID)
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-convid-accepted"
+	server, _, resolves, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
-	// Execute the command path — the gate fires before any hub connection.
-	err := messageCmd.RunE(messageCmd, []string{"conv:7f3a91c2-1234-5678-9abc-def012345678", "payload"})
-	require.Error(t, err, "conv: reference must be rejected by the gate")
-	assert.Contains(t, err.Error(), "not yet supported")
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
 
-	// Zero sends — the gate prevented any message delivery.
-	assert.Len(t, *sent, 0, "no agent messages should be sent for gated ref")
-	assert.Len(t, *outbound, 0, "no outbound messages should be sent for gated ref")
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: "7f3a91c2-1234-5678-9abc-def012345678",
+		Raw:   "conv:7f3a91c2-1234-5678-9abc-def012345678",
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "payload", false, false)
+	require.NoError(t, err, "conv: reference should be accepted after DEF-138")
+
+	// The conversation should have been resolved.
+	assert.Len(t, *resolves, 1, "one resolve call expected")
+	assert.Equal(t, "conv:7f3a91c2-1234-5678-9abc-def012345678", (*resolves)[0].Reference)
+
+	// The message should have been sent via the outbound path.
+	assert.Len(t, *outbound, 1, "one outbound message expected")
+	assert.Equal(t, "payload", (*outbound)[0].Message)
 }
 
 // TestSendMessageViaConversation_EmailRef_AgentContext verifies that @<email>

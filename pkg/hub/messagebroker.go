@@ -463,7 +463,25 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !msg.Broadcasted {
 		var convResult *messaging.ConversationResult
-		if msg.ThreadID != "" {
+
+		// DEF-138 P-3: honour a pre-resolved ConversationID from the
+		// upstream handler instead of re-deriving. The handler already
+		// authorized the assertion (P-2) and stamped structuredMsg
+		// before publishing to the broker. Re-deriving here produced the
+		// inbound/outbound conversation split: the handler resolved a
+		// thread conversation, then the broker re-derived a DM because
+		// the agent's reply carries no ThreadID.
+		if msg.ConversationID != "" {
+			storeMsg.ConversationID = msg.ConversationID
+			// Build a minimal ConversationResult for divergence logging.
+			// We do not re-fetch the conversation row — the handler
+			// already looked it up (explicit path) or created it
+			// (derivation path), and re-querying would add latency for
+			// information we have.
+			convResult = &messaging.ConversationResult{
+				ConversationID: msg.ConversationID,
+			}
+		} else if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
@@ -497,29 +515,39 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
 			}
 		}
-		if convResult != nil {
+		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// Always log divergence — even when convResult is nil, that is a divergence signal.
-		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
-		convID := ""
-		actualRef := ""
-		if convResult != nil {
-			convID = convResult.ConversationID
-			actualRef = convResult.ExternalRef
+		// DEF-138: The pre-resolved path (msg.ConversationID != "") bypasses
+		// ComputeDivergenceMatch — there is no old-model routing key to
+		// compare against because the conversation was named by the caller,
+		// not derived from message fields.  Feeding an empty ExternalRef
+		// into ComputeDivergenceMatch would produce a false
+		// routing-type-mismatch on every correctly-routed explicit message.
+		if msg.ConversationID != "" {
+			messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+		} else {
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 		}
-		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-			MessageID:  storeMsg.ID,
-			OldRouting: oldRouting,
-			NewRouting: messaging.NewRoutingStr(convID),
-			Match:      match,
-			Reason:     reason,
-		})
 		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
+		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
 			p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
-				"message_id", storeMsg.ID, "conversation_id", convID)
+				"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
 		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
