@@ -418,7 +418,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
       ];
     } catch (err) {
       console.error('Failed to load boundaries for group:', err);
-      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access boundaries';
+      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access constraints';
     } finally {
       this.boundaryLoading = false;
     }
@@ -561,7 +561,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
       </div>
 
       <scion-boundary-summary-notice
-        label="Access boundaries"
+        label="Access constraints"
         .groups=${this.boundaryGroups}
         ?loading=${this.boundaryLoading}
         error=${this.boundaryError}

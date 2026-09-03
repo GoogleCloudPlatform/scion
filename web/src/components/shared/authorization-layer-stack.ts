@@ -546,7 +546,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
           aria-expanded=${expanded}
         >
           <sl-icon name="chevron-right" class="expand-icon ${expanded ? 'open' : ''}"></sl-icon>
-          <span class="layer-label">Access boundaries</span>
+          <span class="layer-label">Access constraints</span>
           <span class="layer-count removes"> removes ${totalRemoved} </span>
         </div>
         ${expanded ? this.renderBoundariesDetail() : nothing}
@@ -566,7 +566,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
         <span class="status-dot ${boundary.status}"></span>
         <span class="boundary-name">
           ${boundary.redacted || boundary.name === null
-            ? html`<span class="boundary-redacted"> Access boundary (details unavailable) </span>`
+            ? html`<span class="boundary-redacted"> Access constraint (details unavailable) </span>`
             : html`<a
                 class="boundary-link"
                 href="/admin/access-boundaries/${encodeURIComponent(boundary.id)}"
@@ -698,7 +698,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
           <sl-icon name="shield-x"></sl-icon>
           Removed by
           ${reason.boundaryNames
-            .map((n) => n ?? 'access boundary (details unavailable)')
+            .map((n) => n ?? 'access constraint (details unavailable)')
             .join(', ')}
         </span>`;
       case 'removed_by_restriction':

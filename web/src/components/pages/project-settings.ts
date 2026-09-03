@@ -911,7 +911,7 @@ export class ScionPageProjectSettings extends LitElement {
       ];
     } catch (err) {
       console.error('Failed to load boundaries for project:', err);
-      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access boundaries';
+      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access constraints';
     } finally {
       this.boundaryLoading = false;
     }
@@ -1366,7 +1366,7 @@ export class ScionPageProjectSettings extends LitElement {
       ></scion-effective-access-boundary-notice>
 
       <scion-boundary-summary-notice
-        label="Access boundaries affecting this project"
+        label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}
         ?loading=${this.boundaryLoading}
         error=${this.boundaryError}

@@ -243,7 +243,7 @@ export class ScionAccessBoundaryStepper extends LitElement {
 
   override render() {
     return html`
-      <nav aria-label="Access boundary creation steps">
+      <nav aria-label="Access constraint creation steps">
         <ol class="stepper" role="list">
           ${BOUNDARY_STEPS.map((step, i) => {
             const isCurrent = step.index === this.currentStep;

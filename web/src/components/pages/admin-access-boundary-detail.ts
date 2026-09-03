@@ -576,7 +576,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     if (match) {
       this.boundaryId = match[1];
     }
-    setDocumentTitle('Access Boundary');
+    setDocumentTitle('Access Constraint');
     void this.loadBoundary();
     document.addEventListener('visibilitychange', this.boundVisibilityChange);
   }
@@ -608,7 +608,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       this.boundary = boundary;
       this.phase = 'ready';
       this.lastLoadTime = Date.now();
-      setDocumentTitle(`Access Boundary: ${boundary.name}`);
+      setDocumentTitle(`Access Constraint: ${boundary.name}`);
 
       // Load affected principals
       void this.loadAffectedPrincipals();
@@ -625,9 +625,9 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
           return;
         }
       }
-      this.errorMessage = err instanceof Error ? err.message : 'Failed to load access boundary';
+      this.errorMessage = err instanceof Error ? err.message : 'Failed to load access constraint';
       this.phase = 'error';
-      console.error('Failed to load boundary:', err);
+      console.error('Failed to load constraint:', err);
     }
   }
 
@@ -865,7 +865,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       <div class="detail-page">
         <div class="error-state">
           <sl-icon name="exclamation-circle" style="font-size: 2rem"></sl-icon>
-          <h1>Failed to Load Access Boundary</h1>
+          <h1>Failed to Load Access Constraint</h1>
           <p>${this.errorMessage}</p>
           <div style="display: flex; gap: 0.5rem; justify-content: center;">
             <sl-button variant="default" @click=${() => navigateTo('/admin/access-boundaries')}>
@@ -886,9 +886,9 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       <div class="detail-page">
         <div class="not-found-state">
           <sl-icon name="shield-lock" style="font-size: 2rem"></sl-icon>
-          <h1>Access Boundary Not Found</h1>
+          <h1>Access Constraint Not Found</h1>
           <p>
-            The access boundary "${this.boundaryId}" does not exist or you do not have permission to
+            The access constraint "${this.boundaryId}" does not exist or you do not have permission to
             view it.
           </p>
           <sl-button variant="primary" @click=${() => navigateTo('/admin/access-boundaries')}>
@@ -951,7 +951,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             }}
           >
             <sl-icon name="arrow-left"></sl-icon>
-            Access Boundaries
+            Access Constraints
           </a>
         </div>
 

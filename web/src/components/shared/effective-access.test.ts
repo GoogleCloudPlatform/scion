@@ -175,11 +175,11 @@ describe('Invariant 2: No priority/override/winner terminology', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('Invariant 3: No redaction bypass', () => {
-  it('redacted boundaries render as "Access boundary (details unavailable)"', () => {
+  it('redacted boundaries render as "Access constraint (details unavailable)"', () => {
     const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
 
     // The source MUST contain the redacted placeholder text in a template
-    expect(source).toContain('Access boundary (details unavailable)');
+    expect(source).toContain('Access constraint (details unavailable)');
   });
 
   it('redacted boundary check covers both redacted flag and null name', () => {
@@ -197,7 +197,7 @@ describe('Invariant 3: No redaction bypass', () => {
     // When redacted, the template should show the span.boundary-redacted
     // and NOT render a link. Verify the structure: redacted check comes
     // BEFORE the link rendering in a conditional (ternary).
-    expect(source).toMatch(/boundary-redacted.*Access boundary \(details unavailable\)/s);
+    expect(source).toMatch(/boundary-redacted.*Access constraint \(details unavailable\)/s);
 
     // In the renderBoundaryRow method, the redacted branch (truthy)
     // renders BEFORE the link branch (falsy) in the ternary. Extract
@@ -228,7 +228,7 @@ describe('Invariant 3: No redaction bypass', () => {
 
     // The denial reason renderer must map null boundary names to the
     // placeholder text, not attempt a fetch
-    expect(source).toMatch(/\.map\(\(n\).*n \?\? ['"]access boundary \(details unavailable\)['"]/i);
+    expect(source).toMatch(/\.map\(\(n\).*n \?\? ['"]access constraint \(details unavailable\)['"]/i);
   });
 
   it('no secondary apiFetch call exists in authorization-layer-stack for boundary names', () => {

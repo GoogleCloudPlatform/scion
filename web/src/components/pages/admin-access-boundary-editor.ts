@@ -268,11 +268,11 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
     if (match) {
       this.isEditMode = true;
       this.boundaryId = match[1];
-      setDocumentTitle('Edit Access Boundary');
+      setDocumentTitle('Edit Access Constraint');
       void this.loadBoundary();
     } else {
       this.isEditMode = false;
-      setDocumentTitle('New Access Boundary');
+      setDocumentTitle('New Access Constraint');
       // Default scope to system for new boundaries
       this.draftScope = { type: 'system' };
       this.draftScopeType = 'system';
@@ -316,8 +316,8 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       const boundary: AccessBoundaryDetail = await accessBoundariesApi.get(this.boundaryId);
       this.populateFromBoundary(boundary);
     } catch (err) {
-      this.loadError = err instanceof Error ? err.message : 'Failed to load access boundary';
-      console.error('Failed to load access boundary:', err);
+      this.loadError = err instanceof Error ? err.message : 'Failed to load access constraint';
+      console.error('Failed to load access constraint:', err);
     } finally {
       this.loadingBoundary = false;
     }
@@ -522,7 +522,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       return html`
         <div class="loading-state">
           <sl-spinner style="font-size: 2rem"></sl-spinner>
-          <p>Loading access boundary...</p>
+          <p>Loading access constraint...</p>
         </div>
       `;
     }
@@ -548,7 +548,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       <div class="editor-page">
         <div class="editor-header">
           <h1 class="editor-title">
-            ${this.isEditMode ? 'Edit Access Boundary' : 'New Access Boundary'}
+            ${this.isEditMode ? 'Edit Access Constraint' : 'New Access Constraint'}
           </h1>
           <a
             class="editor-back-link"
@@ -623,13 +623,13 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
         <div class="form-field">
           <sl-textarea
             label="Purpose"
-            placeholder="Explain the security intent of this access boundary..."
+            placeholder="Explain the security intent of this access constraint..."
             value=${this.draftPurpose}
             required
             rows="4"
             resize="auto"
             @sl-input=${(e: Event) => this.handlePurposeInput(e)}
-            help-text="Describe why this boundary exists and what it protects"
+            help-text="Describe why this constraint exists and what it protects"
           ></sl-textarea>
           <div class="char-count">${this.draftPurpose.length} characters</div>
         </div>
@@ -651,7 +651,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   private renderStep2() {
     return html`
       <h2 class="step-title">Subject</h2>
-      <p class="step-description">Choose who this access boundary applies to.</p>
+      <p class="step-description">Choose who this access constraint applies to.</p>
 
       <div class="step-body">
         <scion-access-boundary-subject-selector
@@ -677,7 +677,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   private renderStep3() {
     return html`
       <h2 class="step-title">Scope</h2>
-      <p class="step-description">Choose where this access boundary applies.</p>
+      <p class="step-description">Choose where this access constraint applies.</p>
 
       <div class="step-body">
         <scion-access-boundary-scope-selector
@@ -778,7 +778,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
 
     return html`
       <h2 class="step-title">Review</h2>
-      <p class="step-description">Review your access boundary definition before submitting.</p>
+      <p class="step-description">Review your access constraint definition before submitting.</p>
 
       <div class="step-body">
         <scion-access-boundary-definition-summary

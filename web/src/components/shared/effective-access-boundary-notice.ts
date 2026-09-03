@@ -221,7 +221,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
         <sl-icon name="shield-exclamation"></sl-icon>
         <span class="notice-text">
           Effective access may be reduced by ${this.boundaryCount} access
-          ${this.boundaryCount === 1 ? 'boundary' : 'boundaries'}
+          ${this.boundaryCount === 1 ? 'constraint' : 'constraints'}
         </span>
         ${explainHref ? html`<a class="notice-link" href=${explainHref}>View details</a>` : nothing}
       </div>

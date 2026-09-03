@@ -643,7 +643,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
       return 'Preview results are truncated — commit not available.';
     if (this.preview.completeness.degraded) return 'Preview is degraded — commit not available.';
     if (this.preview.lockout?.safe === false)
-      return 'This change would lock out all access boundary administrators.';
+      return 'This change would lock out all access constraint administrators.';
     if (!canAccessBoundary(this.preview._capabilities, 'commit'))
       return 'You do not have permission to commit this change.';
     return '';
@@ -811,11 +811,11 @@ export class ScionAccessBoundaryPreview extends LitElement {
   private commitButtonLabel(): string {
     switch (this.operation) {
       case 'create':
-        return 'Create boundary';
+        return 'Create constraint';
       case 'update':
-        return 'Update boundary';
+        return 'Update constraint';
       case 'delete':
-        return 'Delete boundary';
+        return 'Delete constraint';
       default:
         return 'Commit';
     }

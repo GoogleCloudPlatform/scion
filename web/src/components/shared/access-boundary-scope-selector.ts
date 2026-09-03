@@ -391,12 +391,12 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
 
   private getSummaryText(): string {
     if (this.scopeType === 'system') {
-      return 'This access boundary applies system-wide across all projects.';
+      return 'This access constraint applies system-wide across all projects.';
     }
     if (!this.projectId) {
       return 'Select a project to continue.';
     }
-    return `This access boundary applies only within project "${this.projectLabel || this.projectId}".`;
+    return `This access constraint applies only within project "${this.projectLabel || this.projectId}".`;
   }
 
   override render() {

@@ -17,8 +17,8 @@
 /**
  * admin-permissions — permission mapping tests.
  *
- * Validates the canonical permission names used for Access Boundary
- * routes after the access_constraint → access_boundary rename.
+ * Validates the canonical access_constraint.read and access_constraint.admin
+ * permission IDs used for Access Constraints routes.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -38,77 +38,77 @@ function adminWithPermissions(...perms: string[]): AdminStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Permission rename: access_constraint.* → access_boundary.*
+// Canonical access_constraint.* permissions
 // ---------------------------------------------------------------------------
 
-describe('admin-permissions: access_boundary permission rename', () => {
-  it('NAV_PERMISSION_MAP uses access_boundary.read for the list route', () => {
+describe('admin-permissions: access_constraint permissions', () => {
+  it('NAV_PERMISSION_MAP uses access_constraint.read for the list route', () => {
     const perms = NAV_PERMISSION_MAP['/admin/access-boundaries'];
     expect(perms).toBeDefined();
-    expect(perms).toContain('access_boundary.read');
-    expect(perms).toContain('access_boundary.admin');
+    expect(perms).toContain('access_constraint.read');
+    expect(perms).toContain('access_constraint.admin');
   });
 
-  it('NAV_PERMISSION_MAP does NOT contain legacy access_constraint permissions', () => {
+  it('NAV_PERMISSION_MAP does NOT contain access_boundary permissions', () => {
     const perms = NAV_PERMISSION_MAP['/admin/access-boundaries'];
-    expect(perms).not.toContain('access_constraint.read');
-    expect(perms).not.toContain('access_constraint.admin');
+    expect(perms).not.toContain('access_boundary.read');
+    expect(perms).not.toContain('access_boundary.admin');
   });
 
-  it('ROUTE_PERMISSION_MAP uses access_boundary.* for list page', () => {
+  it('ROUTE_PERMISSION_MAP uses access_constraint.* for list page', () => {
     const perms = ROUTE_PERMISSION_MAP['scion-page-admin-access-boundaries'];
     expect(perms).toBeDefined();
-    expect(perms).toContain('access_boundary.read');
-    expect(perms).toContain('access_boundary.admin');
-    expect(perms).not.toContain('access_constraint.read');
-    expect(perms).not.toContain('access_constraint.admin');
+    expect(perms).toContain('access_constraint.read');
+    expect(perms).toContain('access_constraint.admin');
+    expect(perms).not.toContain('access_boundary.read');
+    expect(perms).not.toContain('access_boundary.admin');
   });
 
-  it('ROUTE_PERMISSION_MAP uses access_boundary.* for detail page', () => {
+  it('ROUTE_PERMISSION_MAP uses access_constraint.* for detail page', () => {
     const perms = ROUTE_PERMISSION_MAP['scion-page-admin-access-boundary-detail'];
     expect(perms).toBeDefined();
-    expect(perms).toContain('access_boundary.read');
-    expect(perms).toContain('access_boundary.admin');
-    expect(perms).not.toContain('access_constraint.read');
-    expect(perms).not.toContain('access_constraint.admin');
+    expect(perms).toContain('access_constraint.read');
+    expect(perms).toContain('access_constraint.admin');
+    expect(perms).not.toContain('access_boundary.read');
+    expect(perms).not.toContain('access_boundary.admin');
   });
 
-  it('ROUTE_PERMISSION_MAP uses access_boundary.admin for editor page', () => {
+  it('ROUTE_PERMISSION_MAP uses access_constraint.admin for editor page', () => {
     const perms = ROUTE_PERMISSION_MAP['scion-page-admin-access-boundary-editor'];
     expect(perms).toBeDefined();
-    expect(perms).toContain('access_boundary.admin');
-    expect(perms).not.toContain('access_constraint.admin');
+    expect(perms).toContain('access_constraint.admin');
+    expect(perms).not.toContain('access_boundary.admin');
   });
 
-  it('no permission map entry contains the legacy access_constraint prefix', () => {
+  it('no permission map entry contains access_boundary prefix', () => {
     const allPerms = [
       ...Object.values(NAV_PERMISSION_MAP).flat(),
       ...Object.values(ROUTE_PERMISSION_MAP).flat(),
     ];
-    const legacyPerms = allPerms.filter((p) => p.startsWith('access_constraint.'));
-    expect(legacyPerms).toEqual([]);
+    const wrongPerms = allPerms.filter((p) => p.startsWith('access_boundary.'));
+    expect(wrongPerms).toEqual([]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// hasAnyPermission with access_boundary permissions
+// hasAnyPermission with access_constraint permissions
 // ---------------------------------------------------------------------------
 
-describe('hasAnyPermission: access_boundary permissions', () => {
-  it('grants access when user holds access_boundary.read', () => {
-    const admin = adminWithPermissions('access_boundary.read');
-    const perms = NAV_PERMISSION_MAP['/admin/access-boundaries']!;
-    expect(hasAnyPermission(admin, perms)).toBe(true);
-  });
-
-  it('grants access when user holds access_boundary.admin', () => {
-    const admin = adminWithPermissions('access_boundary.admin');
-    const perms = NAV_PERMISSION_MAP['/admin/access-boundaries']!;
-    expect(hasAnyPermission(admin, perms)).toBe(true);
-  });
-
-  it('denies access when user holds only legacy access_constraint.read', () => {
+describe('hasAnyPermission: access_constraint permissions', () => {
+  it('grants access when user holds access_constraint.read', () => {
     const admin = adminWithPermissions('access_constraint.read');
+    const perms = NAV_PERMISSION_MAP['/admin/access-boundaries']!;
+    expect(hasAnyPermission(admin, perms)).toBe(true);
+  });
+
+  it('grants access when user holds access_constraint.admin', () => {
+    const admin = adminWithPermissions('access_constraint.admin');
+    const perms = NAV_PERMISSION_MAP['/admin/access-boundaries']!;
+    expect(hasAnyPermission(admin, perms)).toBe(true);
+  });
+
+  it('denies access when user holds only access_boundary.read (wrong ID)', () => {
+    const admin = adminWithPermissions('access_boundary.read');
     const perms = NAV_PERMISSION_MAP['/admin/access-boundaries']!;
     expect(hasAnyPermission(admin, perms)).toBe(false);
   });
