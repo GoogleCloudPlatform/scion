@@ -770,6 +770,16 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
 	},
+	"/api/v1/admin/roles/export": {
+		Pattern: "/api/v1/admin/roles/export", RouteID: "admin.roles.export",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
+	"/api/v1/admin/roles/import": {
+		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
 	"/api/v1/admin/roles/": {
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
 		Classification: RouteHubAdmin,

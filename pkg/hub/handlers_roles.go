@@ -85,6 +85,43 @@ type listPermissionsResponse struct {
 	TotalCount int                      `json:"totalCount"`
 }
 
+// exportedRole is the portable representation of a custom role definition.
+type exportedRole struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	ScopeType   string   `json:"scopeType"`
+	Permissions []string `json:"permissions"`
+}
+
+// roleExportResponse is the envelope for GET /api/v1/admin/roles/export.
+type roleExportResponse struct {
+	Version    string         `json:"version"`
+	ExportedAt string         `json:"exportedAt"`
+	Roles      []exportedRole `json:"roles"`
+}
+
+// roleImportRequest is the payload for POST /api/v1/admin/roles/import.
+type roleImportRequest struct {
+	Version string         `json:"version"`
+	Roles   []exportedRole `json:"roles"`
+}
+
+// roleImportResultItem describes the outcome for a single role in an import.
+type roleImportResultItem struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "created", "skipped", "error"
+	Reason string `json:"reason,omitempty"`
+	ID     string `json:"id,omitempty"`
+}
+
+// roleImportResponse is the response for POST /api/v1/admin/roles/import.
+type roleImportResponse struct {
+	Created int                    `json:"created"`
+	Skipped int                    `json:"skipped"`
+	Errors  int                    `json:"errors"`
+	Items   []roleImportResultItem `json:"items"`
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers: Role Definitions
 // ---------------------------------------------------------------------------
@@ -502,6 +539,198 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		"role_id", def.ID, "name", def.Name, "actor", user.Email())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Export / Import: Role Definitions
+// ---------------------------------------------------------------------------
+
+// handleAdminRolesExport handles GET on /api/v1/admin/roles/export.
+// Authorization: route guard checks role.read.
+func (s *Server) handleAdminRolesExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+	s.exportRoleDefinitions(w, r)
+}
+
+// handleAdminRolesImport handles POST on /api/v1/admin/roles/import.
+// Authorization: route guard checks role.read; inline check requires role.create.
+func (s *Server) handleAdminRolesImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+	user, ok := s.requireWritePermissionForRole(w, r, "role.create", "create")
+	if !ok {
+		return
+	}
+	s.importRoleDefinitions(w, r, user)
+}
+
+// exportRoleDefinitions returns all custom (non-system) role definitions in a
+// portable JSON format suitable for importing into another instance.
+func (s *Server) exportRoleDefinitions(w http.ResponseWriter, r *http.Request) {
+	defs, err := s.store.ListRoleDefinitions(r.Context())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	var roles []exportedRole
+	for _, d := range defs {
+		if d.System {
+			continue
+		}
+		roles = append(roles, exportedRole{
+			Name:        d.Name,
+			Description: d.Description,
+			ScopeType:   d.ScopeType,
+			Permissions: d.Permissions,
+		})
+	}
+	if roles == nil {
+		roles = []exportedRole{}
+	}
+
+	writeJSON(w, http.StatusOK, roleExportResponse{
+		Version:    "1",
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
+		Roles:      roles,
+	})
+}
+
+// systemRoleNames is the set of built-in role names that cannot be imported.
+var systemRoleNames = map[string]bool{
+	store.SystemRoleSuperAdmin: true,
+	store.SystemRoleHubAdmin:   true,
+	store.SystemRoleHubMember:  true,
+	store.SystemRoleHubViewer:  true,
+	store.ProjectRoleOwner:     true,
+	store.ProjectRoleAdmin:     true,
+	store.ProjectRoleMember:    true,
+	store.AgentRoleDefNone:     true,
+	store.AgentRoleDefReadonly: true,
+	store.AgentRoleDefBaseline: true,
+	store.AgentRoleDefFull:     true,
+}
+
+// importRoleDefinitions creates custom role definitions from a portable JSON
+// export. System roles are rejected. Name conflicts with existing custom roles
+// are skipped (reported as "skipped"). Each role's permissions are validated
+// against the registry and checked via CanDelegate.
+func (s *Server) importRoleDefinitions(w http.ResponseWriter, r *http.Request, user UserIdentity) {
+	var req roleImportRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Version != "1" {
+		BadRequest(w, "unsupported export version: expected \"1\"")
+		return
+	}
+
+	if len(req.Roles) == 0 {
+		BadRequest(w, "no roles to import")
+		return
+	}
+
+	resp := roleImportResponse{
+		Items: make([]roleImportResultItem, 0, len(req.Roles)),
+	}
+
+	for _, role := range req.Roles {
+		item := roleImportResultItem{Name: role.Name}
+
+		// Validate name.
+		name := strings.TrimSpace(role.Name)
+		if name == "" {
+			item.Status = "error"
+			item.Reason = "name is required"
+			resp.Errors++
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		// Reject system role names.
+		if systemRoleNames[name] {
+			item.Status = "error"
+			item.Reason = "cannot import system role"
+			resp.Errors++
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		// Validate scope type.
+		if role.ScopeType != store.RoleScopeSystem && role.ScopeType != store.RoleScopeProject {
+			item.Status = "error"
+			item.Reason = "scopeType must be \"system\" or \"project\""
+			resp.Errors++
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		// Validate permissions against registry.
+		if err := validatePermissionIDs(role.Permissions); err != nil {
+			item.Status = "error"
+			item.Reason = err.Error()
+			resp.Errors++
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		// CanDelegate check: actor must hold all permissions being imported.
+		if s.authzService != nil {
+			decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
+				Type:                  GrantTypeCustomRole,
+				CustomRolePermissions: role.Permissions,
+				ScopeType:             role.ScopeType,
+			})
+			if !decision.Allowed {
+				item.Status = "error"
+				item.Reason = "cannot delegate: " + decision.Reason
+				resp.Errors++
+				resp.Items = append(resp.Items, item)
+				continue
+			}
+		}
+
+		// Attempt to create. Name conflicts with existing roles are skipped.
+		rd := &store.RoleDefinition{
+			Name:        name,
+			Description: role.Description,
+			ScopeType:   role.ScopeType,
+			Permissions: role.Permissions,
+			System:      false,
+		}
+		created, err := s.store.CreateRoleDefinition(r.Context(), rd)
+		if err != nil {
+			if errors.Is(err, store.ErrAlreadyExists) {
+				item.Status = "skipped"
+				item.Reason = "role with this name and scope already exists"
+				resp.Skipped++
+				resp.Items = append(resp.Items, item)
+				continue
+			}
+			item.Status = "error"
+			item.Reason = err.Error()
+			resp.Errors++
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		item.Status = "created"
+		item.ID = created.ID
+		resp.Created++
+		resp.Items = append(resp.Items, item)
+
+		slog.Info("role definition imported",
+			"role_id", created.ID, "name", created.Name, "actor", user.Email())
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------

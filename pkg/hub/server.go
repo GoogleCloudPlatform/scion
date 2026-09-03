@@ -3999,6 +3999,8 @@ func (s *Server) registerRoutes() {
 
 	// Role management (PR-C1)
 	s.mux.HandleFunc("/api/v1/admin/roles", s.guarded("/api/v1/admin/roles", s.handleAdminRoles))
+	s.mux.HandleFunc("/api/v1/admin/roles/export", s.guarded("/api/v1/admin/roles/export", s.handleAdminRolesExport))
+	s.mux.HandleFunc("/api/v1/admin/roles/import", s.guarded("/api/v1/admin/roles/import", s.handleAdminRolesImport))
 	s.mux.HandleFunc("/api/v1/admin/roles/", s.guarded("/api/v1/admin/roles/", s.handleAdminRoleByID))
 	s.mux.HandleFunc("/api/v1/admin/role-bindings", s.guarded("/api/v1/admin/role-bindings", s.handleAdminRoleBindings))
 	s.mux.HandleFunc("/api/v1/admin/role-bindings/", s.guarded("/api/v1/admin/role-bindings/", s.handleAdminRoleBindingByID))

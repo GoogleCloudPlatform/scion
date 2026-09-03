@@ -1411,3 +1411,334 @@ func TestRolesAPI_CreateRoleBinding_WithOnlyExpiresAt(t *testing.T) {
 	assert.Nil(t, binding.NotBefore, "notBefore should be nil when not set")
 	require.NotNil(t, binding.ExpiresAt, "expiresAt should be persisted")
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Role Export / Import
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_ExportRoles_Empty(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleExportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, "1", resp.Version)
+	assert.NotEmpty(t, resp.ExportedAt)
+	assert.Empty(t, resp.Roles, "no custom roles should exist initially")
+}
+
+func TestRolesAPI_ExportRoles_ExcludesSystemRoles(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create a custom role first
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "export-test-custom",
+		Description: "A custom role for export testing",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleExportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, "1", resp.Version)
+	require.Len(t, resp.Roles, 1, "only custom roles should be exported")
+	assert.Equal(t, "export-test-custom", resp.Roles[0].Name)
+	assert.Equal(t, "A custom role for export testing", resp.Roles[0].Description)
+	assert.Equal(t, "system", resp.Roles[0].ScopeType)
+	assert.Equal(t, []string{"agent.read"}, resp.Roles[0].Permissions)
+}
+
+func TestRolesAPI_ExportRoles_MethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/export", nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestRolesAPI_ImportRoles_Basic(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "imported-role-1",
+				Description: "First imported role",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read", "agent.list"},
+			},
+			{
+				Name:        "imported-role-2",
+				Description: "Second imported role",
+				ScopeType:   "project",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, 2, resp.Created)
+	assert.Equal(t, 0, resp.Skipped)
+	assert.Equal(t, 0, resp.Errors)
+	require.Len(t, resp.Items, 2)
+	assert.Equal(t, "created", resp.Items[0].Status)
+	assert.NotEmpty(t, resp.Items[0].ID)
+	assert.Equal(t, "created", resp.Items[1].Status)
+	assert.NotEmpty(t, resp.Items[1].ID)
+}
+
+func TestRolesAPI_ImportRoles_SkipDuplicate(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create a role first
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "existing-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Try to import with a duplicate name
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "existing-role",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read"},
+			},
+			{
+				Name:        "new-role",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, 1, resp.Created)
+	assert.Equal(t, 1, resp.Skipped)
+	assert.Equal(t, 0, resp.Errors)
+	assert.Equal(t, "skipped", resp.Items[0].Status)
+	assert.Contains(t, resp.Items[0].Reason, "already exists")
+	assert.Equal(t, "created", resp.Items[1].Status)
+}
+
+func TestRolesAPI_ImportRoles_RejectSystemRoleName(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "super-admin",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, 0, resp.Created)
+	assert.Equal(t, 1, resp.Errors)
+	assert.Equal(t, "error", resp.Items[0].Status)
+	assert.Contains(t, resp.Items[0].Reason, "system role")
+}
+
+func TestRolesAPI_ImportRoles_InvalidPermission(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "bad-perms-role",
+				ScopeType:   "system",
+				Permissions: []string{"nonexistent.permission"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, 0, resp.Created)
+	assert.Equal(t, 1, resp.Errors)
+	assert.Equal(t, "error", resp.Items[0].Status)
+	assert.Contains(t, resp.Items[0].Reason, "invalid permission")
+}
+
+func TestRolesAPI_ImportRoles_InvalidVersion(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "99",
+		Roles: []exportedRole{
+			{
+				Name:        "some-role",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestRolesAPI_ImportRoles_EmptyRoles(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "1",
+		Roles:   []exportedRole{},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestRolesAPI_ImportRoles_InvalidScopeType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "bad-scope-role",
+				ScopeType:   "invalid",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, 1, resp.Errors)
+	assert.Equal(t, "error", resp.Items[0].Status)
+	assert.Contains(t, resp.Items[0].Reason, "scopeType")
+}
+
+func TestRolesAPI_ImportRoles_EmptyName(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Equal(t, 1, resp.Errors)
+	assert.Equal(t, "error", resp.Items[0].Status)
+	assert.Contains(t, resp.Items[0].Reason, "name is required")
+}
+
+func TestRolesAPI_ImportRoles_MethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/import", nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestRolesAPI_ExportImportRoundTrip(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create some custom roles
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "roundtrip-alpha",
+		Description: "Alpha role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read", "agent.list"},
+	})
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "roundtrip-beta",
+		Description: "Beta role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Export
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var exported roleExportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&exported))
+	require.Len(t, exported.Roles, 2)
+
+	// Import into a fresh server — simulate by using the exported payload
+	// on the same server. The duplicate names will be skipped, but the
+	// format is verified as correct.
+	importBody := roleImportRequest{
+		Version: exported.Version,
+		Roles:   exported.Roles,
+	}
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", importBody)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var imported roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&imported))
+
+	// Both should be skipped since they already exist
+	assert.Equal(t, 0, imported.Created)
+	assert.Equal(t, 2, imported.Skipped)
+	assert.Equal(t, 0, imported.Errors)
+}
+
+func TestRolesAPI_ImportRoles_AuthRequired(t *testing.T) {
+	srv, _, _, member := setupScopedAdminTest(t)
+
+	// A regular member should be denied at the route guard (role.read check)
+	body := roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{
+				Name:        "member-import-attempt",
+				ScopeType:   "system",
+				Permissions: []string{"agent.read"},
+			},
+		},
+	}
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/admin/roles/import", body)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"regular member should not be able to import roles; body: %s", rec.Body.String())
+}
