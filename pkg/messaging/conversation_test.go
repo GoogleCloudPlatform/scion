@@ -20,11 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
-	entconv "github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -1431,57 +1434,122 @@ func TestDEF140_UnknownChannelResolvesConversationSuccessfully(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DEF-140: validSurfaces ↔ ent enum cross-check
+// DEF-140: validSurfaces ↔ schema cross-check (source-scanning)
+//
+// Precedent: pkg/hub/consistency_check_guard_test.go (DEF-139 structural guard).
 // ---------------------------------------------------------------------------
 
-func TestValidSurfaces_MatchesEntEnum(t *testing.T) {
-	// This test ensures that the validSurfaces whitelist in
-	// pkg/messaging/conversation.go stays in sync with the authoritative
-	// SurfaceValidator enum in pkg/ent/conversation. A surface added to or
-	// removed from the ent enum without updating validSurfaces will fail this
-	// test in BOTH directions:
-	//   - Addition: entSurfaces has a value validSurfaces lacks → "missing from validSurfaces"
-	//   - Removal: validSurfaces has a value the ent enum no longer accepts → "not accepted by SurfaceValidator"
+// surfaceSchemaRelPath is the path from the repo root to the ent schema file
+// that declares the surface enum. Used by the cross-check test.
+const surfaceSchemaRelPath = "pkg/ent/schema/conversation.go"
 
-	// The ent enum's complete set, sourced from the exported constants.
-	entSurfaces := []entconv.Surface{
-		entconv.SurfaceNative,
-		entconv.SurfaceDiscord,
-		entconv.SurfaceSlack,
-		entconv.SurfaceTelegram,
-		entconv.SurfaceGchat,
-		entconv.SurfaceTeams,
+// parseSurfaceValuesFromSchema reads the ent schema source file and extracts
+// the Values(...) arguments for the "surface" enum field. Returns the set of
+// values and any error. Callers MUST treat an empty set as a failure — the
+// schema is known to have values, and an empty parse means the scanner missed.
+func parseSurfaceValuesFromSchema(schemaPath string) (map[string]bool, error) {
+	data, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read schema file %s: %w", schemaPath, err)
 	}
 
-	// Direction 1: every ent enum value must be in validSurfaces.
-	for _, es := range entSurfaces {
-		if !validSurfaces[string(es)] {
-			t.Errorf("ent enum value %q is missing from validSurfaces — add it to keep the whitelist in sync", es)
+	// Match the surface enum declaration:
+	//   field.Enum("surface").
+	//       Values("native", "discord", ...),
+	// The Values(...) call may be on the same line or the next.
+	// We scan for field.Enum("surface") then capture the Values(...) args.
+	surfaceEnumRe := regexp.MustCompile(
+		`field\.Enum\("surface"\)\.\s*\n?\s*Values\(([^)]+)\)`,
+	)
+	match := surfaceEnumRe.FindSubmatch(data)
+	if match == nil {
+		return nil, fmt.Errorf("cannot find field.Enum(\"surface\").Values(...) declaration in %s", schemaPath)
+	}
+
+	// Extract individual quoted values from the captured group.
+	valueRe := regexp.MustCompile(`"([^"]+)"`)
+	valueMatches := valueRe.FindAllSubmatch(match[1], -1)
+	if len(valueMatches) == 0 {
+		return nil, fmt.Errorf("found surface Values() declaration but extracted zero values from %s", schemaPath)
+	}
+
+	result := make(map[string]bool, len(valueMatches))
+	for _, vm := range valueMatches {
+		result[string(vm[1])] = true
+	}
+	return result, nil
+}
+
+// repoRoot returns the repository root by walking up from the test file's
+// directory until it finds go.mod. This avoids hard-coding an absolute path
+// and works regardless of where `go test` is invoked.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	// runtime.Caller(0) gives us this test file's path.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed — cannot locate test file")
+	}
+	dir := filepath.Dir(thisFile)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find go.mod walking up from %s", thisFile)
+		}
+		dir = parent
+	}
+}
+
+func TestValidSurfaces_MatchesSchemaEnum(t *testing.T) {
+	// This test scans the ent schema source file — the single source of truth
+	// for the surface enum — and asserts that validSurfaces matches it exactly
+	// in both directions. Unlike a hand-written list of constants, this test
+	// cannot silently pass when a value is added to the schema.
+	//
+	// Fail-closed: if the file cannot be found, the pattern cannot be matched,
+	// or zero values are extracted, the test FAILS with a clear message.
+
+	root := repoRoot(t)
+	schemaPath := filepath.Join(root, surfaceSchemaRelPath)
+
+	schemaValues, err := parseSurfaceValuesFromSchema(schemaPath)
+	if err != nil {
+		t.Fatalf("schema scan failed (fail-closed): %v", err)
+	}
+	if len(schemaValues) == 0 {
+		t.Fatal("schema scan returned zero values — the schema is known to declare surface values; this means the scanner is broken")
+	}
+
+	// Direction 1: every schema value must be in validSurfaces.
+	for sv := range schemaValues {
+		if !validSurfaces[sv] {
+			t.Errorf("schema declares surface %q but validSurfaces does not contain it — add it to pkg/messaging/conversation.go validSurfaces", sv)
 		}
 	}
 
-	// Direction 2: every validSurfaces key must be accepted by SurfaceValidator.
-	for s := range validSurfaces {
-		if err := entconv.SurfaceValidator(entconv.Surface(s)); err != nil {
-			t.Errorf("validSurfaces key %q is not accepted by SurfaceValidator — remove it or update the ent enum", s)
+	// Direction 2: every validSurfaces key must be in the schema.
+	for vs := range validSurfaces {
+		if !schemaValues[vs] {
+			t.Errorf("validSurfaces contains %q but the schema does not declare it — remove it from pkg/messaging/conversation.go validSurfaces or add it to the schema", vs)
 		}
 	}
 
-	// Cardinality check: the sets must be the same size. This catches the case
-	// where both directions pass but the sets differ in size (should not happen
-	// if the above are exhaustive, but belt-and-suspenders).
-	if len(validSurfaces) != len(entSurfaces) {
+	// Cardinality check.
+	if len(validSurfaces) != len(schemaValues) {
 		var vsKeys []string
 		for k := range validSurfaces {
 			vsKeys = append(vsKeys, k)
 		}
 		sort.Strings(vsKeys)
-		var esKeys []string
-		for _, es := range entSurfaces {
-			esKeys = append(esKeys, string(es))
+		var svKeys []string
+		for k := range schemaValues {
+			svKeys = append(svKeys, k)
 		}
-		sort.Strings(esKeys)
-		t.Errorf("cardinality mismatch: validSurfaces=%v (%d), entSurfaces=%v (%d)",
-			vsKeys, len(vsKeys), esKeys, len(esKeys))
+		sort.Strings(svKeys)
+		t.Errorf("cardinality mismatch: validSurfaces=%v (%d), schema=%v (%d)",
+			vsKeys, len(vsKeys), svKeys, len(svKeys))
 	}
 }
