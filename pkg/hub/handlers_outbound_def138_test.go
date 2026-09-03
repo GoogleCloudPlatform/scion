@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +31,9 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
@@ -317,8 +320,8 @@ func TestDEF138_AC3_NoMemoryBasedConversationRouting(t *testing.T) {
 	if convBlockStart == -1 {
 		convBlockStart = strings.Index(content, "Phase 5 dual-write: resolve-or-create conversation")
 	}
-	// Find the divergence logging that ends the conversation block.
-	convBlockEnd := strings.Index(content, "Always log divergence")
+	// Find the end of the conversation resolution block (P-3 propagation).
+	convBlockEnd := strings.Index(content, "DEF-138 P-3: propagate the resolved ConversationID")
 
 	if convBlockStart > 0 && convBlockEnd > convBlockStart {
 		convBlock := content[convBlockStart:convBlockEnd]
@@ -638,3 +641,155 @@ func TestDEF138_AC12_MissingConversationField_ProducesMismatch(t *testing.T) {
 // We exercise the nonexistent case above (TestDEF138_AC2_NonexistentConversation_Denied)
 // which covers the same denial path.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// AC-6 / BLOCKER-1 guard: An explicitly-routed message must NEVER be
+// counted as a divergence mismatch.
+//
+// This test exercises the broker's deliverToUser path with a pre-resolved
+// ConversationID and verifies:
+//   1. DivergenceMetrics.Mismatches() does NOT increase.
+//   2. DivergenceMetrics.ExplicitRoutes() DOES increase.
+//   3. The persisted message carries the correct ConversationID.
+//
+// MUTATION VERIFICATION:
+//   Replace the body of messaging.LogExplicitRouting with:
+//     DivergenceMetrics.Inc(false)
+//   (i.e. count it as a mismatch instead of explicit).  The build stays
+//   green — LogExplicitRouting compiles fine with Inc(false) — but this
+//   test fails because Mismatches() increases.
+// ---------------------------------------------------------------------------
+
+func TestDEF138_ExplicitRouting_NeverCountedAsMismatch(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	ctx := context.Background()
+
+	// Create a conversation that the pre-resolved ID will reference.
+	conv := &store.Conversation{
+		Kind:        "group",
+		Surface:     "discord",
+		ExternalRef: "thread:" + projectID + ":explicit-test",
+		ProjectID:   &projectID,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	require.NoError(t, err)
+
+	// Create an agent for the sender FK.
+	agentID := api.NewUUID()
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:         agentID,
+		Name:       "explicit-test-agent",
+		Slug:       "explicit-test-agent",
+		ProjectID:  projectID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}))
+
+	// Create the recipient user.
+	recipientID := api.NewUUID()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          recipientID,
+		Email:       "explicit-recipient@example.com",
+		DisplayName: "Explicit Recipient",
+	}))
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+
+	// Snapshot counters before the test message.
+	mismatchesBefore := messaging.DivergenceMetrics.Mismatches()
+	explicitBefore := messaging.DivergenceMetrics.ExplicitRoutes()
+
+	// Build a message with a pre-resolved ConversationID (simulating the
+	// handler's P-3 stamp: structuredMsg.ConversationID = convResult.ConversationID).
+	msg := messages.NewInstruction("agent:explicit-test-agent", "user:explicit-recipient@example.com", "explicit routing test")
+	msg.SenderID = agentID
+	msg.RecipientID = recipientID
+	msg.ConversationID = created.ID
+
+	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	// Assert 1: no new mismatches.
+	mismatchesAfter := messaging.DivergenceMetrics.Mismatches()
+	require.Equal(t, mismatchesBefore, mismatchesAfter,
+		"BLOCKER-1 regression: an explicitly-routed message was counted as a "+
+			"divergence mismatch — ComputeDivergenceMatch must NOT be called "+
+			"for pre-resolved ConversationIDs")
+
+	// Assert 2: explicit routing counter increased.
+	explicitAfter := messaging.DivergenceMetrics.ExplicitRoutes()
+	require.Greater(t, explicitAfter, explicitBefore,
+		"explicit-routing counter should increment for pre-resolved messages")
+
+	// Assert 3: the message persisted with the correct ConversationID.
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: recipientID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	require.Equal(t, created.ID, result.Items[0].ConversationID,
+		"pre-resolved ConversationID should be honoured on the persisted message")
+}
+
+// TestDEF138_DerivedRouting_StillLogsDivergence verifies that the non-explicit
+// path (thread or DM derivation) still goes through ComputeDivergenceMatch.
+// This is the positive control: if someone accidentally makes ALL paths use
+// LogExplicitRouting, derived messages would stop being checked.
+func TestDEF138_DerivedRouting_StillLogsDivergence(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	ctx := context.Background()
+
+	// Create an agent for the sender FK.
+	agentID := api.NewUUID()
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:         agentID,
+		Name:       "derived-test-agent",
+		Slug:       "derived-test-agent",
+		ProjectID:  projectID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}))
+
+	// Create the recipient user.
+	recipientID := api.NewUUID()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          recipientID,
+		Email:       "derived-recipient@example.com",
+		DisplayName: "Derived Recipient",
+	}))
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+
+	// Snapshot divergence total (matches + mismatches) before.
+	totalBefore := messaging.DivergenceMetrics.Total()
+	explicitBefore := messaging.DivergenceMetrics.ExplicitRoutes()
+
+	// Build a message WITHOUT ConversationID — should derive a DM.
+	msg := messages.NewInstruction("agent:derived-test-agent", "user:derived-recipient@example.com", "derived routing test")
+	msg.SenderID = agentID
+	msg.RecipientID = recipientID
+	// msg.ConversationID is intentionally empty.
+
+	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	// The derived path should have gone through ComputeDivergenceMatch,
+	// incrementing either matches or mismatches.
+	totalAfter := messaging.DivergenceMetrics.Total()
+	require.Greater(t, totalAfter, totalBefore,
+		"derived routing should go through ComputeDivergenceMatch (Total should increase)")
+
+	// And NOT through LogExplicitRouting.
+	explicitAfter := messaging.DivergenceMetrics.ExplicitRoutes()
+	require.Equal(t, explicitBefore, explicitAfter,
+		"derived routing must not increment the explicit-routing counter")
+}

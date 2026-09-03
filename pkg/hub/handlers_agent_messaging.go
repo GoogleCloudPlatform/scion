@@ -470,27 +470,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			}
 		}
 	}
-	// Always log divergence — even when convResult is nil, that is a divergence signal.
-	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
-	convID := ""
-	actualRef := ""
-	if convResult != nil {
-		convID = convResult.ConversationID
-		actualRef = convResult.ExternalRef
-	}
-	match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-	messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
-		MessageID:  storeMsg.ID,
-		OldRouting: oldRouting,
-		NewRouting: messaging.NewRoutingStr(convID),
-		Match:      match,
-		Reason:     reason,
-	})
-	// DEF-3: Independent consistency check against prior messages.
-	if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog); !consistent {
-		s.messageLog.Warn("DEF-3: conversation consistency mismatch (outbound agent message)",
-			"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-	}
+	// DEF-138: Divergence logging and consistency checks are handled by the
+	// broker's deliverToUser callback (messagebroker.go) for the broker path,
+	// and are omitted on the non-broker direct-persist path to avoid double
+	// logging (AC-6). The handler's job is conversation resolution and
+	// authorization (P-2); persistence-time checks belong at the persistence
+	// site.
 
 	// DEF-138 P-3: propagate the resolved ConversationID onto structuredMsg
 	// so it survives through the broker's PublishUserMessage → deliverToUser

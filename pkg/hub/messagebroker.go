@@ -518,26 +518,36 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// Always log divergence — even when convResult is nil, that is a divergence signal.
-		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
-		convID := ""
-		actualRef := ""
-		if convResult != nil {
-			convID = convResult.ConversationID
-			actualRef = convResult.ExternalRef
+		// DEF-138: The pre-resolved path (msg.ConversationID != "") bypasses
+		// ComputeDivergenceMatch — there is no old-model routing key to
+		// compare against because the conversation was named by the caller,
+		// not derived from message fields.  Feeding an empty ExternalRef
+		// into ComputeDivergenceMatch would produce a false
+		// routing-type-mismatch on every correctly-routed explicit message.
+		if msg.ConversationID != "" {
+			messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+		} else {
+			// Always log divergence — even when convResult is nil, that is a divergence signal.
+			oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 		}
-		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-			MessageID:  storeMsg.ID,
-			OldRouting: oldRouting,
-			NewRouting: messaging.NewRoutingStr(convID),
-			Match:      match,
-			Reason:     reason,
-		})
 		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
+		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
 			p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
-				"message_id", storeMsg.ID, "conversation_id", convID)
+				"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
 		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {

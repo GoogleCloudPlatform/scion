@@ -49,6 +49,12 @@ type DivergenceCounter struct {
 	mismatches atomic.Int64
 	fallbacks  atomic.Int64
 
+	// DEF-138: explicit routing events — messages whose ConversationID was
+	// supplied by the caller and authorized by P-2.  These bypass
+	// ComputeDivergenceMatch entirely because there is no old-model routing
+	// key to compare against (the conversation was named, not derived).
+	explicitRoutes atomic.Int64
+
 	// Consistency check counters (CheckConversationConsistency).
 	// These track the independent, non-tautological consistency check that
 	// queries prior persisted messages — unlike the routing-key comparison
@@ -83,6 +89,15 @@ func (c *DivergenceCounter) IncFallback() { c.fallbacks.Add(1) }
 
 // Fallbacks returns the total number of read-path fallbacks recorded.
 func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
+
+// IncExplicitRouting increments the explicit-routing counter.
+// An explicit route is a message whose ConversationID was supplied by the
+// caller and authorized by P-2 — no derivation or old-model comparison
+// was performed.
+func (c *DivergenceCounter) IncExplicitRouting() { c.explicitRoutes.Add(1) }
+
+// ExplicitRoutes returns the total number of explicitly-routed messages.
+func (c *DivergenceCounter) ExplicitRoutes() int64 { return c.explicitRoutes.Load() }
 
 // IncConsistency increments the consistency check counter and, when
 // consistent is false, also increments the consistency mismatch counter.
@@ -266,6 +281,24 @@ func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
 	} else {
 		log.Warn("conversation routing check: DIVERGENCE", attrs...)
 	}
+}
+
+// LogExplicitRouting records that a message was routed via an explicit,
+// caller-supplied ConversationID that was authorized by the upstream handler
+// (DEF-138 P-2). No ComputeDivergenceMatch comparison is performed because
+// there is no old-model routing key to compare against — the conversation
+// identity was asserted, not derived.
+//
+// This replaces the former code path that built a minimal ConversationResult
+// with an empty ExternalRef and fed it to ComputeDivergenceMatch, which
+// produced a false routing-type-mismatch on every correctly-routed message.
+func LogExplicitRouting(log *slog.Logger, messageID, convID string) {
+	DivergenceMetrics.IncExplicitRouting()
+	log.Info("conversation routing check: explicit-routing",
+		"message_id", messageID,
+		"conversation_id", convID,
+		"explicit_route_count", DivergenceMetrics.ExplicitRoutes(),
+	)
 }
 
 // NewRoutingStr formats a conversation ID for the divergence log's NewRouting
