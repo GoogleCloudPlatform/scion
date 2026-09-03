@@ -361,6 +361,8 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/admin/roles` |
+| http_route | POST | `/api/v1/admin/roles/import` |
+| http_route | POST | `/api/v1/admin/roles/{id}/duplicate` |
 
 **Principals:** `user`
 
@@ -3026,6 +3028,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/roles` |
 | http_route | GET | `/api/v1/admin/roles/{id}` |
+| http_route | GET | `/api/v1/admin/roles/export` |
 | http_route | GET | `/api/v1/admin/permissions` |
 
 **Principals:** `user`
