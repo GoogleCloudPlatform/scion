@@ -512,7 +512,30 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	limit, offset := parsePaginationParams(r)
 
-	bindings, err := s.store.ListAllRoleBindings(ctx, limit, offset)
+	// Parse optional sort parameters.
+	sortBy := store.RoleBindingSortCreated // default
+	if v := r.URL.Query().Get("sort_by"); v != "" {
+		if !store.ValidRoleBindingSortField(v) {
+			BadRequest(w, "invalid sort_by value: must be one of principal, role, created")
+			return
+		}
+		sortBy = store.RoleBindingSortField(v)
+	}
+	sortOrder := "desc"
+	if v := r.URL.Query().Get("sort_order"); v != "" {
+		if v != "asc" && v != "desc" {
+			BadRequest(w, "invalid sort_order value: must be asc or desc")
+			return
+		}
+		sortOrder = v
+	}
+
+	bindings, err := s.store.ListAllRoleBindings(ctx, store.RoleBindingListOptions{
+		Limit:     limit,
+		Offset:    offset,
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
+	})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

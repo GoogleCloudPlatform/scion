@@ -1798,9 +1798,8 @@ type RoleStore interface {
 	DeleteRoleDefinition(ctx context.Context, id string) error
 
 	// ListAllRoleBindings returns all role bindings (admin view).
-	// limit and offset control pagination. A limit of 0 defaults to 100.
-	// The maximum allowed limit is 1000.
-	ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*RoleBinding, error)
+	// opts controls pagination and sort order. See RoleBindingListOptions for defaults.
+	ListAllRoleBindings(ctx context.Context, opts RoleBindingListOptions) ([]*RoleBinding, error)
 
 	// CountAllRoleBindings returns the total number of role bindings.
 	CountAllRoleBindings(ctx context.Context) (int, error)

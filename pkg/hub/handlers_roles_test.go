@@ -525,6 +525,346 @@ func TestRolesAPI_MethodNotAllowed_Bindings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: Role Binding Sorting
+// ---------------------------------------------------------------------------
+
+// setupSortBindings creates three bindings with distinct principals, roles, and
+// scopes to exercise every sort axis.  It returns them keyed by a short label.
+func setupSortBindings(t *testing.T, srv *Server) map[string]*store.RoleBinding {
+	t.Helper()
+
+	roleA := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "sort-alpha-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	roleB := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "sort-beta-role",
+		ScopeType:   "system",
+		Permissions: []string{"project.read"},
+	})
+	roleC := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "sort-gamma-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	b1 := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleA.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "alice",
+		ScopeType:        "system",
+	})
+	b2 := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleB.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "bob",
+		ScopeType:        "system",
+	})
+	b3 := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleC.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "charlie",
+		ScopeType:        "project",
+		ScopeID:          "proj-1",
+	})
+
+	return map[string]*store.RoleBinding{
+		"alice":   b1,
+		"bob":     b2,
+		"charlie": b3,
+	}
+}
+
+func TestRolesAPI_ListRoleBindings_SortByPrincipalAsc(t *testing.T) {
+	srv, _ := testServer(t)
+	bindings := setupSortBindings(t, srv)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=asc&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.GreaterOrEqual(t, len(resp.Items), 3)
+
+	// Find the indices of our bindings in the result set.
+	idx := make(map[string]int)
+	for i, item := range resp.Items {
+		for label, b := range bindings {
+			if item.ID == b.ID {
+				idx[label] = i
+			}
+		}
+	}
+
+	assert.Less(t, idx["alice"], idx["bob"], "alice < bob in principal asc")
+	assert.Less(t, idx["bob"], idx["charlie"], "bob < charlie in principal asc")
+}
+
+func TestRolesAPI_ListRoleBindings_SortByPrincipalDesc(t *testing.T) {
+	srv, _ := testServer(t)
+	bindings := setupSortBindings(t, srv)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=desc&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	idx := make(map[string]int)
+	for i, item := range resp.Items {
+		for label, b := range bindings {
+			if item.ID == b.ID {
+				idx[label] = i
+			}
+		}
+	}
+
+	assert.Less(t, idx["charlie"], idx["bob"], "charlie before bob in principal desc")
+	assert.Less(t, idx["bob"], idx["alice"], "bob before alice in principal desc")
+}
+
+func TestRolesAPI_ListRoleBindings_SortByCreatedAsc(t *testing.T) {
+	srv, _ := testServer(t)
+	bindings := setupSortBindings(t, srv)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=created&sort_order=asc&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	idx := make(map[string]int)
+	for i, item := range resp.Items {
+		for label, b := range bindings {
+			if item.ID == b.ID {
+				idx[label] = i
+			}
+		}
+	}
+
+	// Bindings are created in order: alice, bob, charlie.
+	assert.Less(t, idx["alice"], idx["bob"], "alice before bob in created asc")
+	assert.Less(t, idx["bob"], idx["charlie"], "bob before charlie in created asc")
+}
+
+func TestRolesAPI_ListRoleBindings_SortByCreatedDesc(t *testing.T) {
+	srv, _ := testServer(t)
+	bindings := setupSortBindings(t, srv)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=created&sort_order=desc&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	idx := make(map[string]int)
+	for i, item := range resp.Items {
+		for label, b := range bindings {
+			if item.ID == b.ID {
+				idx[label] = i
+			}
+		}
+	}
+
+	assert.Less(t, idx["charlie"], idx["bob"], "charlie before bob in created desc")
+	assert.Less(t, idx["bob"], idx["alice"], "bob before alice in created desc")
+}
+
+func TestRolesAPI_ListRoleBindings_SortByRole(t *testing.T) {
+	srv, _ := testServer(t)
+	bindings := setupSortBindings(t, srv)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=role&sort_order=asc&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Collect the role-definition IDs for our bindings in result order.
+	idx := make(map[string]int)
+	for i, item := range resp.Items {
+		for label, b := range bindings {
+			if item.ID == b.ID {
+				idx[label] = i
+			}
+		}
+	}
+	require.Len(t, idx, 3, "all three bindings must appear")
+
+	// With asc ordering on role_definition_id (UUIDs), we just need consistency:
+	// the order is deterministic and the same three bindings always appear in the
+	// same relative order.
+	ids := []string{
+		bindings["alice"].RoleDefinitionID,
+		bindings["bob"].RoleDefinitionID,
+		bindings["charlie"].RoleDefinitionID,
+	}
+	// Assert that the result order matches the sorted order of role def IDs.
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			labelI := [3]string{"alice", "bob", "charlie"}[i]
+			labelJ := [3]string{"alice", "bob", "charlie"}[j]
+			if ids[i] < ids[j] {
+				assert.Less(t, idx[labelI], idx[labelJ],
+					"%s (role %s) should come before %s (role %s) in asc",
+					labelI, ids[i], labelJ, ids[j])
+			} else if ids[i] > ids[j] {
+				assert.Greater(t, idx[labelI], idx[labelJ],
+					"%s (role %s) should come after %s (role %s) in asc",
+					labelI, ids[i], labelJ, ids[j])
+			}
+		}
+	}
+}
+
+func TestRolesAPI_ListRoleBindings_SecondaryScopeOrdering(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create two bindings with the same principal but different scopes.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "scope-order-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	bProj := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "scope-user",
+		ScopeType:        "project",
+		ScopeID:          "proj-scope-1",
+	})
+
+	roleSys := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "scope-order-role-sys",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	bSys := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleSys.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "scope-user",
+		ScopeType:        "system",
+	})
+
+	// Sort by principal asc — both have "scope-user", so secondary sort by
+	// scope_type (asc) kicks in: "project" < "system".
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=asc&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	idxProj, idxSys := -1, -1
+	for i, item := range resp.Items {
+		if item.ID == bProj.ID {
+			idxProj = i
+		}
+		if item.ID == bSys.ID {
+			idxSys = i
+		}
+	}
+	require.NotEqual(t, -1, idxProj, "project binding must be in results")
+	require.NotEqual(t, -1, idxSys, "system binding must be in results")
+	assert.Less(t, idxProj, idxSys,
+		"project scope should sort before system scope (secondary sort)")
+}
+
+func TestRolesAPI_ListRoleBindings_SortBeforePagination(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create enough bindings to span two pages (page size = 1).
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "page-sort-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "page-user-b",
+		ScopeType:        "system",
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "page-user-a",
+		ScopeType:        "system",
+	})
+
+	// Page 1 (limit=1, offset=0) sorted by principal asc.
+	rec1 := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=asc&limit=1&offset=0", nil)
+	require.Equal(t, http.StatusOK, rec1.Code)
+	var page1 listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&page1))
+
+	// Page 2 (limit=1, offset=1) sorted by principal asc.
+	rec2 := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=asc&limit=1&offset=1", nil)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var page2 listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&page2))
+
+	// Sorting happens before pagination, so the first page should contain
+	// a binding whose principal_id is ≤ that of the second page.
+	require.Len(t, page1.Items, 1)
+	require.Len(t, page2.Items, 1)
+	assert.LessOrEqual(t, page1.Items[0].PrincipalID, page2.Items[0].PrincipalID,
+		"page 1 item should have a ≤ principalId compared to page 2 (sort before paginate)")
+}
+
+func TestRolesAPI_ListRoleBindings_InvalidSortBy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_by=invalid", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestRolesAPI_ListRoleBindings_InvalidSortOrder(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?sort_order=sideways", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestRolesAPI_ListRoleBindings_DefaultSortIsCreatedDesc(t *testing.T) {
+	srv, _ := testServer(t)
+	bindings := setupSortBindings(t, srv)
+
+	// No sort params: should default to created desc.
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	idx := make(map[string]int)
+	for i, item := range resp.Items {
+		for label, b := range bindings {
+			if item.ID == b.ID {
+				idx[label] = i
+			}
+		}
+	}
+
+	// Default is created desc: charlie (last created) should be first.
+	assert.Less(t, idx["charlie"], idx["bob"], "charlie before bob in default sort")
+	assert.Less(t, idx["bob"], idx["alice"], "bob before alice in default sort")
+}
+
+// ---------------------------------------------------------------------------
 // Tests: Permissions Registry Endpoint
 // ---------------------------------------------------------------------------
 

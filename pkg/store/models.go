@@ -2496,6 +2496,32 @@ const (
 	RoleBindingPrincipalGroup = "group"
 )
 
+// RoleBindingSortField enumerates allowed sort fields for listing role bindings.
+type RoleBindingSortField string
+
+const (
+	RoleBindingSortPrincipal RoleBindingSortField = "principal"
+	RoleBindingSortRole      RoleBindingSortField = "role"
+	RoleBindingSortCreated   RoleBindingSortField = "created"
+)
+
+// ValidRoleBindingSortField reports whether s is a recognised sort field.
+func ValidRoleBindingSortField(s string) bool {
+	switch RoleBindingSortField(s) {
+	case RoleBindingSortPrincipal, RoleBindingSortRole, RoleBindingSortCreated:
+		return true
+	}
+	return false
+}
+
+// RoleBindingListOptions controls pagination and ordering for ListAllRoleBindings.
+type RoleBindingListOptions struct {
+	Limit     int                  // 0 → store default (100), max 1000
+	Offset    int                  // 0-based
+	SortBy    RoleBindingSortField // default: RoleBindingSortCreated
+	SortOrder string               // "asc" or "desc" (default: "desc")
+}
+
 // =============================================================================
 // Delegation Edges (Permissions Foundation Phase 1G)
 // =============================================================================

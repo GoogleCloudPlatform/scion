@@ -254,23 +254,49 @@ func (r *RoleStore) DeleteRoleDefinition(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListAllRoleBindings returns all role bindings (admin view) with pagination.
-// A limit of 0 defaults to 100. The maximum allowed limit is 1000.
-func (r *RoleStore) ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*store.RoleBinding, error) {
-	if limit <= 0 {
-		limit = 100
+// ListAllRoleBindings returns all role bindings (admin view) with pagination
+// and configurable sort order.  The primary sort is determined by
+// opts.SortBy (default: created); a secondary sort by scope_type then scope_id
+// is always appended, followed by a final tie-breaker on id for determinism.
+func (r *RoleStore) ListAllRoleBindings(ctx context.Context, opts store.RoleBindingListOptions) ([]*store.RoleBinding, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if opts.Limit > 1000 {
+		opts.Limit = 1000
 	}
-	if offset < 0 {
-		offset = 0
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+
+	// Determine the Ent direction helper.
+	dir := ent.Desc // default for "created"
+	if opts.SortOrder == "asc" {
+		dir = ent.Asc
+	} else if opts.SortOrder == "desc" {
+		dir = ent.Desc
+	}
+
+	// Map the primary sort field.
+	primaryField := rolebinding.FieldCreated // default
+	switch opts.SortBy {
+	case store.RoleBindingSortPrincipal:
+		primaryField = rolebinding.FieldPrincipalID
+	case store.RoleBindingSortRole:
+		primaryField = rolebinding.FieldRoleDefinitionID
+	case store.RoleBindingSortCreated:
+		primaryField = rolebinding.FieldCreated
 	}
 
 	rbs, err := r.client.RoleBinding.Query().
-		Order(ent.Desc(rolebinding.FieldCreated)).
-		Limit(limit).
-		Offset(offset).
+		Order(
+			dir(primaryField),
+			ent.Asc(rolebinding.FieldScopeType),
+			ent.Asc(rolebinding.FieldScopeID),
+			ent.Asc(rolebinding.FieldID),
+		).
+		Limit(opts.Limit).
+		Offset(opts.Offset).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
