@@ -82,12 +82,15 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     let detail: AccessDeniedDetail = {};
     try {
       const body = await response.clone().json();
-      // The backend error envelope is {error: {code, message}}, not
-      // {resource, action, reason}. Read from the actual shape so the
-      // toast can render a specific message when it fires.
+      // The backend error envelope is {error: {code, message, details?}}.
+      // When the central authorization path denied the request, details
+      // carries {resource_type, denied_action}; legacy/generic 403s omit
+      // details and degrade gracefully.
       if (typeof body.error === 'object' && body.error) {
+        const details = body.error.details;
         detail = {
-          action: body.error.code,
+          action: details?.denied_action ?? body.error.code,
+          resource: details?.resource_type,
           reason: body.error.message,
         };
       } else {

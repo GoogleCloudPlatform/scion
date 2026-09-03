@@ -280,6 +280,195 @@ func TestAuthorizeMsg_DenialBodyCarriesMessage(t *testing.T) {
 	}
 }
 
+// TestAuthorize_StructuredDenialDetail asserts that the central authorization
+// path (authorizeWithMessage) returns structured denial detail in the error
+// envelope's details map, so the frontend can render a two-line toast.
+func TestAuthorize_StructuredDenialDetail(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resource := Resource{
+		Type:       "agent",
+		ID:         "secret-id-that-must-not-leak",
+		ParentType: "project",
+		ParentID:   authzHelperProjectA,
+	}
+
+	rec := httptest.NewRecorder()
+	req := authzHelperRequest(authzHelperMember())
+	if srv.authorize(rec, req, resource, ActionDelete) {
+		t.Fatal("expected denial")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot parse 403 body: %v", err)
+	}
+	// Verify structured details are present.
+	if resp.Error.Details == nil {
+		t.Fatal("expected error.details in 403 response, got nil")
+	}
+	if got, ok := resp.Error.Details["resource_type"]; !ok || got != "agent" {
+		t.Errorf("details.resource_type = %v, want %q", got, "agent")
+	}
+	if got, ok := resp.Error.Details["denied_action"]; !ok || got != string(ActionDelete) {
+		t.Errorf("details.denied_action = %v, want %q", got, string(ActionDelete))
+	}
+	// The resource ID must NOT appear in the response body (redaction).
+	if strings.Contains(rec.Body.String(), "secret-id-that-must-not-leak") {
+		t.Error("resource ID leaked in 403 response body")
+	}
+}
+
+// TestAuthorize_StructuredDenialWithMessage verifies that authorizeMsg also
+// carries structured details alongside the custom message.
+func TestAuthorize_StructuredDenialWithMessage(t *testing.T) {
+	srv, _ := testServer(t)
+
+	const msg = "Custom guidance for the user"
+	rec := httptest.NewRecorder()
+	req := authzHelperRequest(authzHelperMember())
+	if srv.authorizeMsg(rec, req, Resource{Type: "project", ID: "p-1"}, ActionManage, msg) {
+		t.Fatal("expected denial")
+	}
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot parse 403 body: %v", err)
+	}
+	if resp.Error.Message != msg {
+		t.Errorf("error.message = %q, want %q", resp.Error.Message, msg)
+	}
+	if resp.Error.Details == nil {
+		t.Fatal("expected error.details in 403 response, got nil")
+	}
+	if got := resp.Error.Details["resource_type"]; got != "project" {
+		t.Errorf("details.resource_type = %v, want %q", got, "project")
+	}
+	if got := resp.Error.Details["denied_action"]; got != string(ActionManage) {
+		t.Errorf("details.denied_action = %v, want %q", got, string(ActionManage))
+	}
+}
+
+// TestWriteForbidden_LegacyNoDetails verifies that the original writeForbidden
+// (used by 40+ call sites) does NOT include structured details, ensuring
+// backward compatibility and graceful degradation on the frontend.
+func TestWriteForbidden_LegacyNoDetails(t *testing.T) {
+	// Empty message → generic Forbidden.
+	rec := httptest.NewRecorder()
+	writeForbidden(rec, "")
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot parse body: %v", err)
+	}
+	if resp.Error.Details != nil {
+		t.Errorf("expected nil details for legacy writeForbidden, got %v", resp.Error.Details)
+	}
+
+	// Non-empty message → still no details.
+	rec = httptest.NewRecorder()
+	writeForbidden(rec, "custom msg")
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot parse body: %v", err)
+	}
+	if resp.Error.Details != nil {
+		t.Errorf("expected nil details for legacy writeForbidden with message, got %v", resp.Error.Details)
+	}
+}
+
+// TestWriteForbiddenStructured_DetailShape verifies the shape and redaction
+// properties of writeForbiddenStructured.
+func TestWriteForbiddenStructured_DetailShape(t *testing.T) {
+	tests := []struct {
+		name         string
+		msg          string
+		resourceType string
+		action       Action
+		wantMessage  string
+		wantDetails  map[string]interface{}
+	}{
+		{
+			name:         "full detail",
+			msg:          "",
+			resourceType: "agent",
+			action:       ActionDelete,
+			wantMessage:  "Insufficient permissions",
+			wantDetails:  map[string]interface{}{"resource_type": "agent", "denied_action": "delete"},
+		},
+		{
+			name:         "custom message with detail",
+			msg:          "You cannot do this",
+			resourceType: "project",
+			action:       ActionManage,
+			wantMessage:  "You cannot do this",
+			wantDetails:  map[string]interface{}{"resource_type": "project", "denied_action": "manage"},
+		},
+		{
+			name:         "only resource type",
+			msg:          "",
+			resourceType: "secret",
+			action:       "",
+			wantMessage:  "Insufficient permissions",
+			wantDetails:  map[string]interface{}{"resource_type": "secret"},
+		},
+		{
+			name:         "only action",
+			msg:          "",
+			resourceType: "",
+			action:       ActionCreate,
+			wantMessage:  "Insufficient permissions",
+			wantDetails:  map[string]interface{}{"denied_action": "create"},
+		},
+		{
+			name:         "no detail at all",
+			msg:          "",
+			resourceType: "",
+			action:       "",
+			wantMessage:  "Insufficient permissions",
+			wantDetails:  nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeForbiddenStructured(rec, tc.msg, tc.resourceType, tc.action)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+
+			var resp ErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("cannot parse body: %v", err)
+			}
+			if resp.Error.Code != ErrCodeForbidden {
+				t.Errorf("code = %q, want %q", resp.Error.Code, ErrCodeForbidden)
+			}
+			if resp.Error.Message != tc.wantMessage {
+				t.Errorf("message = %q, want %q", resp.Error.Message, tc.wantMessage)
+			}
+
+			if tc.wantDetails == nil {
+				if resp.Error.Details != nil {
+					t.Errorf("expected nil details, got %v", resp.Error.Details)
+				}
+				return
+			}
+			if resp.Error.Details == nil {
+				t.Fatal("expected details, got nil")
+			}
+			for key, want := range tc.wantDetails {
+				if got := resp.Error.Details[key]; got != want {
+					t.Errorf("details[%q] = %v, want %v", key, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestAuthorizeMsg_UnauthenticatedStillGets401(t *testing.T) {
 	srv, _ := testServer(t)
 

@@ -64,6 +64,27 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, msg, nil)
 }
 
+// writeForbiddenStructured writes a 403 with machine-readable authorization
+// detail (resource_type, denied_action) in the error envelope's details map.
+// The resource ID and internal policy reason are deliberately omitted to avoid
+// leaking information that aids enumeration (design §denied-detail).
+func writeForbiddenStructured(w http.ResponseWriter, msg string, resourceType string, action Action) {
+	if msg == "" {
+		msg = "Insufficient permissions"
+	}
+	var details map[string]interface{}
+	if resourceType != "" || action != "" {
+		details = make(map[string]interface{})
+		if resourceType != "" {
+			details["resource_type"] = resourceType
+		}
+		if action != "" {
+			details["denied_action"] = string(action)
+		}
+	}
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, msg, details)
+}
+
 // authorize performs a fail-closed authorization check for any identity kind.
 // It writes 401 for an unauthenticated caller, 403 when access is denied, and
 // returns false in both cases, so callers write:
@@ -99,7 +120,7 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	decision := s.authzService.CheckAccess(ctx, identity, resource, action)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, action, decision.Reason)
-		writeForbidden(w, msg)
+		writeForbiddenStructured(w, msg, resource.Type, action)
 		return false
 	}
 	return true

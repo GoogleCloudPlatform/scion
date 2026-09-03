@@ -32,7 +32,7 @@ import './shared/debug-panel.js';
 
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
-import { showToast } from '../utils/toast.js';
+import { showAccessDeniedToast } from '../utils/access-denied.js';
 import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
@@ -244,12 +244,7 @@ export class ScionApp extends LitElement {
     const detail = event.detail || {};
     // Mark as handled to prevent duplicate toasts if chat-shell is also mounted.
     (detail as Record<string, unknown>)._handled = true;
-    // Prefer the backend reason (now correctly extracted from the error envelope).
-    const message = detail.reason
-      ? `Access denied: ${detail.reason}`
-      : `You don't have permission to ${detail.action || 'perform this action on'} this resource.`;
-
-    showToast(message, 'warning');
+    showAccessDeniedToast(detail);
   }
 
   override render() {
