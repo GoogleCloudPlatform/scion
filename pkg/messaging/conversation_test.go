@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 
+	entconv "github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -1230,24 +1232,12 @@ func TestResolveOrCreateThreadConversation_EmptyChannelKeepsNative(t *testing.T)
 
 // surfaceTrackingUpserter records every upsert call keyed by (surface, externalRef)
 // and returns a different conversation ID for each unique pair — mirroring the
-// real (surface, external_ref) unique index behaviour. Unlike the prior version,
-// it validates the surface against the production enum to catch invalid values
-// that the real store would reject (BLOCKER 2 fix).
+// real (surface, external_ref) unique index behaviour. Validates the surface
+// against the production validSurfaces whitelist (which is itself cross-checked
+// against the ent enum by TestValidSurfaces_MatchesEntEnum).
 type surfaceTrackingUpserter struct {
 	rows map[string]*store.Conversation // key = surface + "|" + externalRef
 	seq  int
-}
-
-// validSurfaceEnum mirrors the SurfaceValidator enum from
-// pkg/ent/conversation/conversation.go:129-136. Kept in sync manually;
-// a mismatch is a test bug, not a production bug.
-var validSurfaceEnum = map[string]bool{
-	"native":   true,
-	"discord":  true,
-	"slack":    true,
-	"telegram": true,
-	"gchat":    true,
-	"teams":    true,
 }
 
 func newSurfaceTrackingUpserter() *surfaceTrackingUpserter {
@@ -1257,10 +1247,10 @@ func newSurfaceTrackingUpserter() *surfaceTrackingUpserter {
 func (s *surfaceTrackingUpserter) UpsertConversationByExternalRef(
 	_ context.Context, conv *store.Conversation,
 ) (*store.Conversation, error) {
-	// Validate surface against the production enum — reject values that the
-	// real store would reject, so the test double cannot hide write denials.
-	if !validSurfaceEnum[conv.Surface] {
-		return nil, fmt.Errorf("surface validation failed: invalid enum value %q (test double mirrors production SurfaceValidator)", conv.Surface)
+	// Validate surface against the production whitelist — reject values that
+	// the real store would reject, so the test double cannot hide write denials.
+	if !validSurfaces[conv.Surface] {
+		return nil, fmt.Errorf("surface validation failed: invalid enum value %q (test double uses production validSurfaces whitelist)", conv.Surface)
 	}
 	key := conv.Surface + "|" + conv.ExternalRef
 	if existing, ok := s.rows[key]; ok {
@@ -1437,5 +1427,61 @@ func TestDEF140_UnknownChannelResolvesConversationSuccessfully(t *testing.T) {
 	})
 	if directErr == nil {
 		t.Fatal("expected enum validation error for raw 'irc' surface — test double should reject invalid enum values")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-140: validSurfaces ↔ ent enum cross-check
+// ---------------------------------------------------------------------------
+
+func TestValidSurfaces_MatchesEntEnum(t *testing.T) {
+	// This test ensures that the validSurfaces whitelist in
+	// pkg/messaging/conversation.go stays in sync with the authoritative
+	// SurfaceValidator enum in pkg/ent/conversation. A surface added to or
+	// removed from the ent enum without updating validSurfaces will fail this
+	// test in BOTH directions:
+	//   - Addition: entSurfaces has a value validSurfaces lacks → "missing from validSurfaces"
+	//   - Removal: validSurfaces has a value the ent enum no longer accepts → "not accepted by SurfaceValidator"
+
+	// The ent enum's complete set, sourced from the exported constants.
+	entSurfaces := []entconv.Surface{
+		entconv.SurfaceNative,
+		entconv.SurfaceDiscord,
+		entconv.SurfaceSlack,
+		entconv.SurfaceTelegram,
+		entconv.SurfaceGchat,
+		entconv.SurfaceTeams,
+	}
+
+	// Direction 1: every ent enum value must be in validSurfaces.
+	for _, es := range entSurfaces {
+		if !validSurfaces[string(es)] {
+			t.Errorf("ent enum value %q is missing from validSurfaces — add it to keep the whitelist in sync", es)
+		}
+	}
+
+	// Direction 2: every validSurfaces key must be accepted by SurfaceValidator.
+	for s := range validSurfaces {
+		if err := entconv.SurfaceValidator(entconv.Surface(s)); err != nil {
+			t.Errorf("validSurfaces key %q is not accepted by SurfaceValidator — remove it or update the ent enum", s)
+		}
+	}
+
+	// Cardinality check: the sets must be the same size. This catches the case
+	// where both directions pass but the sets differ in size (should not happen
+	// if the above are exhaustive, but belt-and-suspenders).
+	if len(validSurfaces) != len(entSurfaces) {
+		var vsKeys []string
+		for k := range validSurfaces {
+			vsKeys = append(vsKeys, k)
+		}
+		sort.Strings(vsKeys)
+		var esKeys []string
+		for _, es := range entSurfaces {
+			esKeys = append(esKeys, string(es))
+		}
+		sort.Strings(esKeys)
+		t.Errorf("cardinality mismatch: validSurfaces=%v (%d), entSurfaces=%v (%d)",
+			vsKeys, len(vsKeys), esKeys, len(esKeys))
 	}
 }

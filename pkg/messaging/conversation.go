@@ -352,8 +352,10 @@ func ChannelToSurface(channel string, log *slog.Logger) string {
 		return mapped
 	}
 	// Unknown channel — fall back to "native" to avoid write denial.
-	log.Warn("unmapped channel falling back to native surface",
-		"channel", channel)
+	if log != nil {
+		log.Warn("unmapped channel falling back to native surface",
+			"channel", channel)
+	}
 	return "native"
 }
 
