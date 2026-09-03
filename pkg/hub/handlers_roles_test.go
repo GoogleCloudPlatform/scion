@@ -1742,3 +1742,171 @@ func TestRolesAPI_ImportRoles_AuthRequired(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"regular member should not be able to import roles; body: %s", rec.Body.String())
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Duplicate Role Definition
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_DuplicateCustomRole(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create a custom role to duplicate.
+	source := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "dup-source-custom",
+		Description: "Source custom role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read", "project.read"},
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "dup-target-custom",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var dup store.RoleDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&dup))
+	assert.NotEmpty(t, dup.ID)
+	assert.NotEqual(t, source.ID, dup.ID, "duplicate should have a new ID")
+	assert.Equal(t, "dup-target-custom", dup.Name)
+	assert.Equal(t, source.Description, dup.Description)
+	assert.Equal(t, source.ScopeType, dup.ScopeType)
+	assert.Equal(t, source.Permissions, dup.Permissions)
+	assert.False(t, dup.System, "duplicated role must be a custom role")
+}
+
+func TestRolesAPI_DuplicateSystemRole(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Find a system role.
+	defs, err := st.ListRoleDefinitions(t.Context())
+	require.NoError(t, err)
+
+	var systemRole *store.RoleDefinition
+	for _, d := range defs {
+		if d.System {
+			systemRole = d
+			break
+		}
+	}
+	require.NotNil(t, systemRole, "expected at least one system role")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/"+systemRole.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "my-custom-" + systemRole.Name,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var dup store.RoleDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&dup))
+	assert.Equal(t, "my-custom-"+systemRole.Name, dup.Name)
+	assert.Equal(t, systemRole.ScopeType, dup.ScopeType)
+	assert.Equal(t, systemRole.Permissions, dup.Permissions)
+	assert.False(t, dup.System, "duplicated system role must become a custom role")
+}
+
+func TestRolesAPI_DuplicateRole_MissingName(t *testing.T) {
+	srv, _ := testServer(t)
+
+	source := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "dup-missing-name-src",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "name is required")
+}
+
+func TestRolesAPI_DuplicateRole_NameConflict(t *testing.T) {
+	srv, _ := testServer(t)
+
+	source := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "dup-conflict-src",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// First duplicate should succeed.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "dup-conflict-target",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// Second duplicate with the same name should conflict.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "dup-conflict-target",
+	})
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+func TestRolesAPI_DuplicateRole_SourceNotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/00000000-0000-0000-0000-000000000000/duplicate", duplicateRoleDefinitionRequest{
+		Name: "orphan-dup",
+	})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRolesAPI_DuplicateRole_MethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	source := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "dup-method-src",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// GET on /duplicate should be rejected.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+source.ID+"/duplicate", nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestRolesAPI_NonAdmin_DuplicateRole_WithUnheldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role.create and agent.read, but NOT user.suspend.
+	user := setupNonAdminUser(t, st, []string{"role.create", "role.read", "agent.read"})
+
+	// Create a role as admin that includes user.suspend.
+	source := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "dup-escalation-src",
+		Description: "Has unheld permissions",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read", "user.suspend"},
+	})
+
+	// Non-admin tries to duplicate -> should get 403 (CanDelegate denies).
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "dup-escalation-target",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestRolesAPI_NonAdmin_DuplicateRole_WithHeldPermissions(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Give non-admin user role.create and agent.read.
+	user := setupNonAdminUser(t, st, []string{"role.create", "role.read", "agent.read"})
+
+	// Create a role as admin with only agent.read.
+	source := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "dup-held-src",
+		Description: "Has only held permissions",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Non-admin duplicates -> should succeed.
+	rec := doRequestAsIdentity(t, srv, user, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "dup-held-target",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var dup store.RoleDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&dup))
+	assert.Equal(t, "dup-held-target", dup.Name)
+	assert.False(t, dup.System)
+}

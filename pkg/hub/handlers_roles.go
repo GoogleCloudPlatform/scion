@@ -48,6 +48,11 @@ type updateRoleDefinitionRequest struct {
 	Permissions []string `json:"permissions"`
 }
 
+// duplicateRoleDefinitionRequest is the payload for POST /api/v1/admin/roles/:id/duplicate.
+type duplicateRoleDefinitionRequest struct {
+	Name string `json:"name"`
+}
+
 // createRoleBindingRequest is the payload for POST /api/v1/admin/role-bindings.
 type createRoleBindingRequest struct {
 	RoleDefinitionID string     `json:"roleDefinitionId"`
@@ -146,11 +151,30 @@ func (s *Server) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminRoleByID handles GET / PUT / DELETE on
-// /api/v1/admin/roles/:id.
+// /api/v1/admin/roles/:id and POST on /api/v1/admin/roles/:id/duplicate.
 func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
-	id := extractID(r, "/api/v1/admin/roles")
+	id, action := extractAction(r, "/api/v1/admin/roles")
 	if id == "" {
 		BadRequest(w, "role definition ID is required")
+		return
+	}
+
+	// Sub-resource action: POST /api/v1/admin/roles/:id/duplicate
+	if action == "duplicate" {
+		if r.Method != http.MethodPost {
+			MethodNotAllowed(w)
+			return
+		}
+		user, ok := s.requireWritePermissionForRole(w, r, "role.create", "create")
+		if !ok {
+			return
+		}
+		s.duplicateRoleDefinition(w, r, id, user)
+		return
+	}
+
+	if action != "" {
+		NotFound(w, "Route")
 		return
 	}
 
@@ -539,6 +563,75 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		"role_id", def.ID, "name", def.Name, "actor", user.Email())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) duplicateRoleDefinition(w http.ResponseWriter, r *http.Request, sourceID string, user UserIdentity) {
+	var req duplicateRoleDefinitionRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		BadRequest(w, "name is required")
+		return
+	}
+
+	// Fetch source role (works for both system and custom roles).
+	source, err := s.store.GetRoleDefinition(r.Context(), sourceID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Role Definition")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Validate permissions against registry (source may reference
+	// permissions that were removed since seeding; reject if so).
+	if err := validatePermissionIDs(source.Permissions); err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+
+	// CanDelegate check: actor must hold all permissions in the duplicated role.
+	if s.authzService != nil {
+		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
+			Type:                  GrantTypeCustomRole,
+			CustomRolePermissions: source.Permissions,
+			ScopeType:             source.ScopeType,
+		})
+		if !decision.Allowed {
+			writeForbidden(w, "cannot duplicate role: "+decision.Reason)
+			return
+		}
+	}
+
+	rd := &store.RoleDefinition{
+		Name:        req.Name,
+		Description: source.Description,
+		ScopeType:   source.ScopeType,
+		Permissions: source.Permissions,
+		System:      false, // Duplicates are always custom roles.
+	}
+
+	created, err := s.store.CreateRoleDefinition(r.Context(), rd)
+	if err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			Conflict(w, "a role definition with this name and scope already exists")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	slog.Info("role definition duplicated",
+		"source_id", sourceID, "new_role_id", created.ID,
+		"name", created.Name, "actor", user.Email())
+
+	writeJSON(w, http.StatusCreated, created)
 }
 
 // ---------------------------------------------------------------------------
