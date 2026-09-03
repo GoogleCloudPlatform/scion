@@ -1145,3 +1145,174 @@ func TestDEF100_ReadResolveSoftDeletedTopic(t *testing.T) {
 		t.Errorf("expected GetTopicConversationIDIncludingDeleted, got %q", lookup.calledMethod)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DEF-140: WithThreadSurface tests
+// ---------------------------------------------------------------------------
+
+func TestResolveOrCreateThreadConversation_WithThreadSurface_Discord(t *testing.T) {
+	// DEF-140: When a channel plugin supplies "discord", the upserted
+	// conversation row must carry surface="discord", not the default "native".
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1",
+		WithThreadSurface("discord"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "discord" {
+		t.Errorf("expected surface 'discord', got %q", mock.lastConv.Surface)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_WithThreadSurface_Slack(t *testing.T) {
+	// DEF-140: Verify "slack" channel is forwarded correctly.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1",
+		WithThreadSurface("slack"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "slack" {
+		t.Errorf("expected surface 'slack', got %q", mock.lastConv.Surface)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_DefaultSurfaceIsNative(t *testing.T) {
+	// DEF-140/R3: Without WithThreadSurface the default "native" must survive.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "native" {
+		t.Errorf("expected default surface 'native', got %q", mock.lastConv.Surface)
+	}
+}
+
+func TestResolveOrCreateThreadConversation_EmptyChannelKeepsNative(t *testing.T) {
+	// DEF-140/R3: An empty channel must NOT override the default. The
+	// WithThreadSurface guard checks for non-empty, but verify the invariant
+	// end-to-end.
+	mock := &mockConversationUpserter{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	_, err := ResolveOrCreateThreadConversation(
+		context.Background(), mock, logger, "thread-123", "proj-1",
+		WithThreadSurface(""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastConv == nil {
+		t.Fatal("expected upsert to be called")
+	}
+	if mock.lastConv.Surface != "native" {
+		t.Errorf("expected surface 'native' when channel is empty, got %q", mock.lastConv.Surface)
+	}
+}
+
+// surfaceTrackingUpserter records every upsert call keyed by (surface, externalRef)
+// and returns a different conversation ID for each unique pair — mirroring the
+// real (surface, external_ref) unique index behaviour.
+type surfaceTrackingUpserter struct {
+	rows map[string]*store.Conversation // key = surface + "|" + externalRef
+	seq  int
+}
+
+func newSurfaceTrackingUpserter() *surfaceTrackingUpserter {
+	return &surfaceTrackingUpserter{rows: make(map[string]*store.Conversation)}
+}
+
+func (s *surfaceTrackingUpserter) UpsertConversationByExternalRef(
+	_ context.Context, conv *store.Conversation,
+) (*store.Conversation, error) {
+	key := conv.Surface + "|" + conv.ExternalRef
+	if existing, ok := s.rows[key]; ok {
+		return existing, nil
+	}
+	s.seq++
+	created := *conv
+	created.ID = fmt.Sprintf("conv-%d", s.seq)
+	s.rows[key] = &created
+	return &created, nil
+}
+
+func TestDEF140_DiscordThreadCreatesSeparateConversation(t *testing.T) {
+	// DEF-140 split test: an existing (native, thread:P:T) row and a new
+	// (discord, thread:P:T) inbound must resolve to DIFFERENT conversation ids.
+	// The old row must remain untouched.
+	upsert := newSurfaceTrackingUpserter()
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Step 1: Create the native conversation (simulates historical web-chat usage).
+	nativeResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P")
+	if err != nil {
+		t.Fatalf("native resolve: %v", err)
+	}
+	if nativeResult == nil {
+		t.Fatal("native resolve: expected non-nil result")
+	}
+
+	// Step 2: Resolve the same thread from discord — must get a different ID.
+	discordResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P",
+		WithThreadSurface("discord"))
+	if err != nil {
+		t.Fatalf("discord resolve: %v", err)
+	}
+	if discordResult == nil {
+		t.Fatal("discord resolve: expected non-nil result")
+	}
+
+	if nativeResult.ConversationID == discordResult.ConversationID {
+		t.Fatalf("DEF-140 violation: native and discord resolved to same conversation %q — "+
+			"expected different conversations under the (surface, external_ref) index",
+			nativeResult.ConversationID)
+	}
+
+	// Step 3: Verify the native row is untouched — re-resolve and confirm same ID.
+	nativeAgain, err := ResolveOrCreateThreadConversation(
+		context.Background(), upsert, logger, "thread-T", "proj-P")
+	if err != nil {
+		t.Fatalf("native re-resolve: %v", err)
+	}
+	if nativeAgain.ConversationID != nativeResult.ConversationID {
+		t.Errorf("native row mutated: expected %q, got %q",
+			nativeResult.ConversationID, nativeAgain.ConversationID)
+	}
+
+	// Step 4: Verify surfaces are correct on the stored rows.
+	nativeRow := upsert.rows["native|thread:proj-P:thread-T"]
+	if nativeRow == nil {
+		t.Fatal("expected native row in store")
+	}
+	if nativeRow.Surface != "native" {
+		t.Errorf("native row surface: expected 'native', got %q", nativeRow.Surface)
+	}
+
+	discordRow := upsert.rows["discord|thread:proj-P:thread-T"]
+	if discordRow == nil {
+		t.Fatal("expected discord row in store")
+	}
+	if discordRow.Surface != "discord" {
+		t.Errorf("discord row surface: expected 'discord', got %q", discordRow.Surface)
+	}
+}

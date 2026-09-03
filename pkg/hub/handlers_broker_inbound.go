@@ -305,7 +305,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	var convFromPhase5 *messaging.ConversationResult
 	if !req.Message.Broadcasted {
 		var convErr error
-		convFromPhase5, convErr = s.resolvePhase5Conversation(r.Context(), req.Message.ThreadID, agent.ProjectID, senderUserID, agent.ID)
+		convFromPhase5, convErr = s.resolvePhase5Conversation(r.Context(), req.Message.ThreadID, agent.ProjectID, senderUserID, agent.ID, req.Message.Channel)
 		if convErr != nil {
 			metricKey := "broker.dm"
 			if req.Message.ThreadID != "" {
@@ -554,7 +554,7 @@ func resolveSenderUserID(ctx context.Context, st store.Store, senderID, sender s
 // write-deny semantics.
 func (s *Server) resolvePhase5Conversation(
 	ctx context.Context,
-	threadID, projectID, senderUserID, agentID string,
+	threadID, projectID, senderUserID, agentID, channel string,
 ) (*messaging.ConversationResult, error) {
 	if threadID != "" {
 		var threadOpts []messaging.ThreadConversationOption
@@ -563,6 +563,9 @@ func (s *Server) resolvePhase5Conversation(
 		s.mu.RUnlock()
 		if wcs != nil {
 			threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
+		}
+		if channel != "" {
+			threadOpts = append(threadOpts, messaging.WithThreadSurface(channel))
 		}
 		return messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, threadID, projectID, threadOpts...)
 	}

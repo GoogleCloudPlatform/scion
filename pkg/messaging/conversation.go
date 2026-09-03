@@ -273,11 +273,15 @@ func ResolveOrCreateThreadConversation(
 		return nil, fmt.Errorf("conversation key derivation refused: %w", err)
 	}
 
-	// Forward topic lookup to the shared sink so all paths benefit from
-	// the sink-level guard (DEF-20 unify).
+	// Forward topic lookup and surface to the shared sink so all paths
+	// benefit from the sink-level guard (DEF-20 unify) and carry the
+	// originating channel (DEF-140).
 	var keyOpts []ConversationByKeyOption
 	if cfg.topicLookup != nil {
 		keyOpts = append(keyOpts, WithKeyTopicLookup(cfg.topicLookup))
+	}
+	if cfg.surface != "" {
+		keyOpts = append(keyOpts, WithSurface(cfg.surface))
 	}
 	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID, keyOpts...)
 }
@@ -285,6 +289,7 @@ func ResolveOrCreateThreadConversation(
 // threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.
 type threadConversationConfig struct {
 	topicLookup TopicConversationLookup
+	surface     string // override for the conversation surface; empty keeps the default ("native")
 }
 
 // ThreadConversationOption is a functional option for ResolveOrCreateThreadConversation.
@@ -296,6 +301,15 @@ type ThreadConversationOption func(*threadConversationConfig)
 func WithTopicLookup(tl TopicConversationLookup) ThreadConversationOption {
 	return func(c *threadConversationConfig) {
 		c.topicLookup = tl
+	}
+}
+
+// WithThreadSurface overrides the default surface ("native") for thread
+// conversations. The value must be a valid Surface enum member. Empty strings
+// are ignored — the caller should only pass validated, non-empty channels.
+func WithThreadSurface(s string) ThreadConversationOption {
+	return func(c *threadConversationConfig) {
+		c.surface = s
 	}
 }
 

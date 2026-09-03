@@ -486,6 +486,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
+			if msg.Channel != "" {
+				threadOpts = append(threadOpts, messaging.WithThreadSurface(msg.Channel))
+			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {
@@ -700,6 +703,9 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
+			}
+			if msg.Channel != "" {
+				threadOpts = append(threadOpts, messaging.WithThreadSurface(msg.Channel))
 			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
