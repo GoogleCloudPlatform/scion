@@ -775,6 +775,48 @@ export class ScionPageAdminRoleDetail extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
+  // Export
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Export this single custom role as a downloadable JSON file.
+   */
+  private exportSingleRole(): void {
+    const role = this.roleData;
+    if (!role || role.system) return;
+
+    const exportData = {
+      version: '1' as const,
+      exportedAt: new Date().toISOString(),
+      roles: [
+        {
+          name: role.name,
+          description: role.description,
+          scopeType: role.scopeType,
+          permissions: [...role.permissions],
+        },
+      ],
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `scion-role-${role.name}-export.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    this.actionFeedback = {
+      message: `Exported role "${role.name}"`,
+      variant: 'success',
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
 
@@ -898,6 +940,10 @@ export class ScionPageAdminRoleDetail extends LitElement {
           ${role.system
             ? nothing
             : html`
+                <sl-button variant="default" size="small" @click=${() => this.exportSingleRole()}>
+                  <sl-icon slot="prefix" name="download"></sl-icon>
+                  Export
+                </sl-button>
                 <sl-button variant="default" size="small" @click=${() => this.openEditDialog()}>
                   <sl-icon slot="prefix" name="pencil"></sl-icon>
                   Edit

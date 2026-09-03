@@ -49,6 +49,38 @@ interface Permission {
   Description: string;
 }
 
+/**
+ * Portable role representation used for export/import.
+ * Omits server-generated fields (id, system, createdAt, updatedAt).
+ */
+interface ImportableRole {
+  name: string;
+  description: string;
+  scopeType: string;
+  permissions: string[];
+}
+
+/** Envelope for the exported JSON file. */
+interface RoleExportEnvelope {
+  version: '1';
+  exportedAt: string;
+  roles: ImportableRole[];
+}
+
+/** Per-role import outcome. */
+interface ImportRoleResult {
+  name: string;
+  status: 'created' | 'skipped' | 'error';
+  error?: string;
+}
+
+/** Aggregate import result. */
+interface ImportResult {
+  created: number;
+  skipped: number;
+  errors: ImportRoleResult[];
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -62,8 +94,13 @@ export class ScionPageAdminRoles extends LitElement {
 
   // Dialog state
   @state() private showCreateDialog = false;
+  @state() private showImportDialog = false;
 
-
+  // Import state
+  @state() private importParsedRoles: ImportableRole[] = [];
+  @state() private importParseError: string | null = null;
+  @state() private importInProgress = false;
+  @state() private importResults: ImportResult | null = null;
 
   // Form fields
   @state() private formName = '';
@@ -354,6 +391,139 @@ export class ScionPageAdminRoles extends LitElement {
       font-weight: 500;
     }
 
+    /* Import dialog */
+    .import-help {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 1rem 0;
+    }
+
+    .file-label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+      margin-bottom: 0.5rem;
+    }
+
+    .file-input {
+      display: block;
+      width: 100%;
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .import-error {
+      margin-top: 0.75rem;
+    }
+
+    .error-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      font-size: 0.8125rem;
+      font-family: var(--scion-font-mono, monospace);
+    }
+
+    .import-preview {
+      margin-top: 1rem;
+    }
+
+    .import-preview h4 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
+    }
+
+    .import-preview-list {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .import-preview-item {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .import-preview-item:last-child {
+      border-bottom: none;
+    }
+
+    .import-preview-item.will-skip {
+      opacity: 0.6;
+    }
+
+    .import-preview-name {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .import-skip-badge {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 9999px;
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .import-new-badge {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 9999px;
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .import-preview-meta {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.125rem;
+    }
+
+    .import-results {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .import-results-details {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .import-result-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      font-size: 0.875rem;
+    }
+
+    .import-result-item:last-child {
+      border-bottom: none;
+    }
+
+    .import-result-name {
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .import-result-error {
+      font-size: 0.75rem;
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -507,8 +677,207 @@ export class ScionPageAdminRoles extends LitElement {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Export
+  // ---------------------------------------------------------------------------
 
+  /**
+   * Build a JSON export document from the currently loaded custom roles
+   * and trigger a browser file download.
+   */
+  private exportRoles(): void {
+    const customRoles = this.roles.filter((r) => !r.system);
+    if (customRoles.length === 0) {
+      this.actionFeedback = { message: 'No custom roles to export', variant: 'danger' };
+      return;
+    }
 
+    const exportData: RoleExportEnvelope = {
+      version: '1',
+      exportedAt: new Date().toISOString(),
+      roles: customRoles.map((r) => ({
+        name: r.name,
+        description: r.description,
+        scopeType: r.scopeType,
+        permissions: [...r.permissions],
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `scion-roles-export-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    this.actionFeedback = {
+      message: `Exported ${customRoles.length} custom role${customRoles.length !== 1 ? 's' : ''}`,
+      variant: 'success',
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Import
+  // ---------------------------------------------------------------------------
+
+  private openImportDialog(): void {
+    this.importParsedRoles = [];
+    this.importParseError = null;
+    this.importResults = null;
+    this.showImportDialog = true;
+  }
+
+  /**
+   * Handle the file input change event: read the file, parse JSON,
+   * validate structure, and populate the preview.
+   */
+  private async handleImportFileSelect(e: Event): Promise<void> {
+    this.importParseError = null;
+    this.importParsedRoles = [];
+    this.importResults = null;
+
+    const input = e.target as HTMLInputElement;
+    if (!input.files?.length) return;
+
+    const file = input.files[0];
+
+    // Size guard: 1 MB max
+    if (file.size > 1_048_576) {
+      this.importParseError = 'File is too large (max 1 MB).';
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as Record<string, unknown>;
+
+      // Accept either the envelope format or a plain array of roles
+      let roles: unknown[];
+      if (Array.isArray(data)) {
+        roles = data;
+      } else if (
+        data &&
+        typeof data === 'object' &&
+        'roles' in data &&
+        Array.isArray(data.roles)
+      ) {
+        roles = data.roles as unknown[];
+      } else {
+        this.importParseError =
+          'Invalid format. Expected a JSON file with a "roles" array, or a plain array of role objects.';
+        return;
+      }
+
+      if (roles.length === 0) {
+        this.importParseError = 'The file contains no roles to import.';
+        return;
+      }
+
+      // Validate each role entry
+      const validated: ImportableRole[] = [];
+      const validationErrors: string[] = [];
+
+      for (let i = 0; i < roles.length; i++) {
+        const entry = roles[i] as Record<string, unknown>;
+        if (!entry || typeof entry !== 'object') {
+          validationErrors.push(`Entry ${i + 1}: not a valid object`);
+          continue;
+        }
+        if (typeof entry.name !== 'string' || !entry.name.trim()) {
+          validationErrors.push(`Entry ${i + 1}: missing or empty "name"`);
+          continue;
+        }
+        if (entry.permissions !== undefined && !Array.isArray(entry.permissions)) {
+          validationErrors.push(`Entry ${i + 1} (${entry.name}): "permissions" must be an array`);
+          continue;
+        }
+
+        validated.push({
+          name: entry.name.trim(),
+          description: typeof entry.description === 'string' ? entry.description : '',
+          scopeType: typeof entry.scopeType === 'string' ? entry.scopeType : 'system',
+          permissions: Array.isArray(entry.permissions)
+            ? (entry.permissions as string[]).filter((p) => typeof p === 'string')
+            : [],
+        });
+      }
+
+      if (validationErrors.length > 0) {
+        this.importParseError = validationErrors.join('\n');
+        return;
+      }
+
+      this.importParsedRoles = validated;
+    } catch {
+      this.importParseError = 'Failed to parse the file. Ensure it is valid JSON.';
+    }
+  }
+
+  /**
+   * Import the parsed roles by creating each one via the existing
+   * POST /api/v1/admin/roles endpoint. Skips roles whose names
+   * already exist in the current list.
+   */
+  private async importRoles(): Promise<void> {
+    if (this.importParsedRoles.length === 0) return;
+
+    this.importInProgress = true;
+    this.importResults = null;
+
+    const existingNames = new Set(this.roles.map((r) => r.name));
+    const results: ImportResult = { created: 0, skipped: 0, errors: [] };
+
+    for (const role of this.importParsedRoles) {
+      if (existingNames.has(role.name)) {
+        results.skipped++;
+        results.errors.push({
+          name: role.name,
+          status: 'skipped',
+          error: 'A role with this name already exists',
+        });
+        continue;
+      }
+
+      try {
+        const res = await apiFetch('/api/v1/admin/roles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: role.name,
+            description: role.description,
+            scopeType: role.scopeType,
+            permissions: role.permissions,
+          }),
+        });
+
+        if (!res.ok) {
+          const msg = await extractApiError(res, `HTTP ${res.status}`);
+          results.errors.push({ name: role.name, status: 'error', error: msg });
+        } else {
+          results.created++;
+        }
+      } catch (err) {
+        results.errors.push({
+          name: role.name,
+          status: 'error',
+          error: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    }
+
+    this.importResults = results;
+    this.importInProgress = false;
+
+    // If any were created, refresh the list
+    if (results.created > 0) {
+      void this.loadData();
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Render
@@ -547,6 +916,19 @@ export class ScionPageAdminRoles extends LitElement {
                 >${this.roles.length} role${this.roles.length !== 1 ? 's' : ''}</span
               >`
             : ''}
+          <sl-button
+            variant="default"
+            size="small"
+            @click=${() => this.exportRoles()}
+            ?disabled=${this.loading || !!this.error || this.roles.filter((r) => !r.system).length === 0}
+          >
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Export
+          </sl-button>
+          <sl-button variant="default" size="small" @click=${() => this.openImportDialog()}>
+            <sl-icon slot="prefix" name="upload"></sl-icon>
+            Import
+          </sl-button>
           <sl-button variant="primary" size="small" @click=${() => this.openCreateDialog()}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
             Create Role
@@ -556,6 +938,7 @@ export class ScionPageAdminRoles extends LitElement {
 
       ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderRoles()}
       ${this.renderCreateDialog()}
+      ${this.renderImportDialog()}
     `;
   }
 
@@ -752,6 +1135,146 @@ export class ScionPageAdminRoles extends LitElement {
           >Create Role</sl-button
         >
       </sl-dialog>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Import dialog
+  // ---------------------------------------------------------------------------
+
+  private renderImportDialog() {
+    if (!this.showImportDialog) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Import Roles"
+        open
+        @sl-request-close=${() => {
+          if (!this.importInProgress) this.showImportDialog = false;
+        }}
+      >
+        ${this.importResults ? this.renderImportResults() : this.renderImportForm()}
+      </sl-dialog>
+    `;
+  }
+
+  private renderImportForm() {
+    return html`
+      <p class="import-help">
+        Upload a JSON file containing custom role definitions.
+        Roles with names that already exist will be skipped.
+      </p>
+
+      <div class="form-group">
+        <label class="file-label" for="role-import-input">Select file</label>
+        <input
+          id="role-import-input"
+          type="file"
+          accept=".json,application/json"
+          class="file-input"
+          @change=${(e: Event) => this.handleImportFileSelect(e)}
+        />
+      </div>
+
+      ${this.importParseError
+        ? html`
+            <sl-alert variant="danger" open class="import-error">
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              <pre class="error-pre">${this.importParseError}</pre>
+            </sl-alert>
+          `
+        : nothing}
+
+      ${this.importParsedRoles.length > 0 ? this.renderImportPreview() : nothing}
+
+      <sl-button
+        slot="footer"
+        variant="default"
+        ?disabled=${this.importInProgress}
+        @click=${() => {
+          this.showImportDialog = false;
+        }}
+        >Cancel</sl-button
+      >
+      <sl-button
+        slot="footer"
+        variant="primary"
+        ?loading=${this.importInProgress}
+        ?disabled=${this.importParsedRoles.length === 0}
+        @click=${() => this.importRoles()}
+        >Import ${this.importParsedRoles.length > 0 ? `${this.importParsedRoles.length} Role${this.importParsedRoles.length !== 1 ? 's' : ''}` : 'Roles'}</sl-button
+      >
+    `;
+  }
+
+  private renderImportPreview() {
+    const existingNames = new Set(this.roles.map((r) => r.name));
+
+    return html`
+      <div class="import-preview">
+        <h4>Preview (${this.importParsedRoles.length} role${this.importParsedRoles.length !== 1 ? 's' : ''})</h4>
+        <div class="import-preview-list">
+          ${this.importParsedRoles.map((role) => {
+            const exists = existingNames.has(role.name);
+            return html`
+              <div class="import-preview-item ${exists ? 'will-skip' : ''}">
+                <div class="import-preview-name">
+                  ${role.name}
+                  ${exists
+                    ? html`<span class="import-skip-badge">exists — will skip</span>`
+                    : html`<span class="import-new-badge">new</span>`}
+                </div>
+                <div class="import-preview-meta">
+                  ${role.scopeType} · ${role.permissions.length} permission${role.permissions.length !== 1 ? 's' : ''}
+                </div>
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderImportResults() {
+    const results = this.importResults!;
+    const hasErrors = results.errors.filter((e) => e.status === 'error').length > 0;
+
+    return html`
+      <div class="import-results">
+        <sl-alert variant=${hasErrors ? 'warning' : 'success'} open>
+          <sl-icon slot="icon" name=${hasErrors ? 'exclamation-triangle' : 'check-circle'}></sl-icon>
+          Import complete: ${results.created} created, ${results.skipped} skipped${hasErrors ? `, ${results.errors.filter((e) => e.status === 'error').length} failed` : ''}.
+        </sl-alert>
+
+        ${results.errors.length > 0
+          ? html`
+              <div class="import-results-details">
+                ${results.errors.map(
+                  (r) => html`
+                    <div class="import-result-item ${r.status}">
+                      <span class="import-result-name">${r.name}</span>
+                      <span class="import-result-status">
+                        ${r.status === 'skipped'
+                          ? html`<sl-badge variant="neutral">Skipped</sl-badge>`
+                          : html`<sl-badge variant="danger">Error</sl-badge>`}
+                      </span>
+                      ${r.error ? html`<span class="import-result-error">${r.error}</span>` : nothing}
+                    </div>
+                  `
+                )}
+              </div>
+            `
+          : nothing}
+      </div>
+
+      <sl-button
+        slot="footer"
+        variant="primary"
+        @click=${() => {
+          this.showImportDialog = false;
+        }}
+        >Done</sl-button
+      >
     `;
   }
 
