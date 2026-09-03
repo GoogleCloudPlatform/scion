@@ -34,6 +34,7 @@ type divergenceBoardCaveats struct {
 	SamplingWindow            string `json:"sampling_window"`
 	NotGoNoGo                 string `json:"not_go_no_go"`
 	CounterSnapshot           string `json:"counter_snapshot"`
+	ExplicitRoutingAdoption   string `json:"explicit_routing_adoption"`
 }
 
 // divergenceBoardResponse is the JSON shape returned by
@@ -48,6 +49,7 @@ type divergenceBoardResponse struct {
 	Fallbacks              int64                  `json:"fallbacks"`
 	ConsistencyChecks      int64                  `json:"consistency_checks"`
 	ConsistencyMismatches  int64                  `json:"consistency_mismatches"`
+	ExplicitRoutes         int64                  `json:"explicit_routes"`
 	Caveats                divergenceBoardCaveats `json:"caveats"`
 }
 
@@ -98,6 +100,14 @@ var divergenceCaveats = divergenceBoardCaveats{
 		"matches + mismatches from those independent reads, so the triple is " +
 		"arithmetically consistent but not a true snapshot. Ratios derived from " +
 		"these values (e.g. mismatch rate, fallback percentage) are approximate.",
+	ExplicitRoutingAdoption: "explicit_routes counts messages whose ConversationID " +
+		"was supplied by the caller and authorized by the handler (DEF-138 P-2). " +
+		"These are not comparisons — no old-model routing key exists to compare " +
+		"against because the caller stated the conversation identity directly " +
+		"rather than having it derived from message fields. The counter measures " +
+		"adoption of explicit conversation routing, not correctness. " +
+		"explicit_routes / (comparisons + explicit_routes) approximates the " +
+		"fraction of outbound traffic using the new routing path.",
 }
 
 // handleAdminMessagingDivergence handles GET /api/v1/admin/messaging/divergence.
@@ -121,6 +131,7 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 	fallbacks := m.Fallbacks()
 	consistencyChecks := m.ConsistencyChecks()
 	consistencyMismatches := m.ConsistencyMismatches()
+	explicitRoutes := m.ExplicitRoutes()
 
 	writeJSON(w, http.StatusOK, divergenceBoardResponse{
 		HubID:                 s.HubID(),
@@ -132,6 +143,7 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 		Fallbacks:             fallbacks,
 		ConsistencyChecks:     consistencyChecks,
 		ConsistencyMismatches: consistencyMismatches,
+		ExplicitRoutes:        explicitRoutes,
 		Caveats:               divergenceCaveats,
 	})
 }

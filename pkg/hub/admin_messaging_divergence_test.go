@@ -39,6 +39,9 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	messaging.DivergenceMetrics.Inc(false) // 1 mismatch
 	messaging.DivergenceMetrics.IncFallback()
 	messaging.DivergenceMetrics.IncFallback()
+	messaging.DivergenceMetrics.IncExplicitRouting() // 1 explicit route
+	messaging.DivergenceMetrics.IncExplicitRouting() // 2 explicit routes
+	messaging.DivergenceMetrics.IncExplicitRouting() // 3 explicit routes
 
 	srv := &Server{
 		startTime: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
@@ -90,6 +93,11 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	}
 	if resp.ConsistencyMismatches != 0 {
 		t.Errorf("expected consistency_mismatches=0, got %d", resp.ConsistencyMismatches)
+	}
+
+	// DEF-138: explicit routing counter.
+	if resp.ExplicitRoutes != 3 {
+		t.Errorf("expected explicit_routes=3, got %d", resp.ExplicitRoutes)
 	}
 
 	// Verify identity fields.
@@ -155,6 +163,7 @@ func TestHandleAdminMessagingDivergence_CaveatKeysPresent(t *testing.T) {
 		"sampling_window",
 		"not_go_no_go",
 		"counter_snapshot",
+		"explicit_routing_adoption",
 	}
 	for _, key := range requiredKeys {
 		val, present := caveats[key]
