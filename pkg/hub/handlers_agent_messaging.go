@@ -368,7 +368,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Reason:     reason,
 	})
 	// DEF-3: Independent consistency check against prior messages.
-	messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog)
+	if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog); !consistent {
+		s.messageLog.Warn("DEF-3: conversation consistency mismatch (outbound agent message)",
+			"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+	}
 
 	// Propagate recipients and group_id from metadata for group-set messages.
 	if req.Metadata != nil {
@@ -1124,7 +1127,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		})
 		messaging.RecordStep(ctx, "divergence_logged")
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
+		if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog); !consistent {
+			s.messageLog.Warn("DEF-3: conversation consistency mismatch (structured agent message)",
+				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+		}
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
@@ -1430,7 +1436,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Reason:     reason,
 			})
 			// DEF-3: Independent consistency check against prior messages.
-			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog)
+			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog); !consistent {
+				s.messageLog.Warn("DEF-3: conversation consistency mismatch (agent-to-agent DM)",
+					"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+			}
 			persisted := false
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
@@ -1612,7 +1621,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Reason:     reason,
 			})
 			// DEF-3: Independent consistency check against prior messages.
-			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog)
+			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog); !consistent {
+				s.messageLog.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
+					"message_id", storeMsg.ID, "conversation_id", convID)
+			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {

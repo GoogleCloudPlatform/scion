@@ -517,7 +517,10 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			Reason:     reason,
 		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log)
+		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
+			p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
+				"message_id", storeMsg.ID, "conversation_id", convID)
+		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
@@ -717,7 +720,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			Reason:     reason,
 		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log)
+		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log); !consistent {
+			p.log.Warn("DEF-3: conversation consistency mismatch (agent message from broker)",
+				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
