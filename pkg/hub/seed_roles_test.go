@@ -165,8 +165,8 @@ func TestBuiltInRoles_SuperAdminHasAllPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminConstraintPermissions verifies that hub-admin holds
-// access_constraint.read but does NOT hold access_constraint.admin.
-// Constraint administration requires explicit super-admin authority.
+// both access_constraint.read and access_constraint.admin, making access
+// constraint management operator-complete without requiring super-admin.
 func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 	adminPerms := hubAdminPermissionIDs()
 	permSet := make(map[string]bool, len(adminPerms))
@@ -176,8 +176,8 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 
 	assert.True(t, permSet["access_constraint.read"],
 		"hub-admin must include access_constraint.read")
-	assert.False(t, permSet["access_constraint.admin"],
-		"hub-admin must NOT include access_constraint.admin — constraint admin requires super-admin")
+	assert.True(t, permSet["access_constraint.admin"],
+		"hub-admin must include access_constraint.admin for operator-complete access constraint management")
 }
 
 // TestBuiltInRoles_ProjectMemberPermissions verifies that the curated
