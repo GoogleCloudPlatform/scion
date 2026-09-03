@@ -682,30 +682,34 @@ export class ScionPageAdminRoles extends LitElement {
   // ---------------------------------------------------------------------------
 
   /**
-   * Build a JSON export document from the currently loaded custom roles
-   * and trigger a browser file download.
+   * Export custom roles via the dedicated backend endpoint
+   * GET /api/v1/admin/roles/export. Falls back to client-side
+   * export if the endpoint is unavailable.
    */
-  private exportRoles(): void {
+  private async exportRoles(): Promise<void> {
     const customRoles = this.roles.filter((r) => !r.system);
     if (customRoles.length === 0) {
       this.actionFeedback = { message: 'No custom roles to export', variant: 'danger' };
       return;
     }
 
-    const exportData: RoleExportEnvelope = {
-      version: '1',
-      exportedAt: new Date().toISOString(),
-      roles: customRoles.map((r) => ({
-        name: r.name,
-        description: r.description,
-        scopeType: r.scopeType,
-        permissions: [...r.permissions],
-      })),
-    };
+    let exportJson: string;
 
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-      type: 'application/json',
-    });
+    try {
+      const res = await apiFetch('/api/v1/admin/roles/export');
+      if (res.ok) {
+        const data = await res.json();
+        exportJson = JSON.stringify(data, null, 2);
+      } else {
+        // Fall back to client-side export
+        exportJson = this.buildClientExport(customRoles);
+      }
+    } catch {
+      // Fall back to client-side export
+      exportJson = this.buildClientExport(customRoles);
+    }
+
+    const blob = new Blob([exportJson], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -719,6 +723,21 @@ export class ScionPageAdminRoles extends LitElement {
       message: `Exported ${customRoles.length} custom role${customRoles.length !== 1 ? 's' : ''}`,
       variant: 'success',
     };
+  }
+
+  /** Client-side fallback for building the export envelope. */
+  private buildClientExport(customRoles: RoleDefinition[]): string {
+    const exportData: RoleExportEnvelope = {
+      version: '1',
+      exportedAt: new Date().toISOString(),
+      roles: customRoles.map((r) => ({
+        name: r.name,
+        description: r.description,
+        scopeType: r.scopeType,
+        permissions: [...r.permissions],
+      })),
+    };
+    return JSON.stringify(exportData, null, 2);
   }
 
   // ---------------------------------------------------------------------------
@@ -819,9 +838,10 @@ export class ScionPageAdminRoles extends LitElement {
   }
 
   /**
-   * Import the parsed roles by creating each one via the existing
-   * POST /api/v1/admin/roles endpoint. Skips roles whose names
-   * already exist in the current list.
+   * Import the parsed roles via the dedicated backend endpoint
+   * POST /api/v1/admin/roles/import. The endpoint handles duplicate
+   * detection, permission validation, and CanDelegate checks
+   * server-side.
    */
   private async importRoles(): Promise<void> {
     if (this.importParsedRoles.length === 0) return;
@@ -829,53 +849,69 @@ export class ScionPageAdminRoles extends LitElement {
     this.importInProgress = true;
     this.importResults = null;
 
-    const existingNames = new Set(this.roles.map((r) => r.name));
-    const results: ImportResult = { created: 0, skipped: 0, errors: [] };
+    try {
+      const payload: RoleExportEnvelope = {
+        version: '1',
+        exportedAt: new Date().toISOString(),
+        roles: this.importParsedRoles,
+      };
 
-    for (const role of this.importParsedRoles) {
-      if (existingNames.has(role.name)) {
-        results.skipped++;
-        results.errors.push({
-          name: role.name,
-          status: 'skipped',
-          error: 'A role with this name already exists',
-        });
-        continue;
+      const res = await apiFetch('/api/v1/admin/roles/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const msg = await extractApiError(res, `HTTP ${res.status}`);
+        this.importResults = {
+          created: 0,
+          skipped: 0,
+          errors: [{ name: '(request)', status: 'error', error: msg }],
+        };
+        return;
       }
 
-      try {
-        const res = await apiFetch('/api/v1/admin/roles', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: role.name,
-            description: role.description,
-            scopeType: role.scopeType,
-            permissions: role.permissions,
+      const data = (await res.json()) as {
+        created: number;
+        skipped: number;
+        errors: number;
+        items: { name: string; status: 'created' | 'skipped' | 'error'; reason?: string; id?: string }[];
+      };
+
+      const results: ImportResult = {
+        created: data.created,
+        skipped: data.skipped,
+        errors: (data.items || [])
+          .filter((item) => item.status !== 'created')
+          .map((item) => {
+            const entry: ImportRoleResult = {
+              name: item.name,
+              status: item.status === 'error' ? 'error' as const : 'skipped' as const,
+            };
+            if (item.reason) entry.error = item.reason;
+            return entry;
           }),
-        });
+      };
 
-        if (!res.ok) {
-          const msg = await extractApiError(res, `HTTP ${res.status}`);
-          results.errors.push({ name: role.name, status: 'error', error: msg });
-        } else {
-          results.created++;
-        }
-      } catch (err) {
-        results.errors.push({
-          name: role.name,
-          status: 'error',
-          error: err instanceof Error ? err.message : 'Unknown error',
-        });
+      this.importResults = results;
+
+      // If any were created, refresh the list
+      if (results.created > 0) {
+        void this.loadData();
       }
-    }
-
-    this.importResults = results;
-    this.importInProgress = false;
-
-    // If any were created, refresh the list
-    if (results.created > 0) {
-      void this.loadData();
+    } catch (err) {
+      this.importResults = {
+        created: 0,
+        skipped: 0,
+        errors: [{
+          name: '(request)',
+          status: 'error',
+          error: err instanceof Error ? err.message : 'Failed to import roles',
+        }],
+      };
+    } finally {
+      this.importInProgress = false;
     }
   }
 

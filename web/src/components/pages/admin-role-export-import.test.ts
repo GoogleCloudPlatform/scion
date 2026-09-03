@@ -75,30 +75,69 @@ const PERMISSIONS = [
 
 function createRolesListFetchHandler(opts?: {
   roles?: Record<string, unknown>[];
-  createStatus?: number;
-  createError?: string;
+  importResponse?: Record<string, unknown>;
+  importStatus?: number;
+  importError?: string;
 }) {
   const roles = opts?.roles ?? [CUSTOM_ROLE_1, CUSTOM_ROLE_2, SYSTEM_ROLE];
 
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
 
-    // POST role (create — used by import)
-    if (init?.method === 'POST' && path.includes('/api/v1/admin/roles')) {
-      const status = opts?.createStatus ?? 201;
+    // POST /api/v1/admin/roles/import (bulk import)
+    if (init?.method === 'POST' && path.includes('/api/v1/admin/roles/import')) {
+      const status = opts?.importStatus ?? 200;
       if (status >= 400) {
         return Promise.resolve(
-          new Response(JSON.stringify({ error: opts?.createError ?? 'Bad request' }), {
+          new Response(JSON.stringify({ error: opts?.importError ?? 'Bad request' }), {
             status,
             headers: { 'Content-Type': 'application/json' },
           })
         );
       }
+      if (opts?.importResponse) {
+        return Promise.resolve(
+          new Response(JSON.stringify(opts.importResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      // Default: parse the request body and create results
       const body = JSON.parse(init.body as string);
+      const existingNames = new Set(roles.filter((r: any) => !r.system).map((r: any) => r.name));
+      const items = (body.roles || []).map((r: any) => {
+        if (existingNames.has(r.name)) {
+          return { name: r.name, status: 'skipped', reason: 'role with this name and scope already exists' };
+        }
+        return { name: r.name, status: 'created', id: `role-new-${r.name}` };
+      });
+      const created = items.filter((i: any) => i.status === 'created').length;
+      const skipped = items.filter((i: any) => i.status === 'skipped').length;
       return Promise.resolve(
         new Response(
-          JSON.stringify({ id: `role-new-${body.name}`, ...body, system: false }),
-          { status: 201, headers: { 'Content-Type': 'application/json' } }
+          JSON.stringify({ created, skipped, errors: 0, items }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    }
+
+    // GET /api/v1/admin/roles/export
+    if (path.includes('/api/v1/admin/roles/export')) {
+      const customRoles = roles.filter((r: any) => !r.system);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            version: '1',
+            exportedAt: new Date().toISOString(),
+            roles: customRoles.map((r: any) => ({
+              name: r.name,
+              description: r.description,
+              scopeType: r.scopeType,
+              permissions: r.permissions,
+            })),
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
         )
       );
     }
@@ -327,17 +366,19 @@ describe('admin-roles: export', () => {
       return elem;
     });
 
-    // Click export
+    // Click export — exportRoles() is async, wait for it
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
     const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
     exportBtn?.click();
+    // Wait for the async export to complete
+    await new Promise((r) => setTimeout(r, 50));
     await el.updateComplete;
 
     // Verify download was triggered
     expect(clickSpy).toHaveBeenCalled();
     expect(downloadFilename).toMatch(/^scion-roles-export-\d{4}-\d{2}-\d{2}\.json$/);
 
-    // Verify the blob content
+    // Verify the blob content (from backend export endpoint)
     expect(capturedBlob).not.toBeNull();
     const text = await capturedBlob!.text();
     const data = JSON.parse(text);
@@ -358,7 +399,7 @@ describe('admin-roles: export', () => {
 
     // Even though button is disabled, verify internal method behavior
     // by directly calling exportRoles
-    (el as any).exportRoles();
+    await (el as any).exportRoles();
     await el.updateComplete;
 
     const alert = el.shadowRoot?.querySelector('.feedback-alert');
@@ -547,7 +588,7 @@ describe('admin-roles: import', () => {
     expect(skipBadge?.textContent?.trim()).toContain('exists');
   });
 
-  it('imports new roles and skips existing ones', async () => {
+  it('imports new roles via backend import endpoint and handles skips', async () => {
     const fetchFn = vi.fn(createRolesListFetchHandler());
     vi.stubGlobal('fetch', fetchFn);
 
@@ -580,19 +621,22 @@ describe('admin-roles: import', () => {
     expect(results.errors[0].name).toBe('test-editor');
     expect(results.errors[0].status).toBe('skipped');
 
-    // Verify POST was called only for new role
+    // Verify POST was sent to the import endpoint
     const postCalls = fetchFn.mock.calls.filter(
       (call: unknown[]) => (call[1] as RequestInit)?.method === 'POST'
     );
     expect(postCalls).toHaveLength(1);
+    const postUrl = typeof postCalls[0][0] === 'string' ? postCalls[0][0] : '';
+    expect(postUrl).toContain('/api/v1/admin/roles/import');
     const postBody = JSON.parse((postCalls[0][1] as RequestInit).body as string);
-    expect(postBody.name).toBe('brand-new-role');
+    expect(postBody.version).toBe('1');
+    expect(postBody.roles).toHaveLength(2);
   });
 
-  it('reports API errors during import', async () => {
+  it('reports API errors from import endpoint', async () => {
     const handler = createRolesListFetchHandler({
-      createStatus: 409,
-      createError: 'Conflict: name already taken',
+      importStatus: 403,
+      importError: 'Insufficient permissions: role.create required',
     });
     el = await createRolesPage(handler);
 
@@ -607,6 +651,34 @@ describe('admin-roles: import', () => {
     expect(results.created).toBe(0);
     expect(results.errors).toHaveLength(1);
     expect(results.errors[0].status).toBe('error');
+  });
+
+  it('handles per-role errors from import endpoint', async () => {
+    const handler = createRolesListFetchHandler({
+      importResponse: {
+        created: 0,
+        skipped: 0,
+        errors: 1,
+        items: [
+          { name: 'bad-role', status: 'error', reason: 'invalid permission IDs: foo.bar' },
+        ],
+      },
+    });
+    el = await createRolesPage(handler);
+
+    const importData = [
+      { name: 'bad-role', description: 'Bad', scopeType: 'system', permissions: ['foo.bar'] },
+    ];
+    (el as any).importParsedRoles = importData;
+    await (el as any).importRoles();
+    await el.updateComplete;
+
+    const results = (el as any).importResults;
+    expect(results.created).toBe(0);
+    expect(results.errors).toHaveLength(1);
+    expect(results.errors[0].name).toBe('bad-role');
+    expect(results.errors[0].status).toBe('error');
+    expect(results.errors[0].error).toContain('invalid permission');
   });
 
   it('renders results summary after import', async () => {
