@@ -33,6 +33,7 @@ import type {
 } from '../../shared/types.js';
 import { isTerminalAvailable } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { clampCell, sgrWheel, wheelNotches } from '../../shared/terminal-wheel.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { SSEClient } from '../../client/sse-client.js';
 import type { SSEUpdateEvent } from '../../client/sse-client.js';
@@ -76,6 +77,17 @@ export class ScionPageTerminal extends LitElement {
 
   @state()
   private wasConnected = false;
+  /** Pending auto-reconnect timer, and how many attempts have been made. */
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _reconnectAttempt = 0;
+  /** Set while cleanup/navigation is deliberate, to suppress auto-reconnect. */
+  private _closingDeliberately = false;
+  private _onVisibilityChange: (() => void) | null = null;
+  /** Whether THIS instance holds a claim on the document overscroll lock. */
+  private _hasLockedOverscroll = false;
+  /** Claims outstanding across instances, and the styles the first one displaced. */
+  private static _overscrollClaims = 0;
+  private static _priorOverscroll: { html: string; body: string } | null = null;
 
   @state()
   private error: string | null = null;
@@ -319,6 +331,9 @@ export class ScionPageTerminal extends LitElement {
       left: 0;
       right: 0;
       bottom: 0;
+      /* Stop a scroll that reaches the terminal's edge from chaining out to
+         the page, which on iOS is what produces the rubber-band bounce. */
+      overscroll-behavior: contain;
     }
 
     .disconnected-overlay {
@@ -539,6 +554,7 @@ export class ScionPageTerminal extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.lockDocumentOverscroll();
     // SSR property bindings (.agentId=) aren't restored during client-side
     // hydration for top-level page components. Fall back to URL parsing.
     if (!this.agentId && typeof window !== 'undefined') {
@@ -564,8 +580,55 @@ export class ScionPageTerminal extends LitElement {
   }
 
   override disconnectedCallback(): void {
-    super.disconnectedCallback();
+    try {
+      super.disconnectedCallback();
+    } finally {
+      // finally: a throwing reactive controller would otherwise strand the
+      // claim counter and leave the document locked for the whole session.
+      this.releaseDocumentOverscroll();
+    }
     this.cleanup();
+  }
+
+  /**
+   * Stops the PAGE bouncing while the terminal is on screen. The component's
+   * styles live in its shadow root and cannot reach the document, but the iOS
+   * rubber-band is the document's — so it has to be set here. Reversed on the
+   * way out, since every other page in the SPA does need to scroll.
+   *
+   * Claim-counted across instances rather than saved per instance: if two
+   * ever overlap, the second would capture 'none' as the prior value and the
+   * last to unmount would restore it, leaving the SPA unable to scroll. This
+   * router unmounts before it mounts, so the counter is a guard, not a fix.
+   */
+  private lockDocumentOverscroll(): void {
+    if (typeof document === 'undefined' || this._hasLockedOverscroll) return;
+    this._hasLockedOverscroll = true;
+    if (++ScionPageTerminal._overscrollClaims > 1) return;
+
+    const html = document.documentElement;
+    const body = document.body;
+    ScionPageTerminal._priorOverscroll = {
+      html: html.style.overscrollBehaviorY,
+      body: body.style.overscrollBehaviorY,
+    };
+    // Y only: the rubber-band is vertical, and suppressing the x-axis would
+    // also disable two-finger swipe-back navigation on desktop.
+    html.style.overscrollBehaviorY = 'none';
+    body.style.overscrollBehaviorY = 'none';
+  }
+
+  private releaseDocumentOverscroll(): void {
+    if (typeof document === 'undefined' || !this._hasLockedOverscroll) return;
+    this._hasLockedOverscroll = false;
+    ScionPageTerminal._overscrollClaims = Math.max(0, ScionPageTerminal._overscrollClaims - 1);
+    if (ScionPageTerminal._overscrollClaims > 0) return;
+
+    const prior = ScionPageTerminal._priorOverscroll;
+    if (!prior) return;
+    document.documentElement.style.overscrollBehaviorY = prior.html;
+    document.body.style.overscrollBehaviorY = prior.body;
+    ScionPageTerminal._priorOverscroll = null;
   }
 
   private async loadAgentInfo(): Promise<void> {
@@ -612,6 +675,11 @@ export class ScionPageTerminal extends LitElement {
       // Wait for render, then initialize terminal
       await this.updateComplete;
       await this.initTerminal();
+      // The dynamic imports in initTerminal can resolve after the router has
+      // already removed this page; connecting then would hold a PTY open and
+      // re-arm the reconnect loop on a component that will never disconnect
+      // again.
+      if (!this.isConnected) return;
       this.connectWebSocket();
     } catch (err) {
       console.error('Failed to load agent:', err);
@@ -730,6 +798,7 @@ export class ScionPageTerminal extends LitElement {
 
     this.terminal.open(container);
     this.enableShiftSelectionOnMac();
+    this.enableTouchWheelScroll();
 
     // Detect active tmux window from OSC 7337 sequence sent by the broker
     // on connect. Format: \033]7337;tmuxwindow=<name>\007
@@ -859,8 +928,119 @@ export class ScionPageTerminal extends LitElement {
     };
   }
 
+  /**
+   * Translates a vertical touch drag into wheel events, so an application
+   * holding the wheel (tmux with `mouse on`) has reachable scrollback on a
+   * device that has no wheel to turn and no Ctrl key for copy-mode.
+   *
+   * Only while mouse reporting is ACTIVE: with it off xterm.js already scrolls
+   * its own viewport on touch, and synthesising here would both duplicate that
+   * and inject escape sequences into an application that never asked for them.
+   */
+  private enableTouchWheelScroll(): void {
+    const el = this.terminal?.element;
+    if (!el) return;
+
+    // One notch per row of travel keeps the content under the finger.
+    const rowHeight = (): number => {
+      const rows = this.terminal?.rows ?? 24;
+      return Math.max(8, el.clientHeight / rows);
+    };
+
+    let lastY: number | null = null;
+    let carry = 0;
+    // Decided at touchstart, not on the first move that crosses a row: the
+    // browser begins its own scroll from the very first touchmove.
+    let consuming = false;
+
+    // areMouseEventsActive is true for ANY active protocol and says nothing
+    // about encoding, but sgrWheel only speaks SGR — an app that enabled
+    // mouse reporting without it would be handed a CSI it never negotiated.
+    const mouseActive = (): boolean => {
+      const svc = (this.terminal as (Terminal & {
+        _core?: {
+          coreMouseService?: {
+            areMouseEventsActive?: boolean;
+            activeEncoding?: string;
+          };
+        };
+      }) | undefined)?._core?.coreMouseService;
+      return Boolean(svc?.areMouseEventsActive) && svc?.activeEncoding === 'SGR';
+    };
+
+    const wheel = (up: boolean, touch: Touch): void => {
+      const rect = el.getBoundingClientRect();
+      const cols = this.terminal?.cols ?? 80;
+      const rows = this.terminal?.rows ?? 24;
+      const col = clampCell((touch.clientX - rect.left) / (rect.width / cols), cols);
+      const row = clampCell((touch.clientY - rect.top) / rowHeight(), rows);
+      this.sendData(sgrWheel(up, col, row));
+    };
+
+    el.addEventListener(
+      'touchstart',
+      (ev: TouchEvent) => {
+        consuming = ev.touches.length === 1 && mouseActive();
+        // touch-action is read when a gesture BEGINS, so this governs the
+        // NEXT one; preventDefault below handles the current one.
+        el.style.touchAction = consuming ? 'none' : '';
+        if (!consuming) return;
+        lastY = ev.touches[0].clientY;
+        carry = 0;
+      },
+      { passive: true }
+    );
+
+    el.addEventListener(
+      'touchmove',
+      (ev: TouchEvent) => {
+        // A second finger means pinch-zoom, which belongs to the browser.
+        if (ev.touches.length !== 1) {
+          consuming = false;
+          el.style.touchAction = '';
+          return;
+        }
+        if (!consuming || lastY === null) return;
+        // Re-checked per move: an app can drop mouse reporting mid-drag, and
+        // the reports would then land on whatever owns the tty (a shell).
+        if (!mouseActive()) {
+          consuming = false;
+          el.style.touchAction = '';
+          return;
+        }
+
+        // The whole gesture, not just the part that crosses a row — this is
+        // what stops the page moving underneath. Guarded: the first gesture
+        // after mouse reporting turns on can arrive with the browser scroll
+        // already committed, and cancelling that one only logs a warning.
+        if (ev.cancelable) ev.preventDefault();
+
+        const touch = ev.touches[0];
+        carry += lastY - touch.clientY;
+        lastY = touch.clientY;
+
+        const { notches, up, remainder } = wheelNotches(carry, rowHeight());
+        carry = remainder;
+        for (let i = 0; i < notches; i++) wheel(up, touch);
+      },
+      { passive: false }
+    );
+
+    const end = (): void => {
+      lastY = null;
+      carry = 0;
+      consuming = false;
+      // Left set while reporting is on, so it governs the NEXT gesture too.
+      el.style.touchAction = mouseActive() ? 'none' : '';
+    };
+    el.addEventListener('touchend', end, { passive: true });
+    el.addEventListener('touchcancel', end, { passive: true });
+  }
+
   private connectWebSocket(): void {
     if (!this.terminal) return;
+
+    this.watchVisibility();
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${protocol}//${window.location.host}/api/v1/agents/${this.agentId}/pty?cols=${this.terminal.cols}&rows=${this.terminal.rows}`;
@@ -873,6 +1053,7 @@ export class ScionPageTerminal extends LitElement {
       this.connected = true;
       this.wasConnected = true;
       this.error = null;
+      this._reconnectAttempt = 0;
       // Re-fit now that the connection is live so tmux gets accurate dimensions
       if (this.fitAddon) {
         this.fitAddon.fit();
@@ -903,17 +1084,27 @@ export class ScionPageTerminal extends LitElement {
     };
 
     this.socket.onclose = (event: CloseEvent) => {
+      // Ignore a socket we have already replaced: its close must not tear down
+      // its healthy successor.
+      if (event.target !== this.socket) return;
       console.debug('[Terminal] WebSocket closed, code:', event.code, 'reason:', event.reason);
       this.connected = false;
-      if (event.code !== 1000) {
-        this.error = `Connection closed (code: ${event.code})`;
-      }
+      if (this._closingDeliberately) return;
+      // Not keyed on code 1000: the hub sends CloseNormalClosure on every exit
+      // path, including the read-deadline reap a backgrounded tab always hits,
+      // so a code check would decline to reconnect in exactly the case this
+      // exists for. _closingDeliberately is what actually distinguishes a
+      // teardown we asked for.
+      this.error = `Connection closed (code: ${event.code})`;
+      this.scheduleReconnect();
     };
 
     this.socket.onerror = (event) => {
       console.error('[Terminal] WebSocket error:', event);
       this.connected = false;
       this.error = 'WebSocket connection error';
+      // onerror is followed by onclose, which schedules the retry; scheduling
+      // here too would double the attempt count and halve the backoff.
     };
   }
 
@@ -1097,6 +1288,18 @@ export class ScionPageTerminal extends LitElement {
   }
 
   private cleanup(): void {
+    // Suppress auto-reconnect BEFORE the socket closes, or onclose schedules
+    // a retry for a terminal that is going away.
+    this._closingDeliberately = true;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._reconnectAttempt = 0;
+    if (this._onVisibilityChange) {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange);
+      this._onVisibilityChange = null;
+    }
     this.sendTmuxDetach();
     this.disconnectSSE();
     if (this._windowDragOver) {
@@ -1326,8 +1529,78 @@ export class ScionPageTerminal extends LitElement {
     }
   }
 
+  /**
+   * Reconnects after an unexpected close, with backoff.
+   *
+   * Safe to do without asking because the PTY is a tmux client, not the
+   * session: reconnecting re-attaches to the same window and loses nothing.
+   * Deliberate closes are excluded — navigating away or detaching closes with
+   * 1000, and retrying there would resurrect a terminal just left.
+   */
+  private scheduleReconnect(): void {
+    if (this._closingDeliberately || this._reconnectTimer) return;
+
+    // 1s, 2s, 4s … capped at 30s; jitter so open tabs do not retry in lockstep.
+    const base = Math.min(30_000, 1000 * 2 ** this._reconnectAttempt);
+    const delay = base + Math.random() * 500;
+    this._reconnectAttempt++;
+
+    console.debug(`[Terminal] Reconnecting in ${Math.round(delay)}ms (attempt ${this._reconnectAttempt})`);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (this._closingDeliberately || this.connected) return;
+      this.reconnectNow();
+    }, delay);
+  }
+
+  /**
+   * Drops any pending backoff and reconnects immediately — used when the tab
+   * becomes visible, where waiting out an invisible backoff looks broken.
+   */
+  private reconnectNow(): void {
+    if (this._closingDeliberately || this.connected) return;
+    // A handshake already in flight will resolve on its own.
+    if (this.socket?.readyState === WebSocket.CONNECTING) return;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    // Close a socket stuck in CONNECTING/CLOSING first, so a half-open one
+    // cannot deliver into the terminal after its replacement.
+    if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+      this.socket.onclose = null;
+      this.socket.onerror = null;
+      this.socket.onmessage = null;
+      try {
+        this.socket.close();
+      } catch {
+        /* already closing */
+      }
+    }
+    this.connectWebSocket();
+  }
+
+  /**
+   * Reconnect as soon as the tab is shown, not after whatever backoff was
+   * pending when it was hidden. iOS Safari closes sockets in background tabs,
+   * so this is the case that actually bites.
+   */
+  private watchVisibility(): void {
+    if (this._onVisibilityChange) return;
+    this._onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (this.connected || this._closingDeliberately) return;
+      this._reconnectAttempt = 0;
+      this.reconnectNow();
+    };
+    document.addEventListener('visibilitychange', this._onVisibilityChange);
+  }
+
   private handleReconnect(): void {
     this.cleanup();
+    // cleanup() suppresses auto-reconnect; a manual Retry is the one caller
+    // that means the opposite, so it lifts the flag itself.
+    this._closingDeliberately = false;
     void this.loadAgentInfo();
   }
 
