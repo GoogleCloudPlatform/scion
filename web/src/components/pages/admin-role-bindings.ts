@@ -72,6 +72,9 @@ interface RoleDefinition {
   system: boolean;
 }
 
+type SortField = 'principal' | 'role' | 'created';
+type SortOrder = 'asc' | 'desc';
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -90,6 +93,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
   @state() private totalCount = 0;
   @state() private currentPage = 1;
   @state() private error: string | null = null;
+  @state() private sortBy: SortField = 'created';
+  @state() private sortOrder: SortOrder = 'desc';
 
   // Role name lookup cache
   @state() private roleNameMap: Record<string, string> = {};
@@ -187,6 +192,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
+
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover, th.sortable.active { color: var(--scion-text, #1e293b); }
 
     td {
       padding: 0.75rem 1rem;
@@ -527,8 +535,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     try {
       const offset = (this.currentPage - 1) * PAGE_SIZE;
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), sort_by: this.sortBy, sort_order: this.sortOrder });
       const [bindingsRes, rolesRes] = await Promise.all([
-        apiFetch(`/api/v1/admin/role-bindings?limit=${PAGE_SIZE}&offset=${offset}`),
+        apiFetch(`/api/v1/admin/role-bindings?${params.toString()}`),
         apiFetch('/api/v1/admin/roles'),
       ]);
 
@@ -564,6 +573,17 @@ export class ScionPageAdminRoleBindings extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  private toggleSort(field: SortField): void {
+    if (this.sortBy === field) this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+    else { this.sortBy = field; this.sortOrder = field === 'created' ? 'desc' : 'asc'; }
+    this.currentPage = 1;
+    void this.loadData();
+  }
+
+  private sortIndicator(field: SortField): string {
+    return this.sortBy === field ? (this.sortOrder === 'asc' ? ' ▲' : ' ▼') : '';
   }
 
   /**
@@ -1072,11 +1092,11 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <table>
           <thead>
             <tr>
-              <th>Principal</th>
-              <th>Role</th>
+              <th class="sortable ${this.sortBy === 'principal' ? 'active' : ''}" @click=${() => this.toggleSort('principal')}>Principal${this.sortIndicator('principal')}</th>
+              <th class="sortable ${this.sortBy === 'role' ? 'active' : ''}" @click=${() => this.toggleSort('role')}>Role${this.sortIndicator('role')}</th>
               <th>Scope</th>
               <th class="hide-mobile">Status</th>
-              <th class="hide-mobile">Created</th>
+              <th class="hide-mobile sortable ${this.sortBy === 'created' ? 'active' : ''}" @click=${() => this.toggleSort('created')}>Created${this.sortIndicator('created')}</th>
               <th>Actions</th>
             </tr>
           </thead>
