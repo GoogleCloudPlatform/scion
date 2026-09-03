@@ -48,6 +48,14 @@ type DivergenceCounter struct {
 	matches    atomic.Int64
 	mismatches atomic.Int64
 	fallbacks  atomic.Int64
+
+	// Consistency check counters (CheckConversationConsistency).
+	// These track the independent, non-tautological consistency check that
+	// queries prior persisted messages — unlike the routing-key comparison
+	// (matches/mismatches above) which compares values derived from the same
+	// input fields and cannot disagree under normal conditions.
+	consistencyChecks     atomic.Int64 // total invocations that reached comparison
+	consistencyMismatches atomic.Int64 // invocations where prior messages disagree
 }
 
 // Inc increments the appropriate counter.
@@ -75,6 +83,22 @@ func (c *DivergenceCounter) IncFallback() { c.fallbacks.Add(1) }
 
 // Fallbacks returns the total number of read-path fallbacks recorded.
 func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
+
+// IncConsistency increments the consistency check counter and, when
+// consistent is false, also increments the consistency mismatch counter.
+func (c *DivergenceCounter) IncConsistency(consistent bool) {
+	c.consistencyChecks.Add(1)
+	if !consistent {
+		c.consistencyMismatches.Add(1)
+	}
+}
+
+// ConsistencyChecks returns the total consistency check invocations
+// that reached comparison (excludes fail-open early returns).
+func (c *DivergenceCounter) ConsistencyChecks() int64 { return c.consistencyChecks.Load() }
+
+// ConsistencyMismatches returns the total consistency check mismatches.
+func (c *DivergenceCounter) ConsistencyMismatches() int64 { return c.consistencyMismatches.Load() }
 
 // DivergenceMetrics is the package-level counter for divergence events.
 // Exported so that metrics collectors can read it.
@@ -274,10 +298,21 @@ func directMessageExternalRef(idA, idB string) string {
 	return fmt.Sprintf("dm:%s:%s", pair[0], pair[1])
 }
 
-// ComputeDivergenceMatch compares old-model routing against the ACTUAL
-// external_ref of the conversation the new model resolved. The comparison
-// is non-tautological: actualExternalRef comes from the database, not from
-// reconstructing inputs.
+// ComputeDivergenceMatch compares old-model routing keys against the
+// external_ref of the conversation the new model resolved. CAVEAT: both
+// sides are derived from the same input fields within the same request —
+// oldRouting is built from the message's sender/recipient/thread_id, and
+// actualExternalRef is the external_ref that the resolver just upserted
+// from those same fields. The comparison therefore cannot disagree under
+// normal conditions and its "match" verdicts carry no independent signal.
+//
+// The one residual path to a genuine mismatch is when
+// ResolveOrCreateThreadConversation with WithTopicLookup remaps a thread
+// onto a pre-existing conversation whose external_ref differs from what
+// the thread_id alone would produce.
+//
+// For the independent, non-tautological divergence check, see
+// CheckConversationConsistency, which queries prior persisted messages.
 //
 // Parameters:
 //   - oldRouting: the old-model routing key (from OldRoutingFromMessage)
@@ -451,10 +486,11 @@ func CheckConversationConsistency(
 				"prior_conv_id", msg.ConversationID,
 				"thread_id", threadID,
 			)
-			DivergenceMetrics.Inc(false)
+			DivergenceMetrics.IncConsistency(false)
 			return false
 		}
 	}
 
+	DivergenceMetrics.IncConsistency(true)
 	return true
 }

@@ -449,7 +449,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			Reason:     reason,
 		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log)
+		if consistent := messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log); !consistent {
+			log.Warn("DEF-3: conversation consistency mismatch (inbound broker)",
+				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+		}
 	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
 		log.Error("Failed to persist inbound broker message",

@@ -83,6 +83,15 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 			resp.Comparisons, resp.Matches, resp.Mismatches)
 	}
 
+	// Consistency check counters should be present (zero at this point since
+	// we only seeded the routing-key counters above).
+	if resp.ConsistencyChecks != 0 {
+		t.Errorf("expected consistency_checks=0, got %d", resp.ConsistencyChecks)
+	}
+	if resp.ConsistencyMismatches != 0 {
+		t.Errorf("expected consistency_mismatches=0, got %d", resp.ConsistencyMismatches)
+	}
+
 	// Verify identity fields.
 	if resp.HubID != "test-hub-id" {
 		t.Errorf("expected hub_id=test-hub-id, got %q", resp.HubID)
@@ -139,6 +148,7 @@ func TestHandleAdminMessagingDivergence_CaveatKeysPresent(t *testing.T) {
 	requiredKeys := []string{
 		"scope",
 		"scope_detail",
+		"routing_key_tautology",
 		"mismatch_composition",
 		"consistency_check_fails_open",
 		"unbackfilled_blind_spot",

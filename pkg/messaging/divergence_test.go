@@ -16,13 +16,34 @@ package messaging
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
+
+// mockQueryStore implements MessageQueryStore for divergence tests.
+// It returns preconfigured messages matching any filter.
+type mockQueryStore struct {
+	messages []store.Message
+}
+
+func (m *mockQueryStore) ListMessages(_ context.Context, filter store.MessageFilter, _ store.ListOptions) (*store.ListResult[store.Message], error) {
+	var matched []store.Message
+	for _, msg := range m.messages {
+		if filter.ThreadID != "" && msg.ThreadID == filter.ThreadID {
+			matched = append(matched, msg)
+		} else if filter.SenderID != "" && filter.RecipientID != "" &&
+			msg.SenderID == filter.SenderID && msg.RecipientID == filter.RecipientID {
+			matched = append(matched, msg)
+		}
+	}
+	return &store.ListResult[store.Message]{Items: matched}, nil
+}
 
 func TestLegacyDirectMessageExternalRef_Deterministic(t *testing.T) {
 	// Order should not matter — the ref is sorted.
@@ -317,5 +338,114 @@ func TestNewRoutingStr(t *testing.T) {
 	}
 	if got := NewRoutingStr("conv-abc"); got != "conv:conv-abc" {
 		t.Errorf("expected 'conv:conv-abc', got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC-7 mutation test (DEF-139): the divergence detector must report a
+// mismatch when the resolved conversation differs from the one used by
+// prior messages. This test MUST FAIL against unfixed code because the
+// ConsistencyMismatches counter did not exist.
+// ---------------------------------------------------------------------------
+
+func TestDivergenceDetector_ReportsConsistencyMismatch_DEF139(t *testing.T) {
+	// Scenario: two principals (agent A, user B) have an existing DM
+	// conversation "conv-original". A prior message was persisted with
+	// ConversationID = "conv-original". Now a new message between the same
+	// principals erroneously resolves to "conv-wrong".
+	//
+	// The routing-key comparison (ComputeDivergenceMatch) cannot detect
+	// this because both old and new routing keys are derived from the same
+	// sender/recipient fields — this IS the tautology.
+	//
+	// The consistency check (CheckConversationConsistency) MUST detect it
+	// by querying the prior message and finding a different ConversationID.
+
+	agentID := uuid.New().String()
+	userID := uuid.New().String()
+
+	// --- Part 1: Demonstrate the tautology. ---
+	// Build old routing from the message fields.
+	oldRouting := OldRoutingFromMessage(agentID, userID, "")
+	// Build the external ref the way the resolver would — from the SAME fields.
+	actualRef, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+
+	// ComputeDivergenceMatch says "match" even though the conversation is wrong,
+	// because both sides are derived from the same inputs.
+	match, reason := ComputeDivergenceMatch(oldRouting, actualRef, "conv-wrong")
+	if !match {
+		t.Fatalf("expected tautological match, got mismatch with reason=%q", reason)
+	}
+
+	// --- Part 2: The independent consistency check catches the mismatch. ---
+	DivergenceMetrics = &DivergenceCounter{}
+
+	// Mock store with a prior message that has a DIFFERENT ConversationID.
+	mockStore := &mockQueryStore{
+		messages: []store.Message{
+			{
+				ID:             "prior-msg-1",
+				SenderID:       agentID,
+				RecipientID:    userID,
+				ConversationID: "conv-original", // the CORRECT conversation
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	consistent := CheckConversationConsistency(
+		context.Background(), mockStore, "new-msg-1",
+		"conv-wrong", // resolver returned a different conversation
+		"",           // no thread (DM)
+		agentID, userID, logger,
+	)
+
+	if consistent {
+		t.Fatal("expected consistency check to detect the mismatch, but it reported consistent")
+	}
+
+	// The consistency mismatch counter must have incremented.
+	// Against unfixed code this counter does not exist, so this assertion
+	// causes a compile error — the test cannot pass.
+	if got := DivergenceMetrics.ConsistencyMismatches(); got != 1 {
+		t.Fatalf("expected ConsistencyMismatches()=1, got %d", got)
+	}
+
+	// The log must contain the MISMATCH warning.
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "MISMATCH") {
+		t.Errorf("expected log to contain 'MISMATCH', got: %s", logOutput)
+	}
+
+	// --- Part 3: Verify that a consistent case increments checks, not mismatches. ---
+	DivergenceMetrics = &DivergenceCounter{}
+	mockStoreConsistent := &mockQueryStore{
+		messages: []store.Message{
+			{
+				ID:             "prior-msg-2",
+				SenderID:       agentID,
+				RecipientID:    userID,
+				ConversationID: "conv-correct",
+			},
+		},
+	}
+	consistent = CheckConversationConsistency(
+		context.Background(), mockStoreConsistent, "new-msg-2",
+		"conv-correct",
+		"", agentID, userID, logger,
+	)
+	if !consistent {
+		t.Fatal("expected consistent result for matching ConversationID")
+	}
+	if got := DivergenceMetrics.ConsistencyChecks(); got != 1 {
+		t.Fatalf("expected ConsistencyChecks()=1, got %d", got)
+	}
+	if got := DivergenceMetrics.ConsistencyMismatches(); got != 0 {
+		t.Fatalf("expected ConsistencyMismatches()=0, got %d", got)
 	}
 }

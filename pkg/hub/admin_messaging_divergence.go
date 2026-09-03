@@ -27,6 +27,7 @@ import (
 type divergenceBoardCaveats struct {
 	Scope                     string `json:"scope"`
 	ScopeDetail               string `json:"scope_detail"`
+	RoutingKeyTautology       string `json:"routing_key_tautology"`
 	MismatchComposition       string `json:"mismatch_composition"`
 	ConsistencyCheckFailsOpen string `json:"consistency_check_fails_open"`
 	UnbackfilledBlindSpot     string `json:"unbackfilled_blind_spot"`
@@ -38,14 +39,16 @@ type divergenceBoardCaveats struct {
 // divergenceBoardResponse is the JSON shape returned by
 // GET /api/v1/admin/messaging/divergence.
 type divergenceBoardResponse struct {
-	HubID            string                 `json:"hub_id"`
-	ProcessStartTime string                 `json:"process_start_time"`
-	ProcessUptime    string                 `json:"process_uptime"`
-	Matches          int64                  `json:"matches"`
-	Mismatches       int64                  `json:"mismatches"`
-	Comparisons      int64                  `json:"comparisons"`
-	Fallbacks        int64                  `json:"fallbacks"`
-	Caveats          divergenceBoardCaveats `json:"caveats"`
+	HubID                  string                 `json:"hub_id"`
+	ProcessStartTime       string                 `json:"process_start_time"`
+	ProcessUptime          string                 `json:"process_uptime"`
+	Matches                int64                  `json:"matches"`
+	Mismatches             int64                  `json:"mismatches"`
+	Comparisons            int64                  `json:"comparisons"`
+	Fallbacks              int64                  `json:"fallbacks"`
+	ConsistencyChecks      int64                  `json:"consistency_checks"`
+	ConsistencyMismatches  int64                  `json:"consistency_mismatches"`
+	Caveats                divergenceBoardCaveats `json:"caveats"`
 }
 
 // caveats is the singleton caveat block. These are structural properties of
@@ -53,6 +56,15 @@ type divergenceBoardResponse struct {
 var divergenceCaveats = divergenceBoardCaveats{
 	Scope:       "per_replica_since_boot",
 	ScopeDetail: "These counters live in process memory and reset when the replica restarts. They reflect only this replica's traffic, identified by hub_id.",
+	RoutingKeyTautology: "The matches/mismatches counters from ComputeDivergenceMatch " +
+		"compare routing keys that are both derived from the same input fields " +
+		"(sender, recipient, thread_id) within the same request. The old-model " +
+		"routing key is built from those fields, and the new-model external_ref " +
+		"was upserted from those same fields moments earlier. The comparison " +
+		"therefore cannot disagree under normal conditions, and a match count " +
+		"of N means N tautological comparisons, not N confirmed agreements. " +
+		"For the independent divergence signal, see consistency_checks and " +
+		"consistency_mismatches, which query prior persisted messages.",
 	MismatchComposition: "The mismatches count conflates two unrelated signals: " +
 		"routing-key disagreement (ComputeDivergenceMatch) and prior-message " +
 		"conversation_id inconsistency (CheckConversationConsistency). " +
@@ -107,15 +119,19 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 	matches := m.Matches()
 	mismatches := m.Mismatches()
 	fallbacks := m.Fallbacks()
+	consistencyChecks := m.ConsistencyChecks()
+	consistencyMismatches := m.ConsistencyMismatches()
 
 	writeJSON(w, http.StatusOK, divergenceBoardResponse{
-		HubID:            s.HubID(),
-		ProcessStartTime: s.startTime.UTC().Format(time.RFC3339),
-		ProcessUptime:    time.Since(s.startTime).Round(time.Second).String(),
-		Matches:          matches,
-		Mismatches:       mismatches,
-		Comparisons:      matches + mismatches,
-		Fallbacks:        fallbacks,
-		Caveats:          divergenceCaveats,
+		HubID:                 s.HubID(),
+		ProcessStartTime:      s.startTime.UTC().Format(time.RFC3339),
+		ProcessUptime:         time.Since(s.startTime).Round(time.Second).String(),
+		Matches:               matches,
+		Mismatches:            mismatches,
+		Comparisons:           matches + mismatches,
+		Fallbacks:             fallbacks,
+		ConsistencyChecks:     consistencyChecks,
+		ConsistencyMismatches: consistencyMismatches,
+		Caveats:               divergenceCaveats,
 	})
 }
