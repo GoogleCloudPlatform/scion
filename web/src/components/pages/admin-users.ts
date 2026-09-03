@@ -737,7 +737,7 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async loadCurrentUser(): Promise<void> {
     try {
-      const res = await fetch('/auth/me', { credentials: 'include' });
+      const res = await apiFetch('/auth/me');
       if (res.ok) {
         const data = (await res.json()) as { id?: string };
         this.currentUserId = data.id || null;
@@ -764,9 +764,7 @@ export class ScionPageAdminUsers extends LitElement {
         params.set('status', this.statusFilter);
       }
 
-      const response = await fetch(`/api/v1/users?${params.toString()}`, {
-        credentials: 'include',
-      });
+      const response = await apiFetch(`/api/v1/users?${params.toString()}`);
 
       if (!response.ok) {
         throw new Error(
@@ -813,9 +811,8 @@ export class ScionPageAdminUsers extends LitElement {
     updates: { role?: string; status?: string },
     userLabel?: string
   ): Promise<{ securityReview: boolean }> {
-    const response = await fetch(`/api/v1/users/${userId}`, {
+    const response = await apiFetch(`/api/v1/users/${userId}`, {
       method: 'PATCH',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
@@ -856,9 +853,8 @@ export class ScionPageAdminUsers extends LitElement {
     userId: string,
     userLabel?: string
   ): Promise<{ securityReview: boolean }> {
-    const response = await fetch(`/api/v1/users/${userId}`, {
+    const response = await apiFetch(`/api/v1/users/${userId}`, {
       method: 'DELETE',
-      credentials: 'include',
     });
     if (!response.ok) {
       const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
@@ -1618,12 +1614,6 @@ export class ScionPageAdminUsers extends LitElement {
             ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'member')}>
                 <sl-icon slot="prefix" name="person"></sl-icon>
                 Demote to Member
-              </sl-menu-item>`
-            : nothing}
-          ${user.role !== 'viewer'
-            ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'viewer')}>
-                <sl-icon slot="prefix" name="eye"></sl-icon>
-                Set as Viewer
               </sl-menu-item>`
             : nothing}
           <sl-divider></sl-divider>

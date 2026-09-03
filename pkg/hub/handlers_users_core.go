@@ -15,6 +15,9 @@
 package hub
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -147,6 +150,18 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
+	// Require an authenticated user identity.
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	actor, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
+		return
+	}
+
 	user, err := s.store.GetUser(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -165,11 +180,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// Role changes are handled through the canonical role-binding path.
+	if updates.Role != "" && updates.Role != user.Role {
+		if err := s.updateUserRole(ctx, w, actor, user, updates.Role); err != nil {
+			// updateUserRole writes its own HTTP error responses.
+			return
+		}
+	}
+
 	if updates.DisplayName != "" {
 		user.DisplayName = updates.DisplayName
-	}
-	if updates.Role != "" {
-		user.Role = updates.Role
 	}
 	if updates.Status != "" {
 		user.Status = updates.Status
@@ -184,6 +204,111 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	writeJSON(w, http.StatusOK, user)
+}
+
+// updateUserRole handles role changes through the canonical role-binding path.
+// On success it mutates user.Role in-place (the caller persists).
+// On failure it writes an HTTP error and returns a non-nil error.
+func (s *Server) updateUserRole(
+	ctx context.Context,
+	w http.ResponseWriter,
+	actor UserIdentity,
+	user *store.User,
+	newRole string,
+) error {
+	// Only "admin" and "member" are canonical roles backed by role bindings.
+	// "viewer" has no distinct role definition; treat it as "member" if
+	// requested but otherwise reject unknown values.
+	switch newRole {
+	case "admin", "member":
+		// valid
+	default:
+		BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\" and \"member\"", newRole))
+		return fmt.Errorf("unsupported role")
+	}
+
+	// Self-lockout guard: an admin cannot demote themselves.
+	if user.Role == "admin" && newRole != "admin" && actor.ID() == user.ID {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"cannot demote yourself; ask another admin to change your role", nil)
+		return fmt.Errorf("self-lockout")
+	}
+
+	// Authorization: role changes require role_binding.create at hub scope.
+	if s.authzService != nil {
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(actor),
+			Credential: credentialContextForIdentity(actor),
+			Resource:   Resource{Type: "role_binding", ID: "hub"},
+			Action:     Action("create"),
+			Permission: "role_binding.create",
+		})
+		if !decision.Allowed {
+			Forbidden(w)
+			return fmt.Errorf("forbidden")
+		}
+	}
+
+	// Promotion: grant super-admin role binding.
+	if newRole == "admin" && user.Role != "admin" {
+		s.ensureSuperAdminBinding(ctx, user.ID)
+		user.Role = "admin"
+		return nil
+	}
+
+	// Demotion: revoke super-admin role binding.
+	if newRole != "admin" && user.Role == "admin" {
+		// Last-super-admin guard: refuse to demote if this is the last admin.
+		if err := s.checkLastSuperAdmin(ctx, user.ID); err != nil {
+			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
+			return err
+		}
+		s.deleteSuperAdminBinding(ctx, user.ID)
+		user.Role = newRole
+		return nil
+	}
+
+	// Same role — no-op for bindings, just sync the legacy field.
+	user.Role = newRole
+	return nil
+}
+
+// checkLastSuperAdmin returns an error if removing the given user's super-admin
+// binding would leave zero system-scoped super-admin bindings.
+func (s *Server) checkLastSuperAdmin(ctx context.Context, userID string) error {
+	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		// If the role definition doesn't exist, there can't be bindings to protect.
+		return nil
+	}
+
+	// Count all system-scoped super-admin bindings.
+	allBindings, err := s.store.ListAllRoleBindings(ctx, store.RoleBindingListOptions{Limit: 0})
+	if err != nil {
+		return fmt.Errorf("failed to verify admin count: %w", err)
+	}
+
+	var superAdminCount int
+	for _, b := range allBindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			superAdminCount++
+		}
+	}
+
+	// If this user is the sole super-admin, block demotion.
+	if superAdminCount <= 1 {
+		// Verify this user actually has the binding (not just counting).
+		userBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+		if err != nil {
+			return fmt.Errorf("failed to verify admin bindings: %w", err)
+		}
+		for _, b := range userBindings {
+			if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+				return errors.New("cannot demote the last super-admin; promote another user first")
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {

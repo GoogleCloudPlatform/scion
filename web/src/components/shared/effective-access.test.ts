@@ -365,3 +365,62 @@ describe('R1 fix: _explainLoaded guard', () => {
     expect(source).toContain('this.loaded = true');
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* 6. Role card displays role name, not UUID                                   */
+/* -------------------------------------------------------------------------- */
+
+describe('Role cards display role names, not UUIDs', () => {
+  it('renderRoleCard uses roleName with roleDefinitionId as fallback', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+    // The template should use roleName || roleDefinitionId as fallback
+    expect(source).toContain('binding.roleName || binding.roleDefinitionId');
+  });
+
+  it('EffectiveRoleBinding interface includes roleName field', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+    // The interface must include a roleName field
+    expect(source).toMatch(/roleName:\s*string/);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 7. Composition expand calls the real effective-access endpoint               */
+/* -------------------------------------------------------------------------- */
+
+describe('Composition expand targets the real effective-access endpoint', () => {
+  it('loadExplainLayers calls /api/v1/admin/effective-access, not /admin/access-explain', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+    expect(source).toContain('/api/v1/admin/effective-access');
+    expect(source).not.toContain('/api/v1/admin/access-explain');
+  });
+
+  it('effective-access-boundary-notice does not target /admin/access-explain', () => {
+    const source = readFileSync(
+      resolve(__dirname, './effective-access-boundary-notice.ts'),
+      'utf-8'
+    );
+
+    expect(source).not.toContain('/api/v1/admin/access-explain');
+    expect(source).not.toContain("'/admin/access-explain");
+    expect(source).not.toContain('"/admin/access-explain');
+  });
+
+  it('no file references nonexistent /admin/access-explain route', () => {
+    const files = [
+      './effective-role-provenance.ts',
+      './effective-access-boundary-notice.ts',
+      './authorization-layer-stack.ts',
+    ];
+
+    for (const file of files) {
+      const source = readFileSync(resolve(__dirname, file), 'utf-8');
+      expect(source, `${file} should not reference /admin/access-explain`).not.toContain(
+        '/admin/access-explain'
+      );
+    }
+  });
+});

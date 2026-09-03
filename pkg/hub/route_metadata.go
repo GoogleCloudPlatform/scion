@@ -830,6 +830,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
 	},
 
+	"/api/v1/admin/effective-access": {
+		Pattern: "/api/v1/admin/effective-access", RouteID: "admin.effectiveAccess",
+		Classification: RouteAuthenticated,
+		Permission:     "hub.audit.read", Resource: "hub", Action: "manage",
+	},
+
 	// -------------------------------------------------------------------------
 	// Authenticated: Usage self-service
 	// -------------------------------------------------------------------------

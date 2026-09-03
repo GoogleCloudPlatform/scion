@@ -49,6 +49,9 @@ interface BoundaryCountResponse {
     status?: string;
     redacted?: { message?: string; reason?: string };
   }>;
+  // Fields from the admin effective-access endpoint.
+  potentialPermissionCount?: number;
+  effectivePermissionCount?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +192,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
       if (this.contextType === 'project') {
         url = `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}&pageSize=0`;
       } else {
-        url = `/api/v1/admin/access-explain?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}&summary=true`;
+        url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
       }
 
       const res = await apiFetch(url);
@@ -232,7 +235,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
     if (this.contextType === 'project') {
       return `/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}`;
     }
-    return `/admin/access-explain?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
+    return `/admin/access-boundaries?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
   }
 }
 

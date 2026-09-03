@@ -549,7 +549,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     this.explainError = null;
 
     try {
-      const url = `/api/v1/admin/access-explain?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
+      const url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
       const res = await apiFetch(url);
 
       if (!res.ok) {

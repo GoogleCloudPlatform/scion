@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -73,6 +74,7 @@ type listRoleDefinitionsResponse struct {
 // RoleBindingInfo is a role binding enriched with human-friendly display info.
 type RoleBindingInfo struct {
 	store.RoleBinding
+	RoleName             string `json:"roleName,omitempty"`
 	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
 	ScopeDisplayName     string `json:"scopeDisplayName,omitempty"`
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
@@ -891,6 +893,8 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		enriched = append(enriched, info)
 	}
 
+	s.enrichBindingRoleNames(ctx, enriched)
+
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
 		Items:      enriched,
 		TotalCount: total,
@@ -1187,10 +1191,58 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 		enriched = append(enriched, info)
 	}
 
+	s.enrichBindingRoleNames(ctx, enriched)
+
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
 		Items:      enriched,
 		TotalCount: len(enriched),
 	})
+}
+
+// enrichBindingRoleNames resolves role-definition names for a slice of
+// RoleBindingInfo, setting the RoleName field. Uses a single batch lookup
+// to avoid N+1 queries, falling back to per-binding lookups when the batch
+// API is unavailable.
+func (s *Server) enrichBindingRoleNames(ctx context.Context, bindings []RoleBindingInfo) {
+	// Collect unique role definition IDs.
+	idSet := make(map[string]struct{}, len(bindings))
+	for _, b := range bindings {
+		if b.RoleDefinitionID != "" {
+			idSet[b.RoleDefinitionID] = struct{}{}
+		}
+	}
+	if len(idSet) == 0 {
+		return
+	}
+
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+
+	nameMap := make(map[string]string, len(ids))
+
+	// Try batch lookup first.
+	defs, err := s.store.GetRoleDefinitionsByIDs(ctx, ids)
+	if err == nil {
+		for _, d := range defs {
+			nameMap[d.ID] = d.Name
+		}
+	} else {
+		// Fallback: per-ID lookup.
+		for _, id := range ids {
+			rd, err := s.store.GetRoleDefinition(ctx, id)
+			if err == nil {
+				nameMap[rd.ID] = rd.Name
+			}
+		}
+	}
+
+	for i := range bindings {
+		if name, ok := nameMap[bindings[i].RoleDefinitionID]; ok {
+			bindings[i].RoleName = name
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
