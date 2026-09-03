@@ -24,9 +24,10 @@
  * - Project detail/settings (link to boundaries affecting this project)
  * - Role bindings page (summary outside binding rows)
  *
- * Fetches the count of applicable boundaries from the explain API and
- * displays a notice with a link to the explain view. Handles redacted
- * boundaries by showing "Access boundary (details unavailable)" with reason.
+ * Fetches the count of applicable boundaries from the effective-access API
+ * and displays a notice with a link to the access boundaries view. Handles
+ * redacted boundaries by showing "Access boundary (details unavailable)"
+ * with reason.
  *
  * TERMINOLOGY: layers are descriptive. Never "priority", "override", "winner".
  */
@@ -49,9 +50,8 @@ interface BoundaryCountResponse {
     status?: string;
     redacted?: { message?: string; reason?: string };
   }>;
-  // Fields from the admin effective-access endpoint.
-  potentialPermissionCount?: number;
-  effectivePermissionCount?: number;
+  // Fields from the admin effective-access endpoint (system scope).
+  activeBindingCount?: number;
 }
 
 // ---------------------------------------------------------------------------

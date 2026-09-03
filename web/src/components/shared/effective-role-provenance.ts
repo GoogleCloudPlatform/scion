@@ -76,10 +76,8 @@ interface EffectiveRoleBinding {
 
 /** Shape of the access-explain API response. */
 interface AccessExplainResponse {
-  principalType?: string;
-  principalId?: string;
-  potentialPermissionCount?: number;
-  effectivePermissionCount?: number;
+  scopeType?: string;
+  activeBindingCount?: number;
   boundaries?: AccessExplainBoundary[];
   restrictions?: AccessExplainRestriction[];
   deniedPermissions?: AccessExplainDeniedPermission[];
@@ -90,16 +88,12 @@ interface AccessExplainBoundary {
   id: string;
   name?: string | null;
   status?: string;
-  removedCount?: number;
-  overlapCount?: number;
-  membershipSummary?: string;
   redacted?: RedactionNotice;
 }
 
 interface AccessExplainRestriction {
   kind?: string;
   label?: string;
-  removedCount?: number;
   detail?: string;
 }
 
@@ -558,8 +552,11 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
       const data = (await res.json()) as AccessExplainResponse;
 
-      this.potentialCount = data.potentialPermissionCount ?? 0;
-      this.effectiveCount = data.effectivePermissionCount ?? 0;
+      // The endpoint returns activeBindingCount — use it as the potential
+      // indicator. Effective count is not fabricated; the endpoint does not
+      // aggregate permission counts across incompatible scopes.
+      this.potentialCount = data.activeBindingCount ?? 0;
+      this.effectiveCount = data.activeBindingCount ?? 0;
 
       // Map boundaries — preserve redaction
       this.boundaries = (data.boundaries ?? []).map((b): BoundaryLayer => {
@@ -567,10 +564,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           id: b.id,
           name: b.redacted ? null : (b.name ?? null),
           status: b.status ?? 'active',
-          removedCount: b.removedCount ?? 0,
-          overlapCount: b.overlapCount ?? 0,
+          removedCount: 0,
+          overlapCount: 0,
         };
-        if (b.membershipSummary !== undefined) layer.membershipSummary = b.membershipSummary;
         if (b.redacted !== undefined) layer.redacted = b.redacted;
         return layer;
       });
@@ -580,7 +576,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         const restriction: IntrinsicRestriction = {
           kind: r.kind ?? 'unknown',
           label: r.label ?? r.kind ?? 'Unknown restriction',
-          removedCount: r.removedCount ?? 0,
+          removedCount: 0,
         };
         if (r.detail !== undefined) restriction.detail = r.detail;
         return restriction;

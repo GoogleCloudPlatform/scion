@@ -28,9 +28,73 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// TestPromoteUser_CreatesRoleBinding verifies that promoting a user to admin
-// creates exactly one system-scoped super-admin role binding and syncs the
-// compatibility User.Role field.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// superAdminBindingCount counts system-scoped super-admin bindings for a user.
+func superAdminBindingCount(t *testing.T, s store.Store, userID string) int {
+	t.Helper()
+	ctx := context.Background()
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+
+	count := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			count++
+		}
+	}
+	return count
+}
+
+// hubMemberBindingCount counts system-scoped hub-member bindings for a user.
+func hubMemberBindingCount(t *testing.T, s store.Store, userID string) int {
+	t.Helper()
+	ctx := context.Background()
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+
+	count := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			count++
+		}
+	}
+	return count
+}
+
+// getDevUser triggers provisioning and returns the dev user record.
+func getDevUser(t *testing.T, srv *Server, s store.Store) *store.User {
+	t.Helper()
+	ctx := context.Background()
+
+	// Trigger dev user creation.
+	doRequest(t, srv, http.MethodGet, "/api/v1/users", nil)
+
+	result, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	for i := range result.Items {
+		if result.Items[i].Email == "dev@localhost" {
+			return &result.Items[i]
+		}
+	}
+	t.Fatal("dev user not found")
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Promotion tests
+// ---------------------------------------------------------------------------
+
 func TestPromoteUser_CreatesRoleBinding(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -54,23 +118,10 @@ func TestPromoteUser_CreatesRoleBinding(t *testing.T) {
 	assert.Equal(t, "admin", updated.Role, "User.Role should be admin")
 
 	// Verify super-admin binding exists.
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
-	require.NoError(t, err)
-
-	var superAdminCount int
-	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			superAdminCount++
-		}
-	}
-	assert.Equal(t, 1, superAdminCount, "exactly one super-admin binding should exist")
+	assert.Equal(t, 1, superAdminBindingCount(t, s, user.ID),
+		"exactly one super-admin binding should exist")
 }
 
-// TestPromoteUser_Idempotent verifies that repeated promotion does not
-// create duplicate role bindings.
 func TestPromoteUser_Idempotent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -94,24 +145,15 @@ func TestPromoteUser_Idempotent(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	// Verify still exactly one binding.
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
-	require.NoError(t, err)
-
-	var superAdminCount int
-	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			superAdminCount++
-		}
-	}
-	assert.Equal(t, 1, superAdminCount, "repeated promotion should not create duplicate bindings")
+	assert.Equal(t, 1, superAdminBindingCount(t, s, user.ID),
+		"repeated promotion should not create duplicate bindings")
 }
 
-// TestDemoteUser_RemovesRoleBinding verifies that demoting an admin removes
-// the system-scoped super-admin role binding and syncs User.Role.
-func TestDemoteUser_RemovesRoleBinding(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Demotion tests
+// ---------------------------------------------------------------------------
+
+func TestDemoteUser_RemovesBindingAndCreatesHubMember(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -124,12 +166,12 @@ func TestDemoteUser_RemovesRoleBinding(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, user))
 
-	// First promote.
+	// Promote first.
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
 		map[string]string{"role": "admin"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	// Ensure a second admin exists to avoid last-admin guard.
+	// Ensure a second admin exists so this isn't the last admin.
 	admin2 := &store.User{
 		ID:          tid("admin2"),
 		Email:       "admin2@example.com",
@@ -140,7 +182,7 @@ func TestDemoteUser_RemovesRoleBinding(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, admin2))
 	srv.ensureSuperAdminBinding(ctx, admin2.ID)
 
-	// Now demote.
+	// Demote.
 	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
 		map[string]string{"role": "member"})
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -151,106 +193,63 @@ func TestDemoteUser_RemovesRoleBinding(t *testing.T) {
 	assert.Equal(t, "member", updated.Role)
 
 	// Verify super-admin binding is gone.
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
+	assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID),
+		"super-admin binding should be deleted after demotion")
 
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
-	require.NoError(t, err)
-
-	for _, b := range bindings {
-		assert.False(t, b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID,
-			"super-admin binding should be deleted after demotion")
-	}
+	// Verify hub-member binding was created.
+	assert.Equal(t, 1, hubMemberBindingCount(t, s, user.ID),
+		"hub-member binding should exist after demotion")
 }
 
-// TestDemoteUser_LastSuperAdminBlocked verifies that demoting the last
-// super-admin is rejected to prevent lockout.
+// ---------------------------------------------------------------------------
+// Last-admin guard
+// ---------------------------------------------------------------------------
+
 func TestDemoteUser_LastSuperAdminBlocked(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// The dev user is auto-created as admin. Trigger creation first.
-	doRequest(t, srv, http.MethodGet, "/api/v1/users", nil)
-
-	// Find the dev user and ensure they have a super-admin binding.
-	result, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	var devUser *store.User
-	for i := range result.Items {
-		if result.Items[i].Email == "dev@localhost" {
-			devUser = &result.Items[i]
-			break
-		}
-	}
-	require.NotNil(t, devUser)
+	// The dev user is admin. Ensure it has a binding.
+	devUser := getDevUser(t, srv, s)
 	srv.ensureSuperAdminBinding(ctx, devUser.ID)
 
-	// Create another admin.
-	targetAdmin := &store.User{
+	// Create another admin with binding.
+	target := &store.User{
 		ID:          tid("target-admin"),
 		Email:       "target@example.com",
 		DisplayName: "Target Admin",
 		Role:        "member",
 		Status:      "active",
 	}
-	require.NoError(t, s.CreateUser(ctx, targetAdmin))
+	require.NoError(t, s.CreateUser(ctx, target))
 
 	// Promote via API.
-	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+targetAdmin.ID,
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
 		map[string]string{"role": "admin"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	// Both dev user and target admin have super-admin bindings.
-	// Demoting target admin should succeed (dev user still has one).
-	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+targetAdmin.ID,
+	// Demote target: should succeed since dev user still has binding.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
 		map[string]string{"role": "member"})
 	assert.Equal(t, http.StatusOK, rec.Code, "demoting non-last admin should succeed")
 
-	// Verify the checkLastSuperAdmin logic works via direct unit test.
-	// Remove all super-admin bindings except one user's.
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	allBindings, err := s.ListAllRoleBindings(ctx, store.RoleBindingListOptions{Limit: 0})
+	// Direct test of checkLastSuperAdminTx for the sole remaining admin.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 
-	var superAdminCount int
-	for _, b := range allBindings {
-		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			superAdminCount++
-		}
-	}
-	// Only dev user should have a super-admin binding now.
-	assert.Equal(t, 1, superAdminCount, "only dev user should have super-admin binding")
-
-	// Direct unit test: checkLastSuperAdmin should return error for the sole admin.
-	err = srv.checkLastSuperAdmin(ctx, devUser.ID)
-	assert.Error(t, err, "checkLastSuperAdmin should reject demotion of the last admin")
-	assert.Contains(t, err.Error(), "last super-admin")
+	err = srv.checkLastSuperAdminTx(ctx, s, devUser.ID, superAdminRD)
+	assert.ErrorIs(t, err, errLastSuperAdmin,
+		"checkLastSuperAdminTx should reject demotion of the last admin")
 }
 
-// TestDemoteUser_SelfLockoutBlocked verifies that an admin cannot demote
-// themselves.
+// ---------------------------------------------------------------------------
+// Self-lockout
+// ---------------------------------------------------------------------------
+
 func TestDemoteUser_SelfLockoutBlocked(t *testing.T) {
 	srv, s := testServer(t)
-	ctx := context.Background()
 
-	// The dev user is automatically admin. Get their user record.
-	// The dev auth user has email "dev@localhost" and is auto-created.
-	// First, trigger user creation by making any request.
-	doRequest(t, srv, http.MethodGet, "/api/v1/users", nil)
-
-	// Find the dev user.
-	result, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-
-	var devUser *store.User
-	for i := range result.Items {
-		if result.Items[i].Email == "dev@localhost" {
-			devUser = &result.Items[i]
-			break
-		}
-	}
-	require.NotNil(t, devUser, "dev user should exist")
+	devUser := getDevUser(t, srv, s)
 
 	// Try to demote self.
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
@@ -258,9 +257,11 @@ func TestDemoteUser_SelfLockoutBlocked(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code, "self-demotion should be rejected")
 }
 
-// TestPromoteUser_UnsupportedRoleRejected verifies that setting an unsupported
-// role value is rejected.
-func TestPromoteUser_UnsupportedRoleRejected(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Role validation
+// ---------------------------------------------------------------------------
+
+func TestUpdateUser_UnsupportedRoleRejected(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -278,13 +279,241 @@ func TestPromoteUser_UnsupportedRoleRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "unsupported role should be rejected")
 }
 
-// TestRoleBindingList_IncludesRoleName verifies that listed role bindings
-// include the human-readable roleName field.
+func TestUpdateUser_UnsupportedRoleRejectedEvenIfMatching(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user with legacy "viewer" role to test that setting
+	// role="viewer" is rejected even when it matches the current role.
+	user := &store.User{
+		ID:          tid("legacy-viewer"),
+		Email:       "viewer@example.com",
+		DisplayName: "Legacy Viewer",
+		Role:        "viewer",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"unsupported role 'viewer' should be rejected even when matching current role")
+}
+
+func TestUpdateUser_MetadataPreservedWhenRoleOmitted(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("metadata-test"),
+		Email:       "metadata@example.com",
+		DisplayName: "Original Name",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Update only displayName, omitting role entirely.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"displayName": "Updated Name"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Updated Name", updated.DisplayName)
+	assert.Equal(t, "member", updated.Role, "role should be unchanged")
+}
+
+// ---------------------------------------------------------------------------
+// Same-role repair (R2 item 4)
+// ---------------------------------------------------------------------------
+
+func TestSameRoleRepair_AdminWithMissingBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user who is role=admin but has NO super-admin binding
+	// (simulates pre-migration state or orphaned record).
+	user := &store.User{
+		ID:          tid("orphan-admin"),
+		Email:       "orphan@example.com",
+		DisplayName: "Orphan Admin",
+		Role:        "admin",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Verify no binding exists yet.
+	assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID))
+
+	// PATCH with role=admin (same role) — should repair the missing binding.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Binding should now exist.
+	assert.Equal(t, 1, superAdminBindingCount(t, s, user.ID),
+		"same-role admin request should repair missing binding")
+}
+
+func TestSameRoleRepair_MemberWithStaleBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("stale-binding"),
+		Email:       "stale@example.com",
+		DisplayName: "Stale Binding",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Manually create a super-admin binding (simulates stale state).
+	srv.ensureSuperAdminBinding(ctx, user.ID)
+	assert.Equal(t, 1, superAdminBindingCount(t, s, user.ID))
+
+	// PATCH with role=member (same role) — should clean up the stale binding.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Stale binding should be removed.
+	assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID),
+		"same-role member request should clean up stale super-admin binding")
+}
+
+// ---------------------------------------------------------------------------
+// Atomicity: binding + User.Role in same transaction
+// ---------------------------------------------------------------------------
+
+func TestPromotion_AtomicBindingAndRole(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("atomic-promote"),
+		Email:       "atomic@example.com",
+		DisplayName: "Atomic",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// After successful promotion, both binding AND User.Role must be updated.
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", updated.Role)
+	assert.Equal(t, 1, superAdminBindingCount(t, s, user.ID))
+}
+
+func TestDemotion_AtomicBindingAndRole(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("atomic-demote"),
+		Email:       "atomicdemote@example.com",
+		DisplayName: "Atomic Demote",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Promote first.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Add a second admin.
+	admin2 := &store.User{
+		ID:          tid("atomic-admin2"),
+		Email:       "atomicadmin2@example.com",
+		DisplayName: "Admin 2",
+		Role:        "admin",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin2))
+	srv.ensureSuperAdminBinding(ctx, admin2.ID)
+
+	// Demote.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Both binding removal AND User.Role update must be atomic.
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", updated.Role)
+	assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID))
+}
+
+// ---------------------------------------------------------------------------
+// Authorization: CanDelegate tests
+// ---------------------------------------------------------------------------
+
+func TestPromoteUser_NonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a non-admin user.
+	actor := &store.User{
+		ID:          tid("non-admin-actor"),
+		Email:       "nonadmin@example.com",
+		DisplayName: "Non Admin",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	target := &store.User{
+		ID:          tid("promote-target-2"),
+		Email:       "target2@example.com",
+		DisplayName: "Target",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	// Request as non-admin — should be denied by CanDelegate.
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch,
+		"/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"non-admin user should not be able to promote")
+}
+
+func TestDemoteUser_SuperAdminAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	target := &store.User{
+		ID:          tid("sa-demote-target"),
+		Email:       "sademote@example.com",
+		DisplayName: "SA Demote Target",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	// Promote via dev user (super-admin).
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code, "super-admin should be able to promote")
+}
+
+// ---------------------------------------------------------------------------
+// Role binding name enrichment
+// ---------------------------------------------------------------------------
+
 func TestRoleBindingList_IncludesRoleName(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a user and promote to admin.
 	user := &store.User{
 		ID:          tid("role-name-test"),
 		Email:       "rolename@example.com",
@@ -322,8 +551,10 @@ func TestRoleBindingList_IncludesRoleName(t *testing.T) {
 	assert.True(t, found, "binding list should include roleName=%q", store.SystemRoleSuperAdmin)
 }
 
-// TestAdminEffectiveAccess_RequiresAuth verifies the effective-access endpoint
-// rejects unauthenticated requests.
+// ---------------------------------------------------------------------------
+// Effective-access endpoint tests
+// ---------------------------------------------------------------------------
+
 func TestAdminEffectiveAccess_RequiresAuth(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -333,8 +564,6 @@ func TestAdminEffectiveAccess_RequiresAuth(t *testing.T) {
 		"unauthenticated request should be rejected, got %d", rec.Code)
 }
 
-// TestAdminEffectiveAccess_Success verifies the effective-access endpoint
-// returns valid data for an existing user.
 func TestAdminEffectiveAccess_Success(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -354,9 +583,116 @@ func TestAdminEffectiveAccess_Success(t *testing.T) {
 
 	var resp adminEffectiveAccessResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "user", resp.PrincipalType)
-	assert.Equal(t, user.ID, resp.PrincipalID)
-	assert.GreaterOrEqual(t, resp.PotentialPermissionCount, 0)
-	assert.GreaterOrEqual(t, resp.EffectivePermissionCount, 0)
+
+	// Response uses system scope, not fabricated permission counts.
+	assert.Equal(t, store.RoleScopeSystem, resp.ScopeType)
+	assert.GreaterOrEqual(t, resp.ActiveBindingCount, 0)
 	assert.NotNil(t, resp.Boundaries, "boundaries should be non-nil (empty array)")
+}
+
+func TestAdminEffectiveAccess_NoPrincipalIDExposure(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("privacy-test"),
+		Email:       "privacy@example.com",
+		DisplayName: "Privacy Test",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/effective-access?principalType=user&principalId="+user.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Parse response as raw JSON — principalId and principalType should NOT
+	// be present in the response body.
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+
+	_, hasPrincipalID := raw["principalId"]
+	_, hasPrincipalType := raw["principalType"]
+	assert.False(t, hasPrincipalID, "response should not echo principalId")
+	assert.False(t, hasPrincipalType, "response should not echo principalType")
+}
+
+func TestAdminEffectiveAccess_SystemScopeOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("scope-test"),
+		Email:       "scope@example.com",
+		DisplayName: "Scope Test",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/effective-access?principalType=user&principalId="+user.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp adminEffectiveAccessResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// Endpoint must report system scope.
+	assert.Equal(t, store.RoleScopeSystem, resp.ScopeType,
+		"effective-access endpoint should report system scope")
+}
+
+func TestAdminEffectiveAccess_FailsClosedWithoutAuthz(t *testing.T) {
+	// This test verifies that if authzService is nil, the endpoint fails
+	// closed rather than bypassing authorization.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("no-authz-user"),
+		Email:       "noauthz@example.com",
+		DisplayName: "No Authz",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Save and nil out authzService.
+	savedAuthz := srv.authzService
+	srv.authzService = nil
+	defer func() { srv.authzService = savedAuthz }()
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/effective-access?principalType=user&principalId="+user.ID, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"endpoint should fail closed when authzService is nil")
+}
+
+// ---------------------------------------------------------------------------
+// Role mutation fails closed without authzService
+// ---------------------------------------------------------------------------
+
+func TestRoleMutation_FailsClosedWithoutAuthz(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("no-authz-role"),
+		Email:       "noauthzrole@example.com",
+		DisplayName: "No Authz Role",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Save and nil out authzService.
+	savedAuthz := srv.authzService
+	srv.authzService = nil
+	defer func() { srv.authzService = savedAuthz }()
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"role mutation should fail closed when authzService is nil")
 }

@@ -2539,6 +2539,10 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.suspend"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "executeRoleTransition", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Atomic User.Role update inside role-transition transaction; caller updateUserRole checks CanDelegate", Scope: "pkg/hub/handlers_users_core.go"}},
+	{File: "pkg/hub/handlers_users_core.go", Function: "createSuperAdminBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding creation inside role-transition transaction; caller updateUserRole checks CanDelegate; uses SystemReconcileCreatedBy sentinel", Scope: "pkg/hub/handlers_users_core.go"}},
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteSuperAdminBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding deletion inside role-transition transaction; caller updateUserRole checks CanDelegate; guarded by checkLastSuperAdminTx", Scope: "pkg/hub/handlers_users_core.go"}},
+	{File: "pkg/hub/handlers_users_core.go", Function: "ensureHubMemberBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-member binding creation during demotion; non-privileged role, ensures basic directory access; uses SystemReconcileCreatedBy sentinel", Scope: "pkg/hub/handlers_users_core.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agents_core.go — agent lifecycle
