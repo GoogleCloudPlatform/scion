@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -472,4 +473,120 @@ func TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth(t *testing.T) {
 	require.Greater(t, explicitAfter, explicitBefore,
 		"AC-6: @agent resolve-or-create must flow through DEF-138 auth "+
 			"(explicit_routes should increment)")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-142 AC-7 / P6: Drive the CLI reference path against a REAL pkg/hub
+// mux, not a mock. The value of this test is its wiring: it must fail if
+// the route or the handler is absent.
+//
+// The request goes through srv.Handler().ServeHTTP() → mux → project
+// routes → agent action dispatch → handleAgentOutboundMessage →
+// conversation_ref resolution via Resolve(). If ANY link in that chain
+// is removed, this test returns non-200.
+// ---------------------------------------------------------------------------
+
+func TestDEF142_AC7_ConversationRef_ThroughRealMux(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("d142-ac7-project"),
+		Name: "d142-ac7-project",
+		Slug: "d142-ac7-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          tid("d142-ac7-user"),
+		Email:       "d142-ac7@example.com",
+		DisplayName: "AC7 User",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:         tid("d142-ac7-agent"),
+		Name:       "d142-ac7-agent",
+		Slug:       "d142-ac7-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Mint a real agent JWT — the outbound-message handler requires agent
+	// auth (GetAgentIdentityFromContext), not user/dev auth.
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc, "agent token service must be available")
+	agentToken, err := tokenSvc.GenerateAgentToken(
+		agent.ID, project.ID, ScopesForRole(AgentRoleBaseline), nil)
+	require.NoError(t, err)
+
+	// Create a group conversation the agent's project owns.
+	conv := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:" + project.ID + ":d142-ac7-thread",
+		ProjectID:   &project.ID,
+		DriftState:  "active",
+		DisplayName: "d142-ac7-thread",
+	}
+	createdConv, err := s.UpsertConversationByExternalRef(ctx, conv)
+	require.NoError(t, err)
+
+	// Build the request with conversation_ref — this is what the CLI sends
+	// after P5: conversation_ref in the outbound message request body.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient:       "user:" + user.Email,
+		Msg:             "hello through real mux",
+		ConversationRef: "#d142-ac7-thread",
+	})
+	// Use the direct agent endpoint — this is the path the CLI's
+	// SendOutboundMessage hits when SCION_AGENT_NAME is set.
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	// The request traverses the FULL mux chain:
+	// mux → guarded (agent JWT auth) → handleAgentRoute →
+	// handleAgentAction (selfAccess=true for outbound-message) →
+	// handleAgentOutboundMessage → Resolve(conversation_ref) →
+	// DEF-138 auth → message dispatch.
+	//
+	// If any of these are missing, the status code changes:
+	// - route absent       → 404
+	// - handler absent     → 404 (action not found)
+	// - resolve absent     → conversation_ref is ignored, ConversationID
+	//                        remains empty, derivation path runs instead
+	// - auth absent        → 401 or 403
+	if rr.Code != http.StatusOK {
+		t.Fatalf("AC-7: expected 200 through real mux, got %d: %s",
+			rr.Code, strings.TrimSpace(rr.Body.String()))
+	}
+
+	// Mandatory mutation catch: verify the message was routed to the GROUP
+	// conversation that conversation_ref resolved, NOT to a DM that the
+	// derivation path would silently create if the Resolve block were absent.
+	var resp struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp),
+		"response must be valid JSON with message_id")
+	require.NotEmpty(t, resp.MessageID, "response must include message_id")
+
+	storedMsg, err := s.GetMessage(ctx, resp.MessageID)
+	require.NoError(t, err, "stored message must be retrievable")
+
+	// The stored message's conversation_id must match the group conversation
+	// created above. If the Resolve block is removed, the derivation path
+	// creates a DM between agent and user — a different conversation_id.
+	require.Equal(t, createdConv.ID, storedMsg.ConversationID,
+		"AC-7 mutation catch: message must land in the group conversation "+
+			"(resolved via conversation_ref), not in a DM (derivation fallback). "+
+			"If this fails after removing the Resolve block, that is the expected red.")
 }
