@@ -547,7 +547,8 @@ type OutboundMessageRequest struct {
 	Channel        string            `json:"channel,omitempty"`
 	ThreadID       string            `json:"thread_id,omitempty"`
 	Metadata       map[string]string `json:"metadata,omitempty"`
-	ConversationID string            `json:"conversation_id,omitempty"`
+	ConversationID  string            `json:"conversation_id,omitempty"`
+	ConversationRef string            `json:"conversation_ref,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent to a human inbox.

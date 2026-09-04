@@ -53,6 +53,12 @@ type OutboundMessageRequest struct {
 	// derivation. When empty, derivation from ThreadID or sender/recipient
 	// principals applies as before. See DEF-138 §3.1 rules 1-3.
 	ConversationID string `json:"conversation_id,omitempty"`
+	// ConversationRef is a human-readable conversation reference (DEF-142).
+	// Accepted forms: conv:<uuid>, @<agent-slug>, @<email>, #<thread-name>.
+	// Mutually exclusive with ConversationID — setting both is a 400.
+	// When set, the hub resolves the reference to a ConversationID via
+	// messaging.Resolve, then routes through the existing DEF-138 path.
+	ConversationRef string `json:"conversation_ref,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -306,6 +312,62 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if err := messaging.ValidateLegacyMessage(structuredMsg); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
+	}
+
+	// DEF-142 P3: mutual exclusion — both ref and id is a client error.
+	if req.ConversationRef != "" && req.ConversationID != "" {
+		ValidationError(w, "conversation_ref and conversation_id are mutually exclusive — set one or neither", nil)
+		return
+	}
+
+	// DEF-142 P3: resolve ConversationRef → ConversationID before the DEF-138
+	// routing block. The resolved ID then flows through the EXISTING explicit
+	// authorization path unchanged.
+	//
+	// ELEVATED CONSTRAINT (DEF-142 review): every field of ResolveContext
+	// comes from the authenticated caller, never from the request body.
+	// Resolve errors (including ambiguity) carry conversation UUIDs and
+	// surfaces, so rctx.ProjectID is the containment boundary for the
+	// information those errors disclose. If any rctx field came from the
+	// body, the error would become an enumeration oracle for arbitrary
+	// projects.
+	if req.ConversationRef != "" {
+		authKind, authID := authenticatedSender(ctx)
+		if authKind == "" || authID == "" {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"authenticated identity required for conversation_ref", nil)
+			return
+		}
+		resolveResult, resolveErr := messaging.Resolve(ctx, s.store, req.ConversationRef, messaging.ResolveContext{
+			SenderPrincipalKind: authKind,
+			SenderPrincipalID:   authID,
+			ProjectID:           agent.ProjectID, // from the authenticated agent, NOT from the request
+		})
+		if resolveErr != nil {
+			var resErr *messaging.ResolutionError
+			if errors.As(resolveErr, &resErr) {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"conversation_ref resolution failed: "+resErr.Error(), nil)
+				return
+			}
+			// ParseReference returns store.ErrInvalidInput for malformed refs —
+			// that is a client error, not a server error.
+			if errors.Is(resolveErr, store.ErrInvalidInput) {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"conversation_ref resolution failed: "+resolveErr.Error(), nil)
+				return
+			}
+			s.messageLog.Error("DEF-142: Resolve failed for conversation_ref",
+				"conversation_ref", req.ConversationRef,
+				"error", resolveErr,
+			)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"conversation reference resolution failed", nil)
+			return
+		}
+		// Promote to ConversationID so the existing DEF-138 authorization
+		// block handles it identically to a caller-supplied UUID.
+		req.ConversationID = resolveResult.ConversationID
 	}
 
 	// DEF-138 §3.1 conversation routing rules:
