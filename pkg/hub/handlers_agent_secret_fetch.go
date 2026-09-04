@@ -57,6 +57,8 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // 64 KB payload limit
+
 	var req secretFetchRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: "+err.Error(), nil)
@@ -65,6 +67,11 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 
 	if len(req.Keys) == 0 {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "keys must not be empty", nil)
+		return
+	}
+
+	if len(req.Keys) > 100 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "too many keys requested (max 100)", nil)
 		return
 	}
 
