@@ -988,16 +988,23 @@ func TestResolve_Thread_ThreeMatches_StillAmbiguous(t *testing.T) {
 func TestResolve_Thread_Ambiguous_AcrossPages(t *testing.T) {
 	// Ambiguity must be detected even when the duplicates span different
 	// pagination pages. Create enough conversations so the mock paginates.
+	//
+	// IDs are deterministic so sorted order equals insertion order and the
+	// two "target" rows (i=5, i=105) are guaranteed to straddle the Limit:100
+	// page boundary.
+	//
+	// Known bounded gap: mockStore paginates on ID alone; production uses
+	// keyset pagination on (created_at, id) via decodeCursor in
+	// conversation_store.go. This test proves the loop iterates across
+	// pages; it does not prove production pagination semantics.
 	ms := newMockStore()
 	ctx := context.Background()
 	projectID := uuid.NewString()
 	senderID := uuid.NewString()
 
-	// Create 110 conversations — first match on page 1 (position 5),
-	// second match on page 2 (position 105). With Limit:100, the second
-	// match is on the second page.
 	for i := 0; i < 110; i++ {
-		convID := uuid.NewString()
+		// Sortable IDs: sorted order == insertion order.
+		convID := fmt.Sprintf("00000000-0000-0000-0000-%012d", i)
 		name := fmt.Sprintf("filler-%03d", i)
 		surface := "native"
 		if i == 5 {
