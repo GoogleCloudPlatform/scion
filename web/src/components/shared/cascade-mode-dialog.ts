@@ -201,12 +201,11 @@ export class ScionCascadeModeDialog extends LitElement {
 
     try {
       const response = await apiFetch(
-        `/api/v1/agents/${this.agentId}/actions?dryRun=true`,
+        `/api/v1/agents/${this.agentId}/set_message_mode?dryRun=true`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action: 'set_message_mode',
             mode: this.selectedMode,
             cascade: true,
           }),
@@ -241,12 +240,11 @@ export class ScionCascadeModeDialog extends LitElement {
 
     try {
       const response = await apiFetch(
-        `/api/v1/agents/${this.agentId}/actions`,
+        `/api/v1/agents/${this.agentId}/set_message_mode`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action: 'set_message_mode',
             mode: this.selectedMode,
             cascade: true,
           }),
