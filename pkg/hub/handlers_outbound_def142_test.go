@@ -22,8 +22,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -379,46 +377,44 @@ func TestDEF142_AC3_NotFound_vs_NotParticipant_ByteIdentical(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DEF-142 AC-3 allowlist guard: a ResolutionError reason that does not
-// exist today must produce the collapsed response, not a disclosed one.
-// This test makes the allowlist load-bearing: if someone adds a reason
-// to ResolutionError without adding it to the allowlist in the handler,
-// the new reason is collapsed by default (safe). The test would need
-// updating only if the NEW reason should be disclosed, which forces the
-// deliberate decision.
+// DEF-142 AC-3 allowlist: disclosableResolutionReason must be the single
+// artefact every ResolutionError reason passes through. Unknown reasons
+// — including any future reason — collapse by default.
 // ---------------------------------------------------------------------------
 
-func TestDEF142_AC3_FutureReason_CollapsedByDefault(t *testing.T) {
-	// Structural guard: the handler's AC-3 switch must be an ALLOWLIST
-	// (default collapses), not a DENYLIST (default discloses). This test
-	// scans the handler source for the switch shape. If someone reverts
-	// the switch to a denylist, this test fails — it is the enforcement
-	// mechanism, not just documentation.
-	//
-	// Additionally, the test posts a request producing a known-collapsed
-	// reason through the actual handler and asserts the response body
-	// contains the generic message, confirming the switch works end-to-end.
+func TestDEF142_AC3_DisclosableResolutionReason(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   bool
+	}{
+		{"ambiguous", true},
+		{"no-shared-project", true},
+		{"not-found", false},
+		{"not-a-participant", false},
+		{"boundary-violation", false},
+		{"some-future-reason", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		name := tt.reason
+		if name == "" {
+			name = "(empty)"
+		}
+		t.Run(name, func(t *testing.T) {
+			got := disclosableResolutionReason(tt.reason)
+			require.Equal(t, tt.want, got,
+				"disclosableResolutionReason(%q) = %v, want %v",
+				tt.reason, got, tt.want)
+		})
+	}
+}
 
-	// --- Part 1: structural scan ---
-	// The switch must have "ambiguous", "no-shared-project" as named cases
-	// and the default must produce the collapsed body. We detect this by
-	// checking that "could not be resolved" appears in the default branch,
-	// not in a named case.
-	src, err := os.ReadFile(filepath.Join(".", "handlers_agent_messaging.go"))
-	require.NoError(t, err)
-	srcStr := string(src)
+// ---------------------------------------------------------------------------
+// DEF-142 AC-3 end-to-end: a known-collapsed reason ("not-found") produces
+// the generic "could not be resolved" body through the actual handler.
+// ---------------------------------------------------------------------------
 
-	// Find the AC-3 switch block. The allowlist shape has "ambiguous" and
-	// "no-shared-project" as the only case, with default doing the collapse.
-	require.Contains(t, srcStr, `case "ambiguous", "no-shared-project":`,
-		"AC-3 switch must have an allowlist case for ambiguous + no-shared-project")
-
-	// The denylist shape would have "not-found", "not-a-participant",
-	// "boundary-violation" as a case. That must NOT appear.
-	require.NotContains(t, srcStr, `case "not-found", "not-a-participant", "boundary-violation":`,
-		"AC-3 switch must NOT be a denylist — the default must collapse, not disclose")
-
-	// --- Part 2: end-to-end confirmation ---
+func TestDEF142_AC3_KnownReason_CollapsedEndToEnd(t *testing.T) {
 	srv, _, project, agent, user := def138Setup(t)
 
 	// Post a request that produces a known-collapsed reason (not-found).

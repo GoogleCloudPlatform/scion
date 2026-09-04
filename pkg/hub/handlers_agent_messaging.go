@@ -346,22 +346,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		if resolveErr != nil {
 			var resErr *messaging.ResolutionError
 			if errors.As(resolveErr, &resErr) {
-				// DEF-142 AC-3: ALLOWLIST of reasons safe to disclose.
-				// Only "ambiguous" and "no-shared-project" are disclosed:
-				// ambiguity candidates are group conversations scoped to
-				// the caller's own project (contained by ResolveContext.ProjectID
-				// being server-derived at line ~344, never from request JSON),
-				// and no-shared-project is a caller-side configuration error.
-				//
-				// Everything else — including any future reason added to
-				// ResolutionError — collapses into one generic response.
-				// A new reason is collapsed until someone deliberately
-				// decides it is safe to disclose and adds it here.
-				switch resErr.Reason {
-				case "ambiguous", "no-shared-project":
+				// DEF-142 AC-3: disclosure decision delegates to the
+				// disclosableResolutionReason allowlist (defined at EOF).
+				if disclosableResolutionReason(resErr.Reason) {
 					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 						"conversation_ref resolution failed: "+resErr.Error(), nil)
-				default:
+				} else {
 					s.messageLog.Info("DEF-142: conversation_ref resolution denied",
 						"conversation_ref", req.ConversationRef,
 						"reason", resErr.Reason,
@@ -2335,4 +2325,25 @@ func authenticatedSender(ctx context.Context) (kind, id string) {
 		return "agent", agent.ID()
 	}
 	return "", ""
+}
+
+// disclosableResolutionReason reports whether a ResolutionError reason is safe
+// to return to the caller in full. This is the single artefact every reason
+// passes through; unknown reasons are collapsed by default (safe).
+//
+// DEF-142 AC-3 ALLOWLIST: only "ambiguous" and "no-shared-project" are
+// disclosed. Ambiguity candidates are group conversations scoped to the
+// caller's own project (contained by ResolveContext.ProjectID being
+// server-derived, never from request JSON), and no-shared-project is a
+// caller-side configuration error. Everything else — including any future
+// reason added to ResolutionError — collapses into one generic response.
+// A new reason is collapsed until someone deliberately decides it is safe
+// to disclose and adds it here.
+func disclosableResolutionReason(reason string) bool {
+	switch reason {
+	case "ambiguous", "no-shared-project":
+		return true
+	default:
+		return false
+	}
 }
