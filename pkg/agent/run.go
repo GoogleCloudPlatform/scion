@@ -667,6 +667,17 @@ authDone:
 	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
 		opts.Env["SCION_MODEL"] = finalScionCfg.Model
 	}
+	// Re-resolve SCION_MODEL if it contains an unresolved size alias.
+	// The hub may inject a raw alias (e.g. "large") when its store lacks
+	// the harness config's model_aliases map; the broker has the on-disk
+	// config and can resolve it here.
+	if model, ok := opts.Env["SCION_MODEL"]; ok && finalScionCfg != nil && finalScionCfg.Model != "" {
+		normalized := config.NormalizeModelAlias(model)
+		if config.KnownModelAliases[normalized] && model != finalScionCfg.Model {
+			util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", model, finalScionCfg.Model)
+			opts.Env["SCION_MODEL"] = finalScionCfg.Model
+		}
+	}
 	if _, ok := opts.Env["SCION_THINKING_LEVEL"]; !ok && finalScionCfg != nil && finalScionCfg.ThinkingLevel != nil {
 		opts.Env["SCION_THINKING_LEVEL"] = strconv.Itoa(*finalScionCfg.ThinkingLevel)
 	}
