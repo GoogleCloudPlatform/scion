@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -358,9 +359,26 @@ func TestDEF141_AC3_ExplicitMessage_LandsInSameConversation(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // DEF-141 AC-5: No DTO, request struct, or unmarshal target binds
-// conversation_asserted. Enforced by POSTing {"conversation_asserted": true}
-// with no conversation_id and asserting explicit_routes did not move.
+// conversation_asserted.
+//
+// Two tests:
+//   1. Route-independent: json.Unmarshal into StructuredMessage must not
+//      bind the field. This test cannot rot — it tests the tag, not a route.
+//   2. Handler-level: POSTing the field on the outbound route does not move
+//      the explicit_routes counter. Covers the live route.
 // ---------------------------------------------------------------------------
+
+func TestDEF141_AC5_ConversationAsserted_UnmarshalIgnored(t *testing.T) {
+	// Route-independent: the json:"-" tag on ConversationAsserted must
+	// prevent any JSON unmarshal from binding the field — regardless of
+	// which handler, which DTO, or which future refactor adds a route.
+	var sm messages.StructuredMessage
+	err := json.Unmarshal([]byte(`{"conversation_asserted":true}`), &sm)
+	require.NoError(t, err)
+	require.False(t, sm.ConversationAsserted,
+		"AC-5: json.Unmarshal must NOT bind conversation_asserted — "+
+			"the json:\"-\" tag must prevent it")
+}
 
 func TestDEF141_AC5_ConversationAsserted_NotAcceptedFromJSON(t *testing.T) {
 	srv, s, _, agent, user := def138Setup(t)

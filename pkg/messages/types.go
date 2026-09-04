@@ -151,7 +151,7 @@ type StructuredMessage struct {
 	// Hub-internal provenance: it is never rendered into the agent envelope and
 	// never accepted from request JSON. Consumers must branch on this, never on
 	// ConversationID != "" — non-emptiness only means "already resolved upstream".
-	ConversationAsserted bool `json:"conversation_asserted,omitempty"`
+	ConversationAsserted bool `json:"-"`
 
 	// Visibility controls which consumers see this message.
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
