@@ -2468,7 +2468,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	// kind: users via policy, agents via ScopeAgentLifecycle within their own
 	// project, everything else denied. authorizeAgentLifecycle logs the denial.
 	switch action {
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionExec:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionExec, api.AgentActionResetAuth:
 		if !s.authorizeAgentLifecycle(w, r, agent) {
 			return
 		}
@@ -2487,6 +2487,8 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		s.restoreAgent(w, r, agent.ID)
 	case api.AgentActionOutboundMessage:
 		s.handleAgentOutboundMessage(w, r, agent.ID)
+	case api.AgentActionResetAuth:
+		s.handleAgentResetAuth(w, r, agent.ID)
 	default:
 		NotFound(w, "Action")
 	}
