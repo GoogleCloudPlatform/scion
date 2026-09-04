@@ -1006,9 +1006,9 @@ func TestResolveIsSharedGitWorkspace(t *testing.T) {
 
 func TestParseCapSetUID(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		want    bool
+		name  string
+		input string
+		want  bool
 	}{
 		{
 			name: "full capabilities (typical Docker root)",
@@ -1029,22 +1029,22 @@ func TestParseCapSetUID(t *testing.T) {
 			want:  false,
 		},
 		{
-			name: "no capabilities at all",
+			name:  "no capabilities at all",
 			input: "Name:\tinit\nCapEff:\t0000000000000000\n",
 			want:  false,
 		},
 		{
-			name: "no CapEff line",
+			name:  "no CapEff line",
 			input: "Name:\tinit\nCapInh:\t0000000000000000\n",
 			want:  false,
 		},
 		{
-			name: "empty input",
+			name:  "empty input",
 			input: "",
 			want:  false,
 		},
 		{
-			name: "malformed hex value",
+			name:  "malformed hex value",
 			input: "CapEff:\tnotahexvalue\n",
 			want:  false,
 		},
