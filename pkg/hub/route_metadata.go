@@ -890,6 +890,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "POST /api/v1/agent/identity-token", RouteID: "agent.identityToken",
 		Classification: RouteAgentToken,
 	},
+	"POST /api/v1/agent/secrets": {
+		Pattern: "POST /api/v1/agent/secrets", RouteID: "agent.secretFetch",
+		Classification: RouteAgentToken,
+	},
 
 	// -------------------------------------------------------------------------
 	// Workstation: System endpoints
