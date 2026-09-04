@@ -320,8 +320,28 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	isSelf := actor.ID() == user.ID
 	needsCrossUserUpdate := needsUpdate && !isSelf
 
+	// Pre-resolve super-admin role definition and canonical binding state
+	// before authorization. Canonical state comes from bindings, not User.Role,
+	// to prevent stale-state bypass (R4-fix).
+	var superAdminRD *store.RoleDefinition
+	var hasCanonicalBinding bool
 	if needsPromote {
-		if err := s.checkUserPromotePermission(ctx, w, actor, user, *updates.Role); err != nil {
+		superAdminRD, err = s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"super-admin role definition not found", nil)
+			return
+		}
+		hasCanonicalBinding, err = s.hasSuperAdminBindingForUser(ctx, s.store, user.ID, superAdminRD)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to check canonical binding state", nil)
+			return
+		}
+	}
+
+	if needsPromote {
+		if err := s.checkUserPromotePermission(ctx, w, actor, user, *updates.Role, hasCanonicalBinding); err != nil {
 			return
 		}
 	}
@@ -359,29 +379,15 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
-	// Self-lockout guard: an admin cannot demote themselves.
-	if needsPromote && user.Role == "admin" && *updates.Role != "admin" && isSelf {
+	// Self-lockout guard: uses canonical binding state, not User.Role (R4-fix).
+	// A user with an active super-admin binding cannot demote themselves.
+	if needsPromote && hasCanonicalBinding && *updates.Role != "admin" && isSelf {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
 			"cannot demote yourself; ask another admin to change your role", nil)
 		return
 	}
 
-	// ── Pre-resolve role definitions needed inside the transaction ──
-
-	var superAdminRD *store.RoleDefinition
-	if needsPromote {
-		superAdminRD, err = s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"super-admin role definition not found", nil)
-			return
-		}
-	}
-
 	// ── Execute ALL mutations in a single atomic transaction (R4-C1) ──
-
-	beforeRole := user.Role
-	beforeStatus := user.Status
 
 	// Build actor audit metadata outside the transaction.
 	auditActor := s.buildAuditActorFromContext(ctx)
@@ -393,13 +399,15 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			return fmt.Errorf("re-read user in tx: %w", err)
 		}
 
-		// Role transition (bindings + User.Role).
-		if needsPromote {
-			newRole := *updates.Role
-			isPromotion := newRole == "admin" && txUser.Role != "admin"
-			isDemotion := newRole != "admin" && txUser.Role == "admin"
+		// Capture canonical before-state from the transactional read for
+		// truthful audit records and change detection (R4-fix: not stale pre-tx).
+		beforeRole := txUser.Role
+		beforeStatus := txUser.Status
 
-			if err := s.executeRoleTransition(ctx, tx, txUser, newRole, superAdminRD, isPromotion, isDemotion); err != nil {
+		// Role transition: derives classification from canonical binding state
+		// inside the transaction, not from User.Role (R4-fix).
+		if needsPromote {
+			if err := s.executeRoleTransition(ctx, tx, txUser, *updates.Role, superAdminRD, actor.ID()); err != nil {
 				return err
 			}
 		}
@@ -425,7 +433,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 
 		// Synchronous audit records (R4-C3): written inside the transaction
-		// so they roll back if the transaction fails.
+		// so they roll back if the transaction fails. beforeRole/beforeStatus
+		// come from the in-tx re-read for truthful audit (R4-fix).
 		if needsPromote && beforeRole != txUser.Role {
 			if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
 				MutationType:       "user_role_change",
@@ -470,7 +479,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		if errors.Is(err, errLastSuperAdmin) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -506,11 +515,40 @@ func (s *Server) buildAuditActorFromContext(ctx context.Context) auditActorInfo 
 	return info
 }
 
+// hasSuperAdminBindingForUser checks whether the given user has an active
+// system-scoped super-admin role binding. This is the canonical state: the
+// binding exists regardless of what User.Role says (R4-fix).
+func (s *Server) hasSuperAdminBindingForUser(
+	ctx context.Context, st store.Store,
+	userID string, rd *store.RoleDefinition,
+) (bool, error) {
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return false, fmt.Errorf("list bindings for user: %w", err)
+	}
+	now := time.Now()
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			// Skip expired bindings.
+			if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+				continue
+			}
+			// Skip not-yet-active bindings.
+			if b.NotBefore != nil && now.Before(*b.NotBefore) {
+				continue
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // checkUserPromotePermission verifies the actor has user.promote + CanDelegate
 // authority for the role transition. Writes HTTP error and returns non-nil on failure.
 func (s *Server) checkUserPromotePermission(
 	ctx context.Context, w http.ResponseWriter,
 	actor UserIdentity, user *store.User, newRole string,
+	hasCanonicalBinding bool,
 ) error {
 	decision := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(actor),
@@ -524,12 +562,15 @@ func (s *Server) checkUserPromotePermission(
 		return fmt.Errorf("user.promote denied")
 	}
 
-	// Additionally require CanDelegate for the super-admin role binding.
-	isPromotion := newRole == "admin" && user.Role != "admin"
-	isDemotion := newRole != "admin" && user.Role == "admin"
-	isSameRoleAdmin := newRole == "admin" && user.Role == "admin"
+	// Determine if this operation involves super-admin bindings using
+	// canonical binding state, not User.Role (R4-fix: prevents stale-state bypass).
+	// CanDelegate is required whenever the target has or will have a super-admin
+	// binding — the only case it can be skipped is when a member with no binding
+	// is being set to member (no binding involvement at all).
+	wantsBinding := newRole == "admin"
+	involvesSuper := hasCanonicalBinding || wantsBinding
 
-	if isPromotion || isDemotion || isSameRoleAdmin {
+	if involvesSuper {
 		superAdminRD, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -554,45 +595,68 @@ func (s *Server) checkUserPromotePermission(
 // super-admin would leave zero authenticatable system-scoped super-admin users.
 var errLastSuperAdmin = errors.New("cannot remove the last super-admin; promote another user first")
 
+// errSelfDemotion is returned when the transactional canonical-state recheck
+// detects the actor is removing their own super-admin binding. This catches
+// the TOCTOU window between the pre-tx self-lockout guard and the in-tx
+// binding mutation.
+var errSelfDemotion = errors.New("cannot demote yourself; ask another admin to change your role")
+
 // executeRoleTransition performs the binding mutations inside a store
-// transaction. The caller (the single WithTx in updateUser) persists the
-// User record; this method only manipulates bindings and updates user.Role.
+// transaction. Classification is derived from canonical binding state (whether
+// a super-admin binding actually exists for the user inside this transaction),
+// NOT from User.Role which may be stale (R4-fix).
+//
+// Any path that removes a super-admin binding is guarded by:
+//   - checkLastSuperAdminTx (prevents leaving zero active super-admins)
+//   - self-demotion check (actor cannot remove their own binding)
+//   - full error propagation (no discarded errors)
 func (s *Server) executeRoleTransition(
 	ctx context.Context,
 	tx store.Store,
 	user *store.User,
 	newRole string,
 	superAdminRD *store.RoleDefinition,
-	isPromotion, isDemotion bool,
+	actorID string,
 ) error {
-	if isPromotion {
+	// Determine canonical binding state inside the transaction (R4-fix).
+	txHasBinding, err := s.hasSuperAdminBindingForUser(ctx, tx, user.ID, superAdminRD)
+	if err != nil {
+		return fmt.Errorf("check canonical binding state in tx: %w", err)
+	}
+
+	wantsBinding := newRole == "admin"
+
+	switch {
+	case wantsBinding && !txHasBinding:
+		// Promotion: create super-admin binding.
 		if err := s.createSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return fmt.Errorf("create super-admin binding: %w", err)
 		}
-	}
 
-	if isDemotion {
+	case !wantsBinding && txHasBinding:
+		// Demotion or same-role repair removing a binding: MUST apply all guards.
+		// Self-lockout re-check inside tx (catches TOCTOU between pre-auth and tx).
+		if user.ID == actorID {
+			return errSelfDemotion
+		}
 		if err := s.checkLastSuperAdminTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return err
 		}
 		if err := s.deleteSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return fmt.Errorf("delete super-admin binding: %w", err)
 		}
-	}
 
-	// Same-role repair: fix inconsistencies between User.Role and bindings.
-	if !isPromotion && !isDemotion {
-		if newRole == "admin" {
-			if err := s.createSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
-				return fmt.Errorf("repair super-admin binding: %w", err)
-			}
-		} else {
-			_ = s.deleteSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD)
+	case wantsBinding && txHasBinding:
+		// Same-role admin: idempotent ensure binding exists.
+		if err := s.createSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
+			return fmt.Errorf("repair super-admin binding: %w", err)
 		}
+
+	// !wantsBinding && !txHasBinding: no super-admin binding change needed.
 	}
 
-	// Ensure hub-member binding on demotion or member role.
-	if isDemotion || newRole == "member" {
+	// Ensure hub-member binding for members.
+	if !wantsBinding {
 		if err := s.ensureHubMemberBindingTx(ctx, tx, user.ID); err != nil {
 			return fmt.Errorf("ensure hub-member binding: %w", err)
 		}
@@ -647,6 +711,12 @@ func (s *Server) deleteSuperAdminBindingTx(
 // checkLastSuperAdminTx verifies that removing the given user's super-admin
 // binding would not leave zero authenticatable system-scoped super-admin users.
 //
+// Concurrency: acquires a SELECT FOR UPDATE lock on the super-admin role
+// definition row before reading bindings. This serializes concurrent
+// demotion/deletion transactions that both try to verify the last-admin
+// invariant, preventing the READ COMMITTED race where two demotions both
+// observe the other admin and both commit (R4-fix concurrency).
+//
 // R4-C4: resolves each unique binding principal to a User record and counts
 // only users with status "active". Suspended/invited users are not counted as
 // surviving admins. Fails closed on user lookup errors.
@@ -654,6 +724,12 @@ func (s *Server) checkLastSuperAdminTx(
 	ctx context.Context, tx store.Store,
 	userID string, rd *store.RoleDefinition,
 ) error {
+	// Acquire serialization lock on the role definition row to prevent
+	// concurrent last-admin checks from racing (R4-fix concurrency).
+	if err := tx.LockRoleDefinitionForAdminGuard(ctx, rd.ID); err != nil {
+		return fmt.Errorf("acquire admin-guard lock: %w", err)
+	}
+
 	systemBindings, err := tx.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
 	if err != nil {
 		return fmt.Errorf("failed to verify admin count: %w", err)

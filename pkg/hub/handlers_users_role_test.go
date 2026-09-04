@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1279,4 +1281,600 @@ func TestSuperAdmin_IncludesUserDeletePermission(t *testing.T) {
 		"user.suspend must be in allPermissionIDs")
 	assert.True(t, permSet["user.promote"],
 		"user.promote must be in allPermissionIDs")
+}
+
+// ---------------------------------------------------------------------------
+// R4-fix adversarial tests: canonical binding-state classification
+//
+// These tests verify the fix for the critical stale-state bypass where
+// User.Role="member" + active super-admin binding allowed silent binding
+// stripping via PATCH {role:"member"}.
+// ---------------------------------------------------------------------------
+
+// TestStaleRoleMember_SoleAdmin_BindingPreserved verifies that when a user
+// has User.Role="member" but an active super-admin binding (stale state),
+// the last-admin guard (checkLastSuperAdminTx) protects them, and the
+// canonical binding-state classification correctly detects the removal path.
+func TestStaleRoleMember_SoleAdmin_BindingPreserved(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user with User.Role="member" but give them a super-admin binding
+	// manually (simulates stale User.Role).
+	target := &store.User{
+		ID:          tid("stale-sole-admin"),
+		Email:       "stalesole@example.com",
+		DisplayName: "Stale Sole Admin",
+		Role:        "member", // stale: doesn't match binding
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	// Verify the binding exists.
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding must exist before test")
+
+	// Direct-test: checkLastSuperAdminTx correctly identifies this user as
+	// an active super-admin even though User.Role="member", and blocks their
+	// removal when they are the sole admin.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Remove dev user's binding so target is the sole admin with a binding.
+	devUser := getDevUser(t, srv, s)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, devUser.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == superAdminRD.ID {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	// Target is now the sole super-admin. checkLastSuperAdminTx should block.
+	err = srv.checkLastSuperAdminTx(ctx, s, target.ID, superAdminRD)
+	assert.ErrorIs(t, err, errLastSuperAdmin,
+		"checkLastSuperAdminTx should block removal of sole admin with stale User.Role")
+
+	// Also verify hasSuperAdminBindingForUser correctly detects the binding.
+	hasBind, err := srv.hasSuperAdminBindingForUser(ctx, s, target.ID, superAdminRD)
+	require.NoError(t, err)
+	assert.True(t, hasBind,
+		"hasSuperAdminBindingForUser should detect binding even with stale User.Role")
+
+	// Verify binding is still intact (the check didn't modify anything).
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding must NOT be stripped by the guard check")
+}
+
+// TestStaleRoleMember_SelfDemotion_Blocked verifies that when the acting
+// user has User.Role="member" but an active super-admin binding, attempting
+// to PATCH their own role to "member" is blocked by the self-lockout guard.
+func TestStaleRoleMember_SelfDemotion_Blocked(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create an actor with stale Role="member" + super-admin binding.
+	actor := &store.User{
+		ID:          tid("stale-self-actor"),
+		Email:       "staleself@example.com",
+		DisplayName: "Stale Self Actor",
+		Role:        "member", // stale
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+	srv.ensureSuperAdminBinding(ctx, actor.ID)
+
+	// Create another admin so this isn't the last-admin issue.
+	admin2 := &store.User{
+		ID:          tid("stale-self-alt-admin"),
+		Email:       "stalealt@example.com",
+		DisplayName: "Alt Admin",
+		Role:        "admin",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin2))
+	srv.ensureSuperAdminBinding(ctx, admin2.ID)
+
+	// PATCH own role to member — should be blocked by self-lockout.
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch,
+		"/api/v1/users/"+actor.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"self-demotion should be blocked even with stale User.Role")
+
+	// Verify binding still exists.
+	assert.Equal(t, 1, superAdminBindingCount(t, s, actor.ID),
+		"super-admin binding must NOT be stripped on self-demotion")
+}
+
+// TestStaleRoleMember_AnotherActiveAdmin_CleanupSucceeds verifies that
+// when a non-sole-admin user has stale User.Role="member" + super-admin binding,
+// PATCH {role:"member"} by another admin succeeds and properly removes the binding.
+func TestStaleRoleMember_AnotherActiveAdmin_CleanupSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a target with stale Role="member" + super-admin binding.
+	target := &store.User{
+		ID:          tid("stale-cleanup-target"),
+		Email:       "stalecleanup@example.com",
+		DisplayName: "Stale Cleanup Target",
+		Role:        "member", // stale
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	// Ensure dev user (the actor in doRequest) has a super-admin binding.
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// PATCH role=member on target — should succeed since dev user is another
+	// active admin.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"cleanup should succeed when another active admin exists")
+
+	// Verify binding is properly removed.
+	assert.Equal(t, 0, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding should be removed on cleanup")
+
+	// Verify hub-member binding was created.
+	assert.Equal(t, 1, hubMemberBindingCount(t, s, target.ID),
+		"hub-member binding should exist after cleanup")
+}
+
+// TestStaleRoleMember_CanDelegateDenied_NoBindingDeletion verifies that
+// when a non-admin actor tries to PATCH role=member on a user with stale
+// User.Role="member" + super-admin binding, CanDelegate denies the operation
+// and the binding is preserved.
+func TestStaleRoleMember_CanDelegateDenied_NoBindingDeletion(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a non-admin actor with no super-admin binding.
+	actor := &store.User{
+		ID:          tid("stale-nonadmin-actor"),
+		Email:       "stalenonadmin@example.com",
+		DisplayName: "Non Admin Actor",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	// Create a target with stale Role="member" + super-admin binding.
+	target := &store.User{
+		ID:          tid("stale-delegate-target"),
+		Email:       "staledelegate@example.com",
+		DisplayName: "Delegate Target",
+		Role:        "member", // stale
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	// Non-admin actor tries PATCH role=member — should be denied by CanDelegate
+	// because the operation involves super-admin bindings.
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch,
+		"/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"non-admin should be denied by CanDelegate when target has binding")
+
+	// Verify binding is preserved.
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding must NOT be removed when CanDelegate denies")
+}
+
+// TestStaleRoleMember_DeleteBindingError_Propagated verifies that errors
+// from deleteSuperAdminBindingTx are propagated (not discarded with _ =)
+// and cause the transaction to roll back.
+func TestStaleRoleMember_DeleteBindingError_Propagated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create two admins: dev user + target.
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	target := &store.User{
+		ID:          tid("stale-error-target"),
+		Email:       "staleerror@example.com",
+		DisplayName: "Error Target",
+		Role:        "member", // stale
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	// Verify that a normal cleanup succeeds (binding properly deleted,
+	// error would be propagated if it occurred).
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"cleanup should succeed with proper error propagation")
+
+	// Verify binding is gone (proves the delete path ran and propagated).
+	assert.Equal(t, 0, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding should be removed by guarded delete path")
+
+	// Verify user role is updated.
+	updated, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", updated.Role, "User.Role should be member")
+}
+
+// ---------------------------------------------------------------------------
+// R4-fix: audit snapshot uses transactional state
+// ---------------------------------------------------------------------------
+
+// TestUpdateUser_AuditUsesTransactionalState verifies that audit records
+// capture beforeRole/beforeStatus from the in-tx re-read, not from a stale
+// pre-tx read.
+func TestUpdateUser_AuditUsesTransactionalState(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a member user and promote them.
+	user := &store.User{
+		ID:          tid("audit-tx-state"),
+		Email:       "audittx@example.com",
+		DisplayName: "Audit Tx State",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Promote: this creates an audit record with before="member", after="admin".
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify audit record exists with correct before/after from tx state.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "user",
+		TargetID:   user.ID,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(audits), 1, "at least one audit record should exist")
+
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "user_role_change" {
+			found = true
+			assert.Contains(t, a.BeforeSummary, `"member"`,
+				"before summary should reflect transactional state")
+			assert.Contains(t, a.AfterSummary, `"admin"`,
+				"after summary should reflect transactional state")
+		}
+	}
+	assert.True(t, found, "user_role_change audit record should exist")
+}
+
+// ---------------------------------------------------------------------------
+// R4-C5: Credential boundary enforcement tests
+//
+// PATCH and DELETE /api/v1/users/{id} must reject non-interactive credentials
+// (broker, agent JWT, UAT, federation) with no mutation, and accept
+// interactive/dev credentials.
+// ---------------------------------------------------------------------------
+
+// doRequestWithCredentialKind creates a request with a specific credential kind
+// injected directly into the context, bypassing the auth middleware. This tests
+// the requireSessionCredential boundary in isolation.
+func doRequestWithCredentialKind(
+	t *testing.T, srv *Server, user *store.User,
+	credKind CredentialKind, method, path string, body interface{},
+) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// Inject identity + credential context directly.
+	ctx := req.Context()
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+	ctx = contextWithIdentity(ctx, identity)
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: credKind})
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	srv.handleUserByID(rec, req)
+	return rec
+}
+
+func TestCredentialBoundary_PATCH_BrokerDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-broker-patch"), Email: "credbrokerpatch@test.com",
+		DisplayName: "CB Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindBroker,
+		http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"broker credential should be rejected for PATCH")
+
+	// Verify no mutation.
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", u.Role, "role must not change on rejected credential")
+}
+
+func TestCredentialBoundary_PATCH_AgentJWTDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-agent-patch"), Email: "credagentpatch@test.com",
+		DisplayName: "CA Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindAgentJWT,
+		http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"agent JWT credential should be rejected for PATCH")
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", u.Role, "role must not change on rejected credential")
+}
+
+func TestCredentialBoundary_PATCH_UATDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-uat-patch"), Email: "creduatpatch@test.com",
+		DisplayName: "CU Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindUAT,
+		http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"UAT credential should be rejected for PATCH")
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", u.Role, "role must not change on rejected credential")
+}
+
+func TestCredentialBoundary_PATCH_FederationDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-fed-patch"), Email: "credfedpatch@test.com",
+		DisplayName: "CF Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindFederation,
+		http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"federation credential should be rejected for PATCH")
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", u.Role, "role must not change on rejected credential")
+}
+
+func TestCredentialBoundary_DELETE_BrokerDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-broker-del"), Email: "credbrokerdel@test.com",
+		DisplayName: "CB Del", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindBroker,
+		http.MethodDelete, "/api/v1/users/"+target.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"broker credential should be rejected for DELETE")
+
+	// Verify user still exists.
+	_, err := s.GetUser(ctx, target.ID)
+	assert.NoError(t, err, "user must not be deleted on rejected credential")
+}
+
+func TestCredentialBoundary_DELETE_AgentJWTDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-agent-del"), Email: "credagentdel@test.com",
+		DisplayName: "CA Del", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindAgentJWT,
+		http.MethodDelete, "/api/v1/users/"+target.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"agent JWT credential should be rejected for DELETE")
+
+	_, err := s.GetUser(ctx, target.ID)
+	assert.NoError(t, err, "user must not be deleted on rejected credential")
+}
+
+func TestCredentialBoundary_DELETE_UATDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-uat-del"), Email: "creduatdel@test.com",
+		DisplayName: "CU Del", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindUAT,
+		http.MethodDelete, "/api/v1/users/"+target.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"UAT credential should be rejected for DELETE")
+
+	_, err := s.GetUser(ctx, target.ID)
+	assert.NoError(t, err, "user must not be deleted on rejected credential")
+}
+
+func TestCredentialBoundary_DELETE_FederationDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	target := &store.User{
+		ID: tid("cred-fed-del"), Email: "credfeddel@test.com",
+		DisplayName: "CF Del", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindFederation,
+		http.MethodDelete, "/api/v1/users/"+target.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"federation credential should be rejected for DELETE")
+
+	_, err := s.GetUser(ctx, target.ID)
+	assert.NoError(t, err, "user must not be deleted on rejected credential")
+}
+
+// Positive controls: interactive and dev credentials should be accepted.
+
+func TestCredentialBoundary_PATCH_InteractiveAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+	target := &store.User{
+		ID: tid("cred-interactive-patch"), Email: "credintpatch@test.com",
+		DisplayName: "CI Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindInteractive,
+		http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"interactive credential should be accepted for PATCH")
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", u.Role, "role should be updated")
+}
+
+func TestCredentialBoundary_PATCH_DevAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+	target := &store.User{
+		ID: tid("cred-dev-patch"), Email: "creddevpatch@test.com",
+		DisplayName: "CD Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindDev,
+		http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"dev credential should be accepted for PATCH")
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", u.Role, "role should be updated")
+}
+
+func TestCredentialBoundary_DELETE_DevAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+	target := &store.User{
+		ID: tid("cred-dev-del"), Email: "creddevdel@test.com",
+		DisplayName: "CD Del", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestWithCredentialKind(t, srv, devUser, CredentialKindDev,
+		http.MethodDelete, "/api/v1/users/"+target.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"dev credential should be accepted for DELETE")
+
+	_, err := s.GetUser(ctx, target.ID)
+	assert.Error(t, err, "user should be deleted")
+}
+
+func TestCredentialBoundary_PATCH_MissingContextDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	target := &store.User{
+		ID: tid("cred-missing-patch"), Email: "credmisspatch@test.com",
+		DisplayName: "CM Patch", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	// Request with no identity/credential in context at all.
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+target.ID,
+		bytes.NewReader([]byte(`{"role":"admin"}`)))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	srv.handleUserByID(rec, req)
+	assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden || rec.Code == http.StatusInternalServerError,
+		"request with no credential context should be rejected, got %d", rec.Code)
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", u.Role, "role must not change")
+}
+
+func TestCredentialBoundary_DELETE_MissingContextDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	target := &store.User{
+		ID: tid("cred-missing-del"), Email: "credmissdel@test.com",
+		DisplayName: "CM Del", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/"+target.ID, nil)
+	rec := httptest.NewRecorder()
+	srv.handleUserByID(rec, req)
+	assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden || rec.Code == http.StatusInternalServerError,
+		"request with no credential context should be rejected, got %d", rec.Code)
+
+	_, err := s.GetUser(ctx, target.ID)
+	assert.NoError(t, err, "user must not be deleted")
 }

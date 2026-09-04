@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -250,6 +251,32 @@ func (r *RoleStore) DeleteRoleDefinition(ctx context.Context, id string) error {
 
 	if err := r.client.RoleDefinition.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
+	}
+	return nil
+}
+
+// LockRoleDefinitionForAdminGuard acquires a serialization lock on the role
+// definition row. On PostgreSQL this runs SELECT id FROM role_definitions
+// WHERE id = $1 FOR UPDATE, serializing concurrent last-admin guard checks.
+// On SQLite all writes are database-serialized, so a plain existence check
+// provides the same ordering guarantee.
+func (r *RoleStore) LockRoleDefinitionForAdminGuard(ctx context.Context, roleDefinitionID string) error {
+	uid, err := parseGetID(roleDefinitionID)
+	if err != nil {
+		return err
+	}
+
+	q := r.client.RoleDefinition.Query().Where(roledefinition.IDEQ(uid))
+	if r.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock role definition for admin guard: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
 	}
 	return nil
 }

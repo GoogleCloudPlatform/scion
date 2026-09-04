@@ -142,6 +142,14 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   @state() private showLayers = false;
   /** Whether explain layers have been successfully loaded at least once. */
   @state() private _explainLoaded = false;
+  /**
+   * Whether the effective-access endpoint returned 403 (insufficient
+   * permissions). When true, the layers toggle is hidden entirely rather
+   * than showing a dead error control. hub-admin users have
+   * role_binding.read/user.update but not hub.audit.read, so this gate
+   * prevents a confusing 403 composition control (R4-fix).
+   */
+  @state() private _explainForbidden = false;
 
   static override styles = [
     srOnlyStyles,
@@ -547,6 +555,15 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       const res = await apiFetch(url);
 
       if (!res.ok) {
+        // Gate on authorization: if the endpoint requires hub.audit.read and
+        // the current user doesn't have it, silently hide the composition
+        // section instead of showing an error (R4-fix: prevents dead 403
+        // composition control for hub-admin users).
+        if (res.status === 403) {
+          this._explainForbidden = true;
+          this.showLayers = false;
+          return;
+        }
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
@@ -746,6 +763,12 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   // ---------------------------------------------------------------------------
 
   private renderLayersSection() {
+    // Hide the composition toggle entirely if the effective-access endpoint
+    // returned 403 — the user lacks hub.audit.read (R4-fix).
+    if (this._explainForbidden) {
+      return nothing;
+    }
+
     return html`
       <div class="layers-toggle">
         <div

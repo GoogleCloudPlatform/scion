@@ -1797,6 +1797,19 @@ type RoleStore interface {
 	// Returns ErrNotFound if the role definition doesn't exist.
 	DeleteRoleDefinition(ctx context.Context, id string) error
 
+	// LockRoleDefinitionForAdminGuard acquires a serialization lock on the
+	// given role definition row. On PostgreSQL this executes SELECT ... FOR
+	// UPDATE, serializing concurrent transactions that both try to check the
+	// last-admin count before mutating super-admin bindings. On SQLite this
+	// is a plain existence check (SQLite already serializes all writes at the
+	// database level).
+	//
+	// Must be called inside a transaction (WithTx) before checkLastSuperAdminTx
+	// to prevent the READ COMMITTED race where two concurrent demotions/deletes
+	// both observe the other admin and both commit, leaving zero super-admins.
+	// Returns ErrNotFound if the role definition doesn't exist.
+	LockRoleDefinitionForAdminGuard(ctx context.Context, roleDefinitionID string) error
+
 	// ListAllRoleBindings returns all role bindings (admin view).
 	// opts controls pagination and sort order. See RoleBindingListOptions for defaults.
 	ListAllRoleBindings(ctx context.Context, opts RoleBindingListOptions) ([]*RoleBinding, error)
