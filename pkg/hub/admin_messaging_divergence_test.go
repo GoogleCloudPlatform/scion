@@ -42,6 +42,8 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	messaging.DivergenceMetrics.IncExplicitRouting() // 1 explicit route
 	messaging.DivergenceMetrics.IncExplicitRouting() // 2 explicit routes
 	messaging.DivergenceMetrics.IncExplicitRouting() // 3 explicit routes
+	messaging.DivergenceMetrics.IncDerivedRouting()  // 1 derived route
+	messaging.DivergenceMetrics.IncDerivedRouting()  // 2 derived routes
 
 	srv := &Server{
 		startTime: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
@@ -98,6 +100,11 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	// DEF-138: explicit routing counter.
 	if resp.ExplicitRoutes != 3 {
 		t.Errorf("expected explicit_routes=3, got %d", resp.ExplicitRoutes)
+	}
+
+	// DEF-141: derived routing counter.
+	if resp.DerivedRoutes != 2 {
+		t.Errorf("expected derived_routes=2, got %d", resp.DerivedRoutes)
 	}
 
 	// Verify identity fields.

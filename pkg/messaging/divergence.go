@@ -55,6 +55,12 @@ type DivergenceCounter struct {
 	// key to compare against (the conversation was named, not derived).
 	explicitRoutes atomic.Int64
 
+	// DEF-141: derived routing events — messages whose ConversationID was
+	// derived by the hub from message fields (DeriveConversationKey) and
+	// propagated onto StructuredMessage by P-3. These are NOT caller
+	// assertions and must not be counted as explicit routes.
+	derivedRoutes atomic.Int64
+
 	// Consistency check counters (CheckConversationConsistency).
 	// These track the independent, non-tautological consistency check that
 	// queries prior persisted messages — unlike the routing-key comparison
@@ -98,6 +104,15 @@ func (c *DivergenceCounter) IncExplicitRouting() { c.explicitRoutes.Add(1) }
 
 // ExplicitRoutes returns the total number of explicitly-routed messages.
 func (c *DivergenceCounter) ExplicitRoutes() int64 { return c.explicitRoutes.Load() }
+
+// IncDerivedRouting increments the derived-routing counter.
+// A derived route is a message whose ConversationID was derived by the hub
+// from message fields and propagated onto StructuredMessage — the caller
+// did not assert a conversation identity.
+func (c *DivergenceCounter) IncDerivedRouting() { c.derivedRoutes.Add(1) }
+
+// DerivedRoutes returns the total number of derived-routed messages.
+func (c *DivergenceCounter) DerivedRoutes() int64 { return c.derivedRoutes.Load() }
 
 // IncConsistency increments the consistency check counter and, when
 // consistent is false, also increments the consistency mismatch counter.
@@ -298,6 +313,22 @@ func LogExplicitRouting(log *slog.Logger, messageID, convID string) {
 		"message_id", messageID,
 		"conversation_id", convID,
 		"explicit_route_count", DivergenceMetrics.ExplicitRoutes(),
+	)
+}
+
+// LogDerivedRouting records that a message was routed via a hub-derived
+// ConversationID — the caller sent no conversation_id in the request, and
+// the hub derived one from message fields (DeriveConversationKey) and
+// propagated it onto StructuredMessage via P-3. No ComputeDivergenceMatch
+// comparison is performed because the comparison would be tautological:
+// both sides would be derived from the same input fields in the same request
+// (DEF-139, [^72]/[^73]).
+func LogDerivedRouting(log *slog.Logger, messageID, convID string) {
+	DivergenceMetrics.IncDerivedRouting()
+	log.Info("conversation routing check: derived-routing",
+		"message_id", messageID,
+		"conversation_id", convID,
+		"derived_route_count", DivergenceMetrics.DerivedRoutes(),
 	)
 }
 

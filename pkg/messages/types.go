@@ -146,6 +146,13 @@ type StructuredMessage struct {
 	ThreadID       string            `json:"thread_id,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
 
+	// ConversationAsserted records that ConversationID was NAMED BY THE CALLER
+	// and authorized, rather than derived by the hub from message fields.
+	// Hub-internal provenance: it is never rendered into the agent envelope and
+	// never accepted from request JSON. Consumers must branch on this, never on
+	// ConversationID != "" — non-emptiness only means "already resolved upstream".
+	ConversationAsserted bool `json:"conversation_asserted,omitempty"`
+
 	// Visibility controls which consumers see this message.
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
 	// Empty defaults to VisibilityNormal for backward compatibility.

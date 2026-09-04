@@ -712,6 +712,7 @@ func TestDEF138_ExplicitRouting_NeverCountedAsMismatch(t *testing.T) {
 	msg.SenderID = agentID
 	msg.RecipientID = recipientID
 	msg.ConversationID = created.ID
+	msg.ConversationAsserted = true // DEF-141: mark as caller-asserted
 
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
 
@@ -736,9 +737,14 @@ func TestDEF138_ExplicitRouting_NeverCountedAsMismatch(t *testing.T) {
 }
 
 // TestDEF138_DerivedRouting_StillLogsDivergence verifies that the non-explicit
-// path (thread or DM derivation) still goes through ComputeDivergenceMatch.
+// path (no ConversationID at all) still goes through ComputeDivergenceMatch.
 // This is the positive control: if someone accidentally makes ALL paths use
-// LogExplicitRouting, derived messages would stop being checked.
+// LogExplicitRouting, underived messages would stop being checked.
+//
+// DEF-141 update: a message with ConversationID set but ConversationAsserted
+// false now goes through LogDerivedRouting. This test exercises the DEFAULT
+// path (no ConversationID at all) — it must still go through
+// ComputeDivergenceMatch.
 func TestDEF138_DerivedRouting_StillLogsDivergence(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
@@ -774,22 +780,24 @@ func TestDEF138_DerivedRouting_StillLogsDivergence(t *testing.T) {
 	totalBefore := messaging.DivergenceMetrics.Total()
 	explicitBefore := messaging.DivergenceMetrics.ExplicitRoutes()
 
-	// Build a message WITHOUT ConversationID — should derive a DM.
+	// Build a message WITHOUT ConversationID — should derive a DM via
+	// the broker and go through ComputeDivergenceMatch (default arm).
 	msg := messages.NewInstruction("agent:derived-test-agent", "user:derived-recipient@example.com", "derived routing test")
 	msg.SenderID = agentID
 	msg.RecipientID = recipientID
 	// msg.ConversationID is intentionally empty.
+	// msg.ConversationAsserted is intentionally false.
 
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
 
-	// The derived path should have gone through ComputeDivergenceMatch,
+	// The default path should have gone through ComputeDivergenceMatch,
 	// incrementing either matches or mismatches.
 	totalAfter := messaging.DivergenceMetrics.Total()
 	require.Greater(t, totalAfter, totalBefore,
-		"derived routing should go through ComputeDivergenceMatch (Total should increase)")
+		"default routing (no ConversationID) should go through ComputeDivergenceMatch (Total should increase)")
 
 	// And NOT through LogExplicitRouting.
 	explicitAfter := messaging.DivergenceMetrics.ExplicitRoutes()
 	require.Equal(t, explicitBefore, explicitAfter,
-		"derived routing must not increment the explicit-routing counter")
+		"default routing must not increment the explicit-routing counter")
 }

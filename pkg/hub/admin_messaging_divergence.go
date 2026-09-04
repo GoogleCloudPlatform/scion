@@ -50,6 +50,7 @@ type divergenceBoardResponse struct {
 	ConsistencyChecks      int64                  `json:"consistency_checks"`
 	ConsistencyMismatches  int64                  `json:"consistency_mismatches"`
 	ExplicitRoutes         int64                  `json:"explicit_routes"`
+	DerivedRoutes          int64                  `json:"derived_routes"`
 	Caveats                divergenceBoardCaveats `json:"caveats"`
 }
 
@@ -100,14 +101,15 @@ var divergenceCaveats = divergenceBoardCaveats{
 		"matches + mismatches from those independent reads, so the triple is " +
 		"arithmetically consistent but not a true snapshot. Ratios derived from " +
 		"these values (e.g. mismatch rate, fallback percentage) are approximate.",
-	ExplicitRoutingAdoption: "explicit_routes counts messages whose ConversationID " +
-		"was supplied by the caller and authorized by the handler (DEF-138 P-2). " +
-		"These are not comparisons — no old-model routing key exists to compare " +
-		"against because the caller stated the conversation identity directly " +
-		"rather than having it derived from message fields. The counter measures " +
-		"adoption of explicit conversation routing, not correctness. " +
-		"explicit_routes / (comparisons + explicit_routes) approximates the " +
-		"fraction of outbound traffic using the new routing path.",
+	ExplicitRoutingAdoption: "explicit_routes counts CALLER ASSERTIONS ONLY — " +
+		"messages whose ConversationID was named by the caller and authorized " +
+		"by the handler (DEF-138 P-2). derived_routes counts messages whose " +
+		"ConversationID was derived by the hub from message fields " +
+		"(DeriveConversationKey) and propagated via P-3. Together they cover " +
+		"the outbound agent→user path. " +
+		"explicit_routes / (explicit_routes + derived_routes) is the adoption " +
+		"ratio — it measures whether agents are adopting explicit conversation " +
+		"routing, and it can go down.",
 }
 
 // handleAdminMessagingDivergence handles GET /api/v1/admin/messaging/divergence.
@@ -132,6 +134,7 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 	consistencyChecks := m.ConsistencyChecks()
 	consistencyMismatches := m.ConsistencyMismatches()
 	explicitRoutes := m.ExplicitRoutes()
+	derivedRoutes := m.DerivedRoutes()
 
 	writeJSON(w, http.StatusOK, divergenceBoardResponse{
 		HubID:                 s.HubID(),
@@ -144,6 +147,7 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 		ConsistencyChecks:     consistencyChecks,
 		ConsistencyMismatches: consistencyMismatches,
 		ExplicitRoutes:        explicitRoutes,
+		DerivedRoutes:         derivedRoutes,
 		Caveats:               divergenceCaveats,
 	})
 }

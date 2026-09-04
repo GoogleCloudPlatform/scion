@@ -465,12 +465,14 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		var convResult *messaging.ConversationResult
 
 		// DEF-138 P-3: honour a pre-resolved ConversationID from the
-		// upstream handler instead of re-deriving. The handler already
-		// authorized the assertion (P-2) and stamped structuredMsg
-		// before publishing to the broker. Re-deriving here produced the
-		// inbound/outbound conversation split: the handler resolved a
-		// thread conversation, then the broker re-derived a DM because
-		// the agent's reply carries no ThreadID.
+		// upstream handler instead of re-deriving. The handler resolved
+		// and stamped structuredMsg before publishing to the broker.
+		// Re-deriving here produced the inbound/outbound conversation
+		// split: the handler resolved a thread conversation, then the
+		// broker re-derived a DM because the agent's reply carries no
+		// ThreadID. Note: non-emptiness means "already resolved upstream"
+		// — it does NOT mean "the caller asserted this". Provenance is
+		// carried by ConversationAsserted (DEF-141).
 		if msg.ConversationID != "" {
 			storeMsg.ConversationID = msg.ConversationID
 			// Build a minimal ConversationResult for divergence logging.
@@ -521,16 +523,26 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// DEF-138: The pre-resolved path (msg.ConversationID != "") bypasses
-		// ComputeDivergenceMatch — there is no old-model routing key to
-		// compare against because the conversation was named by the caller,
-		// not derived from message fields.  Feeding an empty ExternalRef
-		// into ComputeDivergenceMatch would produce a false
-		// routing-type-mismatch on every correctly-routed explicit message.
-		if msg.ConversationID != "" {
+		// DEF-141: Classification is a three-way decision on provenance,
+		// separated from the honouring block above. Honouring is gated on
+		// non-emptiness (P-3, must not regress). Classification branches on
+		// ConversationAsserted — never on ConversationID != "".
+		switch {
+		case msg.ConversationAsserted:
+			// Caller named a conversation and the handler authorized it.
 			messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
-		} else {
-			// Always log divergence — even when convResult is nil, that is a divergence signal.
+
+		case msg.ConversationID != "":
+			// Handler-derived and propagated. Deliberately NOT compared:
+			// ComputeDivergenceMatch would take both sides from the same input
+			// fields in the same request, so the verdict is tautological (DEF-139,
+			// [^72]/[^73]). Counting it as a "match" would inflate the board with
+			// confirmations that confirm nothing. CheckConversationConsistency
+			// below is the independent check and runs on every path regardless.
+			messaging.LogDerivedRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+		default:
+			// No pre-resolved conversation — compare old-model vs new-model routing.
 			oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
 			convID := ""
 			actualRef := ""

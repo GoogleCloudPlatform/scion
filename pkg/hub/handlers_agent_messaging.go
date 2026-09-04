@@ -317,6 +317,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// Rule 1 is the explicit path (req.ConversationID set). Rules 2/3 are
 	// the derivation path (existing DeriveConversationKey logic).
 	var convResult *messaging.ConversationResult
+	var asserted bool // DEF-141: true only when the caller named a conversation and it was authorized.
 	if req.ConversationID != "" {
 		// Rule 1: explicit conversation assertion from the caller.
 		//
@@ -411,6 +412,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 
 		// Authorization passed — honour the caller's assertion.
+		asserted = true // DEF-141: provenance is derived from the authenticated path.
 		storeMsg.ConversationID = req.ConversationID
 		convResult = &messaging.ConversationResult{
 			ConversationID: req.ConversationID,
@@ -485,6 +487,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// inbound/outbound conversation split this defect addresses.
 	if convResult != nil {
 		structuredMsg.ConversationID = convResult.ConversationID
+		structuredMsg.ConversationAsserted = asserted
 	}
 
 	// Propagate recipients and group_id from metadata for group-set messages.
