@@ -1181,6 +1181,7 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 // super-admin binding through the generic DELETE endpoint. It applies the
 // same invariant guards as user PATCH role demotion (R6):
 //
+//   - Credential boundary: session/dev credentials only (no broker/agent/UAT/federation)
 //   - CanDelegate: caller must have delegation authority over the super-admin role
 //   - Self-lockout: caller cannot remove their own super-admin binding
 //   - Last-admin: serialized check prevents removing the sole active admin
@@ -1193,6 +1194,16 @@ func (s *Server) deleteSystemSuperAdminBinding(
 	binding *store.RoleBinding, actor UserIdentity, rd *store.RoleDefinition,
 ) {
 	ctx := r.Context()
+
+	// Credential boundary: super-admin binding mutations require interactive
+	// session or dev credentials. Reject broker, agent JWT, UAT, and
+	// federation tokens (R6 credential gate).
+	cred := GetCredentialContextFromContext(ctx)
+	if !allowedMutationCredentials[cred.Kind] {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed", cred.Kind), nil)
+		return
+	}
 
 	// CanDelegate: caller must have delegation authority over super-admin.
 	canDel := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{

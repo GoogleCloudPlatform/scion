@@ -412,7 +412,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		var bindingMutation bindingMutationKind
 		if needsPromote {
 			var err error
-			bindingMutation, err = s.executeRoleTransition(ctx, tx, txUser, *updates.Role, superAdminRD, actor.ID())
+			bindingMutation, err = s.executeRoleTransition(ctx, tx, txUser, *updates.Role, superAdminRD, actor.ID(), preAuthBindingState)
 			if err != nil {
 				return err
 			}
@@ -496,6 +496,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	if err != nil {
 		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
+		} else if errors.Is(err, errBindingStateDrift) {
+			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user update failed: "+err.Error(), nil)
@@ -644,6 +646,11 @@ const (
 	bindingMutationCleanedUp bindingMutationKind = "cleanup"  // expired/scheduled removed, no active existed
 )
 
+// errBindingStateDrift is returned when the canonical binding state inside the
+// transaction differs from the pre-authorization check in a way that would
+// bypass CanDelegate. The caller must retry (R6 TOCTOU fix).
+var errBindingStateDrift = errors.New("binding state changed since authorization check; retry the operation")
+
 // executeRoleTransition performs the binding mutations inside a store
 // transaction. Classification is derived from canonical binding state (whether
 // super-admin bindings exist and their lifecycle state) inside the transaction,
@@ -654,6 +661,12 @@ const (
 //   - admin: ensures exactly one active binding exists; stale rows are
 //     deleted then a fresh active binding is created
 //
+// TOCTOU safety (R6): preAuthState records the binding state that was
+// authorized before the transaction. If the in-tx state has bindings that
+// weren't present at preauth (txState.HasAny && !preAuthState.HasAny), the
+// operation is rejected to prevent concurrent promotion from creating a
+// binding that is then silently removed without CanDelegate verification.
+//
 // Returns what binding mutation occurred for truthful audit (R4-fix audit).
 func (s *Server) executeRoleTransition(
 	ctx context.Context,
@@ -662,11 +675,21 @@ func (s *Server) executeRoleTransition(
 	newRole string,
 	superAdminRD *store.RoleDefinition,
 	actorID string,
+	preAuthState superAdminBindingState,
 ) (bindingMutationKind, error) {
 	// Determine canonical binding state inside the transaction (R4-fix).
 	txState, err := s.superAdminBindingStateForUser(ctx, tx, user.ID, superAdminRD)
 	if err != nil {
 		return bindingMutationNone, fmt.Errorf("check canonical binding state in tx: %w", err)
+	}
+
+	// TOCTOU guard (R6): if the in-tx state has super-admin bindings that
+	// weren't present at pre-authorization time, a concurrent operation
+	// created them between the preauth check and this transaction. The
+	// CanDelegate check may not have covered this new state, so fail
+	// closed rather than silently mutating bindings without authorization.
+	if txState.HasAny && !preAuthState.HasAny {
+		return bindingMutationNone, errBindingStateDrift
 	}
 
 	wantsBinding := newRole == "admin"

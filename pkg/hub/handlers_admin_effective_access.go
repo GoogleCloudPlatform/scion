@@ -109,6 +109,15 @@ func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// HEAD short-circuit (R6): return 200 with no body after authorization
+	// succeeds. Used by the UI pre-click capability gate to probe whether
+	// the composition toggle should be shown — avoids executing the full
+	// effective-access computation just for an authorization check.
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// Parse query parameters.
 	principalType := r.URL.Query().Get("principalType")
 	principalID := r.URL.Query().Get("principalId")

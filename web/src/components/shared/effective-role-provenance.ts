@@ -150,6 +150,12 @@ export class ScionEffectiveRoleProvenance extends LitElement {
    * prevents a confusing 403 composition control (R4-fix).
    */
   @state() private _explainForbidden = false;
+  /**
+   * Whether the pre-click capability check has resolved (either allowed or
+   * denied). The composition toggle is hidden until this is true, so the
+   * user never sees a toggle that will be removed moments later (R6).
+   */
+  @state() private _explainPreChecked = false;
 
   static override styles = [
     srOnlyStyles,
@@ -552,21 +558,31 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
   /**
    * Pre-click capability gate for the effective-access composition toggle
-   * (R6). Fires a lightweight HEAD request to the explain endpoint. If the
-   * server responds with 403, the toggle is hidden before the user can
-   * interact with it — no wasted click and no dead error control.
+   * (R6). Fires a lightweight HEAD request to the explain endpoint. The
+   * backend short-circuits after the authorization check (no full effective-
+   * access computation). If the server responds with 403, the toggle is
+   * hidden before the user can interact with it — no wasted click and no
+   * dead error control. The 403 toast is suppressed since it's an expected
+   * authorization probe, not an unexpected denial.
+   *
+   * The toggle is rendered only after this check resolves (_explainPreChecked).
    */
   private async preCheckExplainAccess(): Promise<void> {
     if (this._explainForbidden || this._explainLoaded) return;
     try {
       const url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
-      const res = await apiFetch(url, { method: 'HEAD' });
+      const res = await apiFetch(url, {
+        method: 'HEAD',
+        suppressAccessDeniedToast: true,
+      });
       if (res.status === 403) {
         this._explainForbidden = true;
       }
     } catch {
       // Network errors are not authorization failures — leave the toggle
       // visible so the user can retry after connectivity is restored.
+    } finally {
+      this._explainPreChecked = true;
     }
   }
 
@@ -791,7 +807,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   private renderLayersSection() {
     // Hide the composition toggle entirely if the effective-access endpoint
     // returned 403 — the user lacks hub.audit.read (R4-fix).
-    if (this._explainForbidden) {
+    // Also hide until the pre-check has resolved so the user never sees a
+    // toggle that will be removed moments later (R6).
+    if (this._explainForbidden || !this._explainPreChecked) {
       return nothing;
     }
 

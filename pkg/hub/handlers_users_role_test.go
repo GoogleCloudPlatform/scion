@@ -2244,3 +2244,55 @@ func TestConcurrentDemotion_AtMostOneSucceeds(t *testing.T) {
 	devUser.Status = "active"
 	_ = s.UpdateUser(ctx, devUser)
 }
+
+// ---------------------------------------------------------------------------
+// R6: CanDelegate TOCTOU — binding state drift detection
+// ---------------------------------------------------------------------------
+
+// TestBindingStateDrift_DemoteRejectsUnauthorizedBinding verifies that
+// executeRoleTransition fails closed when a super-admin binding appeared
+// between the pre-authorization check and the transaction. This prevents
+// a concurrent promotion from creating a binding that is then silently
+// removed without CanDelegate verification.
+func TestBindingStateDrift_DemoteRejectsUnauthorizedBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Create a user with Role="member" and NO binding (clean state).
+	target := &store.User{
+		ID: tid("drift-target"), Email: "drifttarget@test.com",
+		DisplayName: "Drift Target", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	// Simulate the TOCTOU scenario: after preauth (which sees no binding),
+	// a concurrent promotion creates a super-admin binding.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Call executeRoleTransition with preAuthState.HasAny=false, but the
+	// target now has a binding. This should fail closed.
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	err = s.WithTx(ctx, func(tx store.Store) error {
+		txUser, err := tx.GetUser(ctx, target.ID)
+		require.NoError(t, err)
+
+		// preAuthState was HasAny=false (no binding at preauth time).
+		preAuth := superAdminBindingState{HasAny: false, HasActive: false}
+		_, err = srv.executeRoleTransition(ctx, tx, txUser, "member", rd, devUser.ID, preAuth)
+		return err
+	})
+
+	// Should fail with binding state drift error.
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, errBindingStateDrift,
+		"executeRoleTransition should reject when bindings appeared since preauth")
+
+	// Verify the binding is still intact (not removed).
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"binding should NOT be removed when state drifted")
+}

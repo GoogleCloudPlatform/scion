@@ -445,10 +445,13 @@ describe('Pre-click capability gating for effective-access (R6)', () => {
     expect(loadFnMatch![0]).toContain('preCheckExplainAccess');
   });
 
-  it('preCheckExplainAccess uses HEAD method for lightweight authorization check', () => {
+  it('preCheckExplainAccess uses HEAD method with suppressed 403 toast', () => {
     const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
     // The pre-check should use HEAD to minimize data transfer.
     expect(source).toContain("method: 'HEAD'");
+    // The 403 toast must be suppressed — this is an expected authorization
+    // probe, not an unexpected denial.
+    expect(source).toContain('suppressAccessDeniedToast: true');
   });
 
   it('preCheckExplainAccess sets _explainForbidden on 403 response', () => {
@@ -460,6 +463,24 @@ describe('Pre-click capability gating for effective-access (R6)', () => {
     const body = preCheckMatch![0];
     expect(body).toContain('res.status === 403');
     expect(body).toContain('this._explainForbidden = true');
+  });
+
+  it('toggle is hidden until pre-check resolves (_explainPreChecked)', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    // The _explainPreChecked flag must be declared as a @state() field.
+    expect(source).toMatch(/@state\(\)\s+private\s+_explainPreChecked/);
+    // preCheckExplainAccess must set it to true in the finally block.
+    const preCheckMatch = source.match(
+      /async preCheckExplainAccess\(\)[\s\S]*?(?=\n\s*(?:private|public|protected|override|\/\*\*))/m
+    );
+    expect(preCheckMatch).toBeTruthy();
+    expect(preCheckMatch![0]).toContain('this._explainPreChecked = true');
+    // renderLayersSection must check !this._explainPreChecked.
+    const renderMatch = source.match(
+      /private renderLayersSection\(\)[\s\S]*?(?=\n\s*private\s)/m
+    );
+    expect(renderMatch).toBeTruthy();
+    expect(renderMatch![0]).toContain('_explainPreChecked');
   });
 
   it('renderLayersSection returns nothing when _explainForbidden is true', () => {

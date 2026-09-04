@@ -2139,3 +2139,102 @@ func TestGenericDeleteBinding_NonSuperAdmin_StillWorks(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code,
 		"non-super-admin binding deletion should work normally")
 }
+
+// ---------------------------------------------------------------------------
+// R6: Credential boundary on generic DELETE super-admin bindings
+// ---------------------------------------------------------------------------
+
+// doDeleteBindingWithCredentialKind creates a request to the generic DELETE
+// role-bindings endpoint with a specific credential kind injected directly
+// into the context, bypassing the auth middleware.
+func doDeleteBindingWithCredentialKind(
+	t *testing.T, srv *Server, user *store.User,
+	credKind CredentialKind, bindingID string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+
+	path := "/api/v1/admin/role-bindings/" + bindingID
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+
+	ctx := req.Context()
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+	ctx = contextWithIdentity(ctx, identity)
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: credKind})
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	srv.handleAdminRoleBindingByID(rec, req)
+	return rec
+}
+
+// TestGenericDeleteBinding_SuperAdmin_BrokerDenied verifies that broker
+// credentials cannot delete super-admin bindings via the generic endpoint.
+func TestGenericDeleteBinding_SuperAdmin_BrokerDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-broker")
+	seedRolesTestUser(t, s, targetID, "gacredbroker@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doDeleteBindingWithCredentialKind(t, srv, devUser, CredentialKindBroker, targetBinding.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"broker credential should be denied for super-admin binding deletion")
+}
+
+// TestGenericDeleteBinding_SuperAdmin_AgentJWTDenied verifies that agent JWT
+// credentials cannot delete super-admin bindings.
+func TestGenericDeleteBinding_SuperAdmin_AgentJWTDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-agent")
+	seedRolesTestUser(t, s, targetID, "gacredagent@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doDeleteBindingWithCredentialKind(t, srv, devUser, CredentialKindAgentJWT, targetBinding.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"agent JWT credential should be denied for super-admin binding deletion")
+}
+
+// TestGenericDeleteBinding_SuperAdmin_UATDenied verifies that UAT credentials
+// cannot delete super-admin bindings.
+func TestGenericDeleteBinding_SuperAdmin_UATDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-uat")
+	seedRolesTestUser(t, s, targetID, "gacreduat@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doDeleteBindingWithCredentialKind(t, srv, devUser, CredentialKindUAT, targetBinding.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"UAT credential should be denied for super-admin binding deletion")
+}
+
+// TestGenericDeleteBinding_SuperAdmin_DevAllowed verifies that dev credentials
+// CAN delete super-admin bindings (positive control).
+func TestGenericDeleteBinding_SuperAdmin_DevAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-dev-ok")
+	seedRolesTestUser(t, s, targetID, "gacreddevok@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doDeleteBindingWithCredentialKind(t, srv, devUser, CredentialKindDev, targetBinding.ID)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"dev credential should be allowed for super-admin binding deletion")
+}
