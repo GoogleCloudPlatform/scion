@@ -3338,6 +3338,13 @@ func TestReResolveModelAlias(t *testing.T) {
 			wantResolv: false,
 		},
 		{
+			name:       "empty envModel does not re-resolve",
+			envModel:   "",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "",
+			wantResolv: false,
+		},
+		{
 			name:       "empty config model does not re-resolve",
 			envModel:   "large",
 			cfg:        &api.ScionConfig{Model: ""},

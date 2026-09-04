@@ -1596,7 +1596,7 @@ func mergeExtraHosts(a, b []string) []string {
 // when no re-resolution is needed — either because the value is not a known
 // alias, the config is nil, or the config model is empty.
 func reResolveModelAlias(envModel string, cfg *api.ScionConfig) (string, bool) {
-	if cfg == nil || cfg.Model == "" {
+	if envModel == "" || cfg == nil || cfg.Model == "" {
 		return "", false
 	}
 	normalized := config.NormalizeModelAlias(envModel)
