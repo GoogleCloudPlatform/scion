@@ -484,7 +484,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			Scope:         secret.ScopeProject,
 			ScopeID:       project.ID,
 			Description:   "GitHub token for repository access",
-			InjectionMode: "as_needed",
+			InjectionMode: "always",
 			CreatedBy:     project.CreatedBy,
 			UpdatedBy:     project.CreatedBy,
 		}

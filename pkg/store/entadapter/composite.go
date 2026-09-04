@@ -41,6 +41,7 @@ const systemProjectMembersGroupAnnotation = "scion.io/system-project-members-gro
 const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_markers_backfilled"
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
+const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -269,6 +270,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// together do not race, and the columns being read are guaranteed to exist.
 	if err := c.BackfillGCPVerificationStatus(ctx); err != nil {
 		return err
+	}
+	if err := c.MigrateGitHubTokenInjectionMode(ctx); err != nil {
+		return fmt.Errorf("github token injection mode migration: %w", err)
 	}
 	return c.SeedMaintenanceOperations(ctx)
 }
@@ -662,6 +666,40 @@ func (c *CompositeStore) BackfillProjectAgentsGroupMarkers(ctx context.Context) 
 		"rows_updated", updated, "rows_skipped", skipped)
 
 	_, err = c.UpsertHubSetting(ctx, projectAgentsGroupMarkerBackfillSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// MigrateGitHubTokenInjectionMode updates existing GITHUB_TOKEN secrets from
+// injection_mode "as_needed" to "always". The token must be injected in the
+// first env-resolution pass so it is available when sciontool init clones the
+// repository for clone-per-agent and worktree-per-agent workspace modes.
+// See https://github.com/ptone/scion/issues/1437.
+func (c *CompositeStore) MigrateGitHubTokenInjectionMode(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, githubTokenInjectionModeMarkerSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	db := c.DB()
+	if db == nil {
+		return nil
+	}
+
+	result, err := db.ExecContext(ctx,
+		"UPDATE secrets SET injection_mode = 'always' WHERE key = 'GITHUB_TOKEN' AND injection_mode = 'as_needed'")
+	if err != nil {
+		return fmt.Errorf("update GITHUB_TOKEN injection_mode: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n > 0 {
+		slog.Info("migrated GITHUB_TOKEN secrets to injection_mode=always", "rows_updated", n)
+	}
+
+	_, err = c.UpsertHubSetting(ctx, githubTokenInjectionModeMarkerSection,
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil
