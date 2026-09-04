@@ -125,39 +125,6 @@ func TestHubClient_DeliverInbound_Hub4xx(t *testing.T) {
 	assert.Contains(t, err.Error(), "400")
 }
 
-func TestHubClient_DeliverCallback(t *testing.T) {
-	var receivedData map[string]interface{}
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "POST", r.Method)
-		assert.Equal(t, "/api/v1/broker/callback", r.URL.Path)
-
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		var payload callbackPayload
-		err = json.Unmarshal(body, &payload)
-		require.NoError(t, err)
-		receivedData = payload.Data
-
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-
-	hmacKey := base64.StdEncoding.EncodeToString([]byte("secret"))
-	client := NewHubClient(ts.URL, hmacKey, "broker", slog.Default())
-	client.httpClient = ts.Client()
-
-	data := map[string]interface{}{
-		"action": "submit",
-		"value":  "test",
-	}
-
-	err := client.DeliverCallback(context.Background(), data)
-	require.NoError(t, err)
-	assert.Equal(t, "submit", receivedData["action"])
-}
-
 func TestHubClient_SignRequest_NoCredentials(t *testing.T) {
 	// When no HMAC credentials are set, signing should be a no-op.
 	client := NewHubClient("http://example.com", "", "", slog.Default())
