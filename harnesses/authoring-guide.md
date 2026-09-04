@@ -117,6 +117,7 @@ command:
   task_position: after_base_args # or before_base_args
   resume_flag: "resume --last"   # split on whitespace into argv tokens
   system_prompt_flag: "--system-prompt"  # only if the CLI accepts a native flag
+  system_prompt_file_flag: "--system-prompt-file"  # preferred when supported
 ```
 
 The host assembles: `base... [resume tokens] [harness args] [task]` (default
@@ -124,8 +125,11 @@ The host assembles: `base... [resume tokens] [harness args] [task]` (default
 `before_base_args`. Pick the position that matches how your CLI parses argv
 when extra flags are passed through — this is a common parity bug (see the
 comments in the codex and opencode configs). `resume_flag` is whitespace-split,
-so multi-token resume subcommands work. If `system_prompt_flag` is set, the
-host appends it with the staged system-prompt content at launch.
+so multi-token resume subcommands work. If `system_prompt_file_flag` is set,
+the harness resolves `system_prompt_file` against the container's `$HOME` and
+passes the file path at launch, keeping the prompt content out of the
+sciontool/tmux command line. Prefer it when the CLI supports a file. Otherwise,
+`system_prompt_flag` appends the complete staged prompt content at launch.
 
 Base flags should put the tool in full-permission, non-interactive-approval
 mode (`--yolo`, `--dangerously-skip-permissions`, `approval_policy = never`,

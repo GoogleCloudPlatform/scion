@@ -100,6 +100,50 @@ func TestContainerScriptHarness_BasicGetters(t *testing.T) {
 	}
 }
 
+func TestContainerScriptHarness_SystemPromptFileStaysOutOfCommand(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	largePrompt := strings.Repeat("system prompt content\n", 10_000)
+	if err := h.InjectSystemPrompt(agentHome, []byte(largePrompt)); err != nil {
+		t.Fatal(err)
+	}
+	h.agentHome = agentHome
+	h.entry.Command.SystemPromptFileFlag = "--system-prompt-file"
+
+	cmd := h.GetCommand("hello", false, []string{"--debug"})
+	want := []string{
+		"sh", "-c",
+		`prompt_file=$1; shift; case "$prompt_file" in /*) ;; *) prompt_file=$HOME/$prompt_file ;; esac; exec "$@" "$prompt_file"`,
+		"scion-system-prompt", ".test/system.md",
+		"testcli", "--debug", "--prompt", "hello", "--system-prompt-file",
+	}
+	if strings.Join(cmd, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("GetCommand=%q want %q", cmd, want)
+	}
+	if strings.Contains(strings.Join(cmd, " "), "system prompt content") {
+		t.Fatal("system prompt content leaked into command argv")
+	}
+	if got := len(strings.Join(cmd, " ")); got > 1024 {
+		t.Fatalf("command length=%d, want bounded command", got)
+	}
+}
+
+func TestContainerScriptHarness_SystemPromptContentFlagCompatibility(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	if err := h.InjectSystemPrompt(agentHome, []byte("legacy prompt")); err != nil {
+		t.Fatal(err)
+	}
+	h.agentHome = agentHome
+	h.entry.Command.SystemPromptFlag = "--system-prompt"
+
+	cmd := h.GetCommand("hello", false, nil)
+	want := []string{"testcli", "--prompt", "hello", "--system-prompt", "legacy prompt"}
+	if strings.Join(cmd, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("GetCommand=%q want %q", cmd, want)
+	}
+}
+
 func TestContainerScriptHarness_GetInterruptSequence(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: seqtest\nimage: scion-test:latest\n")

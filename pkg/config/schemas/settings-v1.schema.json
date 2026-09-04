@@ -520,7 +520,8 @@
           "type": "string",
           "enum": ["after_base_args", "before_base_args", "positional"]
         },
-        "system_prompt_flag": { "type": "string" }
+        "system_prompt_flag": { "type": "string" },
+        "system_prompt_file_flag": { "type": "string" }
       },
       "additionalProperties": false
     },

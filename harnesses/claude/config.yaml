@@ -60,7 +60,7 @@ command:
   base: ["claude", "--no-chrome", "--dangerously-skip-permissions"]
   resume_flag: "--continue"
   task_position: after_base_args
-  system_prompt_flag: "--system-prompt"
+  system_prompt_file_flag: "--system-prompt-file"
 capabilities:
   limits:
     max_turns: { support: "yes" }

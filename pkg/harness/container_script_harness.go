@@ -173,11 +173,49 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 		}
 	}
 
-	if prompt := c.readSystemPrompt(); prompt != "" {
+	if cmd.SystemPromptFileFlag != "" && c.entry.SystemPromptFile != "" && c.hasSystemPrompt() {
+		// The host-side agent home is not necessarily the path mounted as HOME
+		// inside the container. Resolve the declared home-relative path in a
+		// small in-container shell instead of embedding the prompt content in the
+		// sciontool/tmux argv. $0 is an intentional sh -c placeholder.
+		commandArgs := append(args, cmd.SystemPromptFileFlag)
+		args = []string{
+			"sh", "-c",
+			`prompt_file=$1; shift; case "$prompt_file" in /*) ;; *) prompt_file=$HOME/$prompt_file ;; esac; exec "$@" "$prompt_file"`,
+			"scion-system-prompt", c.entry.SystemPromptFile,
+		}
+		args = append(args, commandArgs...)
+	} else if prompt := c.readSystemPrompt(); prompt != "" {
 		args = append(args, cmd.SystemPromptFlag, prompt)
 	}
 
 	return args
+}
+
+// hasSystemPrompt reports whether a non-empty staged or native system prompt
+// exists. Unlike readSystemPrompt, it does not load the prompt for inclusion in
+// the harness command line.
+func (c *ContainerScriptHarness) hasSystemPrompt() bool {
+	for _, p := range c.systemPromptPaths() {
+		info, err := os.Stat(p)
+		if err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *ContainerScriptHarness) systemPromptPaths() []string {
+	if c.agentHome == "" {
+		return nil
+	}
+	paths := []string{
+		filepath.Join(c.agentHome, ".scion", "harness", "inputs", "system-prompt.md"),
+	}
+	if c.entry.SystemPromptFile != "" {
+		paths = append(paths, filepath.Join(c.agentHome, c.entry.SystemPromptFile))
+	}
+	return paths
 }
 
 // readSystemPrompt returns the system prompt content if SystemPromptFlag is
@@ -195,14 +233,7 @@ func (c *ContainerScriptHarness) readSystemPrompt() string {
 	// Prefer the staged input written by InjectSystemPrompt; fall back to the
 	// harness-native location (e.g. .claude/system-prompt.md) which may exist
 	// on resume when the staged inputs directory has been cleaned up.
-	paths := []string{
-		filepath.Join(c.agentHome, ".scion", "harness", "inputs", "system-prompt.md"),
-	}
-	if c.entry.SystemPromptFile != "" {
-		paths = append(paths, filepath.Join(c.agentHome, c.entry.SystemPromptFile))
-	}
-
-	for _, p := range paths {
+	for _, p := range c.systemPromptPaths() {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
