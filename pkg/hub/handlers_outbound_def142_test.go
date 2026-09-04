@@ -292,11 +292,28 @@ func TestDEF142_G1_ResolveContext_ProjectFromAuth_NotBody(t *testing.T) {
 	_, err := s.UpsertConversationByExternalRef(ctx, foreignConv)
 	require.NoError(t, err)
 
-	// The agent belongs to def138-project, NOT to d142-foreign-project.
-	// rctx.ProjectID comes from agent.ProjectID (the authenticated agent's
-	// project), so #foreign-secret is invisible.
-	rr := postOutboundWithRef(t, srv, agent.ProjectID, agent.ID, user.Email,
-		"probing foreign project", "#foreign-secret")
+	// The request body carries a project_id naming the FOREIGN project.
+	// This is the competing value: two candidate sources for ProjectID,
+	// and the authenticated one (agent.ProjectID) must win. If a future
+	// change sources rctx.ProjectID from the body when present, the
+	// foreign thread resolves and the error changes — that is the
+	// provenance violation this test exists to catch.
+	rawBody := []byte(`{
+		"recipient":        "user:` + user.Email + `",
+		"msg":              "probing foreign project",
+		"conversation_ref": "#foreign-secret",
+		"project_id":       "` + foreignProject.ID + `"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message",
+		bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: agent.ProjectID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
 
 	// The thread does not exist in the agent's project → collapsed error.
 	// The response must NOT leak the foreign project's conversation details,
