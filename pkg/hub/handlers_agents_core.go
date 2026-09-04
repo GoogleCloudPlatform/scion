@@ -2698,6 +2698,13 @@ actionDispatch:
 		// are served. This case handles the unlikely path where the request
 		// reaches handleAgentAction directly.
 		s.handleAgentMessages(w, r, id)
+	case api.AgentActionEnv:
+		agent, err := s.store.GetAgent(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		s.submitAgentEnv(w, r, agent.ProjectID, id)
 	default:
 		NotFound(w, "Action")
 	}
