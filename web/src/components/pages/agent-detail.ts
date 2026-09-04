@@ -1872,10 +1872,10 @@ export class ScionPageAgentDetail extends LitElement {
 
     // Apply the mode change via API
     try {
-      const response = await apiFetch(`/api/v1/agents/${agent.id}/actions`, {
+      const response = await apiFetch(`/api/v1/agents/${agent.id}/set_message_mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set_message_mode', mode: newMode }),
+        body: JSON.stringify({ mode: newMode }),
       });
 
       if (!response.ok) {
