@@ -85,6 +85,10 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to look up agent", nil)
 		return
 	}
+	if agentRecord == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
+		return
+	}
 
 	slog.Info("agent secret fetch",
 		"agent_id", agent.Subject,
