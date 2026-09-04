@@ -213,7 +213,7 @@ the Antigravity bundle's `capture_auth.py` (which can also extract the token fro
 - **MCP**: `~/.gemini/config/mcp_config.json`.
 - **Hooks**: Antigravity ships a hook dialect (`dialect.yaml`) mapping `agy` events to Scion lifecycle events. Hooks fire **project-locally** (wired via `/workspace/.agents/hooks.json`).
 - **Runtime**: requires gnome-keyring and D-Bus in the container (provided by the base image); a generated wrapper script bootstraps the keyring and injects the token before launching `agy`.
-- **Default model**: `Gemini 3.7 Flash (Medium)` (override via `AGY_MODEL`).
+- **Default model**: `Gemini 3.8 Flash (Medium)` (override via `AGY_MODEL`).
 
 ### Known Limitations
 - **System Prompt**: approximated via `GEMINI.md` (no native override).
