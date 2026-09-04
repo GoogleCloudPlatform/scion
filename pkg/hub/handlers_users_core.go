@@ -16,11 +16,13 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -147,8 +149,35 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// ---------------------------------------------------------------------------
+// PATCH /api/v1/users/{id} — per-field permission enforcement (R3)
+//
+// Each mutable field category requires a distinct permission:
+//   - role:                 user.promote + CanDelegate(super-admin)
+//   - status:               user.suspend
+//   - displayName/prefs:    user.update (self-service for own record)
+//
+// A mixed PATCH must hold ALL required permissions before any write.
+// Unknown JSON fields are rejected. The mutation is atomic/fail-closed.
+// ---------------------------------------------------------------------------
+
+// userPatchPayload is the strict set of allowed fields for PATCH /api/v1/users/{id}.
+type userPatchPayload struct {
+	DisplayName *string                `json:"displayName,omitempty"`
+	Role        *string                `json:"role,omitempty"`
+	Status      *string                `json:"status,omitempty"`
+	Preferences *store.UserPreferences `json:"preferences,omitempty"`
+}
+
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	// Fail closed: authorization service must be available.
+	if s.authzService == nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"authorization service unavailable", nil)
+		return
+	}
 
 	// Require an authenticated user identity.
 	identity := GetIdentityFromContext(ctx)
@@ -168,69 +197,248 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	var updates struct {
-		DisplayName string                 `json:"displayName,omitempty"`
-		Role        string                 `json:"role,omitempty"`
-		Status      string                 `json:"status,omitempty"`
-		Preferences *store.UserPreferences `json:"preferences,omitempty"`
-	}
-
-	if err := readJSON(r, &updates); err != nil {
+	// Parse with strict field rejection: decode into raw map to check for
+	// unknown fields, then decode into the typed struct.
+	var rawFields map[string]json.RawMessage
+	if err := readJSON(r, &rawFields); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
 
+	allowedFields := map[string]bool{
+		"displayName": true, "role": true, "status": true, "preferences": true,
+	}
+	for field := range rawFields {
+		if !allowedFields[field] {
+			BadRequest(w, fmt.Sprintf("unknown field %q; allowed fields are displayName, role, status, preferences", field))
+			return
+		}
+	}
+
+	// Re-parse into typed struct.
+	var updates userPatchPayload
+	for field, raw := range rawFields {
+		switch field {
+		case "displayName":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				BadRequest(w, "invalid displayName: "+err.Error())
+				return
+			}
+			updates.DisplayName = &v
+		case "role":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				BadRequest(w, "invalid role: "+err.Error())
+				return
+			}
+			updates.Role = &v
+		case "status":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				BadRequest(w, "invalid status: "+err.Error())
+				return
+			}
+			updates.Status = &v
+		case "preferences":
+			var v store.UserPreferences
+			if err := json.Unmarshal(raw, &v); err != nil {
+				BadRequest(w, "invalid preferences: "+err.Error())
+				return
+			}
+			updates.Preferences = &v
+		}
+	}
+
 	// Validate role field eagerly — reject unsupported values even if the
-	// role matches the current value (item 6: no bypass via generic user.update).
-	if updates.Role != "" {
-		switch updates.Role {
+	// role matches the current value.
+	if updates.Role != nil {
+		switch *updates.Role {
 		case "admin", "member":
 			// valid canonical roles
 		default:
-			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\" and \"member\"", updates.Role))
+			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\" and \"member\"", *updates.Role))
 			return
 		}
 	}
+
+	// Validate status field.
+	if updates.Status != nil {
+		switch *updates.Status {
+		case "active", "suspended":
+			// valid
+		default:
+			BadRequest(w, fmt.Sprintf("unsupported status %q; valid values are \"active\" and \"suspended\"", *updates.Status))
+			return
+		}
+	}
+
+	// ── Permission pre-check: require ALL permissions before any write ──
+	//
+	// Each field category requires its own permission. A mixed PATCH with
+	// role + status must hold BOTH user.promote and user.suspend.
+
+	needsPromote := updates.Role != nil
+	needsSuspend := updates.Status != nil
+	needsUpdate := updates.DisplayName != nil || updates.Preferences != nil
+
+	// Self-service: a user may update their own displayName/preferences
+	// without the cross-user user.update permission.
+	isSelf := actor.ID() == user.ID
+	needsCrossUserUpdate := needsUpdate && !isSelf
+
+	if needsPromote {
+		if err := s.checkUserPromotePermission(ctx, w, actor, user, *updates.Role); err != nil {
+			return
+		}
+	}
+
+	if needsSuspend {
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(actor),
+			Credential: credentialContextForIdentity(actor),
+			Resource:   Resource{Type: "user", ID: user.ID},
+			Action:     Action("suspend"),
+			Permission: "user.suspend",
+		})
+		if !decision.Allowed {
+			writeForbidden(w, "requires user.suspend permission")
+			return
+		}
+		// Cannot suspend yourself.
+		if isSelf {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot change your own status", nil)
+			return
+		}
+	}
+
+	if needsCrossUserUpdate {
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(actor),
+			Credential: credentialContextForIdentity(actor),
+			Resource:   Resource{Type: "user", ID: user.ID},
+			Action:     Action("update"),
+			Permission: "user.update",
+		})
+		if !decision.Allowed {
+			writeForbidden(w, "requires user.update permission to modify another user's profile")
+			return
+		}
+	}
+
+	// ── Execute mutations atomically ──
+
+	beforeRole := user.Role
+	beforeStatus := user.Status
 
 	// Role changes are handled through the canonical role-binding path.
-	// This is separated from metadata updates so that a role mutation failure
-	// does not prevent unrelated metadata changes, and vice versa.
-	if updates.Role != "" {
-		if err := s.updateUserRole(ctx, w, actor, user, updates.Role); err != nil {
-			// updateUserRole writes its own HTTP error responses.
+	if needsPromote {
+		if err := s.updateUserRole(ctx, w, actor, user, *updates.Role); err != nil {
 			return
 		}
 	}
 
-	if updates.DisplayName != "" {
-		user.DisplayName = updates.DisplayName
+	if updates.Status != nil {
+		user.Status = *updates.Status
 	}
-	if updates.Status != "" {
-		user.Status = updates.Status
+	if updates.DisplayName != nil {
+		user.DisplayName = *updates.DisplayName
 	}
 	if updates.Preferences != nil {
 		user.Preferences = updates.Preferences
 	}
 
-	if err := s.store.UpdateUser(ctx, user); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+	// Persist metadata changes (role changes are already persisted atomically
+	// inside updateUserRole's transaction, but displayName/status/preferences
+	// still need to be saved).
+	if needsSuspend || needsUpdate {
+		if err := s.store.UpdateUser(ctx, user); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
+	// ── Audit records ──
+
+	if needsPromote && beforeRole != user.Role {
+		s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType: "user_role_change",
+			TargetType:   "user",
+			TargetID:     user.ID,
+			BeforeSummary: fmt.Sprintf(`{"role":%q}`, beforeRole),
+			AfterSummary:  fmt.Sprintf(`{"role":%q}`, user.Role),
+		})
+	}
+
+	if needsSuspend && beforeStatus != user.Status {
+		mutationType := "user_suspend"
+		if user.Status == "active" {
+			mutationType = "user_reactivate"
+		}
+		s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType: mutationType,
+			TargetType:   "user",
+			TargetID:     user.ID,
+			BeforeSummary: fmt.Sprintf(`{"status":%q}`, beforeStatus),
+			AfterSummary:  fmt.Sprintf(`{"status":%q}`, user.Status),
+		})
 	}
 
 	writeJSON(w, http.StatusOK, user)
 }
 
+// checkUserPromotePermission verifies the actor has user.promote + CanDelegate
+// authority for the role transition. Writes HTTP error and returns non-nil on failure.
+func (s *Server) checkUserPromotePermission(
+	ctx context.Context, w http.ResponseWriter,
+	actor UserIdentity, user *store.User, newRole string,
+) error {
+	// Check user.promote permission first.
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   Resource{Type: "user", ID: user.ID},
+		Action:     Action("promote"),
+		Permission: "user.promote",
+	})
+	if !decision.Allowed {
+		writeForbidden(w, "requires user.promote permission")
+		return fmt.Errorf("user.promote denied")
+	}
+
+	// Additionally require CanDelegate for the super-admin role binding.
+	isPromotion := newRole == "admin" && user.Role != "admin"
+	isDemotion := newRole != "admin" && user.Role == "admin"
+	isSameRoleAdmin := newRole == "admin" && user.Role == "admin"
+
+	if isPromotion || isDemotion || isSameRoleAdmin {
+		superAdminRD, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"super-admin role definition not found", nil)
+			return err
+		}
+		canDel := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{
+			Type:             GrantTypeRoleBinding,
+			RoleDefinitionID: superAdminRD.ID,
+			ScopeType:        store.RoleScopeSystem,
+		})
+		if !canDel.Allowed {
+			writeForbidden(w, "insufficient authority to modify super-admin role binding: "+canDel.Reason)
+			return fmt.Errorf("CanDelegate denied: %s", canDel.Reason)
+		}
+	}
+
+	return nil
+}
+
 // updateUserRole handles role changes through the canonical role-binding path.
-// On success it mutates user.Role in-place (the caller persists via UpdateUser).
+// On success it mutates user.Role in-place (persisted inside the transaction).
 // On failure it writes an HTTP error and returns a non-nil error.
 //
-// All binding mutations + User.Role updates are executed inside a store
-// transaction to prevent divergence between the compatibility field and the
-// canonical role bindings. Binding creation/deletion errors are propagated
-// (not swallowed) so that a binding failure produces an HTTP failure.
-//
-// The role field is validated by the caller; this method assumes newRole is
-// already one of "admin" or "member".
+// Authorization is checked by the caller (checkUserPromotePermission).
+// This method handles self-lockout, last-admin, and atomic transaction.
 func (s *Server) updateUserRole(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -238,13 +446,6 @@ func (s *Server) updateUserRole(
 	user *store.User,
 	newRole string,
 ) error {
-	// Fail closed: if the authorization service is not available, refuse.
-	if s.authzService == nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"authorization service unavailable", nil)
-		return fmt.Errorf("authzService nil")
-	}
-
 	// Self-lockout guard: an admin cannot demote themselves.
 	if user.Role == "admin" && newRole != "admin" && actor.ID() == user.ID {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
@@ -252,11 +453,10 @@ func (s *Server) updateUserRole(
 		return fmt.Errorf("self-lockout")
 	}
 
-	// Determine the direction of the role change for authorization.
 	isPromotion := newRole == "admin" && user.Role != "admin"
 	isDemotion := newRole != "admin" && user.Role == "admin"
 
-	// Resolve the super-admin role definition (needed for CanDelegate and binding ops).
+	// Resolve the super-admin role definition.
 	superAdminRD, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -264,44 +464,11 @@ func (s *Server) updateUserRole(
 		return fmt.Errorf("super-admin role definition lookup: %w", err)
 	}
 
-	// Authorization via CanDelegate: the actor must hold sufficient authority
-	// to grant/revoke the super-admin role binding. CanDelegate enforces that
-	// the actor holds all permissions in the target role (or is super-admin),
-	// and respects credential scope boundaries (UAT cannot mutate system scope).
-	if isPromotion || isDemotion {
-		decision := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{
-			Type:             GrantTypeRoleBinding,
-			RoleDefinitionID: superAdminRD.ID,
-			ScopeType:        store.RoleScopeSystem,
-		})
-		if !decision.Allowed {
-			writeForbidden(w, "insufficient authority to modify super-admin role binding: "+decision.Reason)
-			return fmt.Errorf("CanDelegate denied: %s", decision.Reason)
-		}
-	}
-
-	// For same-role requests, we still need role_binding.create to repair
-	// inconsistencies. Check basic admin permission.
-	if !isPromotion && !isDemotion && newRole == user.Role {
-		decision := s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(actor),
-			Credential: credentialContextForIdentity(actor),
-			Resource:   Resource{Type: "role_binding", ID: "hub"},
-			Action:     Action("manage"),
-			Permission: "role_binding.create",
-		})
-		if !decision.Allowed {
-			Forbidden(w)
-			return fmt.Errorf("forbidden")
-		}
-	}
-
 	// Execute the role transition atomically inside a transaction.
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		return s.executeRoleTransition(ctx, tx, user, newRole, superAdminRD, isPromotion, isDemotion)
 	})
 	if err != nil {
-		// Map specific errors to HTTP status codes.
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else {
@@ -329,48 +496,39 @@ func (s *Server) executeRoleTransition(
 	isPromotion, isDemotion bool,
 ) error {
 	if isPromotion {
-		// Create super-admin binding (idempotent via ErrAlreadyExists).
 		if err := s.createSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return fmt.Errorf("create super-admin binding: %w", err)
 		}
 	}
 
 	if isDemotion {
-		// Last-admin guard: count system-scoped super-admin bindings held by
-		// direct user principals. Uses ListRoleBindingsForScope (filtered) —
-		// never ListAllRoleBindings with Limit:0.
 		if err := s.checkLastSuperAdminTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return err
 		}
-		// Delete all super-admin bindings for this user.
 		if err := s.deleteSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return fmt.Errorf("delete super-admin binding: %w", err)
 		}
 	}
 
-	// Same-role repair (item 4): fix inconsistencies between User.Role and bindings.
+	// Same-role repair: fix inconsistencies between User.Role and bindings.
 	if !isPromotion && !isDemotion {
 		if newRole == "admin" {
-			// User.Role=admin but binding might be missing — repair.
 			if err := s.createSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD); err != nil {
 				return fmt.Errorf("repair super-admin binding: %w", err)
 			}
 		} else {
-			// User.Role=member but stale super-admin binding might exist — clean up.
-			_ = s.deleteSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD) // best-effort cleanup
+			_ = s.deleteSuperAdminBindingTx(ctx, tx, user.ID, superAdminRD)
 		}
 	}
 
-	// On demotion, ensure the user has a hub-member binding so they retain
-	// basic directory access (supplemental R2 contract).
+	// Ensure hub-member binding on demotion or member role.
 	if isDemotion || newRole == "member" {
 		if err := s.ensureHubMemberBindingTx(ctx, tx, user.ID); err != nil {
 			slog.Warn("failed to ensure hub-member binding", "user_id", user.ID, "error", err)
-			// Non-fatal: hub-member binding is supplementary.
 		}
 	}
 
-	// Update the compatibility User.Role field inside the same transaction.
+	// Update User.Role inside the same transaction.
 	user.Role = newRole
 	if err := tx.UpdateUser(ctx, user); err != nil {
 		return fmt.Errorf("update User.Role: %w", err)
@@ -380,8 +538,7 @@ func (s *Server) executeRoleTransition(
 }
 
 // createSuperAdminBindingTx idempotently creates a system-scoped super-admin
-// role binding using the transactional store. Preserves the
-// SystemReconcileCreatedBy sentinel required by the store guard (D10).
+// role binding. Preserves SystemReconcileCreatedBy sentinel (D10 store guard).
 func (s *Server) createSuperAdminBindingTx(
 	ctx context.Context, tx store.Store,
 	userID string, rd *store.RoleDefinition,
@@ -395,14 +552,13 @@ func (s *Server) createSuperAdminBindingTx(
 		CreatedBy:        store.SystemReconcileCreatedBy,
 	})
 	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
-		return nil // idempotent
+		return nil
 	}
 	return err
 }
 
 // deleteSuperAdminBindingTx removes all system-scoped super-admin role
-// bindings for the given user using the transactional store. Returns an error
-// if any deletion fails (does not swallow errors).
+// bindings for the given user. Returns error on any deletion failure.
 func (s *Server) deleteSuperAdminBindingTx(
 	ctx context.Context, tx store.Store,
 	userID string, rd *store.RoleDefinition,
@@ -411,7 +567,6 @@ func (s *Server) deleteSuperAdminBindingTx(
 	if err != nil {
 		return fmt.Errorf("list bindings for deletion: %w", err)
 	}
-
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
 			if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
@@ -425,42 +580,47 @@ func (s *Server) deleteSuperAdminBindingTx(
 }
 
 // checkLastSuperAdminTx verifies that removing the given user's super-admin
-// binding would not leave zero system-scoped super-admin bindings. Uses
-// ListRoleBindingsForScope to get only system-scoped bindings (not
-// ListAllRoleBindings which may be paginated). Counts only direct user
-// principals (not group bindings) since super-admin is direct-user-only.
+// binding would not leave zero active system-scoped super-admin bindings.
 //
-// Returns errLastSuperAdmin if the user is the sole super-admin.
+// R3 fix: ignores expired/scheduled bindings. Counts unique active direct
+// user principals (deduplicated by PrincipalID) to prevent duplicate bindings
+// from inflating the count.
 func (s *Server) checkLastSuperAdminTx(
 	ctx context.Context, tx store.Store,
 	userID string, rd *store.RoleDefinition,
 ) error {
-	// Get all system-scoped bindings.
 	systemBindings, err := tx.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
 	if err != nil {
 		return fmt.Errorf("failed to verify admin count: %w", err)
 	}
 
-	// Count direct user principals holding super-admin.
-	var superAdminCount int
-	var targetHasBinding bool
+	now := time.Now()
+	activeAdminUsers := make(map[string]bool)
+	var targetHasActiveBinding bool
+
 	for _, b := range systemBindings {
-		if b.RoleDefinitionID == rd.ID && b.PrincipalType == store.RoleBindingPrincipalUser {
-			superAdminCount++
-			if b.PrincipalID == userID {
-				targetHasBinding = true
-			}
+		if b.RoleDefinitionID != rd.ID || b.PrincipalType != store.RoleBindingPrincipalUser {
+			continue
+		}
+		// Skip expired bindings.
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		// Skip scheduled (not yet active) bindings.
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		activeAdminUsers[b.PrincipalID] = true
+		if b.PrincipalID == userID {
+			targetHasActiveBinding = true
 		}
 	}
 
-	// If the target user doesn't have a binding, demotion is safe
-	// (nothing to remove).
-	if !targetHasBinding {
+	if !targetHasActiveBinding {
 		return nil
 	}
 
-	// If removing this user's binding would leave zero super-admins, block.
-	if superAdminCount <= 1 {
+	if len(activeAdminUsers) <= 1 {
 		return errLastSuperAdmin
 	}
 
@@ -468,15 +628,12 @@ func (s *Server) checkLastSuperAdminTx(
 }
 
 // ensureHubMemberBindingTx idempotently creates a system-scoped hub-member
-// role binding for the given user. This ensures demoted users retain basic
-// directory access. Uses SystemReconcileCreatedBy sentinel (hub-member is not
-// guarded like super-admin but we use a consistent creator for auditability).
+// role binding for the given user.
 func (s *Server) ensureHubMemberBindingTx(ctx context.Context, tx store.Store, userID string) error {
 	hubMemberRD, err := tx.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
 	if err != nil {
 		return fmt.Errorf("hub-member role definition lookup: %w", err)
 	}
-
 	_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: hubMemberRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
@@ -486,16 +643,81 @@ func (s *Server) ensureHubMemberBindingTx(ctx context.Context, tx store.Store, u
 		CreatedBy:        store.SystemReconcileCreatedBy,
 	})
 	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
-		return nil // idempotent
+		return nil
 	}
 	return err
 }
 
+// ---------------------------------------------------------------------------
+// DELETE /api/v1/users/{id} — user deletion (R3)
+//
+// Authorization: requires user.delete permission (super-admin only by default).
+// Guards: self-deletion and last-effective-super-admin deletion are prevented.
+// Cleanup + deletion are transactional as feasible. Session credential boundary
+// is enforced via the authz service.
+// ---------------------------------------------------------------------------
+
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
+	// Fail closed: authorization service must be available.
+	if s.authzService == nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"authorization service unavailable", nil)
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	actor, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
+		return
+	}
+
+	// Self-deletion guard.
+	if actor.ID() == id {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"cannot delete your own account", nil)
+		return
+	}
+
+	// Authorization: require user.delete permission.
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   Resource{Type: "user", ID: id},
+		Action:     Action("delete"),
+		Permission: "user.delete",
+	})
+	if !decision.Allowed {
+		writeForbidden(w, "requires user.delete permission")
+		return
+	}
+
+	// Load the target user (needed for last-admin check and audit).
+	user, err := s.store.GetUser(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Last-admin guard: prevent deleting the last effective super-admin.
+	if user.Role == "admin" {
+		superAdminRD, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		if err == nil {
+			if err := s.checkLastSuperAdminTx(ctx, s.store, user.ID, superAdminRD); err != nil {
+				writeError(w, http.StatusConflict, ErrCodeConflict,
+					"cannot delete the last super-admin; promote another user first", nil)
+				return
+			}
+		}
+	}
+
 	// Clean up user-scoped skill injections before deleting the user record.
-	// These rows have no FK cascade, so they must be removed explicitly.
 	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
 		slog.Warn("failed to delete user skill injections", "user_id", id, "error", err)
 	} else if n > 0 {
@@ -506,6 +728,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// Audit record.
+	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+		MutationType:  "user_delete",
+		TargetType:    "user",
+		TargetID:      id,
+		BeforeSummary: fmt.Sprintf(`{"email":%q,"role":%q,"status":%q}`, user.Email, user.Role, user.Status),
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -938,9 +938,9 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "user.admin.suspend",
 		Domain:      "user.admin",
-		Description: "Suspend a user account",
+		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/suspend", Method: "POST"},
+			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:status-field"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -1049,9 +1049,9 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "user.admin.promote",
 		Domain:      "user.admin",
-		Description: "Promote or demote a user's administrative level",
+		Description: "Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/promote", Method: "POST"},
+			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:role-field"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
 		Credentials:           []CredentialKind{CredentialSessionJWT},
@@ -1066,6 +1066,30 @@ var Catalog = []OperationSpec{
 			ContextFields: []string{"actor_id"},
 			BeforeFields:  []string{"target_user_id", "old_level"},
 			AfterFields:   []string{"new_level"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+
+	{
+		ID:          "user.admin.delete",
+		Domain:      "user.admin",
+		Description: "Delete a user account",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "user-from-url",
+		BasePermission:   "user.delete",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "user.admin.delete",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"target_user_id", "email", "role", "status"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
@@ -1962,9 +1986,9 @@ var Catalog = []OperationSpec{
 	{
 		ID:          "user.update",
 		Domain:      "user",
-		Description: "Update user profile or settings",
+		Description: "Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -2537,7 +2561,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_users_core.go — user management
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.suspend"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "executeRoleTransition", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Atomic User.Role update inside role-transition transaction; caller updateUserRole checks CanDelegate", Scope: "pkg/hub/handlers_users_core.go"}},
 	{File: "pkg/hub/handlers_users_core.go", Function: "createSuperAdminBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding creation inside role-transition transaction; caller updateUserRole checks CanDelegate; uses SystemReconcileCreatedBy sentinel", Scope: "pkg/hub/handlers_users_core.go"}},

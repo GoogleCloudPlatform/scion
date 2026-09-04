@@ -552,13 +552,18 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
       const data = (await res.json()) as AccessExplainResponse;
 
-      // The endpoint returns activeBindingCount — use it as the potential
-      // indicator. Effective count is not fabricated; the endpoint does not
-      // aggregate permission counts across incompatible scopes.
+      // The endpoint returns activeBindingCount (role bindings, not permission
+      // counts). Display it as a binding indicator — do NOT label it as
+      // "permissions" since per-permission aggregation is not computed.
       this.potentialCount = data.activeBindingCount ?? 0;
+      // Effective count is set to the same binding count; the system-scope
+      // endpoint does not compute per-permission subtraction.  The component
+      // labels are patched to say "bindings" so this is truthful.
       this.effectiveCount = data.activeBindingCount ?? 0;
 
-      // Map boundaries — preserve redaction
+      // Map boundaries — preserve redaction. removedCount is unknown at this
+      // scope so it stays 0 (the layer-stack renders "applied" instead of a
+      // fabricated count when removedCount is 0).
       this.boundaries = (data.boundaries ?? []).map((b): BoundaryLayer => {
         const layer: BoundaryLayer = {
           id: b.id,
@@ -571,7 +576,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         return layer;
       });
 
-      // Map restrictions
+      // Map restrictions — removedCount unknown, same treatment.
       this.restrictions = (data.restrictions ?? []).map((r): IntrinsicRestriction => {
         const restriction: IntrinsicRestriction = {
           kind: r.kind ?? 'unknown',

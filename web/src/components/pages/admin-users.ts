@@ -24,7 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { AdminUser, UserRole } from '../../shared/types.js';
+import { can, type AdminUser, type UserRole } from '../../shared/types.js';
 import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
 import {
   parseSecurityReviewResponse,
@@ -1549,8 +1549,14 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private renderUserActions(user: AdminUser) {
+    const caps = user._capabilities;
+    const canPromote = can(caps, 'promote');
+    const canSuspend = can(caps, 'suspend');
+    const canDelete = can(caps, 'delete');
+
     if (user.status === 'invited') {
-      // Invited users: only Remove action
+      // Invited users: only Remove action (requires delete capability)
+      if (!canDelete) return nothing;
       return html`
         <sl-dropdown placement="bottom-end" hoist>
           <sl-button slot="trigger" size="small" variant="text" caret>
@@ -1567,28 +1573,35 @@ export class ScionPageAdminUsers extends LitElement {
     }
 
     if (user.status === 'suspended') {
-      // Suspended users: Reactivate, Delete
+      // Suspended users: Reactivate (requires suspend), Delete (requires delete)
+      if (!canSuspend && !canDelete) return nothing;
       return html`
         <sl-dropdown placement="bottom-end" hoist>
           <sl-button slot="trigger" size="small" variant="text" caret>
             <sl-icon name="three-dots-vertical"></sl-icon>
           </sl-button>
           <sl-menu>
-            <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
-              <sl-icon slot="prefix" name="check-circle"></sl-icon>
-              Reactivate
-            </sl-menu-item>
-            <sl-divider></sl-divider>
-            <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
-              <sl-icon slot="prefix" name="trash"></sl-icon>
-              Delete
-            </sl-menu-item>
+            ${canSuspend
+              ? html`<sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
+                  <sl-icon slot="prefix" name="check-circle"></sl-icon>
+                  Reactivate
+                </sl-menu-item>`
+              : nothing}
+            ${canSuspend && canDelete ? html`<sl-divider></sl-divider>` : nothing}
+            ${canDelete
+              ? html`<sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Delete
+                </sl-menu-item>`
+              : nothing}
           </sl-menu>
         </sl-dropdown>
       `;
     }
 
-    // Active users: View Roles, Change role, Suspend, Delete
+    // Active users: View Roles (always), Promote/Demote, Suspend, Delete
+    // — each action gated by its capability.
+    const hasAnyAction = canPromote || canSuspend || canDelete;
     return html`
       <sl-dropdown placement="bottom-end" hoist>
         <sl-button slot="trigger" size="small" variant="text" caret>
@@ -1603,29 +1616,33 @@ export class ScionPageAdminUsers extends LitElement {
             <sl-icon slot="prefix" name="shield"></sl-icon>
             View Roles
           </sl-menu-item>
-          <sl-divider></sl-divider>
-          ${user.role !== 'admin'
+          ${hasAnyAction ? html`<sl-divider></sl-divider>` : nothing}
+          ${canPromote && user.role !== 'admin'
             ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
                 <sl-icon slot="prefix" name="shield-check"></sl-icon>
                 Promote to Admin
               </sl-menu-item>`
             : nothing}
-          ${user.role === 'admin'
+          ${canPromote && user.role === 'admin'
             ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'member')}>
                 <sl-icon slot="prefix" name="person"></sl-icon>
                 Demote to Member
               </sl-menu-item>`
             : nothing}
-          <sl-divider></sl-divider>
-          <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
-            <sl-icon slot="prefix" name="slash-circle"></sl-icon>
-            Suspend
-          </sl-menu-item>
-          <sl-divider></sl-divider>
-          <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
-            <sl-icon slot="prefix" name="trash"></sl-icon>
-            Delete
-          </sl-menu-item>
+          ${canSuspend
+            ? html`${canPromote ? html`<sl-divider></sl-divider>` : nothing}
+                <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
+                  <sl-icon slot="prefix" name="slash-circle"></sl-icon>
+                  Suspend
+                </sl-menu-item>`
+            : nothing}
+          ${canDelete
+            ? html`${canPromote || canSuspend ? html`<sl-divider></sl-divider>` : nothing}
+                <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Delete
+                </sl-menu-item>`
+            : nothing}
         </sl-menu>
       </sl-dropdown>
     `;

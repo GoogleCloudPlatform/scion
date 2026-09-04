@@ -117,6 +117,7 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"useraccesstoken.go":              "RS4 bounded credential service: uses store mutations for token CRUD, not project membership role bindings",
 		"seed.go":                         "bootstrap seeding: creates initial system/hub-level role bindings, not project membership",
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
+		"handlers_users_core.go":          "user admin role sync: creates/deletes system-scoped super-admin and hub-member bindings inside atomic role transitions, guarded by CanDelegate and per-field permission checks",
 	}
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.

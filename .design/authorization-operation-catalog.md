@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 92
+**Operations:** 93
 
 ## Table of Contents
 
@@ -33,11 +33,12 @@
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
-- [user.admin.suspend](#useradminsuspend) — Suspend a user account
+- [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
 - [secret.write](#secretwrite) — Create or update project secrets
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
-- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level
+- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
+- [user.admin.delete](#useradmindelete) — Delete a user account
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
@@ -81,7 +82,7 @@
 - [group.create](#groupcreate) — Create a new group
 - [group.update](#groupupdate) — Update group metadata
 - [user.read](#userread) — Read user profile or list users
-- [user.update](#userupdate) — Update user profile or settings
+- [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
@@ -1271,13 +1272,13 @@
 
 **Domain:** user.admin
 
-**Description:** Suspend a user account
+**Description:** Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/users/{id}/suspend` |
+| internal_dispatch | — | `updateUser:status-field` |
 
 **Principals:** `user`
 
@@ -1431,13 +1432,13 @@
 
 **Domain:** user.admin
 
-**Description:** Promote or demote a user's administrative level
+**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/users/{id}/promote` |
+| internal_dispatch | — | `updateUser:role-field` |
 
 **Principals:** `user`
 
@@ -1462,6 +1463,43 @@
 - **Context Fields:** actor_id
 - **Before Fields:** target_user_id, old_level
 - **After Fields:** new_level
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.admin.delete
+
+**Domain:** user.admin
+
+**Description:** Delete a user account
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/users/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `user.delete`
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `user.admin.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
@@ -2886,13 +2924,13 @@
 
 **Domain:** user
 
-**Description:** Update user profile or settings
+**Description:** Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/users/{id}` |
+| http_route | PATCH | `/api/v1/users/{id}` |
 
 **Principals:** `user`
 
