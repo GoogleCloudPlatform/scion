@@ -3275,3 +3275,93 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestReResolveModelAlias verifies the broker-side safety net that
+// re-resolves leaked model aliases. When the hub dispatches SCION_MODEL with
+// an unresolved alias (e.g. "large"), reResolveModelAlias should return the
+// concrete model from finalScionCfg.Model.
+func TestReResolveModelAlias(t *testing.T) {
+	tests := []struct {
+		name       string
+		envModel   string
+		cfg        *api.ScionConfig
+		wantModel  string
+		wantResolv bool
+	}{
+		{
+			name:       "unresolved alias large is re-resolved",
+			envModel:   "large",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "gemini-3.1-pro-preview",
+			wantResolv: true,
+		},
+		{
+			name:       "unresolved alias small is re-resolved",
+			envModel:   "small",
+			cfg:        &api.ScionConfig{Model: "gemini-flash-lite"},
+			wantModel:  "gemini-flash-lite",
+			wantResolv: true,
+		},
+		{
+			name:       "unresolved alias extra-large is re-resolved",
+			envModel:   "extra-large",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "gemini-3.1-pro-preview",
+			wantResolv: true,
+		},
+		{
+			name:       "uppercase alias shorthand is re-resolved",
+			envModel:   "L",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "gemini-3.1-pro-preview",
+			wantResolv: true,
+		},
+		{
+			name:       "concrete model name is not altered",
+			envModel:   "gemini-3.1-pro-preview",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "",
+			wantResolv: false,
+		},
+		{
+			name:       "concrete model differs from cfg but is not an alias",
+			envModel:   "gemini-3.6-flash",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "",
+			wantResolv: false,
+		},
+		{
+			name:       "nil config does not panic",
+			envModel:   "large",
+			cfg:        nil,
+			wantModel:  "",
+			wantResolv: false,
+		},
+		{
+			name:       "empty envModel does not re-resolve",
+			envModel:   "",
+			cfg:        &api.ScionConfig{Model: "gemini-3.1-pro-preview"},
+			wantModel:  "",
+			wantResolv: false,
+		},
+		{
+			name:       "empty config model does not re-resolve",
+			envModel:   "large",
+			cfg:        &api.ScionConfig{Model: ""},
+			wantModel:  "",
+			wantResolv: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := reResolveModelAlias(tt.envModel, tt.cfg)
+			if ok != tt.wantResolv {
+				t.Errorf("reResolveModelAlias() resolved = %v, want %v", ok, tt.wantResolv)
+			}
+			if got != tt.wantModel {
+				t.Errorf("reResolveModelAlias() model = %q, want %q", got, tt.wantModel)
+			}
+		})
+	}
+}
