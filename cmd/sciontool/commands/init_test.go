@@ -1003,3 +1003,65 @@ func TestResolveIsSharedGitWorkspace(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCapSetUID(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    bool
+	}{
+		{
+			name: "full capabilities (typical Docker root)",
+			// CapEff with all bits set — includes CAP_SETUID (bit 7).
+			input: "Name:\tinit\nCapEff:\t000001ffffffffff\n",
+			want:  true,
+		},
+		{
+			name: "CAP_SETUID present among limited caps",
+			// Bits 0-7 set (0xff) — CAP_SETUID (bit 7) is present.
+			input: "Name:\tinit\nCapInh:\t0000000000000000\nCapEff:\t00000000000000ff\n",
+			want:  true,
+		},
+		{
+			name: "CAP_SETUID absent (gVisor restricted sandbox)",
+			// Only bits 0-6 set (0x7f) — CAP_SETUID (bit 7) is missing.
+			input: "Name:\tinit\nCapEff:\t000000000000007f\n",
+			want:  false,
+		},
+		{
+			name: "no capabilities at all",
+			input: "Name:\tinit\nCapEff:\t0000000000000000\n",
+			want:  false,
+		},
+		{
+			name: "no CapEff line",
+			input: "Name:\tinit\nCapInh:\t0000000000000000\n",
+			want:  false,
+		},
+		{
+			name: "empty input",
+			input: "",
+			want:  false,
+		},
+		{
+			name: "malformed hex value",
+			input: "CapEff:\tnotahexvalue\n",
+			want:  false,
+		},
+		{
+			name: "only CAP_SETUID bit set",
+			// Only bit 7 set (0x80).
+			input: "CapEff:\t0000000000000080\n",
+			want:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseCapSetUID(tc.input)
+			if got != tc.want {
+				t.Errorf("parseCapSetUID() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

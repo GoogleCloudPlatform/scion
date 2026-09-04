@@ -83,16 +83,23 @@ const sandboxWorkspace = "/workspace"
 // output; when it fails the file holds the error output that explains why.
 const entrypointLogFile = ".scion-entrypoint.log"
 
-// sandboxUID and sandboxGID are the UID/GID passed to the sandbox via
-// SCION_HOST_UID / SCION_HOST_GID. They correspond to the `scion` user
-// created by the omni-image Dockerfile (useradd -u 1000 scion).
+// sandboxUID and sandboxGID control the UID/GID passed to the sandbox via
+// SCION_HOST_UID / SCION_HOST_GID.
 //
-// On Cloud Run the launcher runs as root (UID 0). Passing 0 would make
-// sciontool init keep the sandbox process as root, which Claude Code
-// ≥ 2.1.246 rejects. Hardcoding 1000 ensures the sandbox always drops
-// privileges to the scion user regardless of the launcher's own UID.
-const sandboxUID = 1000
-const sandboxGID = 1000
+// Ideally these would be 1000 (the scion user) to match Docker/Podman
+// behaviour, but Cloud Run's gVisor sandbox does not grant CAP_SETUID or
+// CAP_SETGID, making runtime privilege drops impossible. Until the sandbox
+// CLI gains a --user flag (or the capability bounding set is extended),
+// the sandbox process must run as root (UID 0).
+//
+// Running as UID 0 means:
+//   - Harnesses that reject root (e.g. Claude Code's --dangerously-skip-permissions)
+//     will not work on this runtime.
+//   - Harnesses that accept root (e.g. antigravity, gemini-cli) work normally.
+//
+// TODO(single-node): Switch back to 1000 when the sandbox CLI supports --user.
+const sandboxUID = 0
+const sandboxGID = 0
 
 // SandboxLauncherAvailable reports whether the Cloud Run Sandbox launcher
 // binary is present on the filesystem.
@@ -369,13 +376,15 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	// workspace copy) so that every file — including those created by
 	// relocateToScion and copyDirContents — is owned by the sandbox user.
 	//
-	// Guard: only chown when running as root (Cloud Run). In non-root
-	// environments (local dev, CI) os.Chown fails with EPERM, so skip it.
+	// Guard: only chown when running as root (Cloud Run) AND the target
+	// UID is non-zero. When sandboxUID is 0 (root), files are already
+	// root-owned and chown-to-self is a no-op that wastes syscalls on
+	// large directory trees.
 	//
 	// Lchown is used instead of Chown to avoid following symlinks: if a
 	// relocated directory contains symlinks, we change the link's ownership
 	// rather than the target's (which may be outside our mount).
-	if os.Getuid() == 0 {
+	if os.Getuid() == 0 && sandboxUID > 0 {
 		for _, d := range []string{p.agentHome, p.workspace} {
 			if walkErr := filepath.WalkDir(d, func(path string, entry fs.DirEntry, err error) error {
 				if err != nil {

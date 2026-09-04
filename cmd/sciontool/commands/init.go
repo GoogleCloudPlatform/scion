@@ -1282,6 +1282,16 @@ func setupHostUser() (int, int, bool) {
 		return 0, 0, false
 	}
 
+	// Safety net: detect restricted capability environments (e.g. gVisor
+	// sandboxes on Cloud Run) where CAP_SETUID is absent. In these
+	// environments, setuid/setgid syscalls return EPERM. Fall back to
+	// rootless-equivalent mode: no privilege drop, no usermod.
+	if !hasCapSetUID() {
+		log.Info("Running as root but CAP_SETUID is absent (restricted sandbox); " +
+			"skipping privilege operations — process will remain UID 0")
+		return 0, 0, true
+	}
+
 	hostUID := os.Getenv("SCION_HOST_UID")
 	hostGID := os.Getenv("SCION_HOST_GID")
 
@@ -2160,4 +2170,32 @@ func cleanGcloudConfigForMetadata(gcloudDir string) {
 			log.Debug("Could not remove gcloud config entry %s: %v", p, err)
 		}
 	}
+}
+
+// hasCapSetUID checks whether the current process has CAP_SETUID (bit 7)
+// in its effective capability set by reading /proc/self/status.
+// Returns true if the capability is present, false if absent or on error
+// (safe default: assume restricted, skip privilege operations).
+func hasCapSetUID() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	return parseCapSetUID(string(data))
+}
+
+// parseCapSetUID parses the content of /proc/self/status and returns true
+// if CAP_SETUID (bit 7) is present in the effective capability set.
+func parseCapSetUID(statusContent string) bool {
+	for _, line := range strings.Split(statusContent, "\n") {
+		if strings.HasPrefix(line, "CapEff:") {
+			hexStr := strings.TrimSpace(strings.TrimPrefix(line, "CapEff:"))
+			caps, err := strconv.ParseUint(hexStr, 16, 64)
+			if err != nil {
+				return false
+			}
+			return caps&(1<<7) != 0 // CAP_SETUID = bit 7
+		}
+	}
+	return false
 }
