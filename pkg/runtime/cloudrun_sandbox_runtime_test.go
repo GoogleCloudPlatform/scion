@@ -682,11 +682,11 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 	if env["SCION_HOST_GID"] == "" {
 		t.Error("SCION_HOST_GID not set")
 	}
-	if env["SCION_HOST_UID"] != "1000" {
-		t.Errorf("SCION_HOST_UID = %q, want %q (non-root scion user)", env["SCION_HOST_UID"], "1000")
+	if env["SCION_HOST_UID"] != "0" {
+		t.Errorf("SCION_HOST_UID = %q, want %q (root — CAP_SETUID unavailable in gVisor)", env["SCION_HOST_UID"], "0")
 	}
-	if env["SCION_HOST_GID"] != "1000" {
-		t.Errorf("SCION_HOST_GID = %q, want %q (non-root scion user)", env["SCION_HOST_GID"], "1000")
+	if env["SCION_HOST_GID"] != "0" {
+		t.Errorf("SCION_HOST_GID = %q, want %q (root — CAP_SETGID unavailable in gVisor)", env["SCION_HOST_GID"], "0")
 	}
 }
 
@@ -743,32 +743,33 @@ func TestEnvFor_WorkspaceBackend(t *testing.T) {
 	}
 }
 
-// TestEnvFor_NonRootUID verifies that SCION_HOST_UID and SCION_HOST_GID
-// are always set to the scion user (UID 1000), NOT to os.Getuid(). On
-// Cloud Run the launcher runs as root; passing UID 0 would keep the
-// sandbox process as root, which Claude Code ≥ 2.1.246 rejects.
-func TestEnvFor_NonRootUID(t *testing.T) {
+// TestEnvFor_RootUID verifies that SCION_HOST_UID and SCION_HOST_GID
+// are set to 0 (root). Cloud Run's gVisor sandbox does not grant
+// CAP_SETUID or CAP_SETGID, making runtime privilege drops impossible.
+// Until the sandbox CLI supports --user, the sandbox process must run
+// as root.
+func TestEnvFor_RootUID(t *testing.T) {
 	cfg := RunConfig{}
 	paths := scionPaths{}
 
 	env := envFor(cfg, paths)
 
-	// Must use the scion user's UID/GID (1000), not the process UID.
-	if env["SCION_HOST_UID"] != "1000" {
-		t.Errorf("SCION_HOST_UID = %q, want %q; sandbox must run as non-root scion user",
-			env["SCION_HOST_UID"], "1000")
+	// Must use UID 0 (root) — CAP_SETUID is absent in gVisor.
+	if env["SCION_HOST_UID"] != "0" {
+		t.Errorf("SCION_HOST_UID = %q, want %q; sandbox must run as root (gVisor lacks CAP_SETUID)",
+			env["SCION_HOST_UID"], "0")
 	}
-	if env["SCION_HOST_GID"] != "1000" {
-		t.Errorf("SCION_HOST_GID = %q, want %q; sandbox must run as non-root scion user",
-			env["SCION_HOST_GID"], "1000")
+	if env["SCION_HOST_GID"] != "0" {
+		t.Errorf("SCION_HOST_GID = %q, want %q; sandbox must run as root (gVisor lacks CAP_SETGID)",
+			env["SCION_HOST_GID"], "0")
 	}
 
-	// Verify the constants match the expected scion user UID.
-	if sandboxUID != 1000 {
-		t.Errorf("sandboxUID = %d, want 1000 (scion user from omni Dockerfile)", sandboxUID)
+	// Verify the constants match the expected root UID.
+	if sandboxUID != 0 {
+		t.Errorf("sandboxUID = %d, want 0 (root — gVisor lacks CAP_SETUID)", sandboxUID)
 	}
-	if sandboxGID != 1000 {
-		t.Errorf("sandboxGID = %d, want 1000 (scion user from omni Dockerfile)", sandboxGID)
+	if sandboxGID != 0 {
+		t.Errorf("sandboxGID = %d, want 0 (root — gVisor lacks CAP_SETGID)", sandboxGID)
 	}
 }
 
