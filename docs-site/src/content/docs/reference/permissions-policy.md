@@ -73,7 +73,7 @@ At runtime, agents do not require static RoleBindings to be manually created. In
 
 ## AccessConstraints (Monotonic Restrictions)
 
-An **AccessConstraint** is a monotonic restriction that defines a **maximum-permissions boundary** (permission ceiling). It can only reduce (never widen) the authority granted by positive RoleBindings.
+An **AccessConstraint** is the underlying database and API representation of a user-facing **Access Boundary**. It acts as a monotonic restriction defining a **maximum-permissions boundary** (permission ceiling). It can only reduce (never widen) the authority granted by positive RoleBindings.
 
 An `AccessConstraint` contains the following fields:
 
@@ -86,6 +86,16 @@ An `AccessConstraint` contains the following fields:
 * **Maximum Permissions**: A JSON array of permission IDs that targeted principals are allowed to hold. If a permission is not listed in this array, targeted principals **cannot** exercise it, regardless of their positive RoleBindings.
 * **Time Bounds (`not_before` / `expires_at`)**: Optional time window during which the constraint is active.
 * **Disabled**: A boolean flag (`true`/`false`) used to deactivate the constraint. This is primarily used for **offline recovery** in lockout scenarios.
+
+### Security Gates & Backend Subsystems
+
+The AccessConstraint system relies on several backend subsystems to ensure secure, correct, and high-performance operations:
+
+* **Canonical Evaluator**: Built into the core AK1 Kernel, the evaluator computes the intersection of active role permissions and monotonic ceilings at wire-speed on every request.
+* **Typed Constraint Model**: A strictly typed and schema-validated structural model. It validates all inputs before persistence, ensuring permission lists only refer to valid, registered permission IDs.
+* **Preview Engine & Provenance/Explain API**: An interactive dry-run service (`POST /api/v1/admin/access-constraint-previews`) that evaluates the effective permissions of a targeted principal. It provides high-fidelity **provenance/explain data** showcasing exactly which positive permissions are restricted by active boundaries, which rules caused the ceiling to apply, and what the final resolved permissions set is.
+* **Transactional Governance & Atomic Audit**: To prevent partial policy writes or split-brain configurations, all updates are fully transaction-bound. The system records atomic, tamper-evident audit logs of all access boundary creations, updates, or deactivations in the global Hub secure audit ledger.
+* **HTTP API and Error Contract**: Standardized REST endpoints govern AccessConstraints. The API features a strict error contract, validating payloads and returning detailed error diagnostics—such as `422 Unprocessable Entity` with a validation error matrix for invalid scopes or permissions, or `403 Forbidden` for delegation and access-denial scenarios.
 
 ---
 
