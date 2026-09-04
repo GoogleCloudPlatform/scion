@@ -114,6 +114,10 @@ const (
 	// that deletes expired entries from the chat_link_codes table.
 	LockChatLinkCodeEviction AdvisoryLockKey = 0x5C100013
 
+	// LockWebchatMigration guards webchat store data migrations so only
+	// one replica runs them during multi-replica cold start.
+	LockWebchatMigration AdvisoryLockKey = 0x5C100014
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant
