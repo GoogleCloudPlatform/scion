@@ -179,6 +179,7 @@ var routePermissionClassifications = map[string]string{
 	"GET /.well-known/openid-configuration":     "public:oidc",
 	"GET /.well-known/jwks.json":                "public:oidc",
 	"POST /api/v1/agent/identity-token":         "agent-token:identity-token",
+	"POST /api/v1/agent/secrets":                "agent-token:agent-secrets",
 	"/api/v1/system/fs/list":                    "workstation:filesystem",
 	"/api/v1/system/fs/mkdir":                   "workstation:filesystem",
 	"/api/v1/system/fs/validate-path":           "workstation:filesystem",

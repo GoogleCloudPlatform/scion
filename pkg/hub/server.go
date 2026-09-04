@@ -3919,6 +3919,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/agent/gcp-token", s.guarded("/api/v1/agent/gcp-token", s.handleAgentGCPToken))
 	s.mux.HandleFunc("/api/v1/agent/gcp-identity-token", s.guarded("/api/v1/agent/gcp-identity-token", s.handleAgentGCPIdentityToken))
 
+	// Agent self-service secret fetch (agent token auth)
+	s.mux.HandleFunc("POST /api/v1/agent/secrets", s.guarded("POST /api/v1/agent/secrets", s.handleAgentSecretFetch))
+
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
 
