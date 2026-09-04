@@ -2568,6 +2568,12 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_users_core.go", Function: "ensureHubMemberBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-member binding creation during demotion inside single atomic WithTx; non-privileged role, ensures basic directory access; uses SystemReconcileCreatedBy sentinel", Scope: "pkg/hub/handlers_users_core.go"}},
 
 	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_roles.go — generic role-binding delete with super-admin guard (R6)
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_roles.go", Function: "deleteSystemSuperAdminBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding deletion via generic DELETE endpoint inside atomic WithTx; guarded by CanDelegate, self-lockout, checkLastSuperAdminTx with serialization lock, and transactional audit (R6)", Scope: "pkg/hub/handlers_roles.go"}},
+	{File: "pkg/hub/handlers_roles.go", Function: "deleteSystemSuperAdminBinding", Symbol: "CreateMutationAudit", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Transactional audit record for super-admin binding deletion via generic endpoint (R6)", Scope: "pkg/hub/handlers_roles.go"}},
+
+	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agents_core.go — agent lifecycle
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_agents_core.go", Function: "performAgentDelete", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent delete handler, route-guarded by agent.update permission", Scope: "pkg/hub/handlers_agents_core.go"}},

@@ -505,6 +505,12 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     this.loading = true;
     this.error = null;
 
+    // Pre-click capability gate (R6): check effective-access authorization
+    // concurrently with binding load. If the current user lacks hub.audit.read,
+    // the composition toggle is hidden before the user ever sees it — no
+    // wasted click and no 403 after interaction.
+    void this.preCheckExplainAccess();
+
     try {
       // Fetch role bindings for this principal (direct and group-derived)
       const url = `/api/v1/admin/role-bindings?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}&includeGroupDerived=true`;
@@ -541,6 +547,26 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load effective roles';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /**
+   * Pre-click capability gate for the effective-access composition toggle
+   * (R6). Fires a lightweight HEAD request to the explain endpoint. If the
+   * server responds with 403, the toggle is hidden before the user can
+   * interact with it — no wasted click and no dead error control.
+   */
+  private async preCheckExplainAccess(): Promise<void> {
+    if (this._explainForbidden || this._explainLoaded) return;
+    try {
+      const url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
+      const res = await apiFetch(url, { method: 'HEAD' });
+      if (res.status === 403) {
+        this._explainForbidden = true;
+      }
+    } catch {
+      // Network errors are not authorization failures — leave the toggle
+      // visible so the user can retry after connectivity is restored.
     }
   }
 

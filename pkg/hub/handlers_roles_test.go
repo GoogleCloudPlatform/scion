@@ -1965,3 +1965,177 @@ func TestRolesAPI_CreateRoleBinding_AgentProjectScope_Allowed(t *testing.T) {
 	assert.Equal(t, "agent", binding.PrincipalType)
 	assert.Equal(t, "project", binding.ScopeType)
 }
+
+// ---------------------------------------------------------------------------
+// R6: Generic DELETE /api/v1/admin/role-bindings/{id} super-admin guards
+// ---------------------------------------------------------------------------
+
+// createSuperAdminBindingDirect creates a super-admin binding via the store
+// directly (bypassing the API's D10 guard), and returns the binding.
+func createSuperAdminBindingDirect(t *testing.T, s store.Store, userID string) *store.RoleBinding {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+	return b
+}
+
+// TestGenericDeleteBinding_SuperAdmin_SelfLockout verifies that a super-admin
+// cannot delete their own super-admin binding via the generic DELETE endpoint.
+func TestGenericDeleteBinding_SuperAdmin_SelfLockout(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Find dev user's super-admin binding.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, devUser.ID)
+	require.NoError(t, err)
+	var saBinding *store.RoleBinding
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			saBinding = b
+			break
+		}
+	}
+	require.NotNil(t, saBinding, "dev user should have super-admin binding")
+
+	// Try to delete own super-admin binding: should be rejected as self-lockout.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+saBinding.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"deleting own super-admin binding should be rejected as self-lockout")
+	assert.Contains(t, rec.Body.String(), "self_lockout")
+}
+
+// TestGenericDeleteBinding_SuperAdmin_LastAdmin verifies that deleting the
+// last active super-admin binding (of another user) is blocked when no other
+// active admins survive.
+func TestGenericDeleteBinding_SuperAdmin_LastAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Create a second admin.
+	targetID := tid("ga-sole-target")
+	seedRolesTestUser(t, s, targetID, "gasole@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	// Suspend the dev user so they don't count as an active admin.
+	// (checkLastSuperAdminTx only counts active users.)
+	devUser.Status = "suspended"
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	// Now try to delete target's binding. Target is the only active admin.
+	// Dev can still make the request (auth middleware uses identity, not user status
+	// for existing sessions), but the guard should see zero surviving active admins.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+targetBinding.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"deleting last active admin's binding should be blocked")
+	assert.Contains(t, rec.Body.String(), "last_admin")
+
+	// Re-activate dev for cleanup.
+	devUser.Status = "active"
+	_ = s.UpdateUser(ctx, devUser)
+}
+
+// TestGenericDeleteBinding_SuperAdmin_AllowedWithSurvivor verifies that
+// deleting a super-admin binding succeeds when another active admin exists.
+func TestGenericDeleteBinding_SuperAdmin_AllowedWithSurvivor(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Create a target with a super-admin binding.
+	targetID := tid("ga-del-ok")
+	seedRolesTestUser(t, s, targetID, "gadelok@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	// Dev is still active admin, so deleting target's binding is allowed.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+targetBinding.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"deleting super-admin binding should succeed when another admin survives")
+
+	// Verify the binding is actually gone.
+	rd, _ := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			t.Fatal("super-admin binding should have been deleted")
+		}
+	}
+}
+
+// TestGenericDeleteBinding_SuperAdmin_AuditRecorded verifies that deleting a
+// super-admin binding via the generic DELETE endpoint produces an audit record.
+func TestGenericDeleteBinding_SuperAdmin_AuditRecorded(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-audit-target")
+	seedRolesTestUser(t, s, targetID, "gaaudit@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+targetBinding.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Verify audit record exists.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "role_binding",
+		TargetID:   targetBinding.ID,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "role_binding_delete" {
+			found = true
+			assert.Contains(t, a.BeforeSummary, "super-admin")
+			assert.Contains(t, a.AfterSummary, "generic_delete_endpoint")
+		}
+	}
+	assert.True(t, found, "deletion of super-admin binding via generic endpoint should produce audit record")
+}
+
+// TestGenericDeleteBinding_NonSuperAdmin_StillWorks verifies that deleting a
+// non-super-admin system-scoped binding still works without the super-admin guards.
+func TestGenericDeleteBinding_NonSuperAdmin_StillWorks(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("ga-nonsuperadmin")
+	seedRolesTestUser(t, s, userID, "ganonsuperadmin@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "ga-test-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+	})
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+binding.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"non-super-admin binding deletion should work normally")
+}

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1146,6 +1147,21 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// R6: system-scoped super-admin binding deletion must go through the
+	// same invariant guards as user PATCH role demotion: CanDelegate,
+	// last-admin serialized check, self-lockout, and transactional audit.
+	// Without this, any hub-admin with role_binding.delete could delete
+	// the sole super-admin binding and lock out the system.
+	superAdminRD, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		writeErrorFromErr(w, err, "super-admin role definition lookup")
+		return
+	}
+	if binding.RoleDefinitionID == superAdminRD.ID && binding.ScopeType == store.RoleScopeSystem {
+		s.deleteSystemSuperAdminBinding(w, r, binding, user, superAdminRD)
+		return
+	}
+
 	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
@@ -1158,6 +1174,89 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 	slog.Info("role binding deleted",
 		"binding_id", id, "actor", user.Email())
 
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteSystemSuperAdminBinding handles deletion of a system-scoped
+// super-admin binding through the generic DELETE endpoint. It applies the
+// same invariant guards as user PATCH role demotion (R6):
+//
+//   - CanDelegate: caller must have delegation authority over the super-admin role
+//   - Self-lockout: caller cannot remove their own super-admin binding
+//   - Last-admin: serialized check prevents removing the sole active admin
+//   - Audit: transactional mutation audit record
+//
+// Without these guards, any hub-admin with role_binding.delete could delete
+// the sole super-admin binding and lock out the system.
+func (s *Server) deleteSystemSuperAdminBinding(
+	w http.ResponseWriter, r *http.Request,
+	binding *store.RoleBinding, actor UserIdentity, rd *store.RoleDefinition,
+) {
+	ctx := r.Context()
+
+	// CanDelegate: caller must have delegation authority over super-admin.
+	canDel := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{
+		Type:             GrantTypeRoleBinding,
+		RoleDefinitionID: rd.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	if !canDel.Allowed {
+		writeForbidden(w, "insufficient authority to delete super-admin binding: "+canDel.Reason)
+		return
+	}
+
+	// Self-lockout: prevent the actor from removing their own super-admin binding.
+	if binding.PrincipalType == store.RoleBindingPrincipalUser && binding.PrincipalID == actor.ID() {
+		writeError(w, http.StatusConflict, "self_lockout",
+			"cannot delete your own super-admin binding; ask another admin", nil)
+		return
+	}
+
+	// All mutations inside a single atomic transaction with serialization.
+	var txErr error
+	txErr = s.store.WithTx(ctx, func(tx store.Store) error {
+		// Last-admin guard with serialization lock.
+		if err := s.checkLastSuperAdminTx(ctx, tx, binding.PrincipalID, rd); err != nil {
+			return err
+		}
+
+		// Delete the binding.
+		if err := tx.DeleteRoleBinding(ctx, binding.ID); err != nil {
+			return fmt.Errorf("delete super-admin binding: %w", err)
+		}
+
+		// Synchronous transactional audit.
+		auditActor := s.buildAuditActorFromContext(ctx)
+		if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:        "role_binding_delete",
+			ActorPrincipalKind:  auditActor.kind,
+			ActorPrincipalID:    auditActor.id,
+			ActorCredentialID:   auditActor.credID,
+			ActorCredentialType: auditActor.credType,
+			TargetType:          "role_binding",
+			TargetID:            binding.ID,
+			BeforeSummary:       fmt.Sprintf(`{"principal_type":%q,"principal_id":%q,"role":%q,"scope_type":%q}`, binding.PrincipalType, binding.PrincipalID, store.SystemRoleSuperAdmin, binding.ScopeType),
+			AfterSummary:        `{"deleted":true,"source":"generic_delete_endpoint"}`,
+			Timestamp:           time.Now(),
+		}); err != nil {
+			return fmt.Errorf("audit super-admin binding delete: %w", err)
+		}
+
+		return nil
+	})
+	if txErr != nil {
+		if errors.Is(txErr, errLastSuperAdmin) {
+			writeError(w, http.StatusConflict, "last_admin",
+				txErr.Error(), nil)
+			return
+		}
+		writeErrorFromErr(w, txErr, "")
+		return
+	}
+
+	slog.Info("deleted super-admin binding via generic delete endpoint",
+		"binding_id", binding.ID, "principal_id", binding.PrincipalID,
+		"actor", actor.Email())
 	w.WriteHeader(http.StatusNoContent)
 }
 

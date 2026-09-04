@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1336,11 +1338,13 @@ func TestStaleRoleMember_SoleAdmin_BindingPreserved(t *testing.T) {
 	assert.ErrorIs(t, err, errLastSuperAdmin,
 		"checkLastSuperAdminTx should block removal of sole admin with stale User.Role")
 
-	// Also verify hasSuperAdminBindingForUser correctly detects the binding.
-	hasBind, err := srv.hasSuperAdminBindingForUser(ctx, s, target.ID, superAdminRD)
+	// Also verify superAdminBindingStateForUser correctly detects the binding.
+	bindState, err := srv.superAdminBindingStateForUser(ctx, s, target.ID, superAdminRD)
 	require.NoError(t, err)
-	assert.True(t, hasBind,
-		"hasSuperAdminBindingForUser should detect binding even with stale User.Role")
+	assert.True(t, bindState.HasAny,
+		"HasAny should detect binding even with stale User.Role")
+	assert.True(t, bindState.HasActive,
+		"HasActive should detect active binding even with stale User.Role")
 
 	// Verify binding is still intact (the check didn't modify anything).
 	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
@@ -1877,4 +1881,366 @@ func TestCredentialBoundary_DELETE_MissingContextDenied(t *testing.T) {
 
 	_, err := s.GetUser(ctx, target.ID)
 	assert.NoError(t, err, "user must not be deleted")
+}
+
+// ---------------------------------------------------------------------------
+// R4-fix lifecycle: scheduled/expired binding tests
+// ---------------------------------------------------------------------------
+
+// createSuperAdminBindingWithLifecycle creates a super-admin binding with
+// specific NotBefore/ExpiresAt lifecycle fields for testing.
+func createSuperAdminBindingWithLifecycle(
+	t *testing.T, s store.Store, userID string,
+	notBefore, expiresAt *time.Time,
+) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+		NotBefore:        notBefore,
+		ExpiresAt:        expiresAt,
+	})
+	require.NoError(t, err)
+}
+
+// TestDemoteUser_ScheduledBindingRemoved verifies that PATCH role=member
+// removes a scheduled (not-yet-active) super-admin binding. Before the
+// R4-fix, hasSuperAdminBindingForUser skipped scheduled bindings, leaving
+// them to activate later.
+func TestDemoteUser_ScheduledBindingRemoved(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Ensure dev user is an active admin (actor for the request).
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Create a user with User.Role="member" and a SCHEDULED super-admin
+	// binding (activates in the future).
+	target := &store.User{
+		ID: tid("sched-demote-target"), Email: "scheddemote@test.com",
+		DisplayName: "Sched Demote", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	future := time.Now().Add(24 * time.Hour)
+	createSuperAdminBindingWithLifecycle(t, s, target.ID, &future, nil)
+
+	// Verify the binding exists (raw count, any lifecycle).
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"scheduled binding should exist before test")
+
+	// PATCH role=member should remove the scheduled binding.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"PATCH role=member should succeed for scheduled binding cleanup")
+
+	// Verify the scheduled binding is gone.
+	assert.Equal(t, 0, superAdminBindingCount(t, s, target.ID),
+		"scheduled binding must be removed on demotion")
+}
+
+// TestDemoteUser_ExpiredBindingRemoved verifies that PATCH role=member
+// removes an expired super-admin binding (cleanup). No governance guards
+// are needed since the binding is already expired.
+func TestDemoteUser_ExpiredBindingRemoved(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	target := &store.User{
+		ID: tid("exp-demote-target"), Email: "expdemote@test.com",
+		DisplayName: "Exp Demote", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	past := time.Now().Add(-24 * time.Hour)
+	createSuperAdminBindingWithLifecycle(t, s, target.ID, nil, &past)
+
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"expired binding should exist before test")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"PATCH role=member should succeed for expired binding cleanup")
+
+	assert.Equal(t, 0, superAdminBindingCount(t, s, target.ID),
+		"expired binding must be removed on demotion")
+}
+
+// TestPromoteUser_ExpiredBindingReplaced verifies that PATCH role=admin
+// on a user with an expired super-admin binding replaces it with a fresh
+// active binding. Before the R4-fix, the expired binding would cause
+// ErrAlreadyExists to be swallowed, leaving no active grant.
+func TestPromoteUser_ExpiredBindingReplaced(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	target := &store.User{
+		ID: tid("exp-promote-target"), Email: "exppromote@test.com",
+		DisplayName: "Exp Promote", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	past := time.Now().Add(-24 * time.Hour)
+	createSuperAdminBindingWithLifecycle(t, s, target.ID, nil, &past)
+
+	// Promote: should delete the expired binding and create a new active one.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"PATCH role=admin should succeed with expired binding replacement")
+
+	updated, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", updated.Role, "User.Role should be admin")
+
+	// Verify exactly one binding exists and it's active (no ExpiresAt in the past).
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"exactly one super-admin binding should exist")
+
+	// Verify the binding is actually active (not the old expired one).
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, target.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			assert.Nil(t, b.ExpiresAt, "new binding should have no ExpiresAt (active)")
+			assert.Nil(t, b.NotBefore, "new binding should have no NotBefore (active)")
+		}
+	}
+}
+
+// TestPromoteUser_ScheduledBindingReplaced verifies that PATCH role=admin
+// on a user with a scheduled (future) super-admin binding replaces it with
+// a fresh active binding.
+func TestPromoteUser_ScheduledBindingReplaced(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	target := &store.User{
+		ID: tid("sched-promote-target"), Email: "schedpromote@test.com",
+		DisplayName: "Sched Promote", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	future := time.Now().Add(24 * time.Hour)
+	createSuperAdminBindingWithLifecycle(t, s, target.ID, &future, nil)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"PATCH role=admin should replace scheduled binding with active")
+
+	updated, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", updated.Role, "User.Role should be admin")
+
+	// Verify the binding is active now (no future NotBefore).
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, target.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			assert.Nil(t, b.NotBefore, "replaced binding should have no NotBefore (active)")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R4-fix audit: same-role canonical repairs produce audit records
+// ---------------------------------------------------------------------------
+
+// TestSameRoleRepair_AdminBindingCreated_Audited verifies that when
+// User.Role="admin" but no binding exists, PATCH role=admin creates the
+// missing binding AND produces an audit record.
+func TestSameRoleRepair_AdminBindingCreated_Audited(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user with Role=admin but no super-admin binding (stale state).
+	target := &store.User{
+		ID: tid("repair-admin-audit"), Email: "repairadminaudit@test.com",
+		DisplayName: "Repair Admin", Role: "admin", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	// No binding created — simulates stale state.
+
+	// PATCH role=admin → should create the missing binding.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify binding now exists.
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
+		"missing binding should be created by same-role repair")
+
+	// Verify audit record was created for the binding repair.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "user",
+		TargetID:   target.ID,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "user_role_binding_grant" || a.MutationType == "user_role_change" {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"same-role admin repair should produce an audit record")
+}
+
+// TestSameRoleRepair_MemberBindingRemoved_Audited verifies that when
+// User.Role="member" but a stale super-admin binding exists, PATCH
+// role=member removes it AND produces an audit record.
+func TestSameRoleRepair_MemberBindingRemoved_Audited(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Create a user with Role=member but a stale super-admin binding.
+	target := &store.User{
+		ID: tid("repair-member-audit"), Email: "repairmemberaudit@test.com",
+		DisplayName: "Repair Member", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	// PATCH role=member → should remove the stale binding.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify binding is gone.
+	assert.Equal(t, 0, superAdminBindingCount(t, s, target.ID),
+		"stale binding should be removed by same-role repair")
+
+	// Verify audit record was created.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "user",
+		TargetID:   target.ID,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "user_role_binding_revoke" || a.MutationType == "user_role_change" {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"same-role member repair should produce an audit record")
+}
+
+// ---------------------------------------------------------------------------
+// R6: Concurrency regression — last-admin serialization
+// ---------------------------------------------------------------------------
+
+// TestConcurrentDemotion_AtMostOneSucceeds verifies that when two admins
+// are concurrently demoted, at most one demotion succeeds and the system
+// never reaches zero active super-admins.
+//
+// On PostgreSQL this is serialized by SELECT FOR UPDATE on the role definition
+// row. On SQLite, transactions are inherently serialized. The test verifies
+// the invariant regardless of backend.
+func TestConcurrentDemotion_AtMostOneSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create three admins: dev (the caller) + admin1 + admin2.
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	admin1 := &store.User{
+		ID: tid("race-admin-1"), Email: "raceadmin1@test.com",
+		DisplayName: "Race Admin 1", Role: "admin", Status: "active",
+	}
+	admin2 := &store.User{
+		ID: tid("race-admin-2"), Email: "raceadmin2@test.com",
+		DisplayName: "Race Admin 2", Role: "admin", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin1))
+	require.NoError(t, s.CreateUser(ctx, admin2))
+	srv.ensureSuperAdminBinding(ctx, admin1.ID)
+	srv.ensureSuperAdminBinding(ctx, admin2.ID)
+
+	// Now suspend the dev user so they don't count as an active admin.
+	// This leaves admin1 and admin2 as the only two active admins.
+	devUser.Status = "suspended"
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	// Concurrently demote both admin1 and admin2. At most one should succeed.
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+admin1.ID,
+			map[string]string{"role": "member"})
+		results[0] = rec.Code
+	}()
+	go func() {
+		defer wg.Done()
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+admin2.ID,
+			map[string]string{"role": "member"})
+		results[1] = rec.Code
+	}()
+	wg.Wait()
+
+	// Count successful demotions.
+	successCount := 0
+	for _, code := range results {
+		if code == http.StatusOK {
+			successCount++
+		}
+	}
+
+	// At most one should succeed. The other should get 409 (last-admin).
+	assert.LessOrEqual(t, successCount, 1,
+		"at most one concurrent demotion should succeed; results: %v", results)
+
+	// Verify the invariant: at least one active super-admin must remain.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	now := time.Now()
+	activeAdminCount := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID != rd.ID || b.PrincipalType != store.RoleBindingPrincipalUser {
+			continue
+		}
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		// Check if the user is active.
+		u, err := s.GetUser(ctx, b.PrincipalID)
+		if err != nil || u.Status != "active" {
+			continue
+		}
+		activeAdminCount++
+	}
+	assert.GreaterOrEqual(t, activeAdminCount, 1,
+		"system must always have at least one active super-admin after concurrent demotions")
+
+	// Re-activate dev for cleanup.
+	devUser.Status = "active"
+	_ = s.UpdateUser(ctx, devUser)
 }

@@ -424,3 +424,54 @@ describe('Composition expand targets the real effective-access endpoint', () => 
     }
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* 8. R6: Pre-click capability gating for effective-access composition        */
+/* -------------------------------------------------------------------------- */
+
+describe('Pre-click capability gating for effective-access (R6)', () => {
+  it('preCheckExplainAccess fires during loadEffectiveRoles, not on toggle click', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+    // The pre-check must be called inside loadEffectiveRoles, which runs at
+    // mount time — before any user interaction.
+    expect(source).toContain('void this.preCheckExplainAccess()');
+
+    // It should be in loadEffectiveRoles, not in handleLayersToggle.
+    const loadFnMatch = source.match(
+      /async loadEffectiveRoles\(\)[\s\S]*?(?=private async|private [a-z]|^\s*\/\*\*)/m
+    );
+    expect(loadFnMatch).toBeTruthy();
+    expect(loadFnMatch![0]).toContain('preCheckExplainAccess');
+  });
+
+  it('preCheckExplainAccess uses HEAD method for lightweight authorization check', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    // The pre-check should use HEAD to minimize data transfer.
+    expect(source).toContain("method: 'HEAD'");
+  });
+
+  it('preCheckExplainAccess sets _explainForbidden on 403 response', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    const preCheckMatch = source.match(
+      /async preCheckExplainAccess\(\)[\s\S]*?(?=\n\s*(?:private|public|protected|override|\/\*\*))/m
+    );
+    expect(preCheckMatch).toBeTruthy();
+    const body = preCheckMatch![0];
+    expect(body).toContain('res.status === 403');
+    expect(body).toContain('this._explainForbidden = true');
+  });
+
+  it('renderLayersSection returns nothing when _explainForbidden is true', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    // The renderLayersSection method must check _explainForbidden and return
+    // `nothing` when true. Match the full method body up to the next method.
+    const renderMatch = source.match(
+      /private renderLayersSection\(\)[\s\S]*?(?=\n\s*private\s)/m
+    );
+    expect(renderMatch).toBeTruthy();
+    const body = renderMatch![0];
+    expect(body).toContain('_explainForbidden');
+    expect(body).toContain('nothing');
+  });
+});
