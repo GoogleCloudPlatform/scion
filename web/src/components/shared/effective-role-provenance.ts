@@ -803,6 +803,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           ? html`<div class="redaction-notice">${this.explainRedacted.message}</div>`
           : nothing}
         <scion-authorization-layer-stack
+          mode="bindings"
           .potentialCount=${this.potentialCount}
           .boundaries=${this.boundaries}
           .restrictions=${this.restrictions}

@@ -90,6 +90,14 @@ export interface DeniedPermission {
 
 @customElement('scion-authorization-layer-stack')
 export class ScionAuthorizationLayerStack extends LitElement {
+  /**
+   * Display mode. 'permissions' (default) uses permission-count semantics
+   * for labels and counts. 'bindings' uses truthful binding-count semantics
+   * suitable for system-scope role composition where per-permission counts
+   * are not available.
+   */
+  @property({ type: String }) mode: 'permissions' | 'bindings' = 'permissions';
+
   /** Total permissions from active role grants (potential). */
   @property({ type: Number }) potentialCount = 0;
 
@@ -508,8 +516,8 @@ export class ScionAuthorizationLayerStack extends LitElement {
           aria-expanded=${expanded}
         >
           <sl-icon name="chevron-right" class="expand-icon ${expanded ? 'open' : ''}"></sl-icon>
-          <span class="layer-label">Active role bindings</span>
-          <span class="layer-count potential">${this.potentialCount} binding${this.potentialCount !== 1 ? 's' : ''}</span>
+          <span class="layer-label">${this.mode === 'bindings' ? 'Active role bindings' : 'Potential permissions'}</span>
+          <span class="layer-count potential">${this.potentialCount} ${this.mode === 'bindings' ? (this.potentialCount !== 1 ? 'bindings' : 'binding') : 'permissions'}</span>
         </div>
         ${expanded ? this.renderPotentialDetail() : nothing}
       </div>
@@ -519,7 +527,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
   private renderPotentialDetail() {
     return html`
       <div class="layer-detail">
-        <div class="empty-layer">System-scoped role bindings currently active for this principal.</div>
+        <div class="empty-layer">${this.mode === 'bindings' ? 'System-scoped role bindings currently active for this principal.' : 'Union of permissions from active role grants.'}</div>
       </div>
     `;
   }
@@ -547,7 +555,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
         >
           <sl-icon name="chevron-right" class="expand-icon ${expanded ? 'open' : ''}"></sl-icon>
           <span class="layer-label">Access constraints</span>
-          <span class="layer-count removes">${totalRemoved > 0 ? `removes ${totalRemoved}` : `${this.boundaries.length} applied`}</span>
+          <span class="layer-count removes">${totalRemoved > 0 ? `removes ${totalRemoved}` : (this.mode === 'bindings' ? `${this.boundaries.length} applied` : `removes ${totalRemoved}`)}</span>
         </div>
         ${expanded ? this.renderBoundariesDetail() : nothing}
       </div>
@@ -575,7 +583,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
         </span>
         ${boundary.removedCount > 0
           ? html`<span class="removal-count">removes ${boundary.removedCount}</span>`
-          : html`<span class="removal-count">applied</span>`}
+          : html`<span class="removal-count">${this.mode === 'bindings' ? 'applied' : 'removes 0'}</span>`}
         ${boundary.overlapCount > 0
           ? html`<span class="overlap-note"> (${boundary.overlapCount} removed by both) </span>`
           : nothing}
@@ -606,7 +614,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
         >
           <sl-icon name="chevron-right" class="expand-icon ${expanded ? 'open' : ''}"></sl-icon>
           <span class="layer-label">Intrinsic restrictions</span>
-          <span class="layer-count removes">${totalRemoved > 0 ? `removes ${totalRemoved}` : `${this.restrictions.length} applied`}</span>
+          <span class="layer-count removes">${totalRemoved > 0 ? `removes ${totalRemoved}` : (this.mode === 'bindings' ? `${this.restrictions.length} applied` : `removes ${totalRemoved}`)}</span>
         </div>
         ${expanded ? this.renderRestrictionsDetail() : nothing}
       </div>
@@ -625,7 +633,7 @@ export class ScionAuthorizationLayerStack extends LitElement {
         <span class="restriction-kind">${restriction.label}</span>
         ${restriction.removedCount > 0
           ? html`<span class="removal-count">removes ${restriction.removedCount}</span>`
-          : html`<span class="removal-count">applied</span>`}
+          : html`<span class="removal-count">${this.mode === 'bindings' ? 'applied' : 'removes 0'}</span>`}
         ${restriction.detail
           ? html`<span class="overlap-note">${restriction.detail}</span>`
           : nothing}
@@ -660,8 +668,8 @@ export class ScionAuthorizationLayerStack extends LitElement {
                 class="expand-icon ${expanded ? 'open' : ''}"
               ></sl-icon>`
             : nothing}
-          <span class="layer-label">Effective access</span>
-          <span class="layer-count effective">${this.effectiveCount} binding${this.effectiveCount !== 1 ? 's' : ''} active</span>
+          <span class="layer-label">${this.mode === 'bindings' ? 'Effective access' : 'Effective permissions'}</span>
+          <span class="layer-count effective">${this.mode === 'bindings' ? `${this.effectiveCount} binding${this.effectiveCount !== 1 ? 's' : ''} active` : `${this.effectiveCount} permissions`}</span>
         </div>
         ${expanded && hasDenied ? this.renderDeniedDetail() : nothing}
       </div>

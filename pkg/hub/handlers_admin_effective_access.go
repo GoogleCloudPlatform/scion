@@ -187,12 +187,27 @@ func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Reque
 	// Compute boundary information from access constraints.
 	// Only include constraints that apply to this principal and are currently
 	// in their active window.
+	//
+	// R4-R3: exhaustive pagination — ListAccessConstraints defaults to 100
+	// rows per page. Loop until all constraints are fetched.
 	boundaries := make([]adminEffectiveAccessBoundary, 0)
-	constraints, err := s.store.ListAccessConstraints(ctx, 0, 0)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to list access constraints", nil)
-		return
+	var constraints []*store.AccessConstraint
+	{
+		const pageSize = 1000
+		offset := 0
+		for {
+			page, err := s.store.ListAccessConstraints(ctx, pageSize, offset)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to list access constraints", nil)
+				return
+			}
+			constraints = append(constraints, page...)
+			if len(page) < pageSize {
+				break
+			}
+			offset += len(page)
+		}
 	}
 
 	// Build principal ID lookup for matching.

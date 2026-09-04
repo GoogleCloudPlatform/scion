@@ -1082,3 +1082,201 @@ func TestUserCapabilities_IncludeDeleteAction(t *testing.T) {
 	}
 	assert.True(t, hasDelete, "super-admin capabilities should include 'delete' action")
 }
+
+// ===========================================================================
+// R4: Atomicity, credential boundary, active-admin verification
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// R4-C4: Last-admin rejects demotion when only other admin is suspended
+// ---------------------------------------------------------------------------
+
+func TestDemoteUser_SuspendedAlternateAdminBlocked(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Create a second admin and suspend them.
+	admin2 := &store.User{
+		ID:          tid("suspended-admin"),
+		Email:       "suspadmin@example.com",
+		DisplayName: "Suspended Admin",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin2))
+
+	// Promote admin2.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+admin2.ID,
+		map[string]string{"role": "admin"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Suspend admin2.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+admin2.ID,
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Now try to check last-admin for devUser — the only other admin is
+	// suspended, so devUser should be considered the last active admin.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	err = srv.checkLastSuperAdminTx(ctx, s, devUser.ID, superAdminRD)
+	assert.ErrorIs(t, err, errLastSuperAdmin,
+		"demotion should be blocked when only other admin is suspended")
+}
+
+// ---------------------------------------------------------------------------
+// R4-C2: Delete uses binding-based protection, not User.Role
+// ---------------------------------------------------------------------------
+
+func TestDeleteUser_BindingBasedProtection(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a user with role=member but who has a super-admin binding
+	// (simulates stale state where User.Role is out of sync with bindings).
+	user := &store.User{
+		ID:          tid("stale-member-admin"),
+		Email:       "stalemember@example.com",
+		DisplayName: "Stale Member",
+		Role:        "member", // Role says member...
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	srv.ensureSuperAdminBinding(ctx, user.ID) // ...but has super-admin binding
+
+	// Get the dev user (also an admin).
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	// Deleting the user should succeed because devUser is still an active admin.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+user.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"deleting user with stale binding should succeed when another admin exists")
+}
+
+// ---------------------------------------------------------------------------
+// R4-C3: Synchronous transactional audit
+// ---------------------------------------------------------------------------
+
+func TestUpdateUser_AuditRecordCreated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("audit-test"),
+		Email:       "audit@example.com",
+		DisplayName: "Audit Test",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "suspended"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// The audit record should exist immediately (synchronous, not async).
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "user",
+		TargetID:   user.ID,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, audits, "synchronous audit record should exist after status change")
+
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "user_suspend" && a.TargetID == user.ID {
+			found = true
+			assert.NotEmpty(t, a.ActorPrincipalID, "audit should have explicit actor ID")
+			assert.NotEmpty(t, a.ActorCredentialType, "audit should have credential type")
+			break
+		}
+	}
+	assert.True(t, found, "user_suspend audit record should exist")
+}
+
+func TestDeleteUser_AuditRecordCreated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("audit-delete"),
+		Email:       "auditdelete@example.com",
+		DisplayName: "Audit Delete",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+user.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "user",
+		TargetID:   user.ID,
+	})
+	require.NoError(t, err)
+
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "user_delete" && a.TargetID == user.ID {
+			found = true
+			assert.NotEmpty(t, a.ActorPrincipalID, "audit should have explicit actor ID")
+			break
+		}
+	}
+	assert.True(t, found, "user_delete audit record should exist immediately (synchronous)")
+}
+
+// ---------------------------------------------------------------------------
+// R4-C1: Atomicity — mixed PATCH all in one transaction
+// ---------------------------------------------------------------------------
+
+func TestMixedPatch_AtomicRoleAndStatus(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("atomic-mixed"),
+		Email:       "atomicmixed@example.com",
+		DisplayName: "Atomic Mixed",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Apply both role and status in one request.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin", "status": "suspended"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Both should be updated atomically.
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", updated.Role, "role should be updated")
+	assert.Equal(t, "suspended", updated.Status, "status should be updated")
+	assert.Equal(t, 1, superAdminBindingCount(t, s, user.ID),
+		"super-admin binding should exist")
+}
+
+// ---------------------------------------------------------------------------
+// R4-R4: Super-admin includes user.delete permission
+// ---------------------------------------------------------------------------
+
+func TestSuperAdmin_IncludesUserDeletePermission(t *testing.T) {
+	allPerms := allPermissionIDs()
+	permSet := make(map[string]bool, len(allPerms))
+	for _, p := range allPerms {
+		permSet[p] = true
+	}
+	assert.True(t, permSet["user.delete"],
+		"user.delete must be in allPermissionIDs (super-admin convergence)")
+	assert.True(t, permSet["user.suspend"],
+		"user.suspend must be in allPermissionIDs")
+	assert.True(t, permSet["user.promote"],
+		"user.promote must be in allPermissionIDs")
+}

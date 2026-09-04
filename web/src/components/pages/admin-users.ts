@@ -1599,9 +1599,13 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
-    // Active users: View Roles (always), Promote/Demote, Suspend, Delete
-    // — each action gated by its capability.
-    const hasAnyAction = canPromote || canSuspend || canDelete;
+    // Active users: View Roles, Promote/Demote, Suspend, Delete
+    // — each action gated by its capability. View Roles requires at least
+    // one admin-level capability since the role-bindings endpoint requires
+    // admin access (R4-R1: don't show dead controls to regular members).
+    const canUpdate = can(caps, 'update');
+    const hasAnyAdminAction = canPromote || canSuspend || canDelete || canUpdate;
+    if (!hasAnyAdminAction) return nothing;
     return html`
       <sl-dropdown placement="bottom-end" hoist>
         <sl-button slot="trigger" size="small" variant="text" caret>
@@ -1616,7 +1620,7 @@ export class ScionPageAdminUsers extends LitElement {
             <sl-icon slot="prefix" name="shield"></sl-icon>
             View Roles
           </sl-menu-item>
-          ${hasAnyAction ? html`<sl-divider></sl-divider>` : nothing}
+          ${canPromote || canSuspend || canDelete ? html`<sl-divider></sl-divider>` : nothing}
           ${canPromote && user.role !== 'admin'
             ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
                 <sl-icon slot="prefix" name="shield-check"></sl-icon>
