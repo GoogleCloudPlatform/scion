@@ -3823,6 +3823,9 @@ func (s *Server) registerRoutes() {
 	// Broker plugin inbound message delivery
 	s.mux.HandleFunc("/api/v1/broker/inbound", s.guarded("/api/v1/broker/inbound", s.handleBrokerInbound))
 
+	// Broker plugin callback delivery (interactive card responses, action acks)
+	s.mux.HandleFunc("/api/v1/broker/callback", s.guarded("/api/v1/broker/callback", s.handleBrokerCallback))
+
 	// Broker plugin project listing (fresh list for /setup flows)
 	s.mux.HandleFunc("/api/v1/broker/projects", s.guarded("/api/v1/broker/projects", s.handleBrokerProjects))
 
