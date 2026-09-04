@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -165,7 +166,8 @@ func TestDEF142_P3_ConversationRef_NotFound(t *testing.T) {
 		"hello nowhere", "#nonexistent-thread-xyz")
 	require.Equal(t, http.StatusBadRequest, rr.Code,
 		"#nonexistent reference should return 400")
-	assert.Contains(t, rr.Body.String(), "not found")
+	// AC-3: collapsed response — no reason-specific text.
+	assert.Contains(t, rr.Body.String(), "could not be resolved")
 }
 
 // ---------------------------------------------------------------------------
@@ -295,13 +297,127 @@ func TestDEF142_G1_ResolveContext_ProjectFromAuth_NotBody(t *testing.T) {
 	rr := postOutboundWithRef(t, srv, agent.ProjectID, agent.ID, user.Email,
 		"probing foreign project", "#foreign-secret")
 
-	// The thread does not exist in the agent's project → not-found.
-	// The response must NOT leak the foreign project's conversation details.
+	// The thread does not exist in the agent's project → collapsed error.
+	// The response must NOT leak the foreign project's conversation details,
+	// the reason, or distinguish this from not-found (AC-3).
 	require.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "not found",
-		"foreign project threads must not be visible via conversation_ref")
+	assert.Contains(t, rr.Body.String(), "could not be resolved",
+		"foreign project threads must get the same generic error")
 	assert.NotContains(t, rr.Body.String(), foreignProject.ID,
 		"foreign project ID must never appear in the error response")
-	assert.NotContains(t, rr.Body.String(), "foreign-secret-conv",
+	assert.NotContains(t, rr.Body.String(), "foreign-secret",
 		"foreign conversation details must not appear in the error response")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-142 AC-3: "not-found" and "not-a-participant" produce BYTE-IDENTICAL
+// response bodies. A caller must not be able to distinguish "does not exist"
+// from "exists but I'm not allowed".
+// ---------------------------------------------------------------------------
+
+func TestDEF142_AC3_NotFound_vs_NotParticipant_ByteIdentical(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+
+	// Create a direct DM between two OTHER principals. The sending agent
+	// (def138-agent) is NOT a participant.
+	otherAgentID := tid("d142-ac3-other-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:         otherAgentID,
+		Name:       "d142-ac3-other",
+		Slug:       "d142-ac3-other",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}))
+	otherUserID := tid("d142-ac3-other-user")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          otherUserID,
+		Email:       "d142-other@example.com",
+		DisplayName: "Other User",
+	}))
+
+	dmKey, err := messages.DMConversationKey("agent", otherAgentID, "user", otherUserID)
+	require.NoError(t, err)
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+		// ProjectID intentionally nil — DMs are global.
+	})
+	require.NoError(t, err)
+
+	// Case 1: conv:<uuid> that does not exist.
+	nonexistentUUID := "00000000-dead-beef-0000-000000000001"
+	rr1 := postOutboundWithRef(t, srv, project.ID, agent.ID, user.Email,
+		"probing nonexistent", "conv:"+nonexistentUUID)
+	require.Equal(t, http.StatusBadRequest, rr1.Code)
+
+	// Case 2: conv:<uuid> naming a DIRECT conversation the sender is not
+	// party to. Resolve finds it, checkPostResolutionAuth returns
+	// "not-a-participant", handler collapses to the same generic error.
+	rr2 := postOutboundWithRef(t, srv, project.ID, agent.ID, user.Email,
+		"probing someone elses DM", "conv:"+dmConv.ID)
+	require.Equal(t, http.StatusBadRequest, rr2.Code)
+
+	// AC-3: the two bodies must be BYTE-IDENTICAL. "Both fail" does not
+	// test the property — the bodies must carry no distinguishing text.
+	body1 := rr1.Body.String()
+	body2 := rr2.Body.String()
+	require.Equal(t, body1, body2,
+		"AC-3: not-found and not-a-participant responses must be byte-identical.\n"+
+			"  not-found body:         %s\n"+
+			"  not-a-participant body:  %s",
+		body1, body2)
+
+	// Sanity: the collapsed message is present, not an empty body.
+	assert.Contains(t, body1, "could not be resolved")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-142 AC-6: A reference that resolves to a NEWLY CREATED conversation
+// (@agent resolve-or-create) must still pass through the DEF-138
+// authorization block. Resolve exempts Created==true from its own
+// post-resolution check, so the DEF-138 block is the only gate.
+// ---------------------------------------------------------------------------
+
+func TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth(t *testing.T) {
+	srv, s, project, agent, user := def141BrokerSetup(t)
+	ctx := context.Background()
+
+	// Create a second agent in the same project that the sending agent can
+	// DM via @slug.
+	targetAgent := &store.Agent{
+		ID:         tid("d142-ac6-target"),
+		Name:       "d142-ac6-target",
+		Slug:       "d142-ac6-target",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, targetAgent))
+
+	// Snapshot counters. The DEF-138 block sets asserted=true, which the
+	// broker routes through the explicit path.
+	explicitBefore := messaging.DivergenceMetrics.ExplicitRoutes()
+
+	// Send via @agent-slug — Resolve creates a new DM (Created==true),
+	// skips its own post-resolution auth, promotes to req.ConversationID,
+	// and the DEF-138 block authorizes + sets asserted=true.
+	rr := postOutboundWithRef(t, srv, project.ID, agent.ID, user.Email,
+		"hello via agent ref", "@"+targetAgent.Slug)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"@agent-slug reference should resolve-or-create and authorize")
+
+	// Give async broker delivery time to complete.
+	time.Sleep(200 * time.Millisecond)
+
+	// explicit_routes must increment — proving the message went through
+	// the DEF-138 authorization block with asserted=true.
+	explicitAfter := messaging.DivergenceMetrics.ExplicitRoutes()
+	require.Greater(t, explicitAfter, explicitBefore,
+		"AC-6: @agent resolve-or-create must flow through DEF-138 auth "+
+			"(explicit_routes should increment)")
 }

@@ -346,8 +346,28 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		if resolveErr != nil {
 			var resErr *messaging.ResolutionError
 			if errors.As(resolveErr, &resErr) {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-					"conversation_ref resolution failed: "+resErr.Error(), nil)
+				// DEF-142 AC-3: collapse disclosure-sensitive reasons into
+				// one identical response. "not-found", "not-a-participant",
+				// and "boundary-violation" produce BYTE-IDENTICAL bodies so
+				// a caller cannot distinguish "does not exist" from "exists
+				// but I'm not allowed". The real reason is logged server-side.
+				//
+				// "ambiguous" and "no-shared-project" stay distinct:
+				// ambiguity candidates are group conversations in the
+				// caller's own project (already authorized), and
+				// no-shared-project is a caller-side configuration error.
+				switch resErr.Reason {
+				case "not-found", "not-a-participant", "boundary-violation":
+					s.messageLog.Info("DEF-142: conversation_ref resolution denied",
+						"conversation_ref", req.ConversationRef,
+						"reason", resErr.Reason,
+					)
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						"conversation_ref could not be resolved", nil)
+				default:
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						"conversation_ref resolution failed: "+resErr.Error(), nil)
+				}
 				return
 			}
 			// ParseReference returns store.ErrInvalidInput for malformed refs —
