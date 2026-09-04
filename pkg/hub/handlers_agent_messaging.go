@@ -346,27 +346,28 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		if resolveErr != nil {
 			var resErr *messaging.ResolutionError
 			if errors.As(resolveErr, &resErr) {
-				// DEF-142 AC-3: collapse disclosure-sensitive reasons into
-				// one identical response. "not-found", "not-a-participant",
-				// and "boundary-violation" produce BYTE-IDENTICAL bodies so
-				// a caller cannot distinguish "does not exist" from "exists
-				// but I'm not allowed". The real reason is logged server-side.
+				// DEF-142 AC-3: ALLOWLIST of reasons safe to disclose.
+				// Only "ambiguous" and "no-shared-project" are disclosed:
+				// ambiguity candidates are group conversations scoped to
+				// the caller's own project (contained by ResolveContext.ProjectID
+				// being server-derived at line ~344, never from request JSON),
+				// and no-shared-project is a caller-side configuration error.
 				//
-				// "ambiguous" and "no-shared-project" stay distinct:
-				// ambiguity candidates are group conversations in the
-				// caller's own project (already authorized), and
-				// no-shared-project is a caller-side configuration error.
+				// Everything else — including any future reason added to
+				// ResolutionError — collapses into one generic response.
+				// A new reason is collapsed until someone deliberately
+				// decides it is safe to disclose and adds it here.
 				switch resErr.Reason {
-				case "not-found", "not-a-participant", "boundary-violation":
+				case "ambiguous", "no-shared-project":
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						"conversation_ref resolution failed: "+resErr.Error(), nil)
+				default:
 					s.messageLog.Info("DEF-142: conversation_ref resolution denied",
 						"conversation_ref", req.ConversationRef,
 						"reason", resErr.Reason,
 					)
 					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 						"conversation_ref could not be resolved", nil)
-				default:
-					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-						"conversation_ref resolution failed: "+resErr.Error(), nil)
 				}
 				return
 			}
