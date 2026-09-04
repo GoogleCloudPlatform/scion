@@ -34,7 +34,6 @@ import (
 	"strings"
 	"time"
 
-	runapi "cloud.google.com/go/run/apiv2"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -65,6 +64,10 @@ var defaultCallOpts = []gax.CallOption{
 type CloudRunRuntime struct {
 	config *config.CloudRunConfig
 	exec   cloudrun.ExecConnector
+	// newClient overrides how the Instances API client is constructed. Nil in
+	// production (the real Cloud Run Admin API); tests inject a fake so the
+	// lifecycle can be exercised without GCP credentials.
+	newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
@@ -116,8 +119,11 @@ func (r *CloudRunRuntime) ExecUser() string {
 }
 
 // client creates a new Cloud Run Instances client. Caller is responsible for closing.
-func (r *CloudRunRuntime) client(ctx context.Context) (*runapi.InstancesClient, error) {
-	return runapi.NewInstancesClient(ctx)
+func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, error) {
+	if r.newClient != nil {
+		return r.newClient(ctx)
+	}
+	return cloudrun.NewInstancesClient(ctx)
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
@@ -303,6 +309,25 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		}
 	}
 	return inst
+}
+
+// cloudRunShortInstanceID returns the bare instance ID for either a short ID
+// or a full "projects/<p>/locations/<l>/instances/<id>" resource name. Run
+// returns short IDs while the Instances API reports full resource names, so
+// either form can reach Stop, Delete or GetLogs.
+func cloudRunShortInstanceID(id string) string {
+	if idx := strings.LastIndex(id, "/"); idx != -1 {
+		return id[idx+1:]
+	}
+	return id
+}
+
+// instanceResourceName builds the fully qualified instance resource name,
+// accepting either a short ID or an already-qualified name so that qualifying
+// an ID twice is impossible.
+func (r *CloudRunRuntime) instanceResourceName(id string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/instances/%s",
+		r.config.ProjectID, r.config.Location, cloudRunShortInstanceID(id))
 }
 
 func cloudRunInstanceID(agentID string) string {
@@ -516,7 +541,7 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 	}
 	defer func() { _ = c.Close() }()
 
-	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", r.config.ProjectID, r.config.Location, id)
+	name := r.instanceResourceName(id)
 	req := &runpb.StopInstanceRequest{
 		Name: name,
 	}
@@ -540,7 +565,7 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
 	}
 	defer func() { _ = c.Close() }()
 
-	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", r.config.ProjectID, r.config.Location, id)
+	name := r.instanceResourceName(id)
 	req := &runpb.DeleteInstanceRequest{
 		Name: name,
 	}
@@ -599,7 +624,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 
 		agents = append(agents, api.AgentInfo{
 			ID:              inst.Labels["agent_id"],
-			ContainerID:     inst.Name,
+			ContainerID:     cloudRunShortInstanceID(inst.Name),
 			Name:            inst.Name,
 			ContainerStatus: status,
 			Labels:          inst.Labels,
@@ -616,7 +641,7 @@ func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error
 	}
 	defer func() { _ = logClient.Close() }()
 
-	entries, err := logClient.GetLogs(ctx, id, cloudrun.LogOptions{Lines: 100}) // default lines
+	entries, err := logClient.GetLogs(ctx, cloudRunShortInstanceID(id), cloudrun.LogOptions{Lines: 100}) // default lines
 	if err != nil {
 		return "", fmt.Errorf("fetching logs: %w", err)
 	}

@@ -473,3 +473,79 @@ func TestCloudRunProvisionNFSFailsWhenHubLacksNFSMount(t *testing.T) {
 		t.Fatalf("error = %q", err)
 	}
 }
+
+func TestCloudRunShortInstanceID(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"already short", "agent-foo-0123456789", "agent-foo-0123456789"},
+		{"full resource name", "projects/p/locations/us-central1/instances/agent-foo-0123456789", "agent-foo-0123456789"},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cloudRunShortInstanceID(tc.in); got != tc.want {
+				t.Errorf("cloudRunShortInstanceID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCloudRunInstanceResourceNameIsIdempotent guards the round-trip bug where
+// a full resource name was qualified a second time, producing
+// "projects/p/locations/l/instances/projects/p/locations/l/instances/x".
+func TestCloudRunInstanceResourceNameIsIdempotent(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "projects/test-project/locations/us-central1/instances/agent-foo-0123456789"
+
+	fromShort := rt.instanceResourceName("agent-foo-0123456789")
+	if fromShort != want {
+		t.Errorf("instanceResourceName(short) = %q, want %q", fromShort, want)
+	}
+
+	fromFull := rt.instanceResourceName(want)
+	if fromFull != want {
+		t.Errorf("instanceResourceName(full) = %q, want %q", fromFull, want)
+	}
+	if strings.Count(fromFull, "/instances/") != 1 {
+		t.Errorf("instanceResourceName(full) double-qualified the name: %q", fromFull)
+	}
+}
+
+// TestCloudRunRuntime_IDRoundTrip covers the Run -> List -> Stop/Delete path:
+// the ContainerID that List reports for an instance must be accepted by
+// Stop/Delete and resolve back to that instance's own resource name.
+func TestCloudRunRuntime_IDRoundTrip(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The ID Run returns for an agent.
+	runID := cloudRunInstanceID("agent-1")
+
+	// The resource name the Instances API reports for that instance, and the
+	// ContainerID List derives from it.
+	instanceName := rt.instanceResourceName(runID)
+	listContainerID := cloudRunShortInstanceID(instanceName)
+
+	if listContainerID != runID {
+		t.Fatalf("List ContainerID = %q, want the ID Run returned (%q)", listContainerID, runID)
+	}
+
+	// Stop/Delete qualify the ContainerID they are handed; it must address the
+	// same instance List reported.
+	if got := rt.instanceResourceName(listContainerID); got != instanceName {
+		t.Errorf("Stop/Delete target = %q, want %q", got, instanceName)
+	}
+}
