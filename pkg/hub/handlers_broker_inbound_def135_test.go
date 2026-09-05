@@ -73,7 +73,7 @@ func (d *def135Dispatcher) getCalls() []def135DispatchCall {
 }
 
 // No-op implementations for the remaining AgentDispatcher methods.
-func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error  { return nil }
+func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error { return nil }
 func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }

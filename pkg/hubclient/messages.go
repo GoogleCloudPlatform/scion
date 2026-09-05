@@ -202,4 +202,3 @@ func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, er
 	}
 	return result.Channels, nil
 }
-

@@ -40,18 +40,18 @@ type divergenceBoardCaveats struct {
 // divergenceBoardResponse is the JSON shape returned by
 // GET /api/v1/admin/messaging/divergence.
 type divergenceBoardResponse struct {
-	HubID                  string                 `json:"hub_id"`
-	ProcessStartTime       string                 `json:"process_start_time"`
-	ProcessUptime          string                 `json:"process_uptime"`
-	Matches                int64                  `json:"matches"`
-	Mismatches             int64                  `json:"mismatches"`
-	Comparisons            int64                  `json:"comparisons"`
-	Fallbacks              int64                  `json:"fallbacks"`
-	ConsistencyChecks      int64                  `json:"consistency_checks"`
-	ConsistencyMismatches  int64                  `json:"consistency_mismatches"`
-	ExplicitRoutes         int64                  `json:"explicit_routes"`
-	DerivedRoutes          int64                  `json:"derived_routes"`
-	Caveats                divergenceBoardCaveats `json:"caveats"`
+	HubID                 string                 `json:"hub_id"`
+	ProcessStartTime      string                 `json:"process_start_time"`
+	ProcessUptime         string                 `json:"process_uptime"`
+	Matches               int64                  `json:"matches"`
+	Mismatches            int64                  `json:"mismatches"`
+	Comparisons           int64                  `json:"comparisons"`
+	Fallbacks             int64                  `json:"fallbacks"`
+	ConsistencyChecks     int64                  `json:"consistency_checks"`
+	ConsistencyMismatches int64                  `json:"consistency_mismatches"`
+	ExplicitRoutes        int64                  `json:"explicit_routes"`
+	DerivedRoutes         int64                  `json:"derived_routes"`
+	Caveats               divergenceBoardCaveats `json:"caveats"`
 }
 
 // caveats is the singleton caveat block. These are structural properties of

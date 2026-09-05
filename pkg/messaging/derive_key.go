@@ -49,7 +49,7 @@ func (e *DeriveError) Unwrap() error { return e.Err }
 // Derive-error cause constants. These match the four refusal branches in
 // DeriveConversationKey and are stable identifiers for aggregate counters.
 const (
-	DeriveErrDMKeyParse      = "dm_key_parse"        // dm: prefix, ParseDMKey or re-derive failed
+	DeriveErrDMKeyParse      = "dm_key_parse"         // dm: prefix, ParseDMKey or re-derive failed
 	DeriveErrDMKeyCanonical  = "dm_key_not_canonical" // dm: prefix, parsed but not canonical
 	DeriveErrThreadNoProject = "thread_no_project"    // non-dm ThreadID, empty ProjectID
 	DeriveErrPrincipalPair   = "principal_pair"       // empty ThreadID, principal-pair derivation failed

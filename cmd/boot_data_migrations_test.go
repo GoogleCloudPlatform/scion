@@ -724,8 +724,8 @@ func TestResidualReport_SteadyStatePermanentInfo(t *testing.T) {
 		ID:        uuid.NewString(),
 		ProjectID: projectID,
 		Msg:       "permanently unattributable reachable message",
-		Sender:    "user:alice@example.com",   // non-UUID principal
-		Recipient: "agent:some-bot",            // non-UUID principal
+		Sender:    "user:alice@example.com", // non-UUID principal
+		Recipient: "agent:some-bot",         // non-UUID principal
 		// No ThreadID — forces principal-pair derivation, which fails
 		// on non-UUID principals.
 	})

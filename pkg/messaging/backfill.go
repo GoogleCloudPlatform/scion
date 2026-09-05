@@ -57,8 +57,8 @@ type BackfillResult struct {
 	Inferred             int `json:"inferred"`
 	Skipped              int `json:"skipped"`
 	ConversationsCreated int `json:"conversationsCreated"`
-	HazardAEmailCount    int            `json:"hazardAEmailCount"`
-	HazardBSlugCount     int            `json:"hazardBSlugCount"`
+	HazardAEmailCount    int `json:"hazardAEmailCount"`
+	HazardBSlugCount     int `json:"hazardBSlugCount"`
 	// DeriveFailures counts refused messages by cause (DEF-114). Keys are
 	// DeriveErr* constants from derive_key.go. This is the per-cause
 	// breakdown that makes the dominant failure mode diagnosable.

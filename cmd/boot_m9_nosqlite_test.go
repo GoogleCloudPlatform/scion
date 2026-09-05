@@ -47,7 +47,7 @@ import (
 
 func TestComputeResidualBuckets_SteadyState(t *testing.T) {
 	tests := []struct {
-		name                                       string
+		name                                        string
 		total, unreachable, permanent               int
 		wantReachable, wantPreClamp, wantActionable int
 	}{

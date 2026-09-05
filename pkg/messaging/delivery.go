@@ -35,18 +35,18 @@ type ConversationInfo struct {
 // DeliveryEnvelope is the new agent-facing message format.
 // It replaces the old deliveryMessage struct in pkg/messages/format.go.
 type DeliveryEnvelope struct {
-	Timestamp    string           `json:"timestamp"`
+	Timestamp    string            `json:"timestamp"`
 	Conversation *ConversationInfo `json:"conversation,omitempty"`
-	From         string           `json:"from"`         // PrincipalRef
-	To           []string         `json:"to,omitempty"` // addressee PrincipalRefs
-	Kind         MessageKind      `json:"kind"`
-	Intent       *TextIntent      `json:"intent,omitempty"` // Kind == text
-	Event        *EventBody       `json:"event,omitempty"`  // Kind == event
-	Msg          string           `json:"msg"`
-	Visibility   Visibility       `json:"visibility,omitempty"`
-	Urgent       bool             `json:"urgent,omitempty"`
-	Attachments  []string         `json:"attachments,omitempty"`
-	ReplyTo      *string          `json:"reply_to,omitempty"` // msg ID
+	From         string            `json:"from"`         // PrincipalRef
+	To           []string          `json:"to,omitempty"` // addressee PrincipalRefs
+	Kind         MessageKind       `json:"kind"`
+	Intent       *TextIntent       `json:"intent,omitempty"` // Kind == text
+	Event        *EventBody        `json:"event,omitempty"`  // Kind == event
+	Msg          string            `json:"msg"`
+	Visibility   Visibility        `json:"visibility,omitempty"`
+	Urgent       bool              `json:"urgent,omitempty"`
+	Attachments  []string          `json:"attachments,omitempty"`
+	ReplyTo      *string           `json:"reply_to,omitempty"` // msg ID
 }
 
 // DeliveryOptions captures transport-level options that are not part of the

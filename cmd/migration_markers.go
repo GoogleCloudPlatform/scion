@@ -48,7 +48,7 @@ const (
 // prevent marker creation — M-1' distinguishes "the pass did not happen"
 // from "the pass happened and some rows are permanent non-participants."
 type migrationMarker struct {
-	CompletedAt *time.Time `json:"completed_at"`       // nil => not yet complete
+	CompletedAt *time.Time `json:"completed_at"`        // nil => not yet complete
 	Residuals   int        `json:"residuals,omitempty"` // row-level refusals (permanent, non-retryable)
 }
 
@@ -66,8 +66,8 @@ type migrationMarker struct {
 //     single marker read.
 type backfillMarker struct {
 	CompletedAt  *time.Time `json:"completed_at"`            // nil => not yet complete
-	Residuals    int        `json:"residuals,omitempty"`      // aggregate row-level refusals
-	ProjectsDone []string   `json:"projects_done,omitempty"`  // projects whose pass completed
+	Residuals    int        `json:"residuals,omitempty"`     // aggregate row-level refusals
+	ProjectsDone []string   `json:"projects_done,omitempty"` // projects whose pass completed
 
 	// PermanentResidual is the measured count of messages that remain
 	// unbackfilled after a complete pass. It is accumulated per-project

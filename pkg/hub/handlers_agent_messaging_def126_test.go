@@ -174,11 +174,11 @@ func TestDEF126_AC_A2_ExactEmailResolves(t *testing.T) {
 // never calls ListUsers at all; it classifies the token as UUID or email
 // and rejects anything else as ADDR_MALFORMED. Reverting to the old
 // len(Items)==1 code would:
-//   1. Compile (the ListUsers API is unchanged).
-//   2. Accept "user:Preston" when exactly one row is returned (the
-//      LIMIT 1 truncation bug).
-//   3. Cause AC-A1 to fail because the test asserts a 400 ADDR_MALFORMED
-//      response that the old code would not produce.
+//  1. Compile (the ListUsers API is unchanged).
+//  2. Accept "user:Preston" when exactly one row is returned (the
+//     LIMIT 1 truncation bug).
+//  3. Cause AC-A1 to fail because the test asserts a 400 ADDR_MALFORMED
+//     response that the old code would not produce.
 //
 // The mutation test is performed by the CI runner — see the test script
 // that reverts the guard and verifies the red output.

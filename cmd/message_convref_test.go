@@ -88,9 +88,9 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 			}
 
 			var body struct {
-				Message           string                     `json:"message"`
+				Message           string                      `json:"message"`
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Interrupt         bool                       `json:"interrupt"`
+				Interrupt         bool                        `json:"interrupt"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 

@@ -841,15 +841,17 @@ func TestM9_Gate6_AccumulatorResetOnRepeatedPass(t *testing.T) {
 // log lines, and asserts both identities per project (no aggregation).
 //
 // Project A: derive failure + hazardA inferred (with AddParticipant
-//   write failures from non-UUID principals). This is the gteam shape:
-//   derive_failures > 0 AND write_failures > 0 in the same project,
-//   so derive_failures != row_errors, and the mutation is detectable.
+//
+//	write failures from non-UUID principals). This is the gteam shape:
+//	derive_failures > 0 AND write_failures > 0 in the same project,
+//	so derive_failures != row_errors, and the mutation is detectable.
+//
 // Project B: clean attributed (baseline)
 //
 // The two identities, as verified from the LOG LINE:
 //
-//   processed  = attributed + inferred + skipped + derive_failures
-//   row_errors = derive_failures + write_failures + resolution_failures
+//	processed  = attributed + inferred + skipped + derive_failures
+//	row_errors = derive_failures + write_failures + resolution_failures
 //
 // These are DIFFERENT equations. The first counts message disposition
 // (each message in exactly one category). The second counts errors

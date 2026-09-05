@@ -68,8 +68,8 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		// runWithAdvisoryLock has an early fn() path (no-op locker) that
 		// returns before its deferred release, so it cannot be relied on
 		// for containment.
-		runMigrationSafe(ctx, s, "DM key migration", runDMKeyMigration)      // §4.4
-		runMigrationSafe(ctx, s, "Message backfill", runMessageBackfill)     // §4.5
+		runMigrationSafe(ctx, s, "DM key migration", runDMKeyMigration)  // §4.4
+		runMigrationSafe(ctx, s, "Message backfill", runMessageBackfill) // §4.5
 	})
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
