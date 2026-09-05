@@ -2662,3 +2662,255 @@ func TestRoleBindingByID_AuthorizedGetUserBindings_Succeeds(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.GreaterOrEqual(t, resp.TotalCount, 1)
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Principal-filtered role-binding list with provenance
+// ---------------------------------------------------------------------------
+
+// TestRolesAPI_ListRoleBindings_PrincipalFilter verifies that when
+// principalType+principalId are provided, the collection endpoint returns
+// only that principal's direct bindings — not the global set.
+func TestRolesAPI_ListRoleBindings_PrincipalFilter(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create two users, each with a distinct binding.
+	userA := tid("pf-user-a")
+	userB := tid("pf-user-b")
+	seedRolesTestUser(t, s, userA, "pf-a@test.local")
+	seedRolesTestUser(t, s, userB, "pf-b@test.local")
+
+	roleA := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "pf-role-a", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	roleB := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "pf-role-b", ScopeType: "system", Permissions: []string{"project.read"},
+	})
+
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleA.ID,
+		PrincipalType: "user", PrincipalID: userA, ScopeType: "system",
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleB.ID,
+		PrincipalType: "user", PrincipalID: userB, ScopeType: "system",
+	})
+
+	// --- Unfiltered list should return both (and possibly seed data).
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?limit=1000", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var allResp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&allResp))
+	assert.GreaterOrEqual(t, allResp.TotalCount, 2, "unfiltered list should include both bindings")
+
+	// --- Filtered list for userA should return only userA's bindings.
+	rec = doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userA, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var filteredResp struct {
+		Items []struct {
+			PrincipalID string `json:"principalId"`
+			Source      string `json:"source"`
+			RoleName    string `json:"roleName"`
+		} `json:"items"`
+		TotalCount int `json:"totalCount"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&filteredResp))
+
+	// All returned bindings must belong to userA.
+	for _, item := range filteredResp.Items {
+		assert.Equal(t, userA, item.PrincipalID,
+			"filtered response must only contain bindings for the requested principal")
+		assert.Equal(t, "direct", item.Source, "direct bindings must have source='direct'")
+	}
+	assert.Equal(t, filteredResp.TotalCount, len(filteredResp.Items))
+
+	// --- userB's bindings must NOT appear in userA's filtered result.
+	for _, item := range filteredResp.Items {
+		assert.NotEqual(t, userB, item.PrincipalID)
+	}
+
+	// --- Verify roleName enrichment is present.
+	foundRole := false
+	for _, item := range filteredResp.Items {
+		if item.RoleName == "pf-role-a" {
+			foundRole = true
+		}
+	}
+	assert.True(t, foundRole, "role name should be enriched in filtered response")
+
+	_ = ctx
+}
+
+// TestRolesAPI_ListRoleBindings_PrincipalFilter_IncludeGroupDerived verifies
+// that includeGroupDerived=true returns group-inherited bindings with correct
+// provenance tagging: group-derived bindings carry source=<groupID> and
+// sourceGroupName, while direct bindings carry source="direct".
+func TestRolesAPI_ListRoleBindings_PrincipalFilter_IncludeGroupDerived(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	userID := tid("gd-user")
+	seedRolesTestUser(t, s, userID, "gd-user@test.local")
+
+	groupID := tid("gd-test-group")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "gd-test-group", Name: "GD Test Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: groupID, MemberType: store.GroupMemberTypeUser, MemberID: userID,
+		Role: store.GroupMemberRoleMember,
+	}))
+
+	// Create a role and bind it to the GROUP (not directly to the user).
+	roleGroup := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "gd-group-role", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleGroup.ID,
+		PrincipalType: "group", PrincipalID: groupID, ScopeType: "system",
+	})
+
+	// Create a role and bind it directly to the user.
+	roleDirect := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "gd-direct-role", ScopeType: "system", Permissions: []string{"project.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleDirect.ID,
+		PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	// --- Without includeGroupDerived: only the direct binding should appear.
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var directOnly struct {
+		Items []struct {
+			Source string `json:"source"`
+			RoleName string `json:"roleName"`
+		} `json:"items"`
+		TotalCount int `json:"totalCount"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&directOnly))
+	for _, item := range directOnly.Items {
+		assert.Equal(t, "direct", item.Source, "without includeGroupDerived, all must be direct")
+	}
+
+	// --- With includeGroupDerived=true: both direct and group-derived.
+	rec = doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userID+"&includeGroupDerived=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var withGroup struct {
+		Items []struct {
+			Source          string `json:"source"`
+			SourceGroupName string `json:"sourceGroupName"`
+			RoleName        string `json:"roleName"`
+			PrincipalType   string `json:"principalType"`
+			PrincipalID     string `json:"principalId"`
+		} `json:"items"`
+		TotalCount int `json:"totalCount"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&withGroup))
+
+	assert.GreaterOrEqual(t, len(withGroup.Items), 2,
+		"should include at least one direct and one group-derived binding")
+
+	var foundDirect, foundGroup bool
+	for _, item := range withGroup.Items {
+		if item.Source == "direct" {
+			foundDirect = true
+			assert.Equal(t, userID, item.PrincipalID, "direct binding should reference the user")
+		} else {
+			foundGroup = true
+			assert.Equal(t, groupID, item.Source,
+				"group-derived binding source should be the group ID")
+			assert.Equal(t, "GD Test Group", item.SourceGroupName,
+				"group-derived binding should carry the group display name")
+			assert.Equal(t, "group", item.PrincipalType,
+				"group-derived binding should show group as principalType")
+		}
+	}
+	assert.True(t, foundDirect, "must include the direct binding")
+	assert.True(t, foundGroup, "must include the group-derived binding")
+	assert.Equal(t, len(withGroup.Items), withGroup.TotalCount)
+}
+
+// TestRolesAPI_ListRoleBindings_PrincipalFilter_InvalidType rejects
+// invalid principalType values.
+func TestRolesAPI_ListRoleBindings_PrincipalFilter_InvalidType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=invalid&principalId=some-id", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "principalType must be")
+}
+
+// TestRolesAPI_ListRoleBindings_PrincipalFilter_NoDuplicates verifies that
+// when a binding is both direct and reachable through a group, it appears
+// exactly once (direct wins).
+func TestRolesAPI_ListRoleBindings_PrincipalFilter_NoDuplicates(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	userID := tid("dedup-user")
+	seedRolesTestUser(t, s, userID, "dedup@test.local")
+
+	groupID := tid("dedup-group")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "dedup-group", Name: "Dedup Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: groupID, MemberType: store.GroupMemberTypeUser, MemberID: userID,
+		Role: store.GroupMemberRoleMember,
+	}))
+
+	// Bind the SAME role directly to the user.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "dedup-role", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	directBinding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	// Bind same role to the group too.
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType: "group", PrincipalID: groupID, ScopeType: "system",
+	})
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userID+"&includeGroupDerived=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []struct {
+			ID     string `json:"id"`
+			Source string `json:"source"`
+		} `json:"items"`
+		TotalCount int `json:"totalCount"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Count binding IDs — each ID should appear exactly once.
+	idCounts := map[string]int{}
+	for _, item := range resp.Items {
+		idCounts[item.ID]++
+	}
+	for id, count := range idCounts {
+		assert.Equal(t, 1, count, "binding %s should appear exactly once", id)
+	}
+
+	// The direct binding should be present and tagged "direct".
+	for _, item := range resp.Items {
+		if item.ID == directBinding.ID {
+			assert.Equal(t, "direct", item.Source)
+		}
+	}
+
+	// Both a direct and a group-derived binding should be present (different IDs).
+	assert.GreaterOrEqual(t, len(resp.Items), 2,
+		"should have distinct direct and group-derived bindings")
+
+	_ = ctx
+}

@@ -81,6 +81,14 @@ type RoleBindingInfo struct {
 	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
 	ScopeDisplayName     string `json:"scopeDisplayName,omitempty"`
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
+	// Source indicates how the binding was obtained: "direct" for bindings
+	// assigned directly to the queried principal, or the group ID for
+	// bindings inherited via group membership.  Only populated when the
+	// request filters by principalType+principalId.
+	Source string `json:"source,omitempty"`
+	// SourceGroupName is the human-friendly group display name when Source
+	// is a group ID (not "direct").
+	SourceGroupName string `json:"sourceGroupName,omitempty"`
 }
 
 // listRoleBindingsResponse wraps the list result for the API.
@@ -842,6 +850,26 @@ func (s *Server) importRoleDefinitions(w http.ResponseWriter, r *http.Request, u
 
 func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// ---------------------------------------------------------------------------
+	// Principal-filtered path: when principalType and principalId are both
+	// provided, return only bindings that apply to that principal — direct
+	// bindings plus (optionally) group-derived bindings.  Each returned
+	// binding carries a "source" field ("direct" or a group ID) and, for
+	// group-derived bindings, a "sourceGroupName" display label.
+	//
+	// When neither filter param is set, the existing unfiltered paginated
+	// path is used (admin binding list).
+	// ---------------------------------------------------------------------------
+	principalType := r.URL.Query().Get("principalType")
+	principalID := r.URL.Query().Get("principalId")
+
+	if principalType != "" && principalID != "" {
+		s.listRoleBindingsForPrincipal(w, r, principalType, principalID)
+		return
+	}
+
+	// Unfiltered admin list — original behaviour.
 	limit, offset := parsePaginationParams(r)
 
 	// Parse optional sort parameters.
@@ -906,6 +934,112 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
 		Items:      enriched,
 		TotalCount: total,
+	})
+}
+
+// listRoleBindingsForPrincipal returns the bindings that apply to a specific
+// principal (direct + optionally group-derived), with provenance tagging.
+func (s *Server) listRoleBindingsForPrincipal(w http.ResponseWriter, r *http.Request, principalType, principalID string) {
+	ctx := r.Context()
+	normalizedType := NormalizePrincipalType(principalType)
+
+	// Validate principal type.
+	switch normalizedType {
+	case store.RoleBindingPrincipalUser, store.RoleBindingPrincipalAgent:
+		// ok
+	default:
+		BadRequest(w, "principalType must be 'user' or 'agent'")
+		return
+	}
+
+	includeGroupDerived := r.URL.Query().Get("includeGroupDerived") == "true"
+
+	// 1. Direct bindings — assigned to this principal directly.
+	directBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, normalizedType, principalID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Build seen-set for deduplication (direct bindings always win).
+	seen := make(map[string]struct{}, len(directBindings))
+
+	enriched := make([]RoleBindingInfo, 0, len(directBindings))
+	for _, b := range directBindings {
+		if b == nil {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		info := RoleBindingInfo{RoleBinding: *b, Source: "direct"}
+		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
+		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
+			if project, err := s.store.GetProject(ctx, b.ScopeID); err == nil && project != nil {
+				info.ScopeDisplayName = project.Name
+			}
+		}
+		enriched = append(enriched, info)
+	}
+
+	// 2. Group-derived bindings (optional).
+	if includeGroupDerived {
+		var groupIDs []string
+		switch normalizedType {
+		case store.RoleBindingPrincipalUser:
+			groupIDs, err = s.store.GetEffectiveGroups(ctx, principalID)
+		case store.RoleBindingPrincipalAgent:
+			groupIDs, err = s.store.GetEffectiveGroupsForAgent(ctx, principalID)
+		}
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		// Resolve group display names (needed for sourceGroupName).
+		groupNames := make(map[string]string, len(groupIDs))
+		for _, gid := range groupIDs {
+			if g, err := s.store.GetGroup(ctx, gid); err == nil && g != nil {
+				groupNames[gid] = g.Name
+			}
+		}
+
+		// Fetch bindings for each group principal.
+		for _, gid := range groupIDs {
+			groupBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, gid)
+			if err != nil {
+				slog.Warn("failed to list bindings for group", "groupID", gid, "error", err)
+				continue
+			}
+			for _, b := range groupBindings {
+				if b == nil {
+					continue
+				}
+				// Skip if already present as a direct binding.
+				if _, dup := seen[b.ID]; dup {
+					continue
+				}
+				seen[b.ID] = struct{}{}
+				info := RoleBindingInfo{RoleBinding: *b, Source: gid}
+				if name, ok := groupNames[gid]; ok {
+					info.SourceGroupName = name
+				}
+				info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
+				info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+				if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
+					if project, err := s.store.GetProject(ctx, b.ScopeID); err == nil && project != nil {
+						info.ScopeDisplayName = project.Name
+					}
+				}
+				enriched = append(enriched, info)
+			}
+		}
+	}
+
+	s.enrichBindingRoleNames(ctx, enriched)
+
+	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
+		Items:      enriched,
+		TotalCount: len(enriched),
 	})
 }
 
