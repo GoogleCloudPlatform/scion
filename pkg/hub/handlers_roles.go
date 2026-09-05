@@ -861,11 +861,18 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	// When neither filter param is set, the existing unfiltered paginated
 	// path is used (admin binding list).
 	// ---------------------------------------------------------------------------
-	principalType := r.URL.Query().Get("principalType")
-	principalID := r.URL.Query().Get("principalId")
+	principalType := strings.TrimSpace(r.URL.Query().Get("principalType"))
+	principalID := strings.TrimSpace(r.URL.Query().Get("principalId"))
 
 	if principalType != "" && principalID != "" {
 		s.listRoleBindingsForPrincipal(w, r, principalType, principalID)
+		return
+	}
+
+	// Partial filter: one param set without the other is a client error.
+	// Must never fall through to the unfiltered global binding list.
+	if principalType != "" || principalID != "" {
+		BadRequest(w, "both principalType and principalId are required for filtered queries")
 		return
 	}
 
@@ -937,8 +944,26 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxEffectiveGroups is the hard cap on the number of effective groups
+// resolved for a single principal in the filtered binding path. If the
+// closure exceeds this limit the request is rejected with a truthful error
+// rather than silently truncating provenance. The BFS depth cap in
+// GetEffectiveGroups is 32, but there is no limit on how many groups a
+// principal can belong to at each level; this cap makes the fan-out
+// defensibly bounded (1 batch binding query + 1 batch group-name query).
+const maxEffectiveGroups = 200
+
 // listRoleBindingsForPrincipal returns the bindings that apply to a specific
 // principal (direct + optionally group-derived), with provenance tagging.
+//
+// Store-call budget for the filtered path:
+//   - 1 × ListRoleBindingsForPrincipal       (direct bindings)
+//   - 1 × GetEffectiveGroups[ForAgent]        (group closure, if requested)
+//   - 1 × ListRoleBindingsForPrincipals       (batch: all group bindings)
+//   - 1 × GetGroupsByIDs                      (batch: group display names)
+//   - O(projects) × GetProject                (scope display name enrichment)
+//   - 1 × enrichBindingRoleNames              (batch: role display names)
+// Total store calls = O(1) + O(distinct-project-scopes), independent of group count.
 func (s *Server) listRoleBindingsForPrincipal(w http.ResponseWriter, r *http.Request, principalType, principalID string) {
 	ctx := r.Context()
 	normalizedType := NormalizePrincipalType(principalType)
@@ -995,21 +1020,51 @@ func (s *Server) listRoleBindingsForPrincipal(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		// Resolve group display names (needed for sourceGroupName).
+		// Hard cap: reject with a truthful error if the effective-group
+		// closure is pathologically large rather than silently truncating.
+		if len(groupIDs) > maxEffectiveGroups {
+			slog.Warn("effective-group count exceeds cap",
+				"principalID", principalID,
+				"groupCount", len(groupIDs),
+				"cap", maxEffectiveGroups)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error": fmt.Sprintf(
+					"principal belongs to %d effective groups, exceeding the maximum of %d; "+
+						"reduce group nesting or membership to use this endpoint",
+					len(groupIDs), maxEffectiveGroups),
+			})
+			return
+		}
+
+		// Batch-resolve group display names in a single store call.
 		groupNames := make(map[string]string, len(groupIDs))
-		for _, gid := range groupIDs {
-			if g, err := s.store.GetGroup(ctx, gid); err == nil && g != nil {
-				groupNames[gid] = g.Name
+		if len(groupIDs) > 0 {
+			groups, err := s.store.GetGroupsByIDs(ctx, groupIDs)
+			if err != nil {
+				slog.Warn("failed to batch-resolve group names", "error", err)
+				// Non-fatal: provenance will lack display names.
+			} else {
+				for _, g := range groups {
+					groupNames[g.ID] = g.Name
+				}
 			}
 		}
 
-		// Fetch bindings for each group principal.
-		for _, gid := range groupIDs {
-			groupBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, gid)
-			if err != nil {
-				slog.Warn("failed to list bindings for group", "groupID", gid, "error", err)
-				continue
+		// Batch-fetch bindings for ALL group principals in a single query.
+		if len(groupIDs) > 0 {
+			principals := make([]store.PrincipalRef, len(groupIDs))
+			for i, gid := range groupIDs {
+				principals[i] = store.PrincipalRef{
+					Type: store.RoleBindingPrincipalGroup,
+					ID:   gid,
+				}
 			}
+			groupBindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+
 			for _, b := range groupBindings {
 				if b == nil {
 					continue
@@ -1019,8 +1074,10 @@ func (s *Server) listRoleBindingsForPrincipal(w http.ResponseWriter, r *http.Req
 					continue
 				}
 				seen[b.ID] = struct{}{}
-				info := RoleBindingInfo{RoleBinding: *b, Source: gid}
-				if name, ok := groupNames[gid]; ok {
+				// The binding's PrincipalID is the group that granted it.
+				sourceGroupID := b.PrincipalID
+				info := RoleBindingInfo{RoleBinding: *b, Source: sourceGroupID}
+				if name, ok := groupNames[sourceGroupID]; ok {
 					info.SourceGroupName = name
 				}
 				info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)

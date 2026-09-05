@@ -698,36 +698,63 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   }
 
   /**
-   * Pre-check whether the current user can create/delete role bindings.
-   * Probes the create endpoint (POST with empty body → 400 means authorized,
-   * 403 means not). Uses suppressAccessDeniedToast since this is an
-   * authorization probe.  For delete, the same role_binding permission
-   * scope governs both create and delete, so a single check suffices.
+   * Pre-check whether the current user can create and/or delete role bindings.
+   *
+   * role_binding.create and role_binding.delete are independent permissions
+   * in the backend (permissions/registry.go). Custom roles can grant one
+   * without the other, so each action is probed separately:
+   *
+   *   - POST /api/v1/admin/role-bindings with empty body:
+   *       400 → authorized (role_binding.create); 403 → not.
+   *   - DELETE /api/v1/admin/role-bindings/00000000-0000-0000-0000-000000000000:
+   *       404 → authorized (role_binding.delete, binding not found);
+   *       403 → not.
+   *
+   * Both probes run concurrently. Buttons remain hidden until both resolve
+   * (_mutationPreChecked). Toast noise from 403 responses is suppressed
+   * since these are expected authorization probes.
    */
   private async preCheckMutationAccess(): Promise<void> {
     if (this._mutationPreChecked) return;
-    try {
-      const res = await apiFetch('/api/v1/admin/role-bindings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-        suppressAccessDeniedToast: true,
-      });
-      // 400 = authorized but invalid body → user can create/delete
-      // 403 = not authorized
-      if (res.status === 400) {
-        this._canCreate = true;
-        this._canDelete = true;
-      } else if (res.status === 403) {
-        this._canCreate = false;
-        this._canDelete = false;
-      } else {
-        // Unexpected — default to visible so user gets server feedback
-        this._canCreate = true;
-        this._canDelete = true;
+
+    const probeCreate = async (): Promise<boolean> => {
+      try {
+        const res = await apiFetch('/api/v1/admin/role-bindings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+          suppressAccessDeniedToast: true,
+        });
+        // 400 = authorized but invalid body; 403 = not authorized.
+        return res.status !== 403;
+      } catch {
+        // Network error — default to visible, server will reject if needed.
+        return true;
       }
+    };
+
+    const probeDelete = async (): Promise<boolean> => {
+      try {
+        // Probe with a well-formed but nonexistent UUID. The backend checks
+        // role_binding.delete authorization before looking up the binding, so
+        // 404 means authorized (binding not found) and 403 means not.
+        const sentinelId = '00000000-0000-0000-0000-000000000000';
+        const res = await apiFetch(`/api/v1/admin/role-bindings/${sentinelId}`, {
+          method: 'DELETE',
+          suppressAccessDeniedToast: true,
+        });
+        return res.status !== 403;
+      } catch {
+        return true;
+      }
+    };
+
+    try {
+      const [canCreate, canDelete] = await Promise.all([probeCreate(), probeDelete()]);
+      this._canCreate = canCreate;
+      this._canDelete = canDelete;
     } catch {
-      // Network error — leave buttons visible, server will reject if needed
+      // Fallback: show both, server is authoritative.
       this._canCreate = true;
       this._canDelete = true;
     } finally {

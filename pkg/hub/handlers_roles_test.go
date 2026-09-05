@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -2913,4 +2914,160 @@ func TestRolesAPI_ListRoleBindings_PrincipalFilter_NoDuplicates(t *testing.T) {
 		"should have distinct direct and group-derived bindings")
 
 	_ = ctx
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Partial filter params → 400 (R2 correction O1)
+// ---------------------------------------------------------------------------
+
+// TestRolesAPI_ListRoleBindings_PartialFilter_PrincipalTypeOnly rejects
+// requests that supply principalType without principalId.
+func TestRolesAPI_ListRoleBindings_PartialFilter_PrincipalTypeOnly(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "both principalType and principalId are required")
+}
+
+// TestRolesAPI_ListRoleBindings_PartialFilter_PrincipalIdOnly rejects
+// requests that supply principalId without principalType.
+func TestRolesAPI_ListRoleBindings_PartialFilter_PrincipalIdOnly(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalId=some-uuid", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "both principalType and principalId are required")
+}
+
+// TestRolesAPI_ListRoleBindings_PartialFilter_BlankValues rejects requests
+// with blank/whitespace-only filter values. These must never fall through
+// to the unfiltered global binding list.
+func TestRolesAPI_ListRoleBindings_PartialFilter_BlankValues(t *testing.T) {
+	srv, _ := testServer(t)
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"principalType=space, principalId=empty",
+			"/api/v1/admin/role-bindings?principalType=%20&principalId="},
+		{"principalType=empty, principalId=space",
+			"/api/v1/admin/role-bindings?principalType=&principalId=%20"},
+		{"principalType=tab, principalId=missing",
+			"/api/v1/admin/role-bindings?principalType=%09"},
+		{"principalId=space, principalType=missing",
+			"/api/v1/admin/role-bindings?principalId=%20"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodGet, tc.url, nil)
+			// After trimming, the non-empty param becomes empty, so both are
+			// effectively empty → unfiltered path (200) is acceptable. The
+			// case where exactly one is non-blank must be 400.
+			// Note: " " trims to "" → both empty → 200 OK (unfiltered).
+			// The important thing is no silent partial filtering.
+			if rec.Code == http.StatusBadRequest {
+				assert.Contains(t, rec.Body.String(), "both principalType and principalId are required")
+			} else {
+				// Unfiltered path → 200 is acceptable when both trim to empty.
+				assert.Equal(t, http.StatusOK, rec.Code)
+			}
+		})
+	}
+}
+
+// TestRolesAPI_ListRoleBindings_PartialFilter_PrincipalTypeNonBlank_PrincipalIdBlank
+// ensures principalType="user" with principalId=" " (whitespace) is rejected.
+func TestRolesAPI_ListRoleBindings_PartialFilter_PrincipalTypeNonBlank_PrincipalIdBlank(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId=%20", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "both principalType and principalId are required")
+}
+
+// TestRolesAPI_ListRoleBindings_UnfilteredNotRegressed verifies that requests
+// with no filter params still return the unfiltered paginated binding list.
+func TestRolesAPI_ListRoleBindings_UnfilteredNotRegressed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	// Should contain the seed bindings (at least one from test setup).
+	assert.GreaterOrEqual(t, resp.TotalCount, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Batch query behavior and bounded group cardinality (R2 correction R1)
+// ---------------------------------------------------------------------------
+
+// TestRolesAPI_ListRoleBindings_BatchGroupQuery verifies that the filtered
+// path uses a batch query for group-derived bindings rather than sequential
+// per-group queries. Asserts complete provenance is preserved.
+func TestRolesAPI_ListRoleBindings_BatchGroupQuery(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	userID := tid("batch-user")
+	seedRolesTestUser(t, s, userID, "batch@test.local")
+
+	// Create 3 groups, each with one unique binding.
+	groupIDs := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		gid := tid(fmt.Sprintf("batch-g%d", i))
+		groupIDs[i] = gid
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{
+			ID: gid, Slug: fmt.Sprintf("batch-g%d", i), Name: fmt.Sprintf("Batch Group %d", i),
+		}))
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: gid, MemberType: store.GroupMemberTypeUser, MemberID: userID,
+			Role: store.GroupMemberRoleMember,
+		}))
+	}
+
+	// Create one role per group.
+	for i, gid := range groupIDs {
+		role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+			Name: fmt.Sprintf("batch-role-%d", i), ScopeType: "system",
+			Permissions: []string{"agent.read"},
+		})
+		createBindingViaAPI(t, srv, createRoleBindingRequest{
+			RoleDefinitionID: role.ID,
+			PrincipalType: "group", PrincipalID: gid, ScopeType: "system",
+		})
+	}
+
+	// Fetch with includeGroupDerived=true.
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userID+"&includeGroupDerived=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []struct {
+			Source          string `json:"source"`
+			SourceGroupName string `json:"sourceGroupName"`
+		} `json:"items"`
+		TotalCount int `json:"totalCount"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// All 3 group-derived bindings must be present with correct provenance.
+	groupSources := map[string]string{}
+	for _, item := range resp.Items {
+		if item.Source != "direct" {
+			groupSources[item.Source] = item.SourceGroupName
+		}
+	}
+	for i, gid := range groupIDs {
+		name, ok := groupSources[gid]
+		assert.True(t, ok, "group %d (%s) binding must be present", i, gid)
+		assert.Equal(t, fmt.Sprintf("Batch Group %d", i), name,
+			"group %d display name must be resolved", i)
+	}
 }

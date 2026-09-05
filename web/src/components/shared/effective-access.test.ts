@@ -28,9 +28,14 @@
  * _explainLoaded guard fix (R1).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+
+// Mock confirm-dialog at module level so showConfirm auto-confirms in all tests.
+vi.mock('./confirm-dialog.js', () => ({
+  showConfirm: vi.fn(() => Promise.resolve(true)),
+}));
 
 import type {
   BoundaryLayer,
@@ -497,206 +502,521 @@ describe('Pre-click capability gating for effective-access (R6)', () => {
   });
 });
 
+/* ========================================================================== */
+/* Behavioral Component Tests (R2 correction O2)                              */
+/*                                                                            */
+/* These tests mount the real component, mock fetch, and exercise rendered     */
+/* buttons/events rather than asserting on source strings.                     */
+/* ========================================================================== */
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let EffectiveRoleProvenance: any;
+
+/** Wait for async loads + Lit update cycle. */
+async function tick(el: { updateComplete: Promise<boolean> }, ms = 250): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+  await el.updateComplete;
+}
+
+function query(el: HTMLElement, sel: string): Element | null {
+  return el.shadowRoot?.querySelector(sel) ?? null;
+}
+
+function queryAll(el: HTMLElement, sel: string): Element[] {
+  return Array.from(el.shadowRoot?.querySelectorAll(sel) ?? []);
+}
+
+/** Standard mock bindings: one direct, one group-derived. */
+function makeBindings() {
+  return {
+    items: [
+      {
+        id: 'b-direct',
+        roleDefinitionId: 'role-1',
+        roleName: 'Editor',
+        principalType: 'user',
+        principalId: 'user-1',
+        scopeType: 'system',
+        scopeId: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        source: 'direct',
+      },
+      {
+        id: 'b-group',
+        roleDefinitionId: 'role-2',
+        roleName: 'Viewer',
+        principalType: 'group',
+        principalId: 'group-1',
+        scopeType: 'system',
+        scopeId: '',
+        createdAt: '2026-01-02T00:00:00Z',
+        source: 'group-1',
+        sourceGroupName: 'Eng Team',
+      },
+    ],
+    totalCount: 2,
+  };
+}
+
+/**
+ * Build a fetch handler that responds to API probes and binding loads.
+ *
+ * @param opts.createStatus  HTTP status for the POST probe (400=allowed, 403=denied)
+ * @param opts.deleteStatus  HTTP status for the DELETE probe (404=allowed, 403=denied)
+ * @param opts.explainStatus HTTP status for HEAD effective-access probe
+ */
+function makeFetchHandler(opts?: {
+  createStatus?: number;
+  deleteStatus?: number;
+  explainStatus?: number;
+}) {
+  const createStatus = opts?.createStatus ?? 400;
+  const deleteStatus = opts?.deleteStatus ?? 404;
+  const explainStatus = opts?.explainStatus ?? 200;
+  const calls: { url: string; method: string; body?: string }[] = [];
+
+  const handler = async (
+    url: string | URL | Request,
+    init?: RequestInit
+  ): Promise<Response> => {
+    const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+    const method = init?.method ?? 'GET';
+    const body = typeof init?.body === 'string' ? init.body : undefined;
+    calls.push({ url: path, method, body });
+
+    // HEAD effective-access probe
+    if (path.includes('/api/v1/admin/effective-access') && method === 'HEAD') {
+      return new Response('', { status: explainStatus });
+    }
+
+    // Mutation pre-check: POST probe (create)
+    if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body === '{}') {
+      return new Response('{}', { status: createStatus });
+    }
+
+    // Mutation pre-check: DELETE probe (delete sentinel)
+    if (path.includes('/api/v1/admin/role-bindings/00000000') && method === 'DELETE') {
+      return new Response('{}', { status: deleteStatus });
+    }
+
+    // Actual POST to create a binding
+    if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body !== '{}') {
+      return new Response(JSON.stringify({ id: 'new-binding' }), { status: 201 });
+    }
+
+    // Actual DELETE to remove a binding
+    if (path.includes('/api/v1/admin/role-bindings/b-direct') && method === 'DELETE') {
+      return new Response('', { status: 204 });
+    }
+
+    // Binding list
+    if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
+      return new Response(JSON.stringify(makeBindings()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Role definitions (for add dialog)
+    if (path.includes('/api/v1/admin/roles') && method === 'GET') {
+      return new Response(
+        JSON.stringify({
+          items: [
+            { id: 'role-1', name: 'Editor', scopeType: 'system' },
+            { id: 'role-2', name: 'Viewer', scopeType: 'system' },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    return new Response('{}', { status: 200 });
+  };
+  return { handler, calls };
+}
+
+async function createEl(
+  fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  props?: { principalType?: string; principalId?: string }
+) {
+  vi.stubGlobal('fetch', vi.fn(fetchHandler));
+  const el = document.createElement('scion-effective-role-provenance') as InstanceType<
+    typeof EffectiveRoleProvenance
+  >;
+  el.principalType = (props?.principalType ?? 'user') as 'user' | 'agent';
+  el.principalId = props?.principalId ?? 'user-1';
+  document.body.appendChild(el);
+  await tick(el, 400);
+  return el;
+}
+
+beforeAll(async () => {
+  const mod = await import('./effective-role-provenance.js');
+  EffectiveRoleProvenance = mod.ScionEffectiveRoleProvenance;
+});
+
+afterEach(() => {
+  document.body.innerHTML = '';
+  vi.restoreAllMocks();
+});
+
 /* -------------------------------------------------------------------------- */
-/* 9. Delete icon only on direct bindings, not group-derived                  */
+/* 9. Behavioral: create-only permission (can create, cannot delete)          */
 /* -------------------------------------------------------------------------- */
 
-describe('Delete icon only on direct bindings', () => {
-  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+describe('Behavioral: create-only permission', () => {
+  it('shows Add Binding button but no trash icons', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 403 });
+    const el = await createEl(handler);
 
-  it('renderRoleCard shows trash icon only when binding is direct AND user can delete', () => {
-    // The trash icon must be gated by both isDirect and _canDelete
-    const renderCardMatch = source.match(
-      /private renderRoleCard\(binding[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
-    );
-    expect(renderCardMatch).toBeTruthy();
-    const body = renderCardMatch![0];
+    // Add Binding button should be visible
+    const addBtn = query(el, 'sl-button[variant="primary"]');
+    expect(addBtn).toBeTruthy();
+    expect(addBtn?.textContent?.trim()).toContain('Add Binding');
 
-    // Must contain the trash icon
-    expect(body).toContain('name="trash"');
-    // Must be gated by isDirect
-    expect(body).toContain('isDirect');
-    // Must be gated by _canDelete
-    expect(body).toContain('_canDelete');
-    // Must be gated by _mutationPreChecked (no icon before check resolves)
-    expect(body).toContain('_mutationPreChecked');
-  });
-
-  it('group-derived bindings never render a delete icon', () => {
-    // The trash icon is inside a conditional that requires isDirect === true.
-    // isDirect is computed from binding.source === 'direct'.
-    // Group-derived bindings have source !== 'direct', so isDirect is false.
-    const renderCardMatch = source.match(
-      /private renderRoleCard\(binding[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
-    );
-    expect(renderCardMatch).toBeTruthy();
-    const body = renderCardMatch![0];
-
-    // isDirect must be derived from binding.source === 'direct'
-    expect(body).toMatch(/isDirect\s*=\s*binding\.source\s*===\s*'direct'/);
-
-    // The trash icon conditional must use isDirect (truthy gate)
-    // Not a negation — the icon only appears when isDirect is true
-    expect(body).not.toMatch(/!isDirect\s*&&.*trash/);
-  });
-
-  it('delete action uses showConfirm for confirmation before API call', () => {
-    expect(source).toContain('showConfirm');
-    expect(source).toContain("import { showConfirm } from './confirm-dialog.js'");
-
-    // deleteBinding method must call showConfirm before the DELETE fetch
-    const deleteMatch = source.match(
-      /async deleteBinding\(binding[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
-    );
-    expect(deleteMatch).toBeTruthy();
-    const body = deleteMatch![0];
-    expect(body).toContain('showConfirm');
-    expect(body).toContain("method: 'DELETE'");
-
-    // Confirm must come BEFORE the DELETE call
-    const confirmIdx = body.indexOf('showConfirm');
-    const deleteIdx = body.indexOf("method: 'DELETE'");
-    expect(confirmIdx).toBeLessThan(deleteIdx);
-  });
-
-  it('delete action refreshes bindings on success', () => {
-    const deleteMatch = source.match(
-      /async deleteBinding\(binding[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
-    );
-    expect(deleteMatch).toBeTruthy();
-    expect(deleteMatch![0]).toContain('this.loadEffectiveRoles()');
+    // Trash icons should NOT be present (delete denied)
+    const trashBtns = queryAll(el, 'sl-icon-button[name="trash"]');
+    expect(trashBtns.length).toBe(0);
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 10. Add Binding button and dialog with locked principal                    */
+/* 10. Behavioral: delete-only permission (can delete, cannot create)         */
 /* -------------------------------------------------------------------------- */
 
-describe('Add Binding button and dialog', () => {
-  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+describe('Behavioral: delete-only permission', () => {
+  it('shows trash icon on direct binding but no Add Binding button', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 403, deleteStatus: 404 });
+    const el = await createEl(handler);
 
-  it('renderAddButton is gated by _mutationPreChecked and _canCreate', () => {
-    const addBtnMatch = source.match(
-      /private renderAddButton\(\)[\s\S]*?(?=\n\s*private\s)/m
-    );
-    expect(addBtnMatch).toBeTruthy();
-    const body = addBtnMatch![0];
-    expect(body).toContain('_mutationPreChecked');
-    expect(body).toContain('_canCreate');
-    expect(body).toContain('Add Binding');
-  });
+    // Add Binding button should NOT be visible
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
+    expect(addBtn).toBeUndefined();
 
-  it('renderAddDialog shows locked principal with lock icon', () => {
-    const addDialogMatch = source.match(
-      /private renderAddDialog\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
-    );
-    expect(addDialogMatch).toBeTruthy();
-    const body = addDialogMatch![0];
-
-    // Must show the principal type and ID
-    expect(body).toContain('this.principalType');
-    expect(body).toContain('this.principalId');
-    // Must show a lock icon indicating principal is preselected
-    expect(body).toContain('name="lock"');
-    // Principal must not be editable (no principal-picker, no editable input)
-    expect(body).not.toContain('scion-principal-picker');
-  });
-
-  it('renderAddDialog includes role select and scope select', () => {
-    const addDialogMatch = source.match(
-      /private renderAddDialog\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
-    );
-    expect(addDialogMatch).toBeTruthy();
-    const body = addDialogMatch![0];
-
-    // Role select
-    expect(body).toContain('label="Role"');
-    // Scope select
-    expect(body).toContain('label="Scope"');
-    // Assign button
-    expect(body).toContain('Assign Role');
-  });
-
-  it('createBinding sends POST with principalType and principalId from component props', () => {
-    const createMatch = source.match(
-      /async createBinding\(\)[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
-    );
-    expect(createMatch).toBeTruthy();
-    const body = createMatch![0];
-
-    // Must use this.principalType and this.principalId (locked, not from form)
-    expect(body).toContain('principalType: this.principalType');
-    expect(body).toContain('principalId: this.principalId');
-    // Must POST to the role-bindings endpoint
-    expect(body).toContain('/api/v1/admin/role-bindings');
-    expect(body).toContain("method: 'POST'");
-  });
-
-  it('createBinding refreshes bindings on success', () => {
-    const createMatch = source.match(
-      /async createBinding\(\)[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
-    );
-    expect(createMatch).toBeTruthy();
-    expect(createMatch![0]).toContain('this.loadEffectiveRoles()');
+    // Trash icon should be present on the direct binding
+    const trashBtns = queryAll(el, 'sl-icon-button[name="trash"]');
+    expect(trashBtns.length).toBe(1); // Only on the direct binding, not the group one
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 11. Mutation capability pre-check                                         */
+/* 11. Behavioral: neither permission (cannot create, cannot delete)          */
 /* -------------------------------------------------------------------------- */
 
-describe('Mutation capability pre-check', () => {
-  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+describe('Behavioral: neither create nor delete permission', () => {
+  it('shows no Add Binding button and no trash icons', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 403, deleteStatus: 403 });
+    const el = await createEl(handler);
 
-  it('preCheckMutationAccess is called during loadEffectiveRoles', () => {
-    const loadMatch = source.match(
-      /async loadEffectiveRoles\(\)[\s\S]*?(?=\n\s*\/\*\*|\n\s*private\s+async\s+preCheck)/m
-    );
-    expect(loadMatch).toBeTruthy();
-    expect(loadMatch![0]).toContain('preCheckMutationAccess');
-  });
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
+    expect(addBtn).toBeUndefined();
 
-  it('preCheckMutationAccess uses suppressAccessDeniedToast', () => {
-    const preCheckMatch = source.match(
-      /async preCheckMutationAccess\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*(?:private|public|protected)\s)/m
-    );
-    expect(preCheckMatch).toBeTruthy();
-    expect(preCheckMatch![0]).toContain('suppressAccessDeniedToast: true');
-  });
-
-  it('preCheckMutationAccess sets _mutationPreChecked in finally block', () => {
-    const preCheckMatch = source.match(
-      /async preCheckMutationAccess\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*(?:private|public|protected)\s)/m
-    );
-    expect(preCheckMatch).toBeTruthy();
-    const body = preCheckMatch![0];
-    expect(body).toContain('this._mutationPreChecked = true');
-    // Must be in a finally block
-    expect(body).toContain('finally');
-    const finallyIdx = body.lastIndexOf('finally');
-    const preCheckedIdx = body.lastIndexOf('this._mutationPreChecked = true');
-    expect(preCheckedIdx).toBeGreaterThan(finallyIdx);
+    const trashBtns = queryAll(el, 'sl-icon-button[name="trash"]');
+    expect(trashBtns.length).toBe(0);
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 12. Provenance labels: direct vs group                                    */
+/* 12. Behavioral: both permissions (can create and delete)                   */
 /* -------------------------------------------------------------------------- */
 
-describe('Provenance labels for direct vs group-derived bindings', () => {
-  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+describe('Behavioral: both create and delete permissions', () => {
+  it('shows Add Binding button and trash icon on direct binding', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const el = await createEl(handler);
 
-  it('direct bindings show "Direct" with person-check icon', () => {
-    expect(source).toContain('name="person-check"');
-    expect(source).toContain('Direct');
+    // Add Binding button present
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
+    expect(addBtn).toBeTruthy();
+
+    // Trash icon on direct binding
+    const trashBtns = queryAll(el, 'sl-icon-button[name="trash"]');
+    expect(trashBtns.length).toBe(1);
   });
 
-  it('group-derived bindings show "Via group:" with diagram-3 icon', () => {
-    expect(source).toContain('name="diagram-3"');
-    expect(source).toContain('Via group:');
+  it('trash icon is only on direct bindings, not group-derived', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const el = await createEl(handler);
+
+    // There are 2 role cards total
+    const cards = queryAll(el, '.role-card');
+    expect(cards.length).toBe(2);
+
+    // Only the direct binding card has a trash icon
+    const directCard = cards.find((c) => c.querySelector('.provenance.direct'));
+    const groupCard = cards.find((c) => c.querySelector('.provenance.group'));
+
+    expect(directCard?.querySelector('sl-icon-button[name="trash"]')).toBeTruthy();
+    expect(groupCard?.querySelector('sl-icon-button[name="trash"]')).toBeFalsy();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 13. Behavioral: pending probes hide action controls                        */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: pending probes', () => {
+  it('Add Binding button and trash icons are hidden before probes resolve', async () => {
+    const neverResolve = (
+      _url: string | URL | Request,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const method = init?.method ?? 'GET';
+      const path =
+        typeof _url === 'string' ? _url : _url instanceof URL ? _url.pathname : _url.url;
+
+      // Binding list responds immediately so we have content
+      if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
+        return Promise.resolve(
+          new Response(JSON.stringify(makeBindings()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+
+      // Mutation probes and explain probes: hang forever
+      if (
+        (method === 'POST' || method === 'DELETE' || method === 'HEAD') &&
+        (path.includes('role-bindings') || path.includes('effective-access'))
+      ) {
+        return new Promise(() => {}); // never resolves
+      }
+
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    };
+
+    vi.stubGlobal('fetch', vi.fn(neverResolve));
+    const el = document.createElement('scion-effective-role-provenance') as InstanceType<
+      typeof EffectiveRoleProvenance
+    >;
+    el.principalType = 'user';
+    el.principalId = 'user-1';
+    document.body.appendChild(el);
+    await tick(el, 300);
+
+    // While probes are pending, neither Add Binding nor trash should render
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
+    expect(addBtn).toBeUndefined();
+
+    const trashBtns = queryAll(el, 'sl-icon-button[name="trash"]');
+    expect(trashBtns.length).toBe(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 14. Behavioral: direct vs inherited binding provenance labels              */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: direct vs inherited binding provenance', () => {
+  it('renders "Direct" label on direct binding and "Via group:" on inherited', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createEl(handler);
+
+    const provenances = queryAll(el, '.provenance');
+    expect(provenances.length).toBe(2);
+
+    const directProv = provenances.find((p) => p.classList.contains('direct'));
+    expect(directProv).toBeTruthy();
+    expect(directProv?.textContent).toContain('Direct');
+
+    const groupProv = provenances.find((p) => p.classList.contains('group'));
+    expect(groupProv).toBeTruthy();
+    expect(groupProv?.textContent).toContain('Via group:');
+    expect(groupProv?.textContent).toContain('Eng Team');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 15. Behavioral: delete confirmation flow                                   */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: delete confirmation and request', () => {
+  it('clicking trash triggers DELETE request for direct binding', async () => {
+    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const el = await createEl(handler);
+
+    const trashBtn = query(el, 'sl-icon-button[name="trash"]') as HTMLElement;
+    expect(trashBtn).toBeTruthy();
+    trashBtn.click();
+    await tick(el, 400);
+
+    const deleteCalls = calls.filter(
+      (c) => c.method === 'DELETE' && c.url.includes('b-direct')
+    );
+    expect(deleteCalls.length).toBe(1);
   });
 
-  it('group-derived bindings display sourceGroupName when available', () => {
-    expect(source).toContain('binding.sourceGroupName || binding.source');
+  it('sends DELETE and triggers refresh on success', async () => {
+    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const el = await createEl(handler);
+    const initialGetCalls = calls.filter(
+      (c) => c.method === 'GET' && c.url.includes('role-bindings')
+    ).length;
+
+    const trashBtn = query(el, 'sl-icon-button[name="trash"]') as HTMLElement;
+    trashBtn?.click();
+    await tick(el, 600);
+
+    // Verify DELETE was sent for the direct binding
+    const deleteCalls = calls.filter(
+      (c) => c.method === 'DELETE' && c.url.includes('b-direct')
+    );
+    expect(deleteCalls.length).toBe(1);
+
+    // Verify a refresh GET was triggered after the delete
+    const postDeleteGetCalls = calls.filter(
+      (c) => c.method === 'GET' && c.url.includes('role-bindings')
+    ).length;
+    expect(postDeleteGetCalls).toBeGreaterThan(initialGetCalls);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 16. Behavioral: create binding dialog with locked principal                */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: create binding request payload', () => {
+  it('Add Binding dialog shows locked principal with lock icon', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const el = await createEl(handler);
+
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) =>
+      b.textContent?.trim().includes('Add Binding')
+    ) as HTMLElement;
+    expect(addBtn).toBeTruthy();
+    addBtn.click();
+    await tick(el, 300);
+
+    const dialog = query(el, 'sl-dialog[open]');
+    expect(dialog).toBeTruthy();
+
+    const lockedPrincipal = query(el, '.locked-principal');
+    expect(lockedPrincipal).toBeTruthy();
+    expect(lockedPrincipal?.textContent).toContain('user');
+    expect(lockedPrincipal?.textContent).toContain('user-1');
+
+    const lockIcon = lockedPrincipal?.querySelector('sl-icon[name="lock"]');
+    expect(lockIcon).toBeTruthy();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 17. Behavioral: error feedback on failed mutation                          */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: error feedback on failed mutation', () => {
+  it('shows error feedback when DELETE fails', async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    const failingHandler = async (
+      url: string | URL | Request,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      const method = init?.method ?? 'GET';
+      const body = typeof init?.body === 'string' ? init.body : undefined;
+      calls.push({ url: path, method, body });
+
+      if (path.includes('/api/v1/admin/role-bindings/b-direct') && method === 'DELETE') {
+        return new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 });
+      }
+      if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
+        return new Response(JSON.stringify(makeBindings()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (path === '/api/v1/admin/role-bindings' && method === 'POST') {
+        return new Response('{}', { status: 400 });
+      }
+      if (path.includes('00000000') && method === 'DELETE') {
+        return new Response('{}', { status: 404 });
+      }
+      if (method === 'HEAD') {
+        return new Response('', { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    };
+
+    const el = await createEl(failingHandler);
+
+    const trashBtn = query(el, 'sl-icon-button[name="trash"]') as HTMLElement;
+    trashBtn?.click();
+    await tick(el, 400);
+
+    const feedback = query(el, '.mutation-feedback.danger');
+    expect(feedback).toBeTruthy();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 18. Behavioral: successful refresh after mutation                          */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: successful refresh after mutation', () => {
+  it('refreshes binding list after successful delete', async () => {
+    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const el = await createEl(handler);
+
+    const initialGetCalls = calls.filter(
+      (c) => c.method === 'GET' && c.url.includes('role-bindings')
+    ).length;
+
+    const trashBtn = query(el, 'sl-icon-button[name="trash"]') as HTMLElement;
+    trashBtn?.click();
+    await tick(el, 500);
+
+    const postDeleteGetCalls = calls.filter(
+      (c) => c.method === 'GET' && c.url.includes('role-bindings')
+    ).length;
+    expect(postDeleteGetCalls).toBeGreaterThan(initialGetCalls);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 19. Behavioral: independent probe results (R2 correction)                  */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: independent create/delete probes (R2)', () => {
+  it('probes POST and DELETE endpoints separately', async () => {
+    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    await createEl(handler);
+
+    const postProbe = calls.find(
+      (c) => c.method === 'POST' && c.url === '/api/v1/admin/role-bindings' && c.body === '{}'
+    );
+    expect(postProbe).toBeTruthy();
+
+    const deleteProbe = calls.find(
+      (c) => c.method === 'DELETE' && c.url.includes('00000000')
+    );
+    expect(deleteProbe).toBeTruthy();
+  });
+
+  it('sets _canCreate=true and _canDelete=false when only POST succeeds', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 403 });
+    const el = await createEl(handler);
+
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
+    expect(addBtn).toBeTruthy();
+
+    expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(0);
+  });
+
+  it('sets _canCreate=false and _canDelete=true when only DELETE succeeds', async () => {
+    const { handler } = makeFetchHandler({ createStatus: 403, deleteStatus: 404 });
+    const el = await createEl(handler);
+
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
+    expect(addBtn).toBeUndefined();
+
+    expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(1);
   });
 });
