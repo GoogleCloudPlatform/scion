@@ -1451,6 +1451,19 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+
+	// Cancel the watcher goroutine started by Run() so its state-file
+	// writes don't race with TempDir cleanup (t.Cleanup runs LIFO, so
+	// this fires before RemoveAll).
+	t.Cleanup(func() {
+		rt.watchMu.Lock()
+		for _, cancel := range rt.watchCancels {
+			cancel()
+		}
+		rt.watchCancels = make(map[string]context.CancelFunc)
+		rt.watchMu.Unlock()
+	})
+
 	if id != "test-agent" {
 		t.Errorf("Run() returned id = %q, want %q", id, "test-agent")
 	}
