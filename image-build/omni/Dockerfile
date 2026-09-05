@@ -37,7 +37,8 @@ ENV CGO_ENABLED=1
 
 # 1. Build web frontend
 COPY web/ ./web/
-RUN cd web && npm install && npm run build
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    cd web && npm install && npm run build
 
 # 2. Prepare Go build
 COPY go.mod go.sum ./
