@@ -1576,9 +1576,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
-			// Session exists — still re-evaluate admin role so config
-			// changes (admin grant/revoke) take effect on the next request
-			// without requiring a full session reset.
+			// Session exists — re-verify user status and role from the
+			// authoritative store using the immutable session user ID.
 			email, _ := session.Values[sessKeyUserEmail].(string)
 			if email != "" {
 				currentRole, _ := session.Values[sessKeyUserRole].(string)
@@ -1590,34 +1589,44 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				// re-minted here, so a transient read failure cannot lengthen
 				// the life of a stale role.
 				storedRole := currentRole
-				// A nil store is fatal further down this middleware (see the
-				// check before proxy provisioning), but this branch returns
-				// before reaching it, so the guard is load-bearing here.
-				if ws.store != nil {
-					u, err := ws.store.GetUserByEmail(r.Context(), email)
-					switch {
-					case err == nil:
-						if u.Status == store.UserStatusSuspended {
-							ws.logger().Warn("Proxy auth: session user is suspended", "email", email, "user_id", u.ID)
-							ws.serveSuspendedPage(w, email)
-							return
-						}
-						storedRole = u.Role
-					case errors.Is(err, store.ErrNotFound):
-						// Definitive answer: the account is gone. Unlike a
-						// transient read failure, this must not fall back to
-						// the session role — that would let a deleted user
-						// keep a UI-granted admin role for the remaining life
-						// of their session cookie.
-						ws.logger().Warn("Proxy auth: session user no longer exists", "email", email)
-						ws.clearStaleSession(w, r)
+				// A nil store must fail closed — do not trust stale cookie
+				// authority for authenticated protected routes.
+				if ws.store == nil {
+					ws.logger().Error("Proxy auth: store not configured, failing closed",
+						"user_id", uid)
+					ws.serveInternalError(w, r)
+					return
+				}
+				// Authoritative lookup by immutable session user ID (not email).
+				// This ensures email changes or duplicates cannot resolve the
+				// wrong account.
+				u, err := ws.store.GetUser(r.Context(), uid)
+				switch {
+				case err == nil:
+					if u.Status == store.UserStatusSuspended {
+						ws.logger().Warn("Proxy auth: session user is suspended", "email", u.Email, "user_id", u.ID)
+						ws.serveSuspendedResponse(w, r, u.Email)
 						return
-					default:
-						// Transient read failure — keep the status quo (see
-						// the storedRole comment above).
-						ws.logger().Warn("Proxy auth: user lookup failed, falling back to session role",
-							"email", email, "error", err)
 					}
+					storedRole = u.Role
+					// Refresh email from authoritative record in case it changed.
+					email = u.Email
+				case errors.Is(err, store.ErrNotFound):
+					// Definitive answer: the account is gone. Unlike a
+					// transient read failure, this must not fall back to
+					// the session role — that would let a deleted user
+					// keep a UI-granted admin role for the remaining life
+					// of their session cookie.
+					ws.logger().Warn("Proxy auth: session user no longer exists", "user_id", uid)
+					ws.clearStaleSession(w, r)
+					return
+				default:
+					// Transient read failure — fail closed to prevent stale
+					// authority from being trusted.
+					ws.logger().Error("Proxy auth: user lookup failed, failing closed",
+						"user_id", uid, "error", err)
+					ws.serveInternalError(w, r)
+					return
 				}
 				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe())
 				if currentRole == expectedRole {
@@ -1727,7 +1736,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			// Reject suspended users
 			if user.Status == "suspended" {
 				ws.logger().Warn("Proxy auth: user is suspended", "email", proxyUser.Email, "user_id", user.ID)
-				ws.serveSuspendedPage(w, proxyUser.Email)
+				ws.serveSuspendedResponse(w, r, proxyUser.Email)
 				return
 			}
 			// Update last login and backfill profile

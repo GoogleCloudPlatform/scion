@@ -173,6 +173,48 @@ func (ws *WebServer) serveSuspendedPage(w http.ResponseWriter, email string) {
 	_, _ = fmt.Fprint(w, suspendedPageHTML(email))
 }
 
+// serveSuspendedResponse is the single entry point for all suspension denial
+// responses. Browser navigations receive the self-contained HTML page; all
+// other request types (SSE, programmatic fetch, HEAD, API-style) receive the
+// canonical structured JSON user_suspended denial so callers that expect
+// machine-readable responses are never surprised by HTML.
+func (ws *WebServer) serveSuspendedResponse(w http.ResponseWriter, r *http.Request, email string) {
+	if isBrowserRequest(r) {
+		ws.serveSuspendedPage(w, email)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]string{
+			"code":    "user_suspended",
+			"message": "Your account has been suspended.",
+		},
+	})
+}
+
+// serveInternalError is the single entry point for fail-closed internal error
+// responses on protected routes. Browser navigations receive a minimal HTML
+// error page; all other request types receive structured JSON. This prevents
+// stale cookie authority from being trusted when the store is unavailable.
+func (ws *WebServer) serveInternalError(w http.ResponseWriter, r *http.Request) {
+	if isBrowserRequest(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Service Error</title></head><body><h1>Service Unavailable</h1><p>An internal error occurred. Please try again later.</p></body></html>`)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]string{
+			"code":    "internal_error",
+			"message": "An internal error occurred. Please try again later.",
+		},
+	})
+}
+
 // suspendedUserMiddleware re-verifies the authenticated user's status against
 // the authoritative store on every protected browser navigation. This catches
 // mid-session suspensions that the cookie-based session auth middleware cannot
@@ -201,9 +243,12 @@ func (ws *WebServer) suspendedUserMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Need a store for authoritative lookup.
+		// Need a store for authoritative lookup. Fail closed if the store
+		// is not configured — do not trust stale cookie authority.
 		if ws.store == nil {
-			next.ServeHTTP(w, r)
+			ws.logger().Error("Suspended user check: store not configured, failing closed",
+				"user_id", user.UserID)
+			ws.serveInternalError(w, r)
 			return
 		}
 
@@ -222,27 +267,14 @@ func (ws *WebServer) suspendedUserMiddleware(next http.Handler) http.Handler {
 			// Transient store error — fail closed to prevent stale authority.
 			ws.logger().Error("Suspended user check: store lookup failed",
 				"user_id", user.UserID, "error", err)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			ws.serveInternalError(w, r)
 			return
 		}
 
 		if dbUser.Status == store.UserStatusSuspended {
 			ws.logger().Info("Suspended user check: access blocked",
 				"user_id", user.UserID, "email", user.Email)
-			if isBrowserRequest(r) {
-				ws.serveSuspendedPage(w, user.Email)
-			} else {
-				// Non-browser requests (e.g. SSE) receive a structured JSON
-				// denial consistent with the Hub API's user_suspended response.
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]string{
-						"code":    "user_suspended",
-						"message": "Your account has been suspended.",
-					},
-				})
-			}
+			ws.serveSuspendedResponse(w, r, user.Email)
 			return
 		}
 
