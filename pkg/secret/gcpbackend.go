@@ -101,6 +101,11 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 			smName := b.gcpSecretName(name, scope, scopeID)
 			value, err = b.accessLatestVersion(ctx, smName)
 		}
+		// Convert gRPC NotFound to store.ErrNotFound so callers such as
+		// MigratePluginSecrets handle missing GCP SM resources correctly.
+		if err != nil && status.Code(err) == codes.NotFound {
+			return nil, store.ErrNotFound
+		}
 	} else {
 		// No DB record; try GCP SM directly by computed name to handle
 		// database resets where the secret still exists in GCP SM.
