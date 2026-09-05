@@ -177,7 +177,9 @@ type explainRequest struct {
 		ID        string `json:"id"`
 		ProjectID string `json:"projectId"`
 	} `json:"resource"`
-	Action        string `json:"action"`
+	Action     string `json:"action"`
+	Permission string `json:"permission,omitempty"` // Canonical permission ID (e.g. "user.read"); when set, bypasses resource.type + action derivation.
+
 	PrincipalID   string `json:"principalId,omitempty"`
 	PrincipalKind string `json:"principalKind,omitempty"`
 
@@ -334,11 +336,16 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the authz request with Explain enabled.
+	// When the client provides a canonical permission ID, pass it through
+	// directly to avoid mis-derivation from non-canonical resource.type + action
+	// pairs (e.g. resource.type="hub" + action="user.read" would incorrectly
+	// derive "hub.user.read" instead of the canonical "user.read").
 	authzReq := AuthzRequest{
 		Principal:  principalContextForIdentity(explainIdentity),
 		Credential: credentialContextForIdentity(explainIdentity),
 		Resource:   resource,
 		Action:     Action(req.Action),
+		Permission: req.Permission,
 		Explain:    true,
 	}
 
