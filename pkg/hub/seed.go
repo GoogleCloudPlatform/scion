@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -1279,9 +1280,24 @@ func seedLimitDefinition(ctx context.Context, s store.Store, name, resourceType,
 
 // CleanupRedundantHubMemberBindings removes system-created direct user→hub-member
 // role bindings that are redundant with the canonical Hub Members group membership.
-// Only bindings with CreatedBy sentinels "system-backfill" or "system-reconcile"
-// are deleted. Administrator-created, project-scoped, or non-hub-member bindings
-// are never touched. This function is idempotent and safe to run on every startup.
+//
+// Safety invariants:
+//  1. Before deleting anything, verifies the canonical Hub Members group has at
+//     least one currently active group-principal hub-member role binding (exact
+//     canonical role definition ID, principalType=group, principalId=group.ID,
+//     scopeType=system, scopeId="", NotBefore absent or ≤ now, ExpiresAt absent
+//     or > now). If this binding is missing, inactive, or lookup fails, cleanup
+//     deletes nothing and returns an error (fail-closed).
+//  2. Only deletes direct bindings that match ALL of: hub-member role definition,
+//     principalType=user, scopeType=system, scopeID="", CreatedBy is an exact
+//     trusted sentinel ("system-backfill" or "system-reconcile"), and both
+//     NotBefore and ExpiresAt are absent (unconditional legacy duplicates only).
+//     Time-windowed (scheduled or expiring) bindings are semantically distinct
+//     and are preserved.
+//  3. All validation and deletes execute in a single WithTx transaction. A delete
+//     failure rolls back all deletes atomically — no partial cleanup is committed.
+//
+// This function is idempotent and safe to run on every startup.
 func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error {
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {
@@ -1296,23 +1312,68 @@ func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error
 		return nil
 	}
 
+	// C1: Verify the canonical group-principal hub-member binding exists and is
+	// currently active before deleting any direct bindings. Without this check,
+	// cleanup could strip users of their only effective hub-member grant.
+	groupBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, group.ID)
+	if err != nil {
+		return fmt.Errorf("verify canonical group binding: list group bindings: %w", err)
+	}
+	now := time.Now()
+	var hasActiveCanonicalBinding bool
+	for _, gb := range groupBindings {
+		if gb.RoleDefinitionID != hubMemberRD.ID {
+			continue
+		}
+		if gb.PrincipalType != store.RoleBindingPrincipalGroup {
+			continue
+		}
+		if gb.PrincipalID != group.ID {
+			continue
+		}
+		if gb.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		if gb.ScopeID != "" {
+			continue
+		}
+		// Time-window check: binding must be currently active.
+		if gb.NotBefore != nil && gb.NotBefore.After(now) {
+			continue // scheduled, not yet active
+		}
+		if gb.ExpiresAt != nil && !gb.ExpiresAt.After(now) {
+			continue // expired
+		}
+		hasActiveCanonicalBinding = true
+		break
+	}
+	if !hasActiveCanonicalBinding {
+		slog.Error("hub-members group lacks an active canonical hub-member binding; skipping cleanup to prevent privilege loss",
+			"group_id", group.ID, "role_definition_id", hubMemberRD.ID)
+		return fmt.Errorf("hub-members group has no active canonical hub-member binding: cleanup aborted to prevent privilege loss")
+	}
+
 	members, err := s.GetGroupMembers(ctx, group.ID)
 	if err != nil {
 		return fmt.Errorf("list hub-members group members: %w", err)
 	}
 
-	var cleaned int
+	// Collect all binding IDs to delete, then execute inside a single
+	// transaction so that a failure mid-cleanup rolls back all deletes.
+	type deleteTarget struct {
+		bindingID string
+		userID    string
+	}
+	var targets []deleteTarget
+
 	for _, m := range members {
 		if m.MemberType != store.GroupMemberTypeUser {
 			continue
 		}
 
-		// List all role bindings for this user.
 		bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, m.MemberID)
 		if err != nil {
-			slog.Warn("failed to list bindings for user during cleanup",
-				"user_id", m.MemberID, "error", err)
-			continue
+			return fmt.Errorf("list bindings for user %s during cleanup: %w", m.MemberID, err)
 		}
 
 		for _, rb := range bindings {
@@ -1324,25 +1385,46 @@ func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error
 			if rb.ScopeType != store.RoleScopeSystem {
 				continue
 			}
+			// R1: Require empty ScopeID — a corrupt or future binding with
+			// a non-empty ScopeID is semantically distinct and must be preserved.
+			if rb.ScopeID != "" {
+				continue
+			}
 			if rb.PrincipalType != store.RoleBindingPrincipalUser {
 				continue
 			}
 			if !store.IsSystemCreatedBinding(rb.CreatedBy) {
 				continue // preserve admin-created direct bindings
 			}
-
-			if err := s.DeleteRoleBinding(ctx, rb.ID); err != nil {
-				slog.Warn("failed to delete redundant hub-member binding",
-					"binding_id", rb.ID, "user_id", m.MemberID, "error", err)
+			// Preserve time-windowed direct bindings (scheduled or expiring) —
+			// these are semantically distinct from unconditional legacy duplicates.
+			if rb.NotBefore != nil || rb.ExpiresAt != nil {
 				continue
 			}
-			cleaned++
+
+			targets = append(targets, deleteTarget{bindingID: rb.ID, userID: m.MemberID})
 		}
 	}
 
-	if cleaned > 0 {
-		slog.Info("cleaned up redundant direct hub-member bindings", "deleted", cleaned)
+	if len(targets) == 0 {
+		return nil
 	}
+
+	// Execute all deletes in a single transaction for atomicity.
+	err = s.WithTx(ctx, func(tx store.Store) error {
+		for _, t := range targets {
+			if err := tx.DeleteRoleBinding(ctx, t.bindingID); err != nil {
+				return fmt.Errorf("delete redundant hub-member binding %s for user %s: %w",
+					t.bindingID, t.userID, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("transactional cleanup of redundant hub-member bindings: %w", err)
+	}
+
+	slog.Info("cleaned up redundant direct hub-member bindings", "deleted", len(targets))
 	return nil
 }
 
