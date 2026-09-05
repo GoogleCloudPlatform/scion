@@ -295,3 +295,120 @@ describe('app-shell + chat-shell deduplication', () => {
     expect(getAlerts()[0].querySelector('script')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// User Administration denial payloads — two-line toast
+// ---------------------------------------------------------------------------
+
+describe('user admin denial payloads', () => {
+  beforeEach(() => {
+    window.addEventListener(
+      'scion:access-denied',
+      appShellHandler as EventListener
+    );
+  });
+
+  afterEach(() => {
+    window.removeEventListener(
+      'scion:access-denied',
+      appShellHandler as EventListener
+    );
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+  });
+
+  it('renders two-line toast for promote denial on user', () => {
+    fireAccessDenied({
+      action: 'promote',
+      resource: 'user',
+      reason: 'requires user.promote permission',
+    });
+
+    const alerts = getAlerts();
+    expect(alerts.length).toBe(1);
+    const spans = alerts[0].querySelectorAll('span');
+    expect(spans.length).toBe(2);
+    expect(spans[0].textContent).toBe('requires user.promote permission');
+    expect(spans[1].textContent).toBe('Permission needed: promote on user');
+  });
+
+  it('renders two-line toast for suspend denial on user', () => {
+    fireAccessDenied({
+      action: 'suspend',
+      resource: 'user',
+      reason: 'requires user.suspend permission',
+    });
+
+    const alerts = getAlerts();
+    expect(alerts.length).toBe(1);
+    const spans = alerts[0].querySelectorAll('span');
+    expect(spans.length).toBe(2);
+    expect(spans[0].textContent).toBe('requires user.suspend permission');
+    expect(spans[1].textContent).toBe('Permission needed: suspend on user');
+  });
+
+  it('renders two-line toast for update denial on user', () => {
+    fireAccessDenied({
+      action: 'update',
+      resource: 'user',
+      reason: "requires user.update permission to modify another user's profile",
+    });
+
+    const alerts = getAlerts();
+    expect(alerts.length).toBe(1);
+    const spans = alerts[0].querySelectorAll('span');
+    expect(spans.length).toBe(2);
+    expect(spans[0].textContent).toBe(
+      "requires user.update permission to modify another user's profile"
+    );
+    expect(spans[1].textContent).toBe('Permission needed: update on user');
+  });
+
+  it('renders two-line toast for delete denial on user', () => {
+    fireAccessDenied({
+      action: 'delete',
+      resource: 'user',
+      reason: 'requires user.delete permission',
+    });
+
+    const alerts = getAlerts();
+    expect(alerts.length).toBe(1);
+    const spans = alerts[0].querySelectorAll('span');
+    expect(spans.length).toBe(2);
+    expect(spans[0].textContent).toBe('requires user.delete permission');
+    expect(spans[1].textContent).toBe('Permission needed: delete on user');
+  });
+
+  it('renders two-line toast for role_binding create denial', () => {
+    fireAccessDenied({
+      action: 'create',
+      resource: 'role_binding',
+      reason: 'Insufficient permissions',
+    });
+
+    const alerts = getAlerts();
+    expect(alerts.length).toBe(1);
+    const spans = alerts[0].querySelectorAll('span');
+    expect(spans.length).toBe(2);
+    expect(spans[0].textContent).toBe(
+      "You don't have permission to perform this action."
+    );
+    expect(spans[1].textContent).toBe(
+      'Permission needed: create on role_binding'
+    );
+  });
+
+  it('renders all user admin payloads as safe literal text', () => {
+    // Ensure textContent is used, not innerHTML, even for user admin denials.
+    fireAccessDenied({
+      action: 'promote',
+      resource: 'user',
+      reason: '<script>alert("xss")</script>',
+    });
+
+    const alerts = getAlerts();
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].querySelector('script')).toBeNull();
+    const spans = alerts[0].querySelectorAll('span');
+    expect(spans[0].textContent).toContain('<script>');
+  });
+});

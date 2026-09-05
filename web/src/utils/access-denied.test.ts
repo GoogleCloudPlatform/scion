@@ -160,6 +160,94 @@ describe('formatAccessDenied', () => {
     const result = formatAccessDenied({ action: long, resource: long });
     expect(result.secondary).toContain(long);
   });
+
+  // ----- User Administration denial payloads -----
+
+  it('renders promote denial on user resource', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'promote',
+      resource: 'user',
+      reason: 'requires user.promote permission',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe('requires user.promote permission');
+    expect(result.secondary).toBe('Permission needed: promote on user');
+  });
+
+  it('renders suspend denial on user resource', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'suspend',
+      resource: 'user',
+      reason: 'requires user.suspend permission',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe('requires user.suspend permission');
+    expect(result.secondary).toBe('Permission needed: suspend on user');
+  });
+
+  it('renders update denial on user resource', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'update',
+      resource: 'user',
+      reason: 'requires user.update permission to modify another user\'s profile',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe(
+      'requires user.update permission to modify another user\'s profile'
+    );
+    expect(result.secondary).toBe('Permission needed: update on user');
+  });
+
+  it('renders delete denial on user resource', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'delete',
+      resource: 'user',
+      reason: 'requires user.delete permission',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe('requires user.delete permission');
+    expect(result.secondary).toBe('Permission needed: delete on user');
+  });
+
+  it('renders create denial on role_binding resource', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'create',
+      resource: 'role_binding',
+      reason: 'Insufficient permissions',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe(
+      "You don't have permission to perform this action."
+    );
+    expect(result.secondary).toBe('Permission needed: create on role_binding');
+  });
+
+  it('renders delete denial on role_binding resource', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'delete',
+      resource: 'role_binding',
+      reason: 'Insufficient permissions',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe(
+      "You don't have permission to perform this action."
+    );
+    expect(result.secondary).toBe('Permission needed: delete on role_binding');
+  });
+
+  it('does not expose user IDs in user admin denials', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'promote',
+      resource: 'user',
+      reason: 'requires user.promote permission',
+    };
+    const result = formatAccessDenied(detail);
+    // The formatted output should not contain any UUID-shaped strings.
+    const uuidPattern =
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    expect(result.primary).not.toMatch(uuidPattern);
+    expect(result.secondary).not.toMatch(uuidPattern);
+  });
 });
 
 // ---------------------------------------------------------------------------

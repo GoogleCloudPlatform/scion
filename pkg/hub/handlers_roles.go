@@ -307,7 +307,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 				Permission: "role_binding.create",
 			})
 			if !decision.Allowed {
-				Forbidden(w)
+				writeForbiddenStructured(w, "", "role_binding", Action("create"))
 				return
 			}
 		}
@@ -1063,7 +1063,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			ScopeID:          req.ScopeID,
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "cannot create binding: "+decision.Reason)
+			writeForbiddenStructured(w, "cannot create binding: "+decision.Reason, "role_binding", Action("create"))
 			return
 		}
 	}
@@ -1212,7 +1212,7 @@ func (s *Server) deleteSystemSuperAdminBinding(
 		ScopeType:        store.RoleScopeSystem,
 	})
 	if !canDel.Allowed {
-		writeForbidden(w, "insufficient authority to delete super-admin binding: "+canDel.Reason)
+		writeForbiddenStructured(w, "insufficient authority to delete super-admin binding: "+canDel.Reason, "role_binding", Action("delete"))
 		return
 	}
 
@@ -1426,7 +1426,7 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 		Permission: permission,
 	})
 	if !decision.Allowed {
-		Forbidden(w)
+		writeForbiddenStructured(w, "", "role_binding", Action(action))
 		return nil, false
 	}
 	return user, true

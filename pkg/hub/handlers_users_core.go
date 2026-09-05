@@ -357,7 +357,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			Permission: "user.suspend",
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "requires user.suspend permission")
+			writeForbiddenStructured(w, "requires user.suspend permission", "user", Action("suspend"))
 			return
 		}
 		if isSelf {
@@ -376,7 +376,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			Permission: "user.update",
 		})
 		if !decision.Allowed {
-			writeForbidden(w, "requires user.update permission to modify another user's profile")
+			writeForbiddenStructured(w, "requires user.update permission to modify another user's profile", "user", Action("update"))
 			return
 		}
 	}
@@ -590,7 +590,7 @@ func (s *Server) checkUserPromotePermission(
 		Permission: "user.promote",
 	})
 	if !decision.Allowed {
-		writeForbidden(w, "requires user.promote permission")
+		writeForbiddenStructured(w, "requires user.promote permission", "user", Action("promote"))
 		return fmt.Errorf("user.promote denied")
 	}
 
@@ -615,7 +615,7 @@ func (s *Server) checkUserPromotePermission(
 			ScopeType:        store.RoleScopeSystem,
 		})
 		if !canDel.Allowed {
-			writeForbidden(w, "insufficient authority to modify super-admin role binding: "+canDel.Reason)
+			writeForbiddenStructured(w, "insufficient authority to modify super-admin role binding: "+canDel.Reason, "role_binding", Action("create"))
 			return fmt.Errorf("CanDelegate denied: %s", canDel.Reason)
 		}
 	}
@@ -927,7 +927,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		Permission: "user.delete",
 	})
 	if !decision.Allowed {
-		writeForbidden(w, "requires user.delete permission")
+		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
 		return
 	}
 

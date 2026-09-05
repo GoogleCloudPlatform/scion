@@ -36,6 +36,8 @@ const ACTION_LABELS: Record<string, string> = {
   attach: 'manage',
   list: 'list',
   execute: 'execute',
+  promote: 'promote',
+  suspend: 'suspend',
 };
 
 /**
