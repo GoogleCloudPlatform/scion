@@ -1218,55 +1218,18 @@ func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
 // =============================================================================
 
 // derivePermissionID derives a canonical permission ID from a resource type
-// and action string. It attempts multiple canonicalization strategies before
-// falling back to "resourceType.action" string concatenation.
-//
-// Canonicalization handles common non-canonical input patterns:
-//   - resource.type="hub", action="user.read" → canonical "user.read"
-//   - resource.type="hub.user", action="read" → canonical "user.read"
-//   - resource.type="hub", action="settings.read" → canonical "hub.settings.read"
+// and action string. Falls back to "resourceType.action" format when no
+// registry match exists.
 func derivePermissionID(resourceType string, action Action) string {
 	actionStr := string(action)
-	// Primary lookup: match by Resource + Action in the permissions registry.
+	// Look for an exact match in the permissions registry.
 	for _, p := range permissions.Registry {
 		if p.Resource == resourceType && p.Action == actionStr {
 			return p.ID
 		}
 	}
-	// Construct the concatenated ID for secondary lookups.
-	constructedID := resourceType + "." + actionStr
-	// Secondary lookup: check if the constructed ID is itself a canonical
-	// permission ID (e.g. resource.type="hub", action="settings.read"
-	// → "hub.settings.read" is a canonical ID).
-	for _, p := range permissions.Registry {
-		if p.ID == constructedID {
-			return p.ID
-		}
-	}
-	// Canonicalization: check if the action is already a canonical permission
-	// ID (e.g. resource.type="hub", action="user.read" → "user.read" exists
-	// in the registry as a canonical ID).
-	for _, p := range permissions.Registry {
-		if p.ID == actionStr {
-			return p.ID
-		}
-	}
-	// Prefix-strip canonicalization: if the constructed ID has 3+ dot-separated
-	// segments, strip the first segment and check whether the remainder is a
-	// canonical permission ID (e.g. resource.type="hub.user", action="read"
-	// → "hub.user.read" → strip "hub." → "user.read" is canonical).
-	if idx := strings.Index(constructedID, "."); idx >= 0 {
-		tail := constructedID[idx+1:]
-		if strings.Contains(tail, ".") {
-			for _, p := range permissions.Registry {
-				if p.ID == tail {
-					return p.ID
-				}
-			}
-		}
-	}
 	// Fallback: construct from resource type and action.
-	return constructedID
+	return resourceType + "." + actionStr
 }
 
 // =============================================================================

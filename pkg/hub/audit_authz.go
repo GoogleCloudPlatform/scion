@@ -21,8 +21,10 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -249,6 +251,66 @@ type PermissionCompareResult struct {
 	Both []string `json:"both"`
 }
 
+// isKnownPermission returns true if the given ID matches a canonical
+// permission in the permissions registry.
+func isKnownPermission(id string) bool {
+	for _, p := range permissions.Registry {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalizeExplainPermission resolves a canonical permission ID from
+// the (resourceType, action) pair supplied by an explain API caller.
+//
+// Production enforcement uses derivePermissionID, which is intentionally left
+// unchanged: its fallback concatenation is safe because route middleware
+// always supplies the correct (Resource, Action) pair from route metadata.
+// The explain API, however, accepts arbitrary client input that may use
+// non-canonical patterns:
+//
+//   - resource.type="hub", action="user.read" → canonical "user.read"
+//   - resource.type="hub.user", action="read" → canonical "user.read"
+//   - resource.type="hub", action="settings.read" → canonical "hub.settings.read"
+//
+// This helper applies three canonicalization passes (constructed-ID lookup,
+// action-as-ID lookup, prefix-strip lookup) before returning the fallback.
+// It is only called from the explain handler.
+func canonicalizeExplainPermission(resourceType string, action string) string {
+	// Primary lookup: exact match by Resource + Action.
+	for _, p := range permissions.Registry {
+		if p.Resource == resourceType && p.Action == action {
+			return p.ID
+		}
+	}
+	// Construct the concatenated ID for secondary lookups.
+	constructedID := resourceType + "." + action
+	// Secondary: check if the constructed ID is itself a canonical ID
+	// (e.g. "hub" + "settings.read" → "hub.settings.read").
+	if isKnownPermission(constructedID) {
+		return constructedID
+	}
+	// Check if the action alone is a canonical permission ID
+	// (e.g. "hub" + "user.read" → "user.read").
+	if isKnownPermission(action) {
+		return action
+	}
+	// Prefix-strip: if the constructed ID has 3+ segments, strip the first
+	// and check the remainder (e.g. "hub.user" + "read" → strip "hub." →
+	// "user.read").
+	if idx := strings.Index(constructedID, "."); idx >= 0 {
+		tail := constructedID[idx+1:]
+		if strings.Contains(tail, ".") && isKnownPermission(tail) {
+			return tail
+		}
+	}
+	// Fallback: return the constructed ID (will not match any granted
+	// permission, producing a truthful "denied" result).
+	return constructedID
+}
+
 // handleAuthzExplain handles POST /api/v1/authz/explain.
 func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -335,17 +397,31 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the permission ID for the explain request.
+	// When the client provides an explicit permission, validate it against
+	// the registry. When omitted, canonicalize from resource.type + action
+	// using the explain-specific helper (not derivePermissionID, which is
+	// reserved for production enforcement and intentionally left unchanged).
+	permissionID := req.Permission
+	if permissionID != "" {
+		// Explicit permission: validate against the canonical registry.
+		if !isKnownPermission(permissionID) {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("unknown permission %q: must be a canonical permission ID from the registry", permissionID), nil)
+			return
+		}
+	} else {
+		// No explicit permission: canonicalize from resource.type + action.
+		permissionID = canonicalizeExplainPermission(req.Resource.Type, req.Action)
+	}
+
 	// Build the authz request with Explain enabled.
-	// When the client provides a canonical permission ID, pass it through
-	// directly to avoid mis-derivation from non-canonical resource.type + action
-	// pairs (e.g. resource.type="hub" + action="user.read" would incorrectly
-	// derive "hub.user.read" instead of the canonical "user.read").
 	authzReq := AuthzRequest{
 		Principal:  principalContextForIdentity(explainIdentity),
 		Credential: credentialContextForIdentity(explainIdentity),
 		Resource:   resource,
 		Action:     Action(req.Action),
-		Permission: req.Permission,
+		Permission: permissionID,
 		Explain:    true,
 	}
 

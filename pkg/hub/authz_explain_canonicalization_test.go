@@ -30,10 +30,15 @@ import (
 )
 
 // =============================================================================
-// Unit tests for derivePermissionID canonicalization
+// Unit tests: derivePermissionID (production enforcement — base behavior)
 // =============================================================================
 
-func TestDerivePermissionID_Canonical(t *testing.T) {
+// TestDerivePermissionID_BaseUnchanged verifies that the production
+// derivePermissionID function retains its original behavior: exact
+// (Resource, Action) match or string-concatenation fallback.
+// This is intentionally NOT enhanced with canonicalization — the
+// production enforcement path must remain exactly as-is.
+func TestDerivePermissionID_BaseUnchanged(t *testing.T) {
 	tests := []struct {
 		name     string
 		resource string
@@ -46,22 +51,12 @@ func TestDerivePermissionID_Canonical(t *testing.T) {
 		{"canonical agent.create", "agent", ActionCreate, "agent.create"},
 		{"canonical project.read", "project", ActionRead, "project.read"},
 
-		// Canonicalization: action is already a canonical permission ID.
-		{"hub + user.read → user.read", "hub", "user.read", "user.read"},
-		{"hub + user.list → user.list", "hub", "user.list", "user.list"},
-		{"hub + agent.create → agent.create", "hub", "agent.create", "agent.create"},
-
-		// Canonicalization: constructed ID matches a canonical ID directly.
-		{"hub + settings.read → hub.settings.read", "hub", "settings.read", "hub.settings.read"},
-		{"hub + config.read → hub.config.read", "hub", "config.read", "hub.config.read"},
-
-		// Prefix-strip canonicalization: dotted resource type.
-		{"hub.user + read → user.read", "hub.user", ActionRead, "user.read"},
-		{"hub.agent + create → agent.create", "hub.agent", ActionCreate, "agent.create"},
-		{"hub.project + read → project.read", "hub.project", ActionRead, "project.read"},
-
-		// Fallback: truly unknown combinations still fall through.
-		{"unknown + unknown", "widget", "frobnicate", "widget.frobnicate"},
+		// Fallback: non-canonical combinations produce concatenated IDs.
+		// This is the expected base behavior — production code never hits
+		// these paths because route middleware supplies correct inputs.
+		{"hub+user.read fallback", "hub", "user.read", "hub.user.read"},
+		{"hub.user+read fallback", "hub.user", ActionRead, "hub.user.read"},
+		{"unknown+unknown fallback", "widget", "frobnicate", "widget.frobnicate"},
 	}
 
 	for _, tt := range tests {
@@ -93,6 +88,63 @@ func TestDerivePermissionID_AllRegistryPermissions(t *testing.T) {
 				"derivePermissionID(%q, %q) should return canonical ID %q", p.Resource, p.Action, p.ID)
 		})
 	}
+}
+
+// =============================================================================
+// Unit tests: canonicalizeExplainPermission (explain-only helper)
+// =============================================================================
+
+// TestCanonicalizeExplainPermission verifies the explain-specific
+// canonicalization helper that normalizes non-canonical resource.type + action
+// pairs to canonical permission IDs. This helper is ONLY called from the
+// explain handler — production enforcement uses derivePermissionID unmodified.
+func TestCanonicalizeExplainPermission(t *testing.T) {
+	tests := []struct {
+		name     string
+		resource string
+		action   string
+		wantID   string
+	}{
+		// Primary lookup: exact (Resource, Action) match.
+		{"canonical user.read", "user", "read", "user.read"},
+		{"canonical user.list", "user", "list", "user.list"},
+		{"canonical agent.create", "agent", "create", "agent.create"},
+		{"canonical project.read", "project", "read", "project.read"},
+
+		// Canonicalization: action is already a canonical permission ID.
+		{"hub + user.read → user.read", "hub", "user.read", "user.read"},
+		{"hub + user.list → user.list", "hub", "user.list", "user.list"},
+		{"hub + agent.create → agent.create", "hub", "agent.create", "agent.create"},
+
+		// Canonicalization: constructed ID matches a canonical ID directly.
+		{"hub + settings.read → hub.settings.read", "hub", "settings.read", "hub.settings.read"},
+		{"hub + config.read → hub.config.read", "hub", "config.read", "hub.config.read"},
+
+		// Prefix-strip canonicalization: dotted resource type.
+		{"hub.user + read → user.read", "hub.user", "read", "user.read"},
+		{"hub.agent + create → agent.create", "hub.agent", "create", "agent.create"},
+		{"hub.project + read → project.read", "hub.project", "read", "project.read"},
+
+		// Fallback: truly unknown combinations still fall through.
+		{"unknown + unknown", "widget", "frobnicate", "widget.frobnicate"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := canonicalizeExplainPermission(tt.resource, tt.action)
+			assert.Equal(t, tt.wantID, got)
+		})
+	}
+}
+
+// TestIsKnownPermission verifies the registry lookup helper.
+func TestIsKnownPermission(t *testing.T) {
+	assert.True(t, isKnownPermission("user.read"), "user.read is canonical")
+	assert.True(t, isKnownPermission("agent.create"), "agent.create is canonical")
+	assert.True(t, isKnownPermission("hub.settings.read"), "hub.settings.read is canonical")
+	assert.False(t, isKnownPermission("hub.user.read"), "hub.user.read is NOT canonical")
+	assert.False(t, isKnownPermission("widget.frobnicate"), "widget.frobnicate is NOT canonical")
+	assert.False(t, isKnownPermission(""), "empty string is NOT canonical")
 }
 
 // =============================================================================
@@ -240,6 +292,195 @@ func TestExplainAPI_ExplicitPermissionField(t *testing.T) {
 		assert.False(t, resp.Allowed,
 			"hub-member should not have user.delete")
 	})
+}
+
+// =============================================================================
+// Adversarial tests: unknown / mismatched permission field
+// =============================================================================
+
+// TestExplainAPI_UnknownExplicitPermission_Returns400 verifies that the
+// explain API returns HTTP 400 when the client provides an explicit
+// "permission" field that is not a canonical permission ID in the registry.
+func TestExplainAPI_UnknownExplicitPermission_Returns400(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	memberID := tid("explain-unknown-perm")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          memberID,
+		Email:       "unknown-perm@test.com",
+		DisplayName: "Unknown Perm",
+		Role:        "member",
+		Status:      "active",
+	}))
+	ensureHubMembership(ctx, s, memberID)
+	identity := NewAuthenticatedUser(memberID, "unknown-perm@test.com", "Unknown Perm", "member", "api")
+
+	tests := []struct {
+		name       string
+		permission string
+	}{
+		{"completely fabricated", "widget.frobnicate"},
+		{"non-canonical hub.user.read", "hub.user.read"},
+		{"empty-looking dotted", "a.b.c.d"},
+		{"partial match prefix", "user.readx"},
+		{"sql injection attempt", "'; DROP TABLE users; --"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := map[string]interface{}{
+				"resource": map[string]interface{}{
+					"type": "user",
+					"id":   "test",
+				},
+				"action":     "read",
+				"permission": tt.permission,
+			}
+			bodyBytes, _ := json.Marshal(body)
+			req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", bodyBytes, identity)
+			rec := httptest.NewRecorder()
+			srv.handleAuthzExplain(rec, req)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"unknown permission %q must be rejected with 400, got %d: %s",
+				tt.permission, rec.Code, rec.Body.String())
+
+			// Verify JSON error response.
+			var errResp map[string]interface{}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp),
+				"error response should be valid JSON")
+			assert.Contains(t, errResp, "error",
+				"error response should contain 'error' field")
+
+			// Error message should mention the rejected permission.
+			if msg, ok := errResp["error"].(map[string]interface{}); ok {
+				if message, ok := msg["message"].(string); ok {
+					assert.Contains(t, message, tt.permission,
+						"error message should mention the unknown permission")
+				}
+			}
+		})
+	}
+}
+
+// TestExplainAPI_MismatchedResourceActionPermission verifies explain
+// behavior when the explicit "permission" field does not match the
+// resource.type + action semantically. The server accepts this — the
+// explicit permission takes precedence, and the resource/action are
+// used only for resource context (scope, ID), not permission derivation.
+func TestExplainAPI_MismatchedResourceActionPermission(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	memberID := tid("explain-mismatch-perm")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          memberID,
+		Email:       "mismatch-perm@test.com",
+		DisplayName: "Mismatch Perm",
+		Role:        "member",
+		Status:      "active",
+	}))
+	ensureHubMembership(ctx, s, memberID)
+	identity := NewAuthenticatedUser(memberID, "mismatch-perm@test.com", "Mismatch Perm", "member", "api")
+
+	t.Run("resource=agent action=create but permission=user.read", func(t *testing.T) {
+		// Semantically mismatched: resource says "agent" + "create" but
+		// permission is "user.read". The explicit permission wins — the
+		// result reflects whether the principal has user.read, not agent.create.
+		body := map[string]interface{}{
+			"resource": map[string]interface{}{
+				"type": "agent",
+				"id":   "test-agent",
+			},
+			"action":     "create",
+			"permission": "user.read", // Canonical, but doesn't match resource+action.
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", bodyBytes, identity)
+		rec := httptest.NewRecorder()
+		srv.handleAuthzExplain(rec, req)
+
+		// Should succeed (200) — explicit permission is valid.
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp explainResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		// Hub-member has user.read → allowed, even though resource says agent.
+		assert.True(t, resp.Allowed,
+			"explicit permission=user.read should be evaluated regardless of resource type")
+		if resp.Provenance != nil {
+			assert.Equal(t, "user.read", resp.Provenance.Permission,
+				"provenance should reflect the explicit permission, not resource+action")
+		}
+	})
+
+	t.Run("permission contradicts resource — denied case", func(t *testing.T) {
+		// Hub-member has user.read but NOT user.delete.
+		body := map[string]interface{}{
+			"resource": map[string]interface{}{
+				"type": "user",
+				"id":   "test-user",
+			},
+			"action":     "read",        // Would be allowed via canonicalization...
+			"permission": "user.delete", // ...but explicit permission overrides → denied.
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", bodyBytes, identity)
+		rec := httptest.NewRecorder()
+		srv.handleAuthzExplain(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp explainResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		assert.False(t, resp.Allowed,
+			"explicit permission=user.delete should override resource+action canonicalization")
+	})
+}
+
+// TestExplainAPI_NonCanonicalWithoutExplicitPermission_Truthful verifies
+// that when the explain canonicalization cannot find a canonical match,
+// the non-canonical constructed ID produces a truthful "denied" result
+// (rather than silently matching an unrelated permission).
+func TestExplainAPI_NonCanonicalWithoutExplicitPermission_Truthful(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	memberID := tid("explain-noncanon-truthful")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          memberID,
+		Email:       "noncanon@test.com",
+		DisplayName: "NonCanon Test",
+		Role:        "member",
+		Status:      "active",
+	}))
+	ensureHubMembership(ctx, s, memberID)
+	identity := NewAuthenticatedUser(memberID, "noncanon@test.com", "NonCanon Test", "member", "api")
+
+	// Completely unknown resource.type + action that cannot canonicalize.
+	body := map[string]interface{}{
+		"resource": map[string]interface{}{
+			"type": "widget",
+			"id":   "test",
+		},
+		"action": "frobnicate",
+	}
+	bodyBytes, _ := json.Marshal(body)
+	req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", bodyBytes, identity)
+	rec := httptest.NewRecorder()
+	srv.handleAuthzExplain(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp explainResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// Should be denied — widget.frobnicate is not a real permission.
+	assert.False(t, resp.Allowed,
+		"completely unknown resource+action should be truthfully denied")
 }
 
 // =============================================================================
