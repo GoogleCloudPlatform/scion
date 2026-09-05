@@ -21,7 +21,8 @@ RUN mkdir -p /home/scion/.local/share/opencode && \
 
 # Install OpenCode
 # RUN curl -fsSL https://opencode.ai/install | bash
-RUN npm install -g opencode-ai \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm install -g opencode-ai \
   && npm cache clean --force
 # Ensure opencode is in PATH
 # ENV PATH="/home/scion/.opencode/bin:${PATH}"

@@ -162,16 +162,25 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # Setup npm global directory
 RUN mkdir -p /usr/local/share/npm-global
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
+
+# Optional npm mirror. Corporate networks commonly block registry.npmjs.org;
+# point this at an internal proxy (Artifactory, Nexus, Verdaccio) to build
+# behind one. Defaults to the public registry, so behaviour is unchanged when
+# unset. Inherited by scion-base, every harness image, and agents at runtime.
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 ENV PATH=/usr/local/share/npm-global/bin:/usr/local/go/bin:/usr/local/gcloud/google-cloud-sdk/bin:$PATH
 ENV LC_ALL=C.UTF-8
 ENV EDITOR=nano
 ENV VISUAL=nano
 
 # Install Chrome DevTools MCP server globally
-RUN npm install -g chrome-devtools-mcp
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm install -g chrome-devtools-mcp
 
 # Install playwright CLI
-RUN npm install -g @playwright/cli@latest
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm install -g @playwright/cli@latest
 
 # Default to bash - no scion-specific entrypoint
 CMD ["bash"]
