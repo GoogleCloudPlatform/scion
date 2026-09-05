@@ -335,6 +335,11 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 			MethodNotAllowed(w)
 			return
 		}
+		// Inline authorization: role_binding.read at hub scope.
+		// Structured denial with resource_type + denied_action.
+		if !s.authorize(w, r, Resource{Type: "role_binding", ID: "hub"}, ActionRead) {
+			return
+		}
 		s.listBindingsForUser(w, r, userID)
 		return
 	}

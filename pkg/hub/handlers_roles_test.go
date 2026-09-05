@@ -2335,3 +2335,151 @@ func TestGenericDeleteBinding_SuperAdmin_MissingCredentialDenied(t *testing.T) {
 	}
 	assert.True(t, found, "super-admin binding must survive missing credential context")
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Role Binding by-ID structured denial (method-aware gate)
+//
+// These tests verify that the by-ID route (/api/v1/admin/role-bindings/{id})
+// returns structured 403 responses with resource_type and denied_action when
+// a hub-member without role_binding permissions attempts operations, rather
+// than a plain 403 from the route guard.
+// ---------------------------------------------------------------------------
+
+func TestRoleBindingByID_MemberDelete_StructuredDenial(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a hub-member user with no role_binding permissions.
+	member := &store.User{
+		ID:          tid("rb-byid-member-del"),
+		Email:       "rb-byid-member-del@test.local",
+		DisplayName: "Member Del",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, member))
+
+	// The binding ID doesn't need to exist — authorization runs before lookup.
+	rec := doRequestAsUser(t, srv, member, http.MethodDelete,
+		"/api/v1/admin/role-bindings/00000000-0000-0000-0000-000000000001", nil)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	resp := parseErrorResponse(t, rec.Body.Bytes())
+	assertStructuredDenial(t, resp, "role_binding", "delete")
+}
+
+func TestRoleBindingByID_MemberGetUserBindings_StructuredDenial(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a hub-member user with no role_binding permissions.
+	member := &store.User{
+		ID:          tid("rb-byid-member-get"),
+		Email:       "rb-byid-member-get@test.local",
+		DisplayName: "Member Get",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, member))
+
+	// Create a target user with a binding — verify no data leaks on denial.
+	targetUserID := tid("rb-byid-target-user")
+	seedRolesTestUser(t, s, targetUserID, "rb-byid-target@test.local")
+
+	// Create a binding for the target user (via super-admin).
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "byid-denial-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      targetUserID,
+		ScopeType:        "system",
+	})
+
+	// Hub-member requests the target's bindings — should get 403, not data.
+	rec := doRequestAsUser(t, srv, member, http.MethodGet,
+		"/api/v1/admin/role-bindings/user/"+targetUserID, nil)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	resp := parseErrorResponse(t, rec.Body.Bytes())
+	assertStructuredDenial(t, resp, "role_binding", "read")
+
+	// Ensure no binding data leaks in the response body.
+	assert.NotContains(t, rec.Body.String(), targetUserID,
+		"response must not leak target user ID")
+	assert.NotContains(t, rec.Body.String(), role.ID,
+		"response must not leak role definition ID")
+}
+
+func TestRoleBindingByID_Unauthenticated_GET_Returns401(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequestNoAuth(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings/user/some-user-id", nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRoleBindingByID_Unauthenticated_DELETE_Returns401(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequestNoAuth(t, srv, http.MethodDelete,
+		"/api/v1/admin/role-bindings/00000000-0000-0000-0000-000000000001", nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRoleBindingByID_AuthorizedDelete_Succeeds(t *testing.T) {
+	srv, s := testServer(t)
+
+	delUserID := tid("rb-byid-auth-del-user")
+	seedRolesTestUser(t, s, delUserID, "rb-byid-auth-del@test.local")
+
+	// Create a custom role and binding.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "byid-auth-del-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      delUserID,
+		ScopeType:        "system",
+	})
+
+	// Super-admin (dev token) can delete.
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/admin/role-bindings/"+binding.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestRoleBindingByID_AuthorizedGetUserBindings_Succeeds(t *testing.T) {
+	srv, s := testServer(t)
+
+	targetUserID := tid("rb-byid-auth-get-user")
+	seedRolesTestUser(t, s, targetUserID, "rb-byid-auth-get@test.local")
+
+	// Create a binding for the target user.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "byid-auth-get-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      targetUserID,
+		ScopeType:        "system",
+	})
+
+	// Super-admin (dev token) can read.
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings/user/"+targetUserID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.GreaterOrEqual(t, resp.TotalCount, 1)
+}

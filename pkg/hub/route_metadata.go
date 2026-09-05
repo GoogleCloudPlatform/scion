@@ -797,8 +797,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/role-bindings/": {
 		Pattern: "/api/v1/admin/role-bindings/", RouteID: "admin.roleBindings.byId",
-		Classification: RouteHubAdmin,
-		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+		// RouteAuthenticated: authorization is method-aware and handled
+		// inline, matching the collection endpoint's pattern.
+		// GET /user/{userID} checks role_binding.read inline.
+		// DELETE /{id} checks role_binding.delete inline via
+		// requireWritePermissionForRoleBinding.
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/permissions": {
 		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
