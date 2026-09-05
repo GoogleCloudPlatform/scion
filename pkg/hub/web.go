@@ -1599,7 +1599,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					case err == nil:
 						if u.Status == store.UserStatusSuspended {
 							ws.logger().Warn("Proxy auth: session user is suspended", "email", email, "user_id", u.ID)
-							http.Error(w, "access denied: user account is suspended", http.StatusForbidden)
+							ws.serveSuspendedPage(w, email)
 							return
 						}
 						storedRole = u.Role
@@ -1610,7 +1610,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 						// keep a UI-granted admin role for the remaining life
 						// of their session cookie.
 						ws.logger().Warn("Proxy auth: session user no longer exists", "email", email)
-						http.Error(w, "access denied: user account no longer exists", http.StatusForbidden)
+						ws.clearStaleSession(w, r)
 						return
 					default:
 						// Transient read failure — keep the status quo (see
@@ -1727,7 +1727,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			// Reject suspended users
 			if user.Status == "suspended" {
 				ws.logger().Warn("Proxy auth: user is suspended", "email", proxyUser.Email, "user_id", user.ID)
-				http.Error(w, "access denied: user account is suspended", http.StatusForbidden)
+				ws.serveSuspendedPage(w, proxyUser.Email)
 				return
 			}
 			// Update last login and backfill profile
@@ -2319,6 +2319,12 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Admin mode middleware (innermost — runs after session user is loaded).
 	// Always applied — checks runtime MaintenanceState on each request.
 	handler = ws.adminModeWebMiddleware(handler)
+
+	// Suspended-user middleware — re-verifies the user's status against the
+	// authoritative store on every protected request. Catches mid-session
+	// suspensions that the cookie-based auth cannot detect. Runs after auth
+	// middleware loads the user, before admin-mode and the SPA handler.
+	handler = ws.suspendedUserMiddleware(handler)
 
 	// Session auth middleware (loads session user into context, redirects to login)
 	handler = ws.sessionAuthMiddleware(handler)

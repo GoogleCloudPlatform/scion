@@ -53,6 +53,19 @@ export interface ApiFetchOptions extends RequestInit {
 const API_SLOW_THRESHOLD_MS = 2000;
 let sessionExpiredRedirectPending = false;
 
+/**
+ * When true, a `user_suspended` API response has been received and a full
+ * page reload is in progress. All subsequent 403 handling is suppressed to
+ * prevent a toast avalanche from concurrent API/SSE requests that each
+ * return the same denial.
+ */
+let userSuspendedRedirectPending = false;
+
+/** Exported for testing — resets the internal suspension redirect flag. */
+export function _resetSuspendedState(): void {
+  userSuspendedRedirectPending = false;
+}
+
 export async function apiFetch(path: string, options?: ApiFetchOptions): Promise<Response> {
   const start = performance.now();
   const response = await fetch(path, {
@@ -78,8 +91,16 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     return response;
   }
 
-  if (response.status === 403 && !options?.suppressAccessDeniedToast) {
+  if (response.status === 403) {
+    // If a suspension redirect is already in progress, suppress all further
+    // 403 handling to prevent a toast avalanche from concurrent requests.
+    if (userSuspendedRedirectPending) {
+      return response;
+    }
+
     let detail: AccessDeniedDetail = {};
+    let isSuspended = false;
+
     try {
       const body = await response.clone().json();
       // The backend error envelope is {error: {code, message, details?}}.
@@ -87,6 +108,9 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
       // carries {resource_type, denied_action}; legacy/generic 403s omit
       // details and degrade gracefully.
       if (typeof body.error === 'object' && body.error) {
+        if (body.error.code === 'user_suspended') {
+          isSuspended = true;
+        }
         const details = body.error.details;
         detail = {
           action: details?.denied_action ?? body.error.code,
@@ -101,7 +125,20 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     } catch {
       // Body wasn't JSON — use empty detail
     }
-    window.dispatchEvent(new CustomEvent('scion:access-denied', { detail }));
+
+    // A suspended account is terminal: trigger a full page reload so the
+    // server's suspended-user middleware renders the self-contained
+    // suspended page. This is preferred over a client-side route because
+    // the reload stops all pending API/SSE bootstrap fan-out.
+    if (isSuspended) {
+      userSuspendedRedirectPending = true;
+      window.location.reload();
+      return response;
+    }
+
+    if (!options?.suppressAccessDeniedToast) {
+      window.dispatchEvent(new CustomEvent('scion:access-denied', { detail }));
+    }
   }
 
   return response;

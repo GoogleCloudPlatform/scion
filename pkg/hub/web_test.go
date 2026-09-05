@@ -3313,6 +3313,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	// Replaying the still-valid admin session cookie must now be rejected.
+	// The server clears the stale session and redirects to login rather
+	// than returning a raw 403, so the user can re-authenticate.
 	req3 := httptest.NewRequest("GET", "/projects", nil)
 	req3.Header.Set("Accept", "text/html")
 	for _, c := range adminCookies {
@@ -3321,7 +3323,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, req3)
 
-	assert.Equal(t, http.StatusForbidden, rec3.Code, "deleted user should be rejected with 403")
+	assert.Equal(t, http.StatusFound, rec3.Code, "deleted user should be redirected to login")
+	assert.Equal(t, "/login", rec3.Header().Get("Location"))
 }
 
 func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testing.T) {

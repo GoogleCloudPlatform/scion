@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from './api.js';
-import { apiFetch } from './api.js';
+import { apiFetch, _resetSuspendedState } from './api.js';
 
 /**
  * Build a fake Response with the given status and JSON body.
@@ -291,5 +291,171 @@ describe('apiFetch — 403 access-denied event', () => {
     await apiFetch('/api/v1/agents/b');
 
     expect(captured).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// user_suspended — one-time redirect and toast suppression
+// ---------------------------------------------------------------------------
+
+describe('apiFetch — user_suspended handling', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let captured: AccessDeniedDetail[];
+  let reloadSpy: ReturnType<typeof vi.fn>;
+
+  function listener(e: Event) {
+    captured.push((e as CustomEvent<AccessDeniedDetail>).detail);
+  }
+
+  beforeEach(() => {
+    captured = [];
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    window.addEventListener('scion:access-denied', listener);
+
+    // Reset the internal suspension flag between tests.
+    _resetSuspendedState();
+
+    // Mock window.location.reload to prevent actual reloads in JSDOM.
+    reloadSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, reload: reloadSpy },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    window.removeEventListener('scion:access-denied', listener);
+    vi.restoreAllMocks();
+  });
+
+  it('triggers page reload on first user_suspended 403', async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, {
+        error: {
+          code: 'user_suspended',
+          message: 'Your account has been suspended.',
+        },
+      })
+    );
+
+    await apiFetch('/api/v1/agents');
+
+    // Should trigger a full page reload.
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+
+    // Should NOT fire access-denied event (no toast).
+    expect(captured).toHaveLength(0);
+  });
+
+  it('suppresses subsequent 403 toasts after user_suspended', async () => {
+    // First call: user_suspended → triggers reload.
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, {
+        error: {
+          code: 'user_suspended',
+          message: 'Your account has been suspended.',
+        },
+      })
+    );
+    await apiFetch('/api/v1/agents');
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+
+    // Second call: another 403 (generic) — should be suppressed entirely.
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, {
+        error: {
+          code: 'forbidden',
+          message: 'Insufficient permissions',
+        },
+      })
+    );
+    await apiFetch('/api/v1/projects');
+
+    // No additional reload calls.
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+
+    // No access-denied event (toast suppressed).
+    expect(captured).toHaveLength(0);
+  });
+
+  it('does not interfere with non-suspended 403 responses', async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, {
+        error: {
+          code: 'forbidden',
+          message: 'Insufficient permissions',
+          details: { resource_type: 'project', denied_action: 'delete' },
+        },
+      })
+    );
+
+    await apiFetch('/api/v1/projects/x');
+
+    // Should NOT trigger reload.
+    expect(reloadSpy).not.toHaveBeenCalled();
+
+    // Should fire the normal access-denied event.
+    expect(captured).toHaveLength(1);
+    expect(captured[0].action).toBe('delete');
+    expect(captured[0].resource).toBe('project');
+  });
+
+  it('suppresses all toasts for concurrent user_suspended responses', async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, {
+        error: {
+          code: 'user_suspended',
+          message: 'Your account has been suspended.',
+        },
+      })
+    );
+
+    // Simulate concurrent API calls all returning user_suspended.
+    // In a single-threaded JS event loop, all three may detect suspension
+    // before the flag suppresses them, but the important invariant is:
+    // zero access-denied toasts, and at least one reload.
+    await Promise.all([
+      apiFetch('/api/v1/agents'),
+      apiFetch('/api/v1/projects'),
+      apiFetch('/api/v1/skills'),
+    ]);
+
+    // At least one reload was triggered.
+    expect(reloadSpy).toHaveBeenCalled();
+
+    // No access-denied events (no toast avalanche).
+    expect(captured).toHaveLength(0);
+  });
+
+  it('suppresses sequential 403 toasts after initial suspension detection', async () => {
+    // First call: user_suspended detected → flag set.
+    fetchMock.mockResolvedValueOnce(
+      fakeResponse(403, {
+        error: {
+          code: 'user_suspended',
+          message: 'Your account has been suspended.',
+        },
+      })
+    );
+    await apiFetch('/api/v1/agents');
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+
+    // Sequential calls after the flag is set are fully suppressed.
+    fetchMock.mockResolvedValueOnce(
+      fakeResponse(403, {
+        error: {
+          code: 'user_suspended',
+          message: 'Your account has been suspended.',
+        },
+      })
+    );
+    await apiFetch('/api/v1/projects');
+
+    // No additional reload.
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+    // No toasts.
+    expect(captured).toHaveLength(0);
   });
 });
