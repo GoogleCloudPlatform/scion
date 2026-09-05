@@ -37,6 +37,14 @@ var (
 	// and the system reconciler; the F1.5 role-binding machinery must not be a
 	// second grant path.
 	ErrSuperAdminBindingRestricted = errors.New("super-admin role bindings can only be created by the system reconciler")
+
+	// ErrDirectUserOnly is returned when a role binding for a direct-user-only
+	// role (super-admin, project-owner) is attempted with a non-user principal.
+	ErrDirectUserOnly = errors.New("this role requires a direct user principal")
+
+	// ErrScopeMismatch is returned when a role binding's scope type does not
+	// match the role definition's scope type.
+	ErrScopeMismatch = errors.New("binding scope type does not match role definition scope type")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -100,9 +108,6 @@ type Store interface {
 
 	// Group operations (Hub Permissions System)
 	GroupStore
-
-	// Policy operations (Hub Permissions System)
-	PolicyStore
 
 	// User Access Token operations
 	UserAccessTokenStore
@@ -181,6 +186,9 @@ type Store interface {
 
 	// Quota operations (Permissions Phase 2B — Limits/Quotas)
 	QuotaStore
+
+	// Access Constraint operations (AC1 — Operator Access Constraint Backend)
+	AccessConstraintStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -293,6 +301,13 @@ type AgentFilter struct {
 	// Labels, when non-empty, restricts results to agents whose labels
 	// contain all specified key-value pairs (AND semantics).
 	Labels map[string]string
+
+	// AuthorizedProjectIDs, when non-nil, restricts results to agents whose
+	// project_id is in this set. This is used by scope-aware list authorization
+	// to push the resolved ScopeSet into the SQL query so pagination and totals
+	// reflect only the authorized set. A nil value means no authorization
+	// filtering. An empty non-nil slice means no agents are authorized.
+	AuthorizedProjectIDs []string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -407,6 +422,14 @@ type ProjectFilter struct {
 	// (true) or non-template projects (false). Template projects carry the
 	// scion.io/template: "true" label.
 	IsTemplate *bool
+
+	// AuthorizedProjectIDs, when non-nil, restricts results to projects whose
+	// ID is in this set. This is used by scope-aware list authorization to push
+	// the resolved ScopeSet into the SQL query so pagination and totals reflect
+	// only the authorized set. A nil value means no authorization filtering
+	// (caller has admin view or filtering is handled elsewhere). An empty non-nil
+	// slice means no projects are authorized — the query returns zero results.
+	AuthorizedProjectIDs []string
 }
 
 // RuntimeBrokerStore defines runtime broker persistence operations.
@@ -879,10 +902,11 @@ type GroupStore interface {
 	// including the implicit project_agents group and transitive parent groups.
 	GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error)
 
-	// CheckDelegatedAccess checks whether an agent's delegation relationship
-	// satisfies the given policy conditions. Returns true if the agent has
-	// delegation enabled, its creator is active, and the conditions match.
-	CheckDelegatedAccess(ctx context.Context, agentID string, conditions *PolicyConditions) (bool, error)
+	// GetParentGroups returns all ancestor groups of the given group —
+	// i.e., groups that transitively contain this group as a child.
+	// Used by delegation checks to compute the full authority inherited
+	// through group membership.
+	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
 	// CountGroupMembersByRole counts how many members of a group have the given role.
 	CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error)
@@ -898,6 +922,7 @@ type GroupFilter struct {
 	ParentID  string // Filter by parent group
 	GroupType string // Filter by group type ("explicit" or "project_agents")
 	ProjectID string // Filter by project ID (for project_agents groups)
+	Search    string // Case-insensitive match on name or slug
 }
 
 // PrincipalRef identifies a principal by type and ID.
@@ -907,54 +932,10 @@ type PrincipalRef struct {
 	ID   string // Principal UUID
 }
 
-// PolicyStore defines policy-related persistence operations.
-type PolicyStore interface {
-	// CreatePolicy creates a new policy record.
-	CreatePolicy(ctx context.Context, policy *Policy) error
-
-	// GetPolicy retrieves a policy by ID.
-	// Returns ErrNotFound if the policy doesn't exist.
-	GetPolicy(ctx context.Context, id string) (*Policy, error)
-
-	// UpdatePolicy updates an existing policy.
-	// Returns ErrNotFound if the policy doesn't exist.
-	UpdatePolicy(ctx context.Context, policy *Policy) error
-
-	// DeletePolicy removes a policy by ID.
-	// Also removes all policy bindings.
-	// Returns ErrNotFound if the policy doesn't exist.
-	DeletePolicy(ctx context.Context, id string) error
-
-	// ListPolicies returns policies matching the filter criteria.
-	ListPolicies(ctx context.Context, filter PolicyFilter, opts ListOptions) (*ListResult[Policy], error)
-
-	// AddPolicyBinding binds a principal (user, group, or agent) to a policy.
-	// Returns ErrAlreadyExists if the binding already exists.
-	AddPolicyBinding(ctx context.Context, binding *PolicyBinding) error
-
-	// RemovePolicyBinding removes a binding from a policy.
-	// Returns ErrNotFound if the binding doesn't exist.
-	RemovePolicyBinding(ctx context.Context, policyID, principalType, principalID string) error
-
-	// GetPolicyBindings returns all bindings for a policy.
-	GetPolicyBindings(ctx context.Context, policyID string) ([]PolicyBinding, error)
-
-	// GetPoliciesForPrincipal returns all policies bound to a specific principal.
-	GetPoliciesForPrincipal(ctx context.Context, principalType, principalID string) ([]Policy, error)
-
-	// GetPoliciesForPrincipals returns all policies bound to any of the given principals.
-	// Results are ordered by scope_type then priority ASC.
-	GetPoliciesForPrincipals(ctx context.Context, principals []PrincipalRef) ([]Policy, error)
-}
-
-// PolicyFilter defines criteria for filtering policies.
-type PolicyFilter struct {
-	Name         string // Filter by policy name
-	ScopeType    string // Filter by scope type (hub, project, resource)
-	ScopeID      string // Filter by scope ID
-	ResourceType string // Filter by resource type
-	Effect       string // Filter by effect (allow, deny)
-}
+// R-5: PolicyStore interface and PolicyFilter removed — CO1 cutover
+// deleted the legacy evaluator and all production Policy reads/writes.
+// Ent schema files (policy.go, policybinding.go) retained for now per
+// brief constraint (schema migration out of scope).
 
 // =============================================================================
 // User Access Tokens (UATs)
@@ -1703,6 +1684,10 @@ type RoleStore interface {
 	// Returns ErrNotFound if the role definition doesn't exist.
 	GetRoleDefinition(ctx context.Context, id string) (*RoleDefinition, error)
 
+	// GetRoleDefinitionsByIDs retrieves role definitions by a list of IDs.
+	// Missing IDs are silently omitted from the result map.
+	GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*RoleDefinition, error)
+
 	// GetRoleDefinitionByName retrieves a role definition by name and scope type.
 	// Returns ErrNotFound if the role definition doesn't exist.
 	GetRoleDefinitionByName(ctx context.Context, name string, scopeType string) (*RoleDefinition, error)
@@ -1721,16 +1706,46 @@ type RoleStore interface {
 	// ListRoleBindingsForPrincipal returns all role bindings for a given principal.
 	ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*RoleBinding, error)
 
+	// ListRoleBindingsForPrincipals returns all role bindings matching any of the
+	// given principals, optionally filtered by scope types and scope IDs.
+	// This is the authorization hot-path query: it resolves bindings for the
+	// entire principal closure (direct user + all transitive groups) and applicable
+	// scopes (system + project) in ONE query.
+	//
+	// If scopeTypes is non-empty, only bindings with a matching scope_type are returned.
+	// If scopeIDs is non-empty, only bindings with a matching scope_id are returned.
+	// When scopeIDs is provided, system-scoped bindings (scope_type="system") are
+	// always included regardless of the scope_id values — callers do not need to
+	// pass "" to match system bindings.
+	// Both filters are optional; passing nil/empty returns all scopes.
+	ListRoleBindingsForPrincipals(ctx context.Context, principals []PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*RoleBinding, error)
+
 	// ListRoleBindingsForScope returns all role bindings for a given scope.
 	ListRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) ([]*RoleBinding, error)
 
 	// CreateRoleBinding creates a new role binding.
 	// Returns ErrAlreadyExists if the exact binding already exists.
+	//
+	// Validation enforced:
+	//   - RoleDefinitionID must reference a valid role definition
+	//   - Scope type must match the role definition's scope type
+	//   - PrincipalType must be one of user/agent/group
+	//   - super-admin and project-owner bindings are direct-user-only
+	//   - Duplicate (role, principal, scope) is rejected
 	CreateRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
 	DeleteRoleBinding(ctx context.Context, id string) error
+
+	// DeleteRoleBindingsForPrincipal deletes all role bindings where the given
+	// principal (type + ID) is the bound principal. Used for cascade delete
+	// when a group is deleted — no orphan bindings may remain.
+	DeleteRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) (int, error)
+
+	// DeleteRoleBindingsForScope deletes all role bindings scoped to the given
+	// scope type and ID. Used for cascade delete when a project is deleted.
+	DeleteRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) (int, error)
 
 	// UpdateRoleDefinition updates an existing role definition.
 	// Returns ErrNotFound if the role definition doesn't exist.
@@ -1926,4 +1941,63 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+}
+
+// =============================================================================
+// Access Constraint Store (AC1 — Operator Access Constraint Backend)
+// =============================================================================
+
+// AccessConstraintStore defines persistence operations for access constraints.
+type AccessConstraintStore interface {
+	// CreateAccessConstraint creates a new access constraint.
+	// Returns ErrAlreadyExists if a constraint with the same name and scope exists.
+	// Sets revision=1 on insert.
+	CreateAccessConstraint(ctx context.Context, c *AccessConstraint) (*AccessConstraint, error)
+
+	// GetAccessConstraint retrieves an access constraint by ID.
+	// Returns ErrNotFound if the constraint doesn't exist.
+	GetAccessConstraint(ctx context.Context, id string) (*AccessConstraint, error)
+
+	// UpdateAccessConstraint updates an existing access constraint.
+	// Returns ErrNotFound if the constraint doesn't exist.
+	// Increments revision atomically. If expectedRevision > 0, returns
+	// ErrRevisionConflict if the stored revision differs (optimistic concurrency).
+	UpdateAccessConstraint(ctx context.Context, c *AccessConstraint, expectedRevision int64) (*AccessConstraint, error)
+
+	// DeleteAccessConstraint deletes an access constraint by ID.
+	// Returns ErrNotFound if the constraint doesn't exist.
+	DeleteAccessConstraint(ctx context.Context, id string) error
+
+	// ListAccessConstraints returns all access constraints with pagination.
+	// limit of 0 defaults to 100. Maximum allowed limit is 1000.
+	// Kept for callers that page through all constraints (loadAllAccessConstraints).
+	ListAccessConstraints(ctx context.Context, limit, offset int) ([]*AccessConstraint, error)
+
+	// ListAccessConstraintsFiltered returns access constraints with SQL-level
+	// filtering, sorting, and cursor-based pagination.
+	// Returns: items, nextPageToken, totalCount, error.
+	ListAccessConstraintsFiltered(ctx context.Context, opts AccessConstraintListOptions) ([]*AccessConstraint, string, int, error)
+
+	// CountAccessConstraints returns the total number of access constraints.
+	CountAccessConstraints(ctx context.Context) (int, error)
+
+	// ResolveApplicableConstraints returns all constraints that may apply to
+	// the given set of principals and scopes. The caller should further filter
+	// by subject matching and time window evaluation.
+	//
+	// This is a batched lookup: it returns constraints where:
+	// - subject_kind is "all_principals", OR
+	// - subject_kind is "principal" and the principal matches one of the given principals, OR
+	// - subject_kind is "group_closure" and the group matches one of the given principals.
+	//
+	// AND the scope matches one of the given scopes (system matches everything,
+	// project matches the specific project).
+	ResolveApplicableConstraints(ctx context.Context, principals []PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*AccessConstraint, error)
+
+	// ListConstraintsForScope returns all constraints scoped to the given scope.
+	ListConstraintsForScope(ctx context.Context, scopeType, scopeID string) ([]*AccessConstraint, error)
+
+	// DisableAccessConstraint disables a constraint (for offline recovery).
+	// Returns ErrNotFound if the constraint doesn't exist.
+	DisableAccessConstraint(ctx context.Context, id string) error
 }

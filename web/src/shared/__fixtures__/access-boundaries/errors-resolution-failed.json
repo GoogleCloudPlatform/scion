@@ -1,0 +1,23 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraint-previews",
+    "status": 503,
+    "responseHeaders": { "Retry-After": "5" },
+    "designRef": "constraint-ui-ux-design.md §9.7, §7.9; plan §WP B1, B3",
+    "notes": "Authorization resolution itself failed — the same condition that makes the evaluator fail closed at authz.go:745-757 (deny-all Restriction with a nil Check). The UI must present this as 'we could not determine the impact', never as 'no impact'. Design §7.9: an unavailable analysis is a distinct state from an empty one."
+  },
+  "error": {
+    "code": "RESOLUTION_FAILED",
+    "message": "Authorization state could not be resolved. Impact cannot be determined right now.",
+    "retryable": true,
+    "correlationId": "req-cc90ab13",
+    "requestId": "req-cc90ab13",
+    "details": {
+      "failedStage": "constraint_load",
+      "retryAfterSeconds": 5,
+      "affectedAnalyses": ["impact", "lockout", "intersectingBoundaries"],
+      "enforcementNote": "Live enforcement is failing closed while this condition persists: affected principals are being denied, not allowed.",
+      "remedy": "Retry in a few seconds. If it persists, check hub storage health before making any boundary change."
+    }
+  }
+}

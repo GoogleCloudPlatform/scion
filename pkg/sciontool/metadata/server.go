@@ -793,8 +793,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	case path == "project/project-id":
 		_, _ = fmt.Fprint(w, s.config.ProjectID)
 
+	case path == "project" || path == "project/":
+		_, _ = fmt.Fprint(w, "project-id\nnumeric-project-id\n")
+
 	case path == "project/numeric-project-id":
 		_, _ = fmt.Fprint(w, "0")
+
+	case path == "instance" || path == "instance/":
+		_, _ = fmt.Fprint(w, "service-accounts/\n")
 
 	case path == "instance/service-accounts/" || path == "instance/service-accounts":
 		s.handleServiceAccountList(w, r)

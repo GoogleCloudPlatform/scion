@@ -66,9 +66,6 @@ type AuthService interface {
 	// Me returns the current authenticated user.
 	Me(ctx context.Context) (*User, error)
 
-	// GetWSTicket gets a short-lived WebSocket authentication ticket.
-	GetWSTicket(ctx context.Context) (*WSTicketResponse, error)
-
 	// GetAuthProviders returns configured OAuth providers for a client type.
 	GetAuthProviders(ctx context.Context, clientType string) (*AuthProvidersResponse, error)
 
@@ -109,12 +106,6 @@ type TokenResponse struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken,omitempty"`
 	ExpiresAt    string `json:"expiresAt"`
-}
-
-// WSTicketResponse is the response for WebSocket ticket.
-type WSTicketResponse struct {
-	Ticket    string `json:"ticket"`
-	ExpiresAt string `json:"expiresAt"`
 }
 
 // AuthURLResponse is the response containing the OAuth authorization URL.
@@ -176,15 +167,6 @@ func (s *authService) Me(ctx context.Context) (*User, error) {
 		return nil, err
 	}
 	return apiclient.DecodeResponse[User](resp)
-}
-
-// GetWSTicket gets a short-lived WebSocket authentication ticket.
-func (s *authService) GetWSTicket(ctx context.Context) (*WSTicketResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/auth/ws-ticket", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeResponse[WSTicketResponse](resp)
 }
 
 // GetAuthProviders returns configured OAuth providers for a client type.

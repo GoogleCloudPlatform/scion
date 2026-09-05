@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
@@ -102,6 +103,46 @@ func (_u *RoleBindingUpdate) SetNillableScopeID(v *string) *RoleBindingUpdate {
 	if v != nil {
 		_u.SetScopeID(*v)
 	}
+	return _u
+}
+
+// SetNotBefore sets the "not_before" field.
+func (_u *RoleBindingUpdate) SetNotBefore(v time.Time) *RoleBindingUpdate {
+	_u.mutation.SetNotBefore(v)
+	return _u
+}
+
+// SetNillableNotBefore sets the "not_before" field if the given value is not nil.
+func (_u *RoleBindingUpdate) SetNillableNotBefore(v *time.Time) *RoleBindingUpdate {
+	if v != nil {
+		_u.SetNotBefore(*v)
+	}
+	return _u
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (_u *RoleBindingUpdate) ClearNotBefore() *RoleBindingUpdate {
+	_u.mutation.ClearNotBefore()
+	return _u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (_u *RoleBindingUpdate) SetExpiresAt(v time.Time) *RoleBindingUpdate {
+	_u.mutation.SetExpiresAt(v)
+	return _u
+}
+
+// SetNillableExpiresAt sets the "expires_at" field if the given value is not nil.
+func (_u *RoleBindingUpdate) SetNillableExpiresAt(v *time.Time) *RoleBindingUpdate {
+	if v != nil {
+		_u.SetExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (_u *RoleBindingUpdate) ClearExpiresAt() *RoleBindingUpdate {
+	_u.mutation.ClearExpiresAt()
 	return _u
 }
 
@@ -211,6 +252,18 @@ func (_u *RoleBindingUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if value, ok := _u.mutation.ScopeID(); ok {
 		_spec.SetField(rolebinding.FieldScopeID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.NotBefore(); ok {
+		_spec.SetField(rolebinding.FieldNotBefore, field.TypeTime, value)
+	}
+	if _u.mutation.NotBeforeCleared() {
+		_spec.ClearField(rolebinding.FieldNotBefore, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ExpiresAt(); ok {
+		_spec.SetField(rolebinding.FieldExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(rolebinding.FieldExpiresAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(rolebinding.FieldCreatedBy, field.TypeString, value)
@@ -340,6 +393,46 @@ func (_u *RoleBindingUpdateOne) SetNillableScopeID(v *string) *RoleBindingUpdate
 	if v != nil {
 		_u.SetScopeID(*v)
 	}
+	return _u
+}
+
+// SetNotBefore sets the "not_before" field.
+func (_u *RoleBindingUpdateOne) SetNotBefore(v time.Time) *RoleBindingUpdateOne {
+	_u.mutation.SetNotBefore(v)
+	return _u
+}
+
+// SetNillableNotBefore sets the "not_before" field if the given value is not nil.
+func (_u *RoleBindingUpdateOne) SetNillableNotBefore(v *time.Time) *RoleBindingUpdateOne {
+	if v != nil {
+		_u.SetNotBefore(*v)
+	}
+	return _u
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (_u *RoleBindingUpdateOne) ClearNotBefore() *RoleBindingUpdateOne {
+	_u.mutation.ClearNotBefore()
+	return _u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (_u *RoleBindingUpdateOne) SetExpiresAt(v time.Time) *RoleBindingUpdateOne {
+	_u.mutation.SetExpiresAt(v)
+	return _u
+}
+
+// SetNillableExpiresAt sets the "expires_at" field if the given value is not nil.
+func (_u *RoleBindingUpdateOne) SetNillableExpiresAt(v *time.Time) *RoleBindingUpdateOne {
+	if v != nil {
+		_u.SetExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (_u *RoleBindingUpdateOne) ClearExpiresAt() *RoleBindingUpdateOne {
+	_u.mutation.ClearExpiresAt()
 	return _u
 }
 
@@ -479,6 +572,18 @@ func (_u *RoleBindingUpdateOne) sqlSave(ctx context.Context) (_node *RoleBinding
 	}
 	if value, ok := _u.mutation.ScopeID(); ok {
 		_spec.SetField(rolebinding.FieldScopeID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.NotBefore(); ok {
+		_spec.SetField(rolebinding.FieldNotBefore, field.TypeTime, value)
+	}
+	if _u.mutation.NotBeforeCleared() {
+		_spec.ClearField(rolebinding.FieldNotBefore, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ExpiresAt(); ok {
+		_spec.SetField(rolebinding.FieldExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(rolebinding.FieldExpiresAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(rolebinding.FieldCreatedBy, field.TypeString, value)

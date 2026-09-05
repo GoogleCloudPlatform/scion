@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -552,12 +553,84 @@ func TestMountsFor_WithSharedDirs(t *testing.T) {
 		t.Fatalf("mountsFor() returned %d mounts, want 4 (2 agent + 2 shared)", len(mounts))
 	}
 
-	// Shared dirs should be at indices 2 and 3.
-	if !strings.Contains(mounts[2], "build-cache") {
-		t.Errorf("mounts[2] = %q, want shared dir build-cache", mounts[2])
+	// Shared dirs should be at indices 2 and 3 with /scion-volumes/<name> destination.
+	wantBuildCache := "type=bind,source=/scion/shared/build-cache,destination=/scion-volumes/build-cache"
+	if mounts[2] != wantBuildCache {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], wantBuildCache)
 	}
-	if !strings.Contains(mounts[3], "artifacts") {
-		t.Errorf("mounts[3] = %q, want shared dir artifacts", mounts[3])
+	wantArtifacts := "type=bind,source=/scion/shared/artifacts,destination=/scion-volumes/artifacts"
+	if mounts[3] != wantArtifacts {
+		t.Errorf("mounts[3] = %q, want %q", mounts[3], wantArtifacts)
+	}
+}
+
+// TestMountsFor_SharedDir_InWorkspace verifies that shared dirs with
+// InWorkspace=true are mounted at <workspace>/.scion-volumes/<name>
+// instead of /scion-volumes/<name>.
+func TestMountsFor_SharedDir_InWorkspace(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "data", InWorkspace: true},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3 (2 agent + 1 shared)", len(mounts))
+	}
+
+	want := "type=bind,source=/scion/shared/data,destination=/workspace/.scion-volumes/data"
+	if mounts[2] != want {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], want)
+	}
+}
+
+// TestMountsFor_SharedDir_ReadOnly verifies that shared dirs with
+// ReadOnly=true get the ,readonly suffix on the mount spec.
+func TestMountsFor_SharedDir_ReadOnly(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "ref-data", ReadOnly: true},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3 (2 agent + 1 shared)", len(mounts))
+	}
+
+	want := "type=bind,source=/scion/shared/ref-data,destination=/scion-volumes/ref-data,readonly"
+	if mounts[2] != want {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], want)
+	}
+}
+
+// TestMountsFor_SharedDir_InWorkspaceAndReadOnly verifies that both
+// InWorkspace and ReadOnly flags are respected simultaneously.
+func TestMountsFor_SharedDir_InWorkspaceAndReadOnly(t *testing.T) {
+	paths := scionPaths{
+		root:      "/scion",
+		agentHome: "/scion/agents/test-agent/home",
+		workspace: "/scion/agents/test-agent/workspace",
+	}
+	sharedDirs := []api.SharedDir{
+		{Name: "configs", InWorkspace: true, ReadOnly: true},
+	}
+
+	mounts := mountsFor(paths, sharedDirs)
+	if len(mounts) != 3 {
+		t.Fatalf("mountsFor() returned %d mounts, want 3 (2 agent + 1 shared)", len(mounts))
+	}
+
+	want := "type=bind,source=/scion/shared/configs,destination=/workspace/.scion-volumes/configs,readonly"
+	if mounts[2] != want {
+		t.Errorf("mounts[2] = %q, want %q", mounts[2], want)
 	}
 }
 
@@ -602,12 +675,18 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 		t.Errorf("SCION_GROVE_ID = %q, want %q", env["SCION_GROVE_ID"], "proj-123")
 	}
 
-	// Check UID/GID are set.
+	// Check UID/GID are set to the scion user (non-root).
 	if env["SCION_HOST_UID"] == "" {
 		t.Error("SCION_HOST_UID not set")
 	}
 	if env["SCION_HOST_GID"] == "" {
 		t.Error("SCION_HOST_GID not set")
+	}
+	if env["SCION_HOST_UID"] != "0" {
+		t.Errorf("SCION_HOST_UID = %q, want %q (root — CAP_SETUID unavailable in gVisor)", env["SCION_HOST_UID"], "0")
+	}
+	if env["SCION_HOST_GID"] != "0" {
+		t.Errorf("SCION_HOST_GID = %q, want %q (root — CAP_SETGID unavailable in gVisor)", env["SCION_HOST_GID"], "0")
 	}
 }
 
@@ -661,6 +740,36 @@ func TestEnvFor_WorkspaceBackend(t *testing.T) {
 	env := envFor(cfg, paths)
 	if env["SCION_WORKSPACE_BACKEND"] != "nfs" {
 		t.Errorf("SCION_WORKSPACE_BACKEND = %q, want %q", env["SCION_WORKSPACE_BACKEND"], "nfs")
+	}
+}
+
+// TestEnvFor_RootUID verifies that SCION_HOST_UID and SCION_HOST_GID
+// are set to 0 (root). Cloud Run's gVisor sandbox does not grant
+// CAP_SETUID or CAP_SETGID, making runtime privilege drops impossible.
+// Until the sandbox CLI supports --user, the sandbox process must run
+// as root.
+func TestEnvFor_RootUID(t *testing.T) {
+	cfg := RunConfig{}
+	paths := scionPaths{}
+
+	env := envFor(cfg, paths)
+
+	// Must use UID 0 (root) — CAP_SETUID is absent in gVisor.
+	if env["SCION_HOST_UID"] != "0" {
+		t.Errorf("SCION_HOST_UID = %q, want %q; sandbox must run as root (gVisor lacks CAP_SETUID)",
+			env["SCION_HOST_UID"], "0")
+	}
+	if env["SCION_HOST_GID"] != "0" {
+		t.Errorf("SCION_HOST_GID = %q, want %q; sandbox must run as root (gVisor lacks CAP_SETGID)",
+			env["SCION_HOST_GID"], "0")
+	}
+
+	// Verify the constants match the expected root UID.
+	if sandboxUID != 0 {
+		t.Errorf("sandboxUID = %d, want 0 (root — gVisor lacks CAP_SETUID)", sandboxUID)
+	}
+	if sandboxGID != 0 {
+		t.Errorf("sandboxGID = %d, want 0 (root — gVisor lacks CAP_SETGID)", sandboxGID)
 	}
 }
 
@@ -965,6 +1074,126 @@ func TestPrepareScionLayout_CreatesDirectories(t *testing.T) {
 		sdPath := filepath.Join(rootDir, "shared", name)
 		if _, err := os.Stat(sdPath); os.IsNotExist(err) {
 			t.Errorf("shared dir not created: %s", sdPath)
+		}
+	}
+}
+
+// TestPrepareScionLayout_CreatesInWorkspaceSharedDirs verifies that
+// prepareScionLayout creates .scion-volumes/<name> subdirectories under
+// the workspace for shared dirs with InWorkspace=true, so that the bind
+// mount destination exists when the sandbox starts.
+func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad", InWorkspace: true},
+			{Name: "ref-data"},
+		},
+	}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// InWorkspace shared dir should have a directory under workspace.
+	iwPath := filepath.Join(paths.workspace, ".scion-volumes", "scratchpad")
+	if _, err := os.Stat(iwPath); os.IsNotExist(err) {
+		t.Errorf("in-workspace shared dir not created: %s", iwPath)
+	}
+
+	// Non-InWorkspace shared dir should NOT have a directory under workspace.
+	noIWPath := filepath.Join(paths.workspace, ".scion-volumes", "ref-data")
+	if _, err := os.Stat(noIWPath); !os.IsNotExist(err) {
+		t.Errorf("non-InWorkspace shared dir should not be created under workspace: %s", noIWPath)
+	}
+
+	// Both should still have host-side dirs under /scion/shared/.
+	for _, name := range []string{"scratchpad", "ref-data"} {
+		sdPath := filepath.Join(rootDir, "shared", name)
+		if _, err := os.Stat(sdPath); os.IsNotExist(err) {
+			t.Errorf("shared dir not created: %s", sdPath)
+		}
+	}
+}
+
+// TestPrepareScionLayout_ChownsDirectories verifies that prepareScionLayout
+// recursively chowns agent home and workspace to sandboxUID:sandboxGID,
+// including files created during relocation and workspace copy.
+// This test only runs as root (like on Cloud Run) because chown requires
+// CAP_CHOWN.
+func TestPrepareScionLayout_ChownsDirectories(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("chown test requires root; skipping in non-root test environment")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("chown ownership check uses syscall.Stat_t (Linux only)")
+	}
+
+	rootDir := t.TempDir()
+
+	// Create a HomeDir with nested content to verify recursive chown.
+	homeDir := t.TempDir()
+	subDir := filepath.Join(homeDir, "subdir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{HomeDir: homeDir}
+	paths, err := prepareScionLayout(rootDir, "chown-agent", cfg)
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// Verify recursive chown: check the directory, a top-level file,
+	// and a nested file are all owned by sandboxUID:sandboxGID.
+	checkPaths := []string{
+		paths.agentHome,
+		filepath.Join(paths.agentHome, "agent-info.json"),
+		filepath.Join(paths.agentHome, "subdir"),
+		filepath.Join(paths.agentHome, "subdir", "nested.txt"),
+		paths.workspace,
+	}
+	for _, p := range checkPaths {
+		info, statErr := os.Lstat(p)
+		if statErr != nil {
+			t.Fatalf("lstat %s: %v", p, statErr)
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if int(stat.Uid) != sandboxUID {
+			t.Errorf("path %s owned by UID %d, want %d", p, stat.Uid, sandboxUID)
+		}
+		if int(stat.Gid) != sandboxGID {
+			t.Errorf("path %s owned by GID %d, want %d", p, stat.Gid, sandboxGID)
+		}
+	}
+}
+
+// TestPrepareScionLayout_SkipsChownNonRoot verifies that prepareScionLayout
+// does NOT call os.Chown when not running as root, preventing EPERM errors
+// in non-root environments (local dev, CI).
+func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("this test verifies non-root behavior; skipping when running as root")
+	}
+
+	rootDir := t.TempDir()
+	paths, err := prepareScionLayout(rootDir, "nonroot-agent", RunConfig{})
+	if err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	// In non-root mode, directories should still be created successfully.
+	// The test passes if no EPERM error was returned (chown was skipped).
+	for _, dir := range []string{paths.agentHome, paths.workspace} {
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			t.Errorf("directory not created: %s", dir)
 		}
 	}
 }

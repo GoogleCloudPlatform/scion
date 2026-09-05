@@ -603,6 +603,9 @@ export class ScionPageProjectCreate extends LitElement {
         if (this.gitWorkspaceMode === 'shared') {
           labels['scion.dev/workspace-mode'] = 'shared';
           body.workspaceMode = 'shared';
+        } else if (this.gitWorkspaceMode === 'per-agent') {
+          labels['scion.dev/workspace-mode'] = 'per-agent';
+          body.workspaceMode = 'per-agent';
         } else if (this.gitWorkspaceMode === 'worktree-per-agent') {
           labels['scion.dev/workspace-mode'] = 'worktree-per-agent';
           body.workspaceMode = 'worktree-per-agent';

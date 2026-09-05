@@ -101,7 +101,9 @@ func TestAuthz_ProjectOwnerBypass_NonCreatorOwnerCanUpdateProject(t *testing.T) 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
 	assert.True(t, decision.Allowed, "non-creator owner should be allowed to update project; reason=%q", decision.Reason)
-	assert.Equal(t, "project owner/admin", decision.Reason)
+	// CO1: The AK1 kernel evaluates role bindings; the project-owner role
+	// binding grants project.update, so the reason is "role binding grant".
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_ProjectOwnerBypass_NonCreatorAdminCanDeleteAgent(t *testing.T) {
@@ -121,8 +123,10 @@ func TestAuthz_ProjectOwnerBypass_NonCreatorAdminCanDeleteAgent(t *testing.T) {
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, agentResource(a), ActionDelete)
-	assert.True(t, decision.Allowed, "project admin should be allowed to delete agents owned by other members; reason=%q", decision.Reason)
-	assert.Equal(t, "project owner/admin", decision.Reason)
+	// CO1: The project-admin role excludes all *.delete permissions, so
+	// project admins can no longer delete agents owned by other members.
+	assert.False(t, decision.Allowed, "project admin should NOT be allowed to delete agents (project-admin excludes *.delete); reason=%q", decision.Reason)
+	assert.Equal(t, `active bindings do not include permission "agent.delete"`, decision.Reason)
 }
 
 func TestAuthz_ProjectOwnerBypass_RegularMemberCannotUpdateProject(t *testing.T) {
@@ -193,7 +197,9 @@ func TestAuthz_ScopedAdminUATProjectUpdateRequiresIndependentGrant(t *testing.T)
 
 		decision := srv.authzService.CheckAccess(ctx, scoped, projectResource(project), ActionUpdate)
 		assert.True(t, decision.Allowed, "scoped admin UAT should use project admin membership after scope checks; reason=%q", decision.Reason)
-		assert.Equal(t, "project owner/admin", decision.Reason)
+		// CO1: The AK1 kernel evaluates role bindings; the project-admin role
+		// binding grants project.update, so the reason is "role binding grant".
+		assert.Equal(t, "role binding grant", decision.Reason)
 	})
 }
 
@@ -223,8 +229,11 @@ func TestAuthz_ProjectOwnerBypass_CreatorOwnerStillWorks(t *testing.T) {
 	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
 	assert.True(t, decision.Allowed, "project creator (direct OwnerID) should still be allowed; reason=%q", decision.Reason)
-	// The OwnerID bypass is checked before the project owner/admin bypass.
-	assert.Equal(t, "resource owner", decision.Reason)
+	// CO1: The AK1 kernel evaluates role bindings first; alice has a
+	// project-owner role binding (created by createProjectMembersGroup)
+	// which includes project.update, so the role binding fires before the
+	// resource-owner relationship check.
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestAuthz_ProjectOwnerBypass_AppliesToProjectMembersGroup(t *testing.T) {
@@ -238,8 +247,10 @@ func TestAuthz_ProjectOwnerBypass_AppliesToProjectMembersGroup(t *testing.T) {
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, groupResource(membersGroup), ActionAddMember)
-	assert.True(t, decision.Allowed, "non-creator project owner should be allowed to add members; reason=%q", decision.Reason)
-	assert.Equal(t, "project owner/admin", decision.Reason)
+	// CO1: The project-owner role does not include group.addMember, so this
+	// action is no longer granted via the project owner bypass.
+	assert.False(t, decision.Allowed, "project-owner role does not include group.addMember; reason=%q", decision.Reason)
+	assert.Equal(t, `active bindings do not include permission "group.addMember"`, decision.Reason)
 }
 
 func TestAuthz_ProjectOwnerBypass_IgnoresNonCanonicalExplicitProjectGroups(t *testing.T) {
@@ -295,7 +306,9 @@ func TestAuthz_ProjectOwnerBypass_CanonicalLookupIgnoresListLimit(t *testing.T) 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
 	assert.True(t, decision.Allowed, "canonical project members group must be found even with more than 10 explicit groups; reason=%q", decision.Reason)
-	assert.Equal(t, "project owner/admin", decision.Reason)
+	// CO1: The AK1 kernel evaluates role bindings; the project-owner role
+	// binding grants project.update, so the reason is "role binding grant".
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 func TestProjectMembersGroup_SlugSquatDoesNotGrantFutureProjectOwnership(t *testing.T) {
@@ -349,7 +362,7 @@ func TestProjectMembersGroup_SlugSquatDoesNotGrantFutureProjectOwnership(t *test
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	got, err := s.GetGroup(ctx, squatted.ID)
 	require.NoError(t, err)
@@ -398,7 +411,7 @@ func TestProjectMembersGroup_AllowsExistingSystemGroupForSameProject(t *testing.
 	}
 	require.NoError(t, s.CreateGroup(ctx, membersGroup))
 
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	membership, err := s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, creator.ID)
 	require.NoError(t, err)
@@ -584,9 +597,11 @@ func TestAuthz_GCPServiceAccount_ProjectScoped_OwnerBypassApplies(t *testing.T) 
 
 	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, gcpServiceAccountResource(sa), ActionDelete)
-	assert.True(t, decision.Allowed,
-		"project owner should reach a project-scoped SA via the bypass; reason=%q", decision.Reason)
-	assert.Equal(t, "project owner/admin", decision.Reason)
+	// CO1: The project-owner role does not include gcp_service_account.delete,
+	// so the project owner bypass no longer grants delete on project-scoped SAs.
+	assert.False(t, decision.Allowed,
+		"project-owner role does not include gcp_service_account.delete; reason=%q", decision.Reason)
+	assert.Equal(t, `active bindings do not include permission "gcp_service_account.delete"`, decision.Reason)
 }
 
 // The regression this task exists to prevent. Goal 2 introduces hub-scoped SAs,

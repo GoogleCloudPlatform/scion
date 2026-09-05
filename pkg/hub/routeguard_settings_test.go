@@ -58,6 +58,22 @@ func TestRouteGuardSettingsConversion(t *testing.T) {
 		}
 	}
 
+	// Give super-admin user the super-admin role binding.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get super-admin role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("create super-admin role binding: %v", err)
+	}
+
 	// Give hub-admin user the hub-admin role binding.
 	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	if err != nil {
@@ -197,6 +213,22 @@ func TestDualMethodRouteWritePermission(t *testing.T) {
 		}
 	}
 
+	// Give super-admin user the super-admin role binding.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get super-admin role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("create super-admin role binding: %v", err)
+	}
+
 	// Give hub-admin user the hub-admin role binding (includes read + update).
 	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	if err != nil {
@@ -252,16 +284,17 @@ func TestDualMethodRouteWritePermission(t *testing.T) {
 		meta := routeMetadataTable[route.pattern]
 		guarded := srv.routeGuard(meta, route.handler)
 
-		// 1. Hub-viewer (read-only) can GET (route guard allows read).
-		t.Run(route.name+"_hub_viewer_GET_allowed", func(t *testing.T) {
+		// R2: hub.config.read and hub.project_defaults.read are admin functions,
+		// not user functions — hub-viewer is denied read access.
+		t.Run(route.name+"_hub_viewer_GET_denied", func(t *testing.T) {
 			viewer := NewAuthenticatedUser(tid("hub-viewer-dw"), "hub-viewer-dw@test.com", "Hub Viewer", "member", "api")
 			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
 			req = req.WithContext(contextWithIdentity(ctx, viewer))
 			rr := httptest.NewRecorder()
 			guarded(rr, req)
 
-			if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
-				t.Fatalf("hub-viewer GET on %s should be allowed, got %d; body: %s", route.name, rr.Code, rr.Body.String())
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("hub-viewer GET on %s should be denied (403), got %d; body: %s", route.name, rr.Code, rr.Body.String())
 			}
 		})
 

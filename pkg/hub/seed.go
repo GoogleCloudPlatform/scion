@@ -16,10 +16,14 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -27,10 +31,395 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// seedDefaultPoliciesAndGroups creates the default hub-members group and
-// associated policies if they don't already exist. This is called once
-// during Hub initialization and is idempotent.
-func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
+// =============================================================================
+// Built-in Role Definitions — Curated, Versioned Permission Lists (PG1)
+// =============================================================================
+//
+// Each built-in role declares an explicit set of canonical permission IDs and a
+// code-declared revision number. A new registry permission does NOT
+// automatically enter any built-in role — the permission must be added to the
+// list here and the revision bumped.
+//
+// Reconciliation at startup compares the code revision with the last-applied
+// revision stored as a hub setting. If the code revision is higher, the role
+// definition's permissions are updated to match the code-declared set.
+
+// BuiltInRole declares the code-authoritative definition of a system role.
+type BuiltInRole struct {
+	Name        string
+	Description string
+	ScopeType   string
+	Revision    int
+	Permissions []string
+}
+
+// builtInRoleRevisionKey returns the hub-setting key used to track the last
+// reconciled revision for a built-in role.
+func builtInRoleRevisionKey(roleName string) string {
+	return "builtin_role.revision." + roleName
+}
+
+// builtInRoleMarker stores both the code-declared revision and a hash of
+// the resolved permission list. This ensures reconciliation fires when
+// either the revision is bumped OR the dynamic permission list changes
+// (e.g., a new permission is added to the registry, expanding the
+// super-admin set).
+type builtInRoleMarker struct {
+	Revision int    `json:"revision"`
+	PermHash string `json:"permHash"`
+}
+
+// permListHash returns a truncated SHA-256 hex digest of the sorted
+// permission list. The sort ensures determinism regardless of input order.
+func permListHash(perms []string) string {
+	sorted := make([]string, len(perms))
+	copy(sorted, perms)
+	sort.Strings(sorted)
+	h := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return hex.EncodeToString(h[:8]) // 16 hex chars — enough for change detection
+}
+
+// BuiltInRoles returns the authoritative list of built-in role definitions.
+// Every permission ID must exist in the canonical permissions registry.
+//
+// Ordering: permissions are listed alphabetically within each role for
+// readability and deterministic comparison.
+func BuiltInRoles() []BuiltInRole {
+	return []BuiltInRole{
+		// ── System-scoped roles ──────────────────────────────────────────
+
+		{
+			Name:        store.SystemRoleSuperAdmin,
+			Description: "Full platform administrator with all permissions",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: allPermissionIDs(),
+		},
+		{
+			Name:        store.SystemRoleHubAdmin,
+			Description: "Hub administrator with scopeable admin permissions",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    2,
+			Permissions: hubAdminPermissionIDs(),
+		},
+		{
+			// hub-member: curated read permissions for directory/catalog resources.
+			// CRITICAL: Does NOT include project.list, project.read, agent.list,
+			// agent.read at system scope. Those are handled by project-scoped
+			// role bindings to prevent cross-project visibility.
+			// See: TestGolden_CrossProjectVisibilityRegression
+			Name:        store.SystemRoleHubMember,
+			Description: "Hub member with read access to directory resources and project creation",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: hubMemberPermissionIDs(),
+		},
+		{
+			// hub-viewer: read-only permissions at system scope, carefully curated.
+			// Same exclusions as hub-member (no cross-project visibility).
+			Name:        store.SystemRoleHubViewer,
+			Description: "Hub viewer with read-only access to directory resources",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: hubViewerPermissionIDs(),
+		},
+
+		// ── Project-scoped roles ─────────────────────────────────────────
+
+		{
+			Name:        store.ProjectRoleOwner,
+			Description: "Project owner with full project permissions",
+			ScopeType:   store.RoleScopeProject,
+			Revision:    1,
+			Permissions: projectOwnerPermissionIDs(),
+		},
+		{
+			Name:        store.ProjectRoleAdmin,
+			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
+			ScopeType:   store.RoleScopeProject,
+			Revision:    1,
+			Permissions: projectAdminPermissionIDs(),
+		},
+		{
+			Name:        store.ProjectRoleMember,
+			Description: "Project member with basic project permissions",
+			ScopeType:   store.RoleScopeProject,
+			Revision:    1,
+			Permissions: projectMemberCuratedPermissionIDs(),
+		},
+
+		// ── Agent roles (system-scoped, used for agent JWT scope mapping) ─
+
+		{
+			Name:        store.AgentRoleDefNone,
+			Description: "No agent permissions",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: nil,
+		},
+		{
+			Name:        store.AgentRoleDefReadonly,
+			Description: "Read-only agent permissions",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: agentRolePermissionIDs(AgentRoleReadOnly),
+		},
+		{
+			Name:        store.AgentRoleDefBaseline,
+			Description: "Baseline agent permissions",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: agentRolePermissionIDs(AgentRoleBaseline),
+		},
+		{
+			Name:        store.AgentRoleDefFull,
+			Description: "Full agent permissions",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: agentRolePermissionIDs(AgentRoleFull),
+		},
+	}
+}
+
+// hubMemberPermissionIDs returns the curated permission set for the hub-member
+// role. This is an explicit list — NOT derived from registry action classes.
+//
+// SECURITY: project.list, project.read, agent.list, agent.read are intentionally
+// EXCLUDED. Including them would grant cross-project admin-view visibility to
+// every hub member via the hasAdminView handler pattern.
+func hubMemberPermissionIDs() []string {
+	return []string{
+		// User directory (read-only)
+		"user.read",
+		"user.list",
+		// Group directory (read-only)
+		"group.read",
+		"group.list",
+		// Template catalog (read-only)
+		"template.read",
+		"template.list",
+		// Harness config catalog (read-only)
+		"harness_config.read",
+		"harness_config.list",
+		// Broker catalog (read-only)
+		"broker.read",
+		"broker.list",
+		// GCP service account catalog (read-only)
+		"gcp_service_account.read",
+		"gcp_service_account.list",
+		// OBS-5: policy.read and policy.list removed — Policy API returns 410 Gone.
+		// Skill catalog (read-only)
+		"skill.read",
+		"skill.list",
+		// Quota definitions (read-only)
+		"quota.read",
+		// Role definitions (read-only)
+		"role.read",
+		// Role bindings (read-only)
+		"role_binding.read",
+		// Hub metadata (read-only)
+		"hub.settings.read",
+		// Project creation — hub members may create projects
+		"project.create",
+	}
+}
+
+// hubViewerPermissionIDs returns the curated permission set for the hub-viewer
+// role. Read-only access to directory/catalog resources at system scope.
+//
+// Same cross-project exclusions as hub-member: no project.read/list or
+// agent.read/list at system scope.
+func hubViewerPermissionIDs() []string {
+	return []string{
+		"user.read",
+		"user.list",
+		"group.read",
+		"group.list",
+		"template.read",
+		"template.list",
+		"harness_config.read",
+		"harness_config.list",
+		"broker.read",
+		"broker.list",
+		"gcp_service_account.read",
+		"gcp_service_account.list",
+		// OBS-5: policy.read and policy.list removed — Policy API returns 410 Gone.
+		"skill.read",
+		"skill.list",
+		"quota.read",
+		"role.read",
+		"role_binding.read",
+		"hub.settings.read",
+	}
+}
+
+// projectOwnerPermissionIDs returns the curated permission set for the
+// project-owner role: all project-scoped permissions. This is an explicit list
+// — NOT derived from registry iteration. A new registry permission does NOT
+// automatically enter this role; it must be added here and the role revision
+// bumped.
+func projectOwnerPermissionIDs() []string {
+	return []string{
+		// Agent lifecycle and operations
+		"agent.attach",
+		"agent.create",
+		"agent.delete",
+		"agent.identity_token",
+		"agent.list",
+		"agent.log_append",
+		"agent.message",
+		"agent.notify",
+		"agent.port_access",
+		"agent.port_forward",
+		"agent.read",
+		"agent.set_message_mode",
+		"agent.status_update",
+		"agent.stop_all",
+		"agent.token_refresh",
+		"agent.update",
+		// Harness config management
+		"harness_config.create",
+		"harness_config.delete",
+		"harness_config.list",
+		"harness_config.read",
+		"harness_config.update",
+		// Project management
+		"project.clone",
+		"project.create",
+		"project.delete",
+		"project.list",
+		"project.manage",
+		"project.read",
+		"project.register",
+		"project.secret_read",
+		"project.update",
+		// Scheduled event management
+		"scheduled_event.create",
+		"scheduled_event.delete",
+		"scheduled_event.list",
+		"scheduled_event.read",
+		"scheduled_event.update",
+		// Skill management
+		"skill.create",
+		"skill.delete",
+		"skill.list",
+		"skill.read",
+		"skill.register",
+		"skill.update",
+		// Template management
+		"template.create",
+		"template.delete",
+		"template.list",
+		"template.read",
+		"template.update",
+	}
+}
+
+// projectAdminPermissionIDs returns the curated permission set for the
+// project-admin role. This is an explicit list — NOT derived from registry
+// iteration. Compared to project-owner, this excludes:
+//   - All *.delete permissions (admins cannot delete resources)
+//   - agent.set_message_mode (D7: only project owners may unseal none-mode agents)
+//
+// A new registry permission does NOT automatically enter this role; it must be
+// added here and the role revision bumped.
+func projectAdminPermissionIDs() []string {
+	return []string{
+		// Agent lifecycle and operations (no delete, no set_message_mode)
+		"agent.attach",
+		"agent.create",
+		"agent.identity_token",
+		"agent.list",
+		"agent.log_append",
+		"agent.message",
+		"agent.notify",
+		"agent.port_access",
+		"agent.port_forward",
+		"agent.read",
+		"agent.status_update",
+		"agent.stop_all",
+		"agent.token_refresh",
+		"agent.update",
+		// Harness config management (no delete)
+		"harness_config.create",
+		"harness_config.list",
+		"harness_config.read",
+		"harness_config.update",
+		// Project management (no delete)
+		"project.clone",
+		"project.create",
+		"project.list",
+		"project.manage",
+		"project.read",
+		"project.register",
+		"project.secret_read",
+		"project.update",
+		// Scheduled event management (no delete)
+		"scheduled_event.create",
+		"scheduled_event.list",
+		"scheduled_event.read",
+		"scheduled_event.update",
+		// Skill management (no delete)
+		"skill.create",
+		"skill.list",
+		"skill.read",
+		"skill.register",
+		"skill.update",
+		// Template management (no delete)
+		"template.create",
+		"template.list",
+		"template.read",
+		"template.update",
+	}
+}
+
+// projectMemberCuratedPermissionIDs returns the curated permission set for the
+// project-member role. This is an explicit list — NOT derived from registry
+// iteration. Members get create, read, list, and message actions on project-
+// scoped resources, plus agent.stop_all.
+//
+// A new registry permission does NOT automatically enter this role; it must be
+// added here and the role revision bumped.
+func projectMemberCuratedPermissionIDs() []string {
+	return []string{
+		// Agent operations (create, read, list, message, stop_all)
+		"agent.create",
+		"agent.list",
+		"agent.message",
+		"agent.read",
+		"agent.stop_all",
+		// Harness config (create, read, list)
+		"harness_config.create",
+		"harness_config.list",
+		"harness_config.read",
+		// Project (create, read, list)
+		"project.create",
+		"project.list",
+		"project.read",
+		// Scheduled events (create, read, list)
+		"scheduled_event.create",
+		"scheduled_event.list",
+		"scheduled_event.read",
+		// Skills (create, read, list)
+		"skill.create",
+		"skill.list",
+		"skill.read",
+		// Templates (create, read, list)
+		"template.create",
+		"template.list",
+		"template.read",
+	}
+}
+
+// seedDefaultGroupsAndBindings creates the default hub-members group and
+// associated role binding. This is called once during Hub initialization
+// and is idempotent.
+//
+// The hub-members group gets a single system-scoped RoleBinding of the
+// hub-member role, which contains a curated permission set. All
+// authorization decisions route through the AK1 kernel using role
+// bindings — no legacy policy seeding is needed.
+func seedDefaultGroupsAndBindings(ctx context.Context, s store.Store) {
 	// 1. Create hub-members group (skip if already exists)
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {
@@ -51,686 +440,40 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		slog.Info("seeded hub-members group", "id", group.ID)
 	}
 
-	// 2. Narrow the hub-member-read-all policy from wildcard to explicit
-	// per-type read policies for directory/catalog resources. Project and agent
-	// reads now come from per-project membership-scoped policies (created by
-	// createProjectMembersGroupAndPolicy and backfillProjectMemberReadPolicies).
-	narrowHubMemberReadAll(ctx, s, group.ID)
+	// 2. Create a system-scoped RoleBinding of hub-member role to the
+	// hub-members group. This single binding is the positive authority
+	// source for hub member permissions.
+	seedHubMemberRoleBinding(ctx, s, group.ID)
+}
 
-	// Seed explicit per-type read policies for resources that should remain
-	// globally readable by all hub members. Only project and agent resources
-	// are excluded — those are gated by per-project membership policies.
-	for _, rt := range []string{"user", "group", "template", "harness_config", "broker", "runtime_broker", "gcp_service_account", "policy", "skill", "quota", "role", "role_binding", "hub"} {
-		seedPolicy(ctx, s, group.ID, &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         "hub-member-read-" + rt,
-			Description:  "Allow hub members to read " + rt + " resources",
-			ScopeType:    "hub",
-			ScopeID:      "",
-			ResourceType: rt,
-			Actions:      []string{"read", "list"},
-			Effect:       "allow",
-		})
+// seedHubMemberRoleBinding creates a system-scoped RoleBinding of the
+// hub-member role to the hub-members group. Idempotent — skips if the
+// binding already exists.
+func seedHubMemberRoleBinding(ctx context.Context, s store.Store, hubMembersGroupID string) {
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	if err != nil {
+		slog.Warn("hub-member role definition not found; cannot seed binding", "error", err)
+		return
 	}
 
-	// 3. Seed hub-member-create-projects policy
-	seedPolicy(ctx, s, group.ID, &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         "hub-member-create-projects",
-		Description:  "Allow hub members to create projects",
-		ScopeType:    "hub",
-		ScopeID:      "",
-		ResourceType: "project",
-		Actions:      []string{"create"},
-		Effect:       "allow",
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      hubMembersGroupID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
 	})
-
-	// Backfill Origin="seeded" on any existing seeded policies that predate
-	// the Origin field.
-	backfillSeededPolicyOrigin(ctx, s, []string{
-		"hub-member-read-all",
-		"hub-member-create-projects",
-		"hub-member-read-user",
-		"hub-member-read-group",
-		"hub-member-read-template",
-		"hub-member-read-harness_config",
-		"hub-member-read-broker",
-		"hub-member-read-runtime_broker",
-		"hub-member-read-gcp_service_account",
-		"hub-member-read-policy",
-		"hub-member-read-skill",
-		"hub-member-read-quota",
-		"hub-member-read-role",
-		"hub-member-read-role_binding",
-		"hub-member-read-hub",
-	})
-
-	// The human half of the svc-accnt service-account assign baseline is
-	// deliberately NOT seeded here. It is a PROJECT-scoped policy created per
-	// project by createProjectMembersGroupAndPolicy, and backfilled onto
-	// existing projects by backfillProjectAssignPolicies below. See
-	// projectAssignPolicyName for why hub scope was rejected.
-}
-
-// projectAssignPolicyName returns the name of a project's service-account
-// assign policy.
-//
-// ⚠️ Policy names are NOT unique hub-wide — there is no such constraint; see
-// ensureProjectAssignPolicy. Idempotency here comes from that function looking
-// the name up before creating, and from this being the only code that writes
-// this name. It is a convention this package keeps, not an invariant the store
-// enforces.
-//
-// ── Why this policy exists ────────────────────────────────────────────────
-//
-// Assigning a service account to an agent is gated today on ActionRead, which
-// the hub-wide hub-member-read-all policy already allows for every hub member.
-// svc-accnt P3 converts that gate to ActionAssign so the GCP actAs check has a
-// resource-shaped place to hang. Without an assign grant somewhere, that
-// conversion would deny every caller who is neither the account's creator nor
-// a project owner or admin, since no other seeded policy grants assign. The
-// security in that change comes from the actAs check, not from narrowing the
-// Hub policy layer — a conversion that denies someone who can assign today is
-// a regression, not a hardening.
-//
-// The population it must reproduce is exactly "members of this project":
-//   - seed.go's hub-member-read-all grants read+list on "*" hub-wide, which is
-//     what makes assign reachable for plain members today via the ActionRead
-//     gate; and
-//   - createProjectMembersGroupAndPolicy binds agent create as a PROJECT-scoped
-//     policy to the members group, so only members of project P can create an
-//     agent in P in the first place.
-//
-// Effective population today == project members. This policy reproduces it.
-//
-// ── Why project scope and not hub scope ───────────────────────────────────
-//
-// A hub-scoped assign policy on gcp_service_account cannot exclude parentless
-// resources, so it would grant assign on every HUB-scoped service account to
-// every hub member — which is the Goal 2 coupling arriving early, through the
-// policy layer, before it has been ruled on.
-//
-// Project scope dissolves that structurally rather than managing it:
-// matchesResource rejects a project-scoped policy against a resource that
-// resolves to no project (pid == "" || pid != policy.ScopeID, fail closed
-// rather than fall through — #595). gcpServiceAccountResource gives a project
-// parent only to project-scoped accounts, so a hub-scoped account yields
-// pid == "" and this policy CANNOT match it. No code-side guard is needed, and
-// none should be added: a policy that presents as applied but is revoked
-// elsewhere is the shape this change exists to avoid.
-//
-// ⚠️ WHAT CONFINES THIS POLICY is matchesResource alone: it refuses to match a
-// project-scoped policy against a resource that resolves to no project (#595).
-// That is a property of the authorization engine. It holds no matter what any
-// handler does, and it is the only thing that needs to be true.
-//
-// Do NOT justify this policy by the scope check in createAgentInProject. An
-// earlier version of this comment named `sa.ScopeID != projectID` there as an
-// enforcing mechanism; a44b2950 replaced it with sa.ReachableFromProject,
-// which admits hub-scoped accounts from every project. The justification went
-// stale while the policy stayed correct for a reason the comment had not
-// recorded. A confinement argument that names a call site can be invalidated
-// by a commit to that call site, silently. Name engine properties only.
-//
-// The agent-side arm (step 3b of checkAccessForAgent) is confined by the SAME
-// engine property read the other way: that arm by `pid != ""`, this policy by
-// `pid == ""` in matchesResource. One discipline in two places, not two
-// unrelated accidents.
-//
-// Goal 2 makes hub-scoped accounts assignable across projects. That does not
-// breach this policy — a hub-scoped account stays parentless, so this policy
-// still cannot match it, which is the fail-closed outcome §8.2 rules correct:
-// hub-scoped accounts are assignable by hub admins and the account's creator
-// and nobody else. If you are here to make hub-scoped accounts broadly
-// assignable, that is task #19, and doing it by adding a hub-scoped assign
-// policy would grant every hub member every service account on the hub.
-//
-// ⚠️ #19 CONSTRAINT: whatever implements that toggle must NOT do it by
-// deleting or editing a grant by name. CreatePolicy enforces no name
-// uniqueness, so a name identifies a SET of rows, and ListPolicies(Name:X,
-// Limit:1) returns an arbitrary element of it. Additive operations are safe;
-// revocation by name is not.
-//
-// ── Scope of the "preserves existing reach" claim ─────────────────────────
-//
-// It restores the reach of hub-member-read-all for project members and nothing
-// else. The action-insensitive bypasses — hub admin, resource owner, project
-// owner/admin — never consulted the action and are unaffected. A hand-authored
-// policy granting read on service accounts to some other group is deliberately
-// NOT mirrored, because a grant to read a service account is not a grant to
-// assign one. Such an operator loses assign for that group and must grant it
-// explicitly. Do not describe this policy as "reachability-preserving" without
-// that qualification.
-func projectAssignPolicyName(slug string) string {
-	return "project:" + slug + ":member-assign-service-accounts"
-}
-
-// ensureProjectAssignPolicy creates the project's service-account assign
-// policy and binds it to the project's members group. It is idempotent, and an
-// existing policy has its ScopeID repaired in case the project was recreated.
-// Best-effort; failures are logged.
-//
-// ResourceType is the single literal "gcp_service_account" and not "*".
-// hub-member-read-all uses the wildcard because read is broadly safe; assign
-// is not, so this mirrors that policy's reach without inheriting its breadth.
-// Actions is assign alone for the same reason.
-//
-// ⚠️ Idempotency is by name LOOKUP, the way seedPolicy does it — deliberately
-// not by creating and catching store.ErrAlreadyExists. CreatePolicy does not
-// enforce name uniqueness, so that error never arrives and the catch would be
-// dead code: three project touches would produce three identical policies.
-// This is a live defect on the neighbouring project:<slug>:member-create-agents
-// policy above, which does use the catch pattern. Do not "simplify" this back
-// to create-then-catch, and do not assume a uniqueness constraint exists.
-func ensureProjectAssignPolicy(ctx context.Context, s store.Store, project *store.Project, groupID string) {
-	name := projectAssignPolicyName(project.Slug)
-
-	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
 	if err != nil {
-		slog.Warn("failed to check for existing project assign policy",
-			"project_id", project.ID, "policy", name, "error", err.Error())
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return // already seeded
+		}
+		slog.Warn("failed to seed hub-member role binding for hub-members group",
+			"group_id", hubMembersGroupID, "error", err)
 		return
 	}
-
-	var policy *store.Policy
-	if len(existing.Items) > 0 {
-		policy = &existing.Items[0]
-		if policy.ScopeID != project.ID {
-			policy.ScopeID = project.ID
-			if updateErr := s.UpdatePolicy(ctx, policy); updateErr != nil {
-				slog.Warn("failed to update existing project assign policy",
-					"project_id", project.ID, "policy", name, "error", updateErr.Error())
-			}
-		}
-	} else {
-		policy = &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         name,
-			Description:  "Allow project members to assign GCP service accounts in this project",
-			ScopeType:    "project",
-			ScopeID:      project.ID,
-			ResourceType: "gcp_service_account",
-			Actions:      []string{"assign"},
-			Effect:       "allow",
-		}
-		if createErr := s.CreatePolicy(ctx, policy); createErr != nil {
-			slog.Warn("failed to create project assign policy",
-				"project_id", project.ID, "policy", name, "error", createErr.Error())
-			return
-		}
-		slog.Info("created project assign policy", "project_id", project.ID, "policy", name, "id", policy.ID)
-	}
-
-	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "group",
-		PrincipalID:   groupID,
-	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Warn("failed to bind project assign policy",
-			"project_id", project.ID, "policy", name, "error", err.Error())
-	}
-}
-
-// backfillProjectAssignPolicies gives every existing project the assign policy
-// described on projectAssignPolicyName. It runs once at startup and is
-// idempotent by policy name, like seedPolicy.
-//
-// It is not redundant with createProjectMembersGroupAndPolicy, which already
-// runs on several project touch paths. Most projects would pick the policy up
-// on their next touch — but a project nobody touches never would, and its
-// members would silently lose the ability to assign service accounts the
-// moment the ActionAssign conversion lands. Without this, the conversion is
-// not reachability-preserving on existing hubs. Do not remove it on the
-// grounds that the create path covers it; the create path covers active
-// projects only.
-//
-// A project with no members group is skipped: there is nothing to bind to, and
-// createProjectMembersGroupAndPolicy will create both together on next touch.
-func backfillProjectAssignPolicies(ctx context.Context, s store.Store) {
-	var cursor string
-	for {
-		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
-			Limit:  500,
-			Cursor: cursor,
-		})
-		if err != nil {
-			slog.Warn("failed to list projects for assign-policy backfill", "error", err)
-			return
-		}
-		for i := range res.Items {
-			project := &res.Items[i]
-			group, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-			if err != nil {
-				slog.Debug("skipping assign-policy backfill, no members group",
-					"project_id", project.ID, "slug", project.Slug)
-				continue
-			}
-			ensureProjectAssignPolicy(ctx, s, project, group.ID)
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-}
-
-// backfillProjectMessageAction ensures every existing project's member-create-agents
-// policy includes the "message" action. Projects created before msg-authz (PR #1371)
-// only had "create" (and possibly "stop_all") — without "message", non-owner/non-admin
-// project members silently lose the ability to message agents. The inline backfill in
-// createProjectMembersGroupAndPolicy covers projects that are touched after the
-// upgrade, but a project nobody touches never runs that path. This startup backfill
-// closes the gap.
-func backfillProjectMessageAction(ctx context.Context, s store.Store) {
-	var cursor string
-	for {
-		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
-			Limit:  500,
-			Cursor: cursor,
-		})
-		if err != nil {
-			slog.Warn("failed to list projects for message-action backfill", "error", err)
-			return
-		}
-		for i := range res.Items {
-			project := &res.Items[i]
-			policyName := "project:" + project.Slug + ":member-create-agents"
-			policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-			if err != nil || len(policies.Items) == 0 {
-				slog.Debug("skipping message-action backfill, no member policy",
-					"project_id", project.ID, "slug", project.Slug)
-				continue
-			}
-			policy := &policies.Items[0]
-			hasMessage := false
-			for _, a := range policy.Actions {
-				if a == "message" {
-					hasMessage = true
-					break
-				}
-			}
-			if !hasMessage {
-				policy.Actions = append(policy.Actions, "message")
-				if err := s.UpdatePolicy(ctx, policy); err != nil {
-					slog.Warn("failed to backfill message action into project member policy",
-						"project_id", project.ID, "policy", policyName, "error", err)
-				} else {
-					slog.Info("backfilled message action into project member policy",
-						"project_id", project.ID, "policy", policyName)
-				}
-			}
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-}
-
-// backfillProjectMemberReadPolicies ensures every existing project has
-// per-project member-read policies for the "project" and "agent" resource
-// types. Without this, narrowing hub-member-read-all at startup would lock
-// regular (non-owner/non-admin) members of untouched projects out of
-// project reads — they have no owner/admin bypass and the wildcard policy
-// that previously granted access has been deleted. The inline backfill in
-// createProjectMembersGroupAndPolicy covers projects that are touched after
-// the upgrade; this covers the rest.
-func backfillProjectMemberReadPolicies(ctx context.Context, s store.Store) {
-	var cursor string
-	for {
-		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
-			Limit:  500,
-			Cursor: cursor,
-		})
-		if err != nil {
-			slog.Warn("failed to list projects for member-read-policy backfill", "error", err)
-			return
-		}
-		for i := range res.Items {
-			project := &res.Items[i]
-			group, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-			if err != nil {
-				slog.Debug("skipping member-read-policy backfill, no members group",
-					"project_id", project.ID, "slug", project.Slug)
-				continue
-			}
-			ensureProjectMemberReadPolicies(ctx, s, project, group.ID)
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-}
-
-// backfillScheduledEventPermissions ensures every existing project has a
-// project-scoped policy granting the scheduled_event actions (create, read,
-// list) to project members. Projects created after this change pick up
-// scheduled_event permissions through the role definitions seeded by
-// seedRoleDefinitions, but existing role definitions are not updated at
-// startup — so this policy-based backfill closes the gap for existing
-// deployments.
-//
-// Idempotent: the function looks up the policy by name before creating. It
-// follows the same pattern as backfillProjectAssignPolicies.
-func backfillScheduledEventPermissions(ctx context.Context, s store.Store) {
-	var cursor string
-	for {
-		res, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
-			Limit:  500,
-			Cursor: cursor,
-		})
-		if err != nil {
-			slog.Warn("failed to list projects for scheduled-event-permission backfill", "error", err)
-			return
-		}
-		for i := range res.Items {
-			project := &res.Items[i]
-			group, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-			if err != nil {
-				slog.Debug("skipping scheduled-event-permission backfill, no members group",
-					"project_id", project.ID, "slug", project.Slug)
-				continue
-			}
-			ensureProjectScheduledEventPolicy(ctx, s, project, group.ID)
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-}
-
-// ensureProjectMemberReadPolicies creates read+list policies for "project"
-// and "agent" resource types scoped to the given project, bound to the
-// project's members group. Idempotent: skips creation if the policy already
-// exists, and repairs stale ScopeID on pre-existing policies.
-//
-// This is a standalone function (not a Server method) so it can be called
-// from startup backfill paths that don't have a Server instance.
-func ensureProjectMemberReadPolicies(ctx context.Context, s store.Store, project *store.Project, membersGroupID string) {
-	for _, rt := range []string{"project", "agent"} {
-		policyName := "project:" + project.Slug + ":member-read-" + rt
-		policy := &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         policyName,
-			Description:  fmt.Sprintf("Allow members to read %s resources in project '%s'", rt, project.Slug),
-			ScopeType:    "project",
-			ScopeID:      project.ID,
-			ResourceType: rt,
-			Actions:      []string{"read", "list"},
-			Effect:       "allow",
-		}
-		if err := s.CreatePolicy(ctx, policy); err != nil {
-			if !errors.Is(err, store.ErrAlreadyExists) {
-				slog.Warn("failed to create project member read policy",
-					"project_id", project.ID, "policy", policyName, "resourceType", rt, "error", err.Error())
-				continue
-			}
-			// Policy already exists — ensure scope ID is correct.
-			existing, lookupErr := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-			if lookupErr != nil || len(existing.Items) == 0 {
-				slog.Warn("failed to look up existing project member read policy",
-					"project_id", project.ID, "policy", policyName, "error", lookupErr)
-				continue
-			}
-			policy = &existing.Items[0]
-			if policy.ScopeID != project.ID {
-				policy.ScopeID = project.ID
-				if updateErr := s.UpdatePolicy(ctx, policy); updateErr != nil {
-					slog.Warn("failed to update existing project member read policy",
-						"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
-				}
-			}
-		}
-
-		// Bind policy to the members group
-		if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
-			PolicyID:      policy.ID,
-			PrincipalType: "group",
-			PrincipalID:   membersGroupID,
-		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to bind project member read policy",
-				"project_id", project.ID, "policy", policyName, "error", err.Error())
-		}
-	}
-}
-
-// narrowHubMemberReadAll migrates an existing hub-member-read-all policy from
-// the wildcard ResourceType:"*" to a no-op state. On existing hubs the wildcard
-// policy grants every hub member read+list on all resource types, including
-// project and agent. This migration deletes that wildcard policy so that
-// project and agent reads are controlled by per-project membership policies
-// instead. Per-type policies for all other resource types (user, group,
-// template, harness_config, broker, runtime_broker, gcp_service_account,
-// policy, skill, quota, role, role_binding, hub) are seeded separately.
-//
-// Idempotent: if the wildcard policy no longer exists, this is a no-op.
-func narrowHubMemberReadAll(ctx context.Context, s store.Store, hubMembersGroupID string) {
-	existing, err := s.ListPolicies(ctx, store.PolicyFilter{
-		Name:      "hub-member-read-all",
-		ScopeType: "hub",
-	}, store.ListOptions{Limit: 1})
-	if err != nil || len(existing.Items) == 0 {
-		return
-	}
-	policy := &existing.Items[0]
-	if policy.ResourceType != "*" {
-		return // already narrowed or customized
-	}
-	// Delete the wildcard policy. The per-type replacements are seeded right after.
-	if err := s.DeletePolicy(ctx, policy.ID); err != nil {
-		slog.Warn("failed to delete wildcard hub-member-read-all policy",
-			"id", policy.ID, "error", err)
-		return
-	}
-	// Record a tombstone so the old wildcard policy is not re-seeded.
-	_, _ = s.UpsertHubSetting(ctx, seedPolicyTombstoneKey("hub-member-read-all"),
-		json.RawMessage(`"narrowed"`), "system", -1, "seeded")
-	slog.Info("narrowed hub-member-read-all: deleted wildcard policy",
-		"id", policy.ID)
-}
-
-// ensureProjectScheduledEventPolicy creates the project's scheduled-event
-// member policy and binds it to the project's members group. Idempotent by
-// policy-name lookup, following the ensureProjectAssignPolicy pattern.
-func ensureProjectScheduledEventPolicy(ctx context.Context, s store.Store, project *store.Project, groupID string) {
-	name := "project:" + project.Slug + ":member-scheduled-events"
-
-	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
-	if err != nil {
-		slog.Warn("failed to check for existing project scheduled-event policy",
-			"project_id", project.ID, "policy", name, "error", err.Error())
-		return
-	}
-
-	var policy *store.Policy
-	if len(existing.Items) > 0 {
-		policy = &existing.Items[0]
-		if policy.ScopeID != project.ID {
-			policy.ScopeID = project.ID
-			if updateErr := s.UpdatePolicy(ctx, policy); updateErr != nil {
-				slog.Warn("failed to update existing project scheduled-event policy",
-					"project_id", project.ID, "policy", name, "error", updateErr.Error())
-			}
-		}
-	} else {
-		policy = &store.Policy{
-			ID:           api.NewUUID(),
-			Name:         name,
-			Description:  "Allow project members to create, read, and list scheduled events",
-			ScopeType:    "project",
-			ScopeID:      project.ID,
-			ResourceType: "scheduled_event",
-			Actions:      []string{"create", "read", "list"},
-			Effect:       "allow",
-		}
-		if createErr := s.CreatePolicy(ctx, policy); createErr != nil {
-			slog.Warn("failed to create project scheduled-event policy",
-				"project_id", project.ID, "policy", name, "error", createErr.Error())
-			return
-		}
-		slog.Info("created project scheduled-event policy", "project_id", project.ID, "policy", name, "id", policy.ID)
-	}
-
-	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "group",
-		PrincipalID:   groupID,
-	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Warn("failed to bind project scheduled-event policy",
-			"project_id", project.ID, "policy", name, "error", err.Error())
-	}
-}
-
-// backfillHubAdminRolePermissions ensures the hub-admin role definition
-// includes all permissions from hubAdminPermissionIDs(). Existing deployments
-// may have a hub-admin role that predates the scheduled_event.* permissions;
-// this backfill adds them without removing any permissions an operator may have
-// customised. It is idempotent and follows the log-and-continue pattern used by
-// backfillProjectAssignPolicies.
-func backfillHubAdminRolePermissions(ctx context.Context, s store.Store) {
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	if err != nil {
-		slog.Warn("failed to look up hub-admin role definition for permission backfill", "error", err)
-		return
-	}
-	if rd == nil {
-		slog.Warn("hub-admin role definition is nil for permission backfill")
-		return
-	}
-
-	desired := hubAdminPermissionIDs()
-
-	// Build a set of current permissions for O(1) lookup.
-	current := make(map[string]bool, len(rd.Permissions))
-	for _, p := range rd.Permissions {
-		current[p] = true
-	}
-
-	// Compute missing permissions (additive only — never remove).
-	var missing []string
-	for _, p := range desired {
-		if !current[p] {
-			missing = append(missing, p)
-		}
-	}
-
-	if len(missing) == 0 {
-		return // nothing to do
-	}
-
-	updated := make([]string, len(rd.Permissions), len(rd.Permissions)+len(missing))
-	copy(updated, rd.Permissions)
-	updated = append(updated, missing...)
-
-	if err := s.UpdateSystemRoleDefinitionPermissions(ctx, rd.ID, updated); err != nil {
-		slog.Warn("failed to backfill hub-admin role permissions", "error", err)
-		return
-	}
-	slog.Info("backfilled hub-admin role permissions", "added", missing)
-}
-
-// seedPolicyTombstoneKey returns the hub-setting key used to record that a
-// seeded policy was intentionally deleted by an operator.
-func seedPolicyTombstoneKey(policyName string) string {
-	return fmt.Sprintf("seed.policy.deleted.%s", policyName)
-}
-
-// hasSeedPolicyTombstone returns true if a tombstone hub setting exists for the
-// given seeded policy name, indicating it was intentionally deleted.
-// It returns an error for transient store failures so the caller can fail-closed.
-func hasSeedPolicyTombstone(ctx context.Context, s store.Store, policyName string) (bool, error) {
-	_, err := s.GetHubSetting(ctx, seedPolicyTombstoneKey(policyName))
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	return false, err
-}
-
-// seedPolicy creates a policy and binds it to the given group, skipping
-// if a policy with the same name already exists or if a deletion tombstone
-// is present.
-func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *store.Policy) {
-	// Check if policy already exists by name+scope.
-	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policy.Name, ScopeType: policy.ScopeType}, store.ListOptions{Limit: 1})
-	if err != nil {
-		slog.Warn("failed to check for existing policy", "name", policy.Name, "error", err)
-		return
-	}
-	if existing.TotalCount > 0 {
-		return
-	}
-
-	// Check for deletion tombstone — an operator intentionally deleted this
-	// seeded policy and it should not be recreated.
-	hasTombstone, err := hasSeedPolicyTombstone(ctx, s, policy.Name)
-	if err != nil {
-		slog.Warn("failed to check tombstone; skipping recreation as precaution",
-			"name", policy.Name, "error", err)
-		return // fail-closed
-	}
-	if hasTombstone {
-		slog.Info("seeded policy was intentionally deleted; skipping recreation",
-			"name", policy.Name)
-		return
-	}
-
-	// Mark as seeded so the delete handler can record a tombstone.
-	policy.Origin = store.PolicyOriginSeeded
-	// Mark as default kind so explicit policies can override at same priority.
-	policy.PolicyKind = store.PolicyKindDefault
-
-	if err := s.CreatePolicy(ctx, policy); err != nil {
-		slog.Warn("failed to create seed policy", "name", policy.Name, "error", err)
-		return
-	}
-	slog.Info("seeded policy", "name", policy.Name, "id", policy.ID)
-
-	// Bind policy to the group
-	binding := &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "group",
-		PrincipalID:   groupID,
-	}
-	if err := s.AddPolicyBinding(ctx, binding); err != nil {
-		slog.Warn("failed to bind seed policy to hub-members group",
-			"policy", policy.Name, "error", err)
-	}
-}
-
-// backfillSeededPolicyOrigin marks existing seeded policies with
-// Origin="seeded" if they were created before the Origin field existed.
-// This ensures existing deployments get the marker on upgrade.
-func backfillSeededPolicyOrigin(ctx context.Context, s store.Store, seededNames []string) {
-	for _, name := range seededNames {
-		existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name, ScopeType: "hub"}, store.ListOptions{Limit: 1})
-		if err != nil || len(existing.Items) == 0 {
-			continue
-		}
-		p := &existing.Items[0]
-		needsUpdate := false
-		if p.Origin == "" {
-			p.Origin = store.PolicyOriginSeeded
-			needsUpdate = true
-		}
-		// Also backfill PolicyKind for seeded policies
-		if p.Origin == store.PolicyOriginSeeded && p.PolicyKind == "" {
-			p.PolicyKind = store.PolicyKindDefault
-			needsUpdate = true
-		}
-		if needsUpdate {
-			if err := s.UpdatePolicy(ctx, p); err != nil {
-				slog.Warn("failed to backfill seeded policy origin/kind",
-					"name", name, "error", err)
-			} else {
-				slog.Info("backfilled seeded policy origin/kind", "name", name, "id", p.ID)
-			}
-		}
-	}
+	slog.Info("seeded hub-member role binding for hub-members group",
+		"group_id", hubMembersGroupID, "role_definition_id", rd.ID)
 }
 
 // seedDevUser ensures the development pseudo-user exists in the store.
@@ -741,7 +484,10 @@ func seedDevUser(ctx context.Context, s store.Store, cfg DevUserConfig) {
 	u := NewDevUser(cfg)
 	_, err := s.GetUser(ctx, DevUserID)
 	if err == nil {
-		return // already exists
+		// User exists — ensure super-admin role binding (CO1: AK1 kernel requires
+		// role bindings, not just the User.Role field).
+		ensureDevUserRoleBinding(ctx, s)
+		return
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		slog.Warn("failed to check for dev user", "error", err)
@@ -755,73 +501,162 @@ func seedDevUser(ctx context.Context, s store.Store, cfg DevUserConfig) {
 		Status:      "active",
 	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		slog.Warn("failed to seed dev user", "error", err)
+		return
+	}
+	ensureDevUserRoleBinding(ctx, s)
+}
+
+// ensureDevUserRoleBinding creates a super-admin role binding for the dev user
+// if one does not already exist. CO1: The AK1 kernel requires role bindings
+// for authorization — the User.Role field alone is not sufficient.
+func ensureDevUserRoleBinding(ctx context.Context, s store.Store) {
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		slog.Warn("failed to find super-admin role definition for dev user", "error", err)
+		return
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      DevUserID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.Warn("failed to create super-admin role binding for dev user", "error", err)
 	}
 }
 
-// seedRoleDefinitions creates the system role definitions if they don't
-// already exist. It is called once during Hub initialization and is idempotent.
-func seedRoleDefinitions(ctx context.Context, s store.Store) {
-	allPermIDs := allPermissionIDs()
-	hubAdminPermIDs := hubAdminPermissionIDs()
-	readListPermIDs := permissionIDsByActions("read", "list")
-	readOnlyPermIDs := permissionIDsByActions("read")
-
-	// Project-scoped permission IDs (all permissions that can apply to project resources)
-	projectAllPermIDs := projectScopedPermissionIDs()
-	projectAdminPermIDs := projectPermissionIDsExcluding("delete")
-	projectMemberPermIDs := projectMemberPermissionIDs()
-
-	// Agent role permission IDs (mapped from agent token scopes)
-	agentReadonlyPermIDs := agentRolePermissionIDs(AgentRoleReadOnly)
-	agentBaselinePermIDs := agentRolePermissionIDs(AgentRoleBaseline)
-	agentFullPermIDs := agentRolePermissionIDs(AgentRoleFull)
-
-	systemRoles := []struct {
-		name        string
-		description string
-		scopeType   string
-		permissions []string
-	}{
-		{store.SystemRoleSuperAdmin, "Full platform administrator with all permissions", store.RoleScopeSystem, allPermIDs},
-		{store.SystemRoleHubAdmin, "Hub administrator with scopeable admin permissions", store.RoleScopeSystem, hubAdminPermIDs},
-		{store.SystemRoleHubMember, "Hub member with read access and project creation", store.RoleScopeSystem, readListPermIDs},
-		{store.SystemRoleHubViewer, "Hub viewer with read-only access", store.RoleScopeSystem, readOnlyPermIDs},
-		{store.ProjectRoleOwner, "Project owner with full project permissions", store.RoleScopeProject, projectAllPermIDs},
-		{store.ProjectRoleAdmin, "Project admin with most project permissions (no delete)", store.RoleScopeProject, projectAdminPermIDs},
-		{store.ProjectRoleMember, "Project member with basic project permissions", store.RoleScopeProject, projectMemberPermIDs},
-		{store.AgentRoleDefNone, "No agent permissions", store.RoleScopeSystem, nil},
-		{store.AgentRoleDefReadonly, "Read-only agent permissions", store.RoleScopeSystem, agentReadonlyPermIDs},
-		{store.AgentRoleDefBaseline, "Baseline agent permissions", store.RoleScopeSystem, agentBaselinePermIDs},
-		{store.AgentRoleDefFull, "Full agent permissions", store.RoleScopeSystem, agentFullPermIDs},
-	}
-
-	for _, role := range systemRoles {
-		seedRoleDefinition(ctx, s, role.name, role.description, role.scopeType, role.permissions)
+// reconcileBuiltInRoles performs deterministic reconciliation of built-in role
+// definitions. For each code-declared built-in role:
+//
+//  1. If the role does not exist in the store, create it.
+//  2. If it exists and the code revision is higher than the last-applied
+//     revision (tracked via hub settings), update the permissions to match
+//     the code-declared set exactly.
+//  3. If the code revision equals the stored revision, no update is needed.
+//
+// This replaces the old create-if-missing seedRoleDefinitions behavior.
+// A new registry permission does NOT automatically enter a built-in role —
+// it must be explicitly added to the role's permission list and the revision
+// bumped.
+//
+// Reconciliation is idempotent: running twice with the same code produces the
+// same result.
+func reconcileBuiltInRoles(ctx context.Context, s store.Store) {
+	for _, role := range BuiltInRoles() {
+		reconcileBuiltInRole(ctx, s, role)
 	}
 }
 
-// seedRoleDefinition creates a single role definition if it doesn't already exist.
-func seedRoleDefinition(ctx context.Context, s store.Store, name, description, scopeType string, perms []string) {
-	_, err := s.GetRoleDefinitionByName(ctx, name, scopeType)
-	if err == nil {
-		return // already exists
+// reconcileBuiltInRole creates or updates a single built-in role definition.
+// R-6: The applied-revision marker now includes a hash of the resolved
+// permission list. This ensures reconciliation fires when the dynamic
+// permission list changes (e.g., a new permission added to the registry
+// expands the super-admin set), even if the code revision is unchanged.
+func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) {
+	codeMarker := builtInRoleMarker{
+		Revision: role.Revision,
+		PermHash: permListHash(role.Permissions),
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		slog.Warn("failed to check for existing role definition", "name", name, "error", err)
+
+	existing, err := s.GetRoleDefinitionByName(ctx, role.Name, role.ScopeType)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("failed to check for existing role definition",
+				"name", role.Name, "error", err)
+			return
+		}
+		// Role does not exist — create it.
+		rd := &store.RoleDefinition{
+			Name:        role.Name,
+			Description: role.Description,
+			ScopeType:   role.ScopeType,
+			Permissions: role.Permissions,
+			System:      true,
+		}
+		if _, err := s.CreateRoleDefinition(ctx, rd); err != nil {
+			slog.Warn("failed to seed role definition",
+				"name", role.Name, "error", err)
+			return
+		}
+		// Record the applied revision marker.
+		recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
+		slog.Info("seeded role definition",
+			"name", role.Name, "scope_type", role.ScopeType,
+			"revision", role.Revision, "perm_hash", codeMarker.PermHash)
 		return
 	}
-	rd := &store.RoleDefinition{
-		Name:        name,
-		Description: description,
-		ScopeType:   scopeType,
-		Permissions: perms,
-		System:      true,
+
+	// Role exists — check if reconciliation is needed.
+	applied := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
+	if applied.Revision > role.Revision {
+		return // stored revision is higher — operator override, do not downgrade
 	}
-	if _, err := s.CreateRoleDefinition(ctx, rd); err != nil {
-		slog.Warn("failed to seed role definition", "name", name, "error", err)
+	if applied.Revision == role.Revision && applied.PermHash == codeMarker.PermHash {
+		return // same revision with matching permission hash — no changes needed
+	}
+	// Reconcile: either the code revision is higher, or the permission list
+	// changed at the same revision (R-6: dynamic lists like allPermissionIDs).
+
+	// Code revision is higher OR permission list changed — update permissions.
+	if err := s.UpdateSystemRoleDefinitionPermissions(ctx, existing.ID, role.Permissions); err != nil {
+		slog.Warn("failed to reconcile role definition permissions",
+			"name", role.Name, "from_revision", applied.Revision,
+			"to_revision", role.Revision, "error", err)
 		return
 	}
-	slog.Info("seeded role definition", "name", name, "scope_type", scopeType)
+	recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
+	slog.Info("reconciled role definition permissions",
+		"name", role.Name, "from_revision", applied.Revision,
+		"to_revision", role.Revision,
+		"perm_hash", codeMarker.PermHash,
+		"permissions_count", len(role.Permissions))
+}
+
+// getAppliedBuiltInRoleMarker reads the last-applied revision marker for a
+// built-in role from hub settings. Returns a zero marker if no revision has
+// been recorded. Backward-compatible: legacy integer-only markers are parsed
+// as revision-only (empty PermHash), which always triggers reconciliation
+// on the first startup after the R-6 fix.
+func getAppliedBuiltInRoleMarker(ctx context.Context, s store.Store, roleName string) builtInRoleMarker {
+	setting, err := s.GetHubSetting(ctx, builtInRoleRevisionKey(roleName))
+	if err != nil {
+		return builtInRoleMarker{} // not yet recorded
+	}
+
+	// Try new marker format first.
+	var marker builtInRoleMarker
+	if err := json.Unmarshal(setting.Value, &marker); err == nil && marker.PermHash != "" {
+		return marker
+	}
+
+	// Backward compat: parse legacy integer revision.
+	var rev int
+	if err := json.Unmarshal(setting.Value, &rev); err == nil {
+		return builtInRoleMarker{Revision: rev}
+	}
+	// Try string-encoded integer (legacy quoted format).
+	var revStr string
+	if err := json.Unmarshal(setting.Value, &revStr); err == nil {
+		if parsed, err2 := strconv.Atoi(revStr); err2 == nil {
+			return builtInRoleMarker{Revision: parsed}
+		}
+	}
+	return builtInRoleMarker{}
+}
+
+// recordBuiltInRoleMarker writes the applied revision marker for a built-in
+// role to hub settings. Best-effort; failures are logged.
+func recordBuiltInRoleMarker(ctx context.Context, s store.Store, roleName string, marker builtInRoleMarker) {
+	markerJSON, _ := json.Marshal(marker)
+	if _, err := s.UpsertHubSetting(ctx, builtInRoleRevisionKey(roleName),
+		markerJSON, "system", -1, "seeded"); err != nil {
+		slog.Warn("failed to record built-in role revision marker",
+			"role", roleName, "revision", marker.Revision,
+			"perm_hash", marker.PermHash, "error", err)
+	}
 }
 
 // allPermissionIDs returns IDs for all permissions in the registry.
@@ -908,6 +743,8 @@ func hubAdminPermissionIDs() []string {
 		"skill.update":   true,
 		"skill.delete":   true,
 		"skill.register": true,
+		// Access constraint read (admin does NOT get access_constraint.admin)
+		"access_constraint.read": true,
 	}
 
 	var ids []string
@@ -1043,11 +880,6 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		return fmt.Errorf("backfill user role bindings: %w", err)
 	}
 
-	// Backfill project role bindings from group memberships
-	if err := backfillProjectRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill project role bindings: %w", err)
-	}
-
 	return nil
 }
 
@@ -1111,97 +943,6 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 
 	if created > 0 {
 		slog.Info("backfilled user role bindings", "created", created)
-	}
-	return nil
-}
-
-// backfillProjectRoleBindings creates project-scoped role bindings from group memberships.
-// It paginates through all projects to avoid silent truncation by store defaults.
-func backfillProjectRoleBindings(ctx context.Context, s store.Store) error {
-	groupRoleMap := map[string]string{
-		store.GroupMemberRoleOwner:  store.ProjectRoleOwner,
-		store.GroupMemberRoleAdmin:  store.ProjectRoleAdmin,
-		store.GroupMemberRoleMember: store.ProjectRoleMember,
-	}
-
-	var cursor string
-	var created int
-	for {
-		projects, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
-			Limit:  500,
-			Cursor: cursor,
-		})
-		if err != nil {
-			return err
-		}
-
-		for i := range projects.Items {
-			project := &projects.Items[i]
-			groupSlug := "project:" + project.Slug + ":members"
-
-			group, err := s.GetGroupBySlug(ctx, groupSlug)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					continue
-				}
-				slog.Warn("failed to look up project members group",
-					"project_id", project.ID, "slug", groupSlug, "error", err)
-				continue
-			}
-
-			members, err := s.GetGroupMembers(ctx, group.ID)
-			if err != nil {
-				slog.Warn("failed to get group members",
-					"project_id", project.ID, "group_id", group.ID, "error", err)
-				continue
-			}
-
-			for _, m := range members {
-				if m.MemberType != store.GroupMemberTypeUser {
-					continue
-				}
-
-				roleName, ok := groupRoleMap[m.Role]
-				if !ok {
-					continue
-				}
-
-				rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-				if err != nil {
-					slog.Warn("role definition not found during project backfill",
-						"role", roleName, "error", err)
-					continue
-				}
-
-				_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-					RoleDefinitionID: rd.ID,
-					PrincipalType:    store.RoleBindingPrincipalUser,
-					PrincipalID:      m.MemberID,
-					ScopeType:        store.RoleScopeProject,
-					ScopeID:          project.ID,
-					CreatedBy:        "system-backfill",
-				})
-				if err != nil {
-					if errors.Is(err, store.ErrAlreadyExists) {
-						continue
-					}
-					slog.Warn("failed to create project role binding during backfill",
-						"user_id", m.MemberID, "project_id", project.ID,
-						"role", roleName, "error", err)
-					continue
-				}
-				created++
-			}
-		}
-
-		if projects.NextCursor == "" {
-			break
-		}
-		cursor = projects.NextCursor
-	}
-
-	if created > 0 {
-		slog.Info("backfilled project role bindings", "created", created)
 	}
 	return nil
 }
@@ -1464,3 +1205,57 @@ func ensureHubMembership(ctx context.Context, s store.Store, userID string) {
 		slog.Debug("failed to add user to hub-members group", "userID", userID, "error", err)
 	}
 }
+
+// =============================================================================
+// Backward-compatible aliases (PG1)
+// =============================================================================
+//
+// These functions are kept as aliases so that test files outside this package's
+// ownership can continue to call them without modification. They delegate to
+// the new reconciliation and seeding functions.
+
+// seedRoleDefinitions is a backward-compatible alias for reconcileBuiltInRoles.
+// Tests and external callers that need to seed role definitions should use this.
+func seedRoleDefinitions(ctx context.Context, s store.Store) {
+	reconcileBuiltInRoles(ctx, s)
+}
+
+// =============================================================================
+// PG1 → RG1 Conversion Points: Progeny Policy to Relationship Grant
+// =============================================================================
+//
+// The following progeny policy creation sites must be converted to named
+// built-in relationship grants by the RG1 developer (af-rg1-dev). PG1
+// documents the conversion points here; the actual conversion happens in RG1.
+//
+// Conversion site 1: handlers_env_secrets.go:ensureProgenyPolicy
+//   Policy: progeny-secret-access:<secretID>
+//   ResourceType: secret, Action: read
+//   Condition: DelegatedFrom user (secret creator)
+//   Target: lineage/progeny resolver checks agent ancestry against creator
+//
+// Conversion site 2: handlers_env_secrets.go:ensureEnvVarProgenyPolicy
+//   Policy: progeny-envvar-access:<envVarID>
+//   ResourceType: envvar, Action: read
+//   Condition: DelegatedFrom user (env var creator)
+//   Target: same lineage/progeny resolver
+//
+// Conversion site 3: handlers_skills_injection.go:ensureSkillProgenyPolicy
+//   Policy: progeny-skill-access:<skillInjectionID>
+//   ResourceType: skill_injection, Action: read
+//   Condition: DelegatedFrom user (skill injection creator)
+//   Target: same lineage/progeny resolver
+//
+// All three follow the same pattern: the policy grants read access to a
+// specific resource (by ResourceID) to agents whose ancestry chain includes
+// the resource creator. The DelegatedFrom condition is checked by
+// checkDelegation (authz.go:781-847).
+//
+// The target relationship grant resolver must:
+// 1. Accept (agentIdentity, resource) as inputs
+// 2. Check if the agent's ancestry/delegation chain includes the resource creator
+// 3. Return allow with "relationship grant: progeny access" provenance
+// 4. NOT use the Policy or PolicyBinding tables
+//
+// Until RG1 is available, these policy creation sites remain active and the
+// current evaluator's checkDelegation path handles them.

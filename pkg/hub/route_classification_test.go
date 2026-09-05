@@ -80,8 +80,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/metrics/session/":                  "authenticated:session-metrics",
 	"/api/v1/groups":                            "policy:group",
 	"/api/v1/groups/":                           "policy:group",
-	"/api/v1/policies":                          "hub-admin:policy",
-	"/api/v1/policies/":                         "hub-admin:policy",
+	"/api/v1/policies":                          "authenticated:policy-gone",
+	"/api/v1/policies/":                         "authenticated:policy-gone",
 	"/api/v1/users/me/groups":                   "authenticated:principal",
 	"/api/v1/principals/":                       "authenticated:principal",
 	"/api/v1/users/me/injected-skills":          "authenticated:injected-skills",
@@ -93,6 +93,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/brokers/join":                      "broker-hmac:registration",
 	"/api/v1/brokers/":                          "broker-hmac:broker",
 	"/api/v1/broker/inbound":                    "broker-hmac:inbound",
+	"/api/v1/broker/callback":                   "broker-hmac:callback",
 	"/api/v1/broker/projects":                   "broker-hmac:projects",
 	"/api/v1/admin/maintenance":                 "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/operations":      "hub-admin:maintenance",
@@ -180,6 +181,7 @@ var routePermissionClassifications = map[string]string{
 	"GET /.well-known/openid-configuration":     "public:oidc",
 	"GET /.well-known/jwks.json":                "public:oidc",
 	"POST /api/v1/agent/identity-token":         "agent-token:identity-token",
+	"POST /api/v1/agent/secrets":                "agent-token:agent-secrets",
 	"/api/v1/system/fs/list":                    "workstation:filesystem",
 	"/api/v1/system/fs/mkdir":                   "workstation:filesystem",
 	"/api/v1/system/fs/validate-path":           "workstation:filesystem",
@@ -196,6 +198,14 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/role-bindings":  "hub-admin:role_binding",
 	"/api/v1/admin/role-bindings/": "hub-admin:role_binding",
 	"/api/v1/admin/permissions":    "hub-admin:role",
+
+	// Access Constraints (AC1)
+	"/api/v1/admin/access-constraints":  "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraints/": "hub-admin:access_constraint",
+
+	// Access Constraint Previews (B7)
+	"/api/v1/admin/access-constraint-previews":  "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraint-previews/": "hub-admin:access_constraint",
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {

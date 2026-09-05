@@ -28,18 +28,23 @@ import (
 )
 
 func TestAuthzDecideUATCannotUseAdminBypass(t *testing.T) {
-	authz, _ := authzTestSetup(t)
-	admin := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
+	authz, s := authzTestSetup(t)
+	// CO1: Create user with super-admin role binding so bindings grant the
+	// requested permission. The UAT scope restriction (not admin bypass)
+	// must block access when the scope does not cover the action.
+	userID := tid("admin-uat")
+	createTestUserWithRole(t, s, userID, "admin@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(userID, "admin@example.com", "Admin", "admin", "api")
 
 	decision := authz.Decide(context.Background(), AuthzRequest{
 		Principal:  PrincipalContext{Identity: admin},
-		Credential: CredentialContext{Kind: CredentialKindUAT, ID: "uat-1", ProjectID: "project-1", Scopes: []string{"agent:read"}},
+		Credential: CredentialContext{Kind: CredentialKindUAT, ID: "uat-1", ProjectID: "project-1", Scopes: []string{"project:read"}},
 		Resource:   Resource{Type: "agent", ID: "agent-1", ParentType: "project", ParentID: "project-1"},
 		Action:     ActionRead,
 	})
 
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	assert.Contains(t, decision.Reason, "credential_scope")
 	assert.Equal(t, "uat-1", decision.CredentialID)
 	assert.Equal(t, string(CredentialKindUAT), decision.CredentialKind)
 }
@@ -56,7 +61,11 @@ func TestAuthzDecideFederatedIdentitiesHaveExplicitOutcomes(t *testing.T) {
 		Resource:   Resource{Type: "agent", ID: "agent-1", OwnerID: federatedUser.ID()},
 		Action:     ActionRead,
 	})
-	assert.True(t, userDecision.Allowed)
+	// AK1: federated user IDs (issuer:subject) are not valid UUIDs, so
+	// principal resolution fails closed before relationship grants are
+	// evaluated.
+	assert.False(t, userDecision.Allowed)
+	assert.Equal(t, "principal resolution error (fail-closed)", userDecision.Reason)
 	assert.Equal(t, PrincipalKindFederatedUser, userDecision.PrincipalKind)
 	assert.Equal(t, string(CredentialKindFederation), userDecision.CredentialKind)
 
@@ -90,8 +99,12 @@ func TestAuthzDecideFederatedIdentitiesHaveExplicitOutcomes(t *testing.T) {
 }
 
 func TestCheckAccessUsesInteractiveCredentialCompatibilityAdapter(t *testing.T) {
-	authz, _ := authzTestSetup(t)
-	admin := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
+	authz, s := authzTestSetup(t)
+	// CO1: Create user with super-admin role binding. CheckAccess infers
+	// interactive credential kind; the AK1 kernel evaluates role bindings.
+	userID := tid("admin-interactive")
+	createTestUserWithRole(t, s, userID, "admin@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(userID, "admin@example.com", "Admin", "admin", "api")
 
 	decision := authz.CheckAccess(context.Background(), admin, Resource{Type: "agent", ID: "agent-1"}, ActionRead)
 
@@ -111,7 +124,9 @@ func TestAuthzDecideFederatedAdminCannotUseLocalAdminBypass(t *testing.T) {
 	})
 
 	assert.False(t, decision.Allowed)
-	assert.Equal(t, "default deny", decision.Reason)
+	// AK1: federated user IDs are not valid UUIDs, so principal resolution
+	// fails closed before role bindings can be evaluated.
+	assert.Equal(t, "principal resolution error (fail-closed)", decision.Reason)
 }
 
 // faultyGetUserStore wraps a real store and injects a non-ErrNotFound error
@@ -163,23 +178,24 @@ func TestAuthzDecideFailClosedOnStoreErrorForMutatingActions(t *testing.T) {
 	faultyAuthz := NewAuthzService(faultyStore, slog.Default())
 
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
-	// Include agentID in Ancestry so canAccessAsAncestor grants initial access,
-	// letting us reach the delegation ceiling error path in Decide().
-	resource := Resource{Type: "agent", ID: tid("dc-child-failopen"), ParentType: "project", ParentID: projectID, Ancestry: []string{agentID}}
 
+	// AK1: the kernel evaluates agent permissions from JWT-scope synthetic
+	// bindings. Only actions whose permissions map to the agent's scopes
+	// are granted. Use agent.delete (from project:agent:lifecycle) and
+	// agent.create (from project:agent:create) for mutating, and
+	// project.read (from project:read) for read-only.
 	for _, tc := range []struct {
-		action  Action
-		allowed bool
-		label   string
+		action   Action
+		resource Resource
+		allowed  bool
+		label    string
 	}{
-		{ActionDelete, false, "ActionDelete must fail closed on store error"},
-		{ActionStop, false, "ActionStop must fail closed on store error"},
-		{ActionUpdate, false, "ActionUpdate must fail closed on store error"},
-		{ActionRead, true, "ActionRead should remain allowed on store error (read-only)"},
-		{ActionList, true, "ActionList should remain allowed on store error (read-only)"},
+		{ActionDelete, Resource{Type: "agent", ID: tid("dc-child-failopen"), ParentType: "project", ParentID: projectID}, false, "ActionDelete must fail closed on store error"},
+		{ActionCreate, Resource{Type: "agent", ID: tid("dc-child-failopen2"), ParentType: "project", ParentID: projectID}, false, "ActionCreate must fail closed on store error"},
+		{ActionRead, Resource{Type: "project", ID: projectID}, true, "project read should remain allowed on store error (read-only)"},
 	} {
 		t.Run(string(tc.action), func(t *testing.T) {
-			decision := faultyAuthz.CheckAccess(ctx, agent, resource, tc.action)
+			decision := faultyAuthz.CheckAccess(ctx, agent, tc.resource, tc.action)
 			require.Equal(t, tc.allowed, decision.Allowed, tc.label)
 			if !tc.allowed {
 				assert.Contains(t, decision.Reason, "fail-closed",

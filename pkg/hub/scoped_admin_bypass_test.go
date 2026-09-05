@@ -106,9 +106,8 @@ func TestAddGroupMemberRejectsScopedAdminBypass(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, target))
 	group := &store.Group{ID: tid("group-1"), Name: "Group", Slug: "group-1", GroupType: store.GroupTypeExplicit, OwnerID: owner.ID}
 	require.NoError(t, s.CreateGroup(ctx, group))
-	policy := &store.Policy{ID: tid("group-add-member"), Name: "group add member", ScopeType: "hub", ResourceType: "group", Actions: []string{"addMember"}, Effect: "allow"}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: caller.ID()}))
+	// CO1: Legacy policy creation removed — AK1 kernel uses RoleBindings
+	// exclusively. The scoped admin is denied regardless.
 	body, err := json.Marshal(AddGroupMemberRequest{MemberType: store.GroupMemberTypeUser, MemberID: target.ID, Role: store.GroupMemberRoleAdmin})
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/groups/"+group.ID+"/members", bytes.NewReader(body))
@@ -170,9 +169,8 @@ func TestFederatedAdminCannotUseGroupHierarchyBypass(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, target))
 	group := &store.Group{ID: tid("federated-group"), Name: "Group", Slug: "federated-group", GroupType: store.GroupTypeExplicit, OwnerID: owner.ID}
 	require.NoError(t, s.CreateGroup(ctx, group))
-	policy := &store.Policy{ID: tid("federated-group-add-member"), Name: "federated group add member", ScopeType: "hub", ResourceType: "group", Actions: []string{"addMember"}, Effect: "allow"}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{PolicyID: policy.ID, PrincipalType: "user", PrincipalID: caller.ID()}))
+	// CO1: Legacy policy creation removed — AK1 kernel uses RoleBindings
+	// exclusively. The federated admin is denied regardless.
 	body, err := json.Marshal(AddGroupMemberRequest{MemberType: store.GroupMemberTypeUser, MemberID: target.ID, Role: store.GroupMemberRoleAdmin})
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/groups/"+group.ID+"/members", bytes.NewReader(body))

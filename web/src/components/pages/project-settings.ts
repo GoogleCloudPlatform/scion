@@ -27,7 +27,6 @@ import type {
   PageData,
   Project,
   Template,
-  AdminGroup,
   GitHubAppProjectStatus,
   GitHubTokenPermissions,
   RuntimeBroker,
@@ -39,12 +38,16 @@ import type {
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
+import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
+import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
-import '../shared/group-member-editor.js';
+import '../shared/project-members-editor.js';
+import '../shared/effective-access-boundary-notice.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -126,9 +129,6 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private deleteLoading = false;
-
-  @state()
-  private membersGroup: AdminGroup | null = null;
 
   @state()
   private settings: ProjectSettings = {};
@@ -275,6 +275,16 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private brokersError: string | null = null;
+
+  // Access boundary state
+  @state()
+  private boundaryGroups: BoundarySummaryGroup[] = [];
+
+  @state()
+  private boundaryLoading = false;
+
+  @state()
+  private boundaryError = '';
 
   private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -826,7 +836,7 @@ export class ScionPageProjectSettings extends LitElement {
         this.activeResourcesTab = tab;
       }
     }
-    void this.loadProject().then(() => this.loadMembersGroup());
+    void this.loadProject();
     void this.loadHubPreStartHook();
     void this.loadDropdownTemplates();
     void this.loadResolvedSettings();
@@ -869,11 +879,41 @@ export class ScionPageProjectSettings extends LitElement {
       if (!skipGitHubCheck && this.project.gitRemote) {
         void this.checkGitHubAppConfigured();
       }
+      // Load access boundaries affecting this project
+      void this.loadBoundaries();
     } catch (err) {
       console.error('Failed to load project:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async loadBoundaries(): Promise<void> {
+    this.boundaryLoading = true;
+    this.boundaryError = '';
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`
+      );
+
+      const items: AccessBoundarySummary[] = res.ok
+        ? (((await res.json()) as { items: AccessBoundarySummary[] }).items ?? [])
+        : [];
+
+      this.boundaryGroups = [
+        {
+          label: 'Boundaries affecting this project',
+          items,
+          filterUrl: `/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`,
+        },
+      ];
+    } catch (err) {
+      console.error('Failed to load boundaries for project:', err);
+      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access boundaries';
+    } finally {
+      this.boundaryLoading = false;
     }
   }
 
@@ -947,37 +987,6 @@ export class ScionPageProjectSettings extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load dropdown templates:', err);
-    }
-  }
-
-  private async loadMembersGroup(): Promise<void> {
-    if (!this.project) {
-      console.warn('[project-settings] loadMembersGroup: project not loaded yet, skipping');
-      return;
-    }
-    const projectUUID = this.project.id;
-    try {
-      const url = `/api/v1/groups?projectId=${encodeURIComponent(projectUUID)}&groupType=explicit&limit=10`;
-      console.debug('[project-settings] loadMembersGroup:', url);
-      const response = await apiFetch(url);
-      if (response.ok) {
-        const data = (await response.json()) as { groups?: AdminGroup[] } | AdminGroup[];
-        const groups = Array.isArray(data) ? data : data.groups || [];
-        console.debug(
-          '[project-settings] groups for project:',
-          groups.length,
-          groups.map((g) => g.slug)
-        );
-        // Find the members group (slug pattern: project:<slug>:members)
-        this.membersGroup = groups.find((g) => g.slug?.endsWith(':members')) || null;
-        if (!this.membersGroup) {
-          console.warn('[project-settings] no :members group found for project', projectUUID);
-        }
-      } else {
-        console.warn('[project-settings] loadMembersGroup response not ok:', response.status);
-      }
-    } catch (err) {
-      console.error('[project-settings] Failed to load project members group:', err);
     }
   }
 
@@ -1344,17 +1353,28 @@ export class ScionPageProjectSettings extends LitElement {
       </div>
 
       ${this.renderConfigSection()} ${this.renderGitHubAppSection()}
-      ${this.membersGroup
-        ? html`
-            <scion-group-member-editor
-              groupId=${this.membersGroup.id}
-              ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
-              compact
-              sectionTitle="Members"
-              sectionDescription="Users and groups with access to this project. To make this project visible to all hub users, add the hub-members group."
-            ></scion-group-member-editor>
-          `
-        : ''}
+      <scion-project-members-editor
+        projectId=${this.project.id}
+        ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
+        compact
+        sectionTitle="Members"
+        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
+      ></scion-project-members-editor>
+      <scion-effective-access-boundary-notice
+        contextType="project"
+        contextId=${this.project.id}
+      ></scion-effective-access-boundary-notice>
+
+      <scion-boundary-summary-notice
+        label="Access boundaries affecting this project"
+        .groups=${this.boundaryGroups}
+        ?loading=${this.boundaryLoading}
+        error=${this.boundaryError}
+        filterUrl="/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(
+          this.projectId
+        )}"
+      ></scion-boundary-summary-notice>
+
       ${this.renderResourcesSection()}
       ${this.pageData?.user
         ? html`
@@ -1753,6 +1773,9 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab slot="nav" panel="general" ?active=${this.activeConfigTab === 'general'}
             >General</sl-tab
           >
+          <sl-tab slot="nav" panel="auth-security" ?active=${this.activeConfigTab === 'auth-security'}
+            >Auth &amp; Security</sl-tab
+          >
           <sl-tab slot="nav" panel="limits" ?active=${this.activeConfigTab === 'limits'}
             >Limits</sl-tab
           >
@@ -1833,38 +1856,6 @@ export class ScionPageProjectSettings extends LitElement {
                 </sl-select>
                 <span class="field-help"
                   >Harness configuration used by default for new agents.</span
-                >
-              </div>
-
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-harness-auth')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Harness Auth
-                  ${this.renderHubIndicator('scion.io/default-harness-auth')}</label
-                >
-                <sl-select
-                  placeholder=${this.hubSelectLabel(
-                    'scion.io/default-harness-auth',
-                    'None (use server default)'
-                  )}
-                  clearable
-                  value=${this.configDefaultHarnessAuth}
-                  ?disabled=${!canEdit}
-                  @sl-change=${(e: Event) => {
-                    this.configDefaultHarnessAuth = (e.target as HTMLSelectElement).value;
-                  }}
-                >
-                  <sl-option value="api-key">Provider API Key</sl-option>
-                  <sl-option value="oauth-token">OAuth Token</sl-option>
-                  <sl-option value="auth-file">Harness credential file</sl-option>
-                  <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
-                  <sl-option value="none">No Authentication</sl-option>
-                </sl-select>
-                <span class="field-help"
-                  >Default authentication type for new agents in this project.</span
                 >
               </div>
 
@@ -2039,6 +2030,43 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help"
                   >Automatically detect and expose listening TCP ports in agent containers. "Use hub
                   default" inherits the server-level setting.</span
+                >
+              </div>
+
+            </div>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="auth-security">
+            <div class="config-form">
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-harness-auth')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Harness Auth
+                  ${this.renderHubIndicator('scion.io/default-harness-auth')}</label
+                >
+                <sl-select
+                  placeholder=${this.hubSelectLabel(
+                    'scion.io/default-harness-auth',
+                    'None (use server default)'
+                  )}
+                  clearable
+                  value=${this.configDefaultHarnessAuth}
+                  ?disabled=${!canEdit}
+                  @sl-change=${(e: Event) => {
+                    this.configDefaultHarnessAuth = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="api-key">Provider API Key</sl-option>
+                  <sl-option value="oauth-token">OAuth Token</sl-option>
+                  <sl-option value="auth-file">Harness credential file</sl-option>
+                  <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
+                  <sl-option value="none">No Authentication</sl-option>
+                </sl-select>
+                <span class="field-help"
+                  >Default authentication type for new agents in this project.</span
                 >
               </div>
 

@@ -73,7 +73,7 @@ Status codes:
 The stored MIME type is derived from the file's content plus its extension; the `Content-Type` a client declares on the part is ignored. Executable extensions (`.exe`, `.sh`, `.js`, `.ps1`, and their peers) and markup extensions (`.html`, `.svg`, and their peers) are refused whatever the content is.
 
 #### Templates (`/api/v1/templates`)
-- `GET /`: List available agent templates.
+- `GET /`: List available agent templates. The authorized list validator caps list requests at a maximum limit of **100** templates per page (default is 50). Requests specifying a `limit` query parameter greater than 100 will fail with HTTP 400 Bad Request.
 - `POST /`: Upload a new template or version.
 
 #### Auth (`/api/v1/auth`)
@@ -88,6 +88,7 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /limits/:id`, `PUT /limits/:id`: Inspect or update a Limit Definition.
 - `GET /entitlements/:id`: Inspect an Entitlement Binding.
 - `GET /gcp-quota`: View GCP quota status.
+- `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
 
 The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
 

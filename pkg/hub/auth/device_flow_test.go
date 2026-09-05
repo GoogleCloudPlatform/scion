@@ -56,9 +56,6 @@ func (m *mockAuthService) Refresh(ctx context.Context, refreshToken string) (*hu
 func (m *mockAuthService) Me(ctx context.Context) (*hubclient.User, error) {
 	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAuthService) GetWSTicket(ctx context.Context) (*hubclient.WSTicketResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
 func (m *mockAuthService) GetAuthProviders(ctx context.Context, clientType string) (*hubclient.AuthProvidersResponse, error) {
 	return nil, mockDeviceFlowNotImplementedError{}
 }

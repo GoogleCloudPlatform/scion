@@ -74,7 +74,7 @@ func setupSkillAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob *
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, alice, bob, project
 }

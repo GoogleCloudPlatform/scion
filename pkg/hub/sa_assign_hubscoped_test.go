@@ -92,6 +92,18 @@ func setupHubScopedAssignTest(t *testing.T) *hubScopedAssignFixture {
 		ensureHubMembership(ctx, s, u.ID)
 	}
 
+	// Grant super-admin role binding for admin user (CO1 cutover: role bindings required)
+	saRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: saRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
 	f.project = &store.Project{
 		ID:        tid("hsa-project"),
 		Name:      "HSA Project",
@@ -102,7 +114,7 @@ func setupHubScopedAssignTest(t *testing.T) *hubScopedAssignFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroupAndPolicy(ctx, f.project, f.owner.ID)
+	srv.createProjectMembersGroup(ctx, f.project, f.owner.ID)
 
 	// Add member to the project members group
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:hsa-project:members")
@@ -167,7 +179,7 @@ func TestHubScopedAssign_CurrentHubMember_PolicyAllows(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"a current hub member must be allowed to assign a hub-scoped SA at the Hub policy layer; reason=%q",
 		decision.Reason)
-	assert.Equal(t, "hub member hub-scoped assign baseline", decision.Reason)
+	assert.Equal(t, "relationship grant: hub member hub-scoped assign", decision.Reason)
 }
 
 // =============================================================================
@@ -182,7 +194,7 @@ func TestHubScopedAssign_ModeOff_Denied(t *testing.T) {
 	// The owner created the SA, so they'd pass Hub policy. But mode=off must
 	// deny at the mode-coupling precondition, before policy runs.
 	sa := hubScopedSACreatedBy(t, f, f.owner.ID, true)
-	f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
@@ -204,7 +216,7 @@ func TestHubScopedAssign_ModeOff_AdminAlsoDenied(t *testing.T) {
 
 	admin := hubAdminUser(t, f)
 	sa := hubScopedSAForAgent(t, f, true)
-	f.srv.createProjectMembersGroupAndPolicy(context.Background(), f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
 
 	rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
@@ -239,7 +251,7 @@ func TestHubScopedAssign_ModeOff_ProjectScopedStillAllowed(t *testing.T) {
 		CreatedAt:          time.Now(),
 	}
 	require.NoError(t, f.store.CreateGCPServiceAccount(ctx, sa))
-	f.srv.createProjectMembersGroupAndPolicy(ctx, f.proj, f.owner.ID)
+	f.srv.createProjectMembersGroup(ctx, f.proj, f.owner.ID)
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
@@ -332,7 +344,8 @@ func TestHubScopedAssign_Admin_ModeEnforce_Allowed(t *testing.T) {
 	assert.True(t, decision.Allowed,
 		"admin must be allowed to assign hub-scoped SA when mode=enforce; reason=%q",
 		decision.Reason)
-	assert.Equal(t, "admin bypass", decision.Reason)
+	// CO1 cutover: role bindings grant access instead of admin bypass
+	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
 // =============================================================================

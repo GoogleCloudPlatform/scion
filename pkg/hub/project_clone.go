@@ -177,7 +177,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			srcMode = src.Labels[store.LabelWorkspaceMode]
 		}
 		switch srcMode {
-		case store.WorkspaceModeShared, store.WorkspaceModeWorktreePerAgent:
+		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
 			if clone.Labels == nil {
 				clone.Labels = make(map[string]string)
 			}
@@ -229,21 +229,40 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	}
 	rollback = append(rollback, func() {
 		rbCtx := context.WithoutCancel(ctx)
+		// Cascade-delete role bindings before the project row (PM1/XL-R1).
+		if _, rbErr := s.store.DeleteRoleBindingsForScope(rbCtx, store.RoleScopeProject, clone.ID); rbErr != nil {
+			slog.Warn("project clone rollback: failed to delete role bindings",
+				"clone_id", clone.ID, "error", rbErr)
+		}
 		if delErr := s.store.DeleteProject(rbCtx, clone.ID); delErr != nil {
 			slog.Warn("project clone rollback: failed to delete project",
 				"clone_id", clone.ID, "error", delErr)
 		}
 	})
 
-	// ── Step 5: Create groups ────────────────────────────────────────────
+	// ── Step 5: Create owner role binding (PM1: atomic with project) ─────
+	// The clone creator becomes the project owner via a direct role binding.
+	// This is the canonical project membership source. The step 4 rollback
+	// already cascade-deletes all project-scoped bindings.
+	if callerID != "" {
+		if rbErr := s.createProjectOwnerRoleBinding(ctx, clone.ID, callerID); rbErr != nil {
+			slog.Error("project clone: failed to create owner role binding",
+				"clone_id", clone.ID, "user_id", callerID, "error", rbErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to create owner role binding: "+rbErr.Error(), nil)
+			return
+		}
+	}
+
+	// ── Step 6: Create groups ────────────────────────────────────────────
 
 	s.createProjectGroup(ctx, clone)
 
-	// ── Step 6: Create members group and policy ──────────────────────────
+	// ── Step 7: Create members group (collaboration) ─────────────────────
+	// The group exists for collaboration; authorization is via RoleBindings.
+	s.createProjectMembersGroup(ctx, clone, callerID)
 
-	s.createProjectMembersGroupAndPolicy(ctx, clone, callerID)
-
-	// ── Step 7: Deep-copy project-scoped harness configs ─────────────────
+	// ── Step 8: Deep-copy project-scoped harness configs ─────────────────
 
 	if err := s.cloneProjectHarnessConfigs(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: harness config copy failed",
@@ -253,7 +272,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// ── Step 8: Deep-copy project-scoped templates ───────────────────────
+	// ── Step 9: Deep-copy project-scoped templates ───────────────────────
 
 	if err := s.cloneProjectTemplates(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: template copy failed",
@@ -263,7 +282,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// ── Step 9: Copy non-secret env vars ─────────────────────────────────
+	// ── Step 10: Copy non-secret env vars ────────────────────────────────
 
 	if err := s.cloneProjectEnvVars(ctx, src.ID, clone.ID, callerID, &rollback); err != nil {
 		slog.Error("project clone: env var copy failed",
@@ -273,7 +292,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// ── Step 10: Copy injected skills ────────────────────────────────────
+	// ── Step 11: Copy injected skills ────────────────────────────────────
 
 	if err := s.cloneProjectSkillInjections(ctx, src.ID, clone.ID, callerID, &rollback); err != nil {
 		slog.Error("project clone: skill injection copy failed",
@@ -283,7 +302,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// ── Step 11: Copy active pre-start hook ──────────────────────────────
+	// ── Step 12: Copy active pre-start hook ──────────────────────────────
 
 	if err := s.cloneProjectPreStartHook(ctx, src.ID, clone.ID, callerID); err != nil {
 		slog.Error("project clone: pre-start hook copy failed",
@@ -292,16 +311,16 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			"Failed to copy pre-start hook: "+err.Error(), nil)
 		return
 	}
-	// No explicit rollback for step 11 — hook is cleaned up transitively by
+	// No explicit rollback for step 12 — hook is cleaned up transitively by
 	// step 4's DeleteProject. See design doc §5.5.
 
-	// ── Step 12: Auto-associate GitHub installation (best-effort) ────────
+	// ── Step 13: Auto-associate GitHub installation (best-effort) ────────
 
 	if clone.GitRemote != "" && clone.GitHubInstallationID == nil {
 		s.autoAssociateGitHubInstallation(ctx, clone)
 	}
 
-	// ── Step 13: Workspace init ──────────────────────────────────────────
+	// ── Step 14: Workspace init ──────────────────────────────────────────
 
 	if clone.IsSharedWorkspace() {
 		if err := s.cloneSharedWorkspaceProject(ctx, clone); err != nil {

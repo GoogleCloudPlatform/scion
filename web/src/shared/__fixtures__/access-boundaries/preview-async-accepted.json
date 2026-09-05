@@ -1,0 +1,31 @@
+{
+  "$fixture": {
+    "endpoint": "POST /api/v1/admin/access-constraint-previews",
+    "status": 202,
+    "responseHeaders": {
+      "Location": "/api/v1/admin/access-constraint-preview-jobs/apj-3b90",
+      "Retry-After": "2"
+    },
+    "designRef": "constraint-ui-ux-design.md §9.4 ('Large previews return 202 with a job URL')",
+    "notes": "Emitted when the subject set is too large to resolve inside the request budget — here an all_principals draft. The UI shows determinate-if-possible progress and must not fabricate counts before the job completes (design §7.9)."
+  },
+  "jobId": "apj-3b90",
+  "status": "accepted",
+  "operation": "create",
+  "constraintId": null,
+  "baseRevision": null,
+  "draftHash": "sha256:e3b1c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "acceptedAt": "2026-08-31T14:33:00Z",
+  "estimatedCompletionSeconds": 18,
+  "pollUrl": "/api/v1/admin/access-constraint-preview-jobs/apj-3b90",
+  "retryAfterSeconds": 2,
+  "reason": "SUBJECT_SET_TOO_LARGE_FOR_SYNCHRONOUS_PREVIEW",
+  "reasonDetails": {
+    "subjectKind": "all_principals",
+    "estimatedPrincipalCount": 4192,
+    "synchronousThreshold": 500
+  },
+  "_capabilities": {
+    "actions": ["read", "cancel"]
+  }
+}

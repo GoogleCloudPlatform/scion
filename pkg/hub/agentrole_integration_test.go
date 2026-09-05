@@ -59,7 +59,7 @@ func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, user, project
 }
@@ -513,7 +513,7 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, st.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-cap"),
@@ -525,6 +525,18 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 	}
 	require.NoError(t, st.CreateUser(ctx, admin))
 	ensureHubMembership(ctx, st, admin.ID)
+
+	// Grant super-admin role binding (CO1 cutover: role bindings required)
+	saRD, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: saRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
 
 	rec := doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
 		Name:      "test-admin-capped",
@@ -571,7 +583,7 @@ func setupFullMaxProject(t *testing.T) (*Server, store.Store, *store.Project) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, project
 }
@@ -852,7 +864,7 @@ func TestCreateAgent_ProjectMaxBaseline_CapsFullToBaseline(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-base-cap"),
@@ -892,7 +904,7 @@ func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Member user requesting no specific role — should default to project max (readonly)
 	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
@@ -955,7 +967,7 @@ func setupReadScopeTest(t *testing.T) (*Server, store.Store, *store.Agent, *stor
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	agent := &store.Agent{
 		ID:        tid("agent-read-scope"),
@@ -977,9 +989,11 @@ func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 	// Baseline scopes include ScopeProjectRead.
 	scopes := ScopesForRole(AgentRoleBaseline)
 
+	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
+	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id}.
+	// Only list and project-level read endpoints pass through.
 	endpoints := []string{
 		"/api/v1/agents?projectId=" + project.ID,
-		"/api/v1/agents/" + agent.ID,
 		"/api/v1/templates",
 		"/api/v1/skills",
 		"/api/v1/harness-configs",
@@ -995,6 +1009,14 @@ func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 				ep, rec.Code, rec.Body.String())
 		})
 	}
+
+	// CO1: agent.read is blocked by agent scope restriction (no AgentScopes mapping).
+	t.Run("/api/v1/agents/"+agent.ID, func(t *testing.T) {
+		rec := doAgentReadRequest(t, srv, agent.ID, project.ID, "/api/v1/agents/"+agent.ID, scopes)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping; agent must be denied on GET /api/v1/agents/{id}; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
 }
 
 func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
@@ -1003,9 +1025,10 @@ func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
 	// Readonly scopes include ScopeProjectRead.
 	scopes := ScopesForRole(AgentRoleReadOnly)
 
+	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
+	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id}.
 	endpoints := []string{
 		"/api/v1/agents?projectId=" + project.ID,
-		"/api/v1/agents/" + agent.ID,
 		"/api/v1/templates",
 		"/api/v1/skills",
 		"/api/v1/harness-configs",
@@ -1021,6 +1044,14 @@ func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
 				ep, rec.Code, rec.Body.String())
 		})
 	}
+
+	// CO1: agent.read is blocked by agent scope restriction (no AgentScopes mapping).
+	t.Run("/api/v1/agents/"+agent.ID, func(t *testing.T) {
+		rec := doAgentReadRequest(t, srv, agent.ID, project.ID, "/api/v1/agents/"+agent.ID, scopes)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping; agent must be denied on GET /api/v1/agents/{id}; got %d: %s",
+			rec.Code, rec.Body.String())
+	})
 }
 
 func TestReadEndpoint_NoReadScope_Blocked(t *testing.T) {
@@ -1151,7 +1182,7 @@ func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T)
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Set the hub-level default to baseline — this should NOT override the
 	// project-level explicit "full".

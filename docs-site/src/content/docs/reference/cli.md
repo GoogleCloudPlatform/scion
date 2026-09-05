@@ -143,6 +143,36 @@ Sends a message to a running agent or user.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
+- **Message Body Formatting:**
+  The command delivers the `<message>` argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient receives.
+  
+  To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n (`\n`) sequences — those will appear as literal characters in the delivered message.
+
+  * **Correct (real newlines in a quoted string):**
+    ```bash
+    scion message --non-interactive @reviewer "PR #42 is ready for review.
+
+    Branch: fix/auth-bug
+    CI: all green"
+    ```
+
+  * **Correct (heredoc for longer messages):**
+    ```bash
+    scion message --non-interactive @reviewer "$(cat <<'EOF'
+    PR #42 is ready for review.
+
+    Branch: fix/auth-bug
+    CI: all green
+    EOF
+    )"
+    ```
+
+  * **Wrong (JSON-encoded body with literal `\n`):**
+    ```bash
+    # BAD: literal \n chars appear in the delivered message
+    scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
+    ```
+
 ### `scion broadcast`
 
 Sends a message to all running agents in the current project (or across all projects).
@@ -493,6 +523,16 @@ Manages Scion server components (Hub and Broker).
         - `--db <string>`: Database driver/connection.
         - `--dev-auth`: Enable dev-auth authentication.
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
+- `scion server backfill`: Scan historical messages that predate the conversation model and assign them to conversations based on their thread, sender, and recipient metadata.
+    - **Safety Default (Dry-Run):** By default, the command runs in DRY-RUN mode — scanning and reporting what would change without modifying the database. You must explicitly pass `--execute` to apply changes.
+    - **Idempotency:** The backfill is idempotent: messages already attributed to a conversation are skipped, making re-running entirely safe.
+    - **Compound-Cursor Resumability (DEF-81):** Supports resuming interrupted runs via `--checkpoint`. The resume checkpoint uses a compound `(created, id)` keyset cursor (instead of a strictly-greater-than timestamp) to guarantee zero permanent row loss on resume, even for messages with identical timestamps.
+    - Flags:
+        - `--execute`: Apply changes (default: dry-run, safe).
+        - `--project <string>`: Scope backfill to a specific project ID (default: all).
+        - `--batch-size <int>`: Number of messages to process per batch (default: 100).
+        - `--checkpoint <string>`: Resume from this pagination cursor (project-scoped).
+        - `--db <string>`: Database DSN (overrides configuration/environment DSN).
 
 ## Miscellaneous
 

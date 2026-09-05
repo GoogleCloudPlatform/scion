@@ -667,6 +667,14 @@ authDone:
 	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
 		opts.Env["SCION_MODEL"] = finalScionCfg.Model
 	}
+	// Re-resolve SCION_MODEL if it contains an unresolved size alias.
+	// The hub may inject a raw alias (e.g. "large") when its store lacks
+	// the harness config's model_aliases map; the broker has the on-disk
+	// config and can resolve it here.
+	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg); ok {
+		util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", opts.Env["SCION_MODEL"], resolved)
+		opts.Env["SCION_MODEL"] = resolved
+	}
 	if _, ok := opts.Env["SCION_THINKING_LEVEL"]; !ok && finalScionCfg != nil && finalScionCfg.ThinkingLevel != nil {
 		opts.Env["SCION_THINKING_LEVEL"] = strconv.Itoa(*finalScionCfg.ThinkingLevel)
 	}
@@ -1580,4 +1588,20 @@ func mergeExtraHosts(a, b []string) []string {
 		}
 	}
 	return result
+}
+
+// reResolveModelAlias detects when SCION_MODEL contains an unresolved size
+// alias (e.g. "large") that the hub failed to resolve, and returns the
+// broker-side resolved concrete model from cfg.Model. It returns ("", false)
+// when no re-resolution is needed — either because the value is not a known
+// alias, the config is nil, or the config model is empty.
+func reResolveModelAlias(envModel string, cfg *api.ScionConfig) (string, bool) {
+	if envModel == "" || cfg == nil || cfg.Model == "" {
+		return "", false
+	}
+	normalized := config.NormalizeModelAlias(envModel)
+	if config.KnownModelAliases[normalized] && envModel != cfg.Model {
+		return cfg.Model, true
+	}
+	return "", false
 }

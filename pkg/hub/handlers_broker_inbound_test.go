@@ -162,7 +162,7 @@ func TestHandleBrokerInbound_RejectsNonRunningAgent(t *testing.T) {
 				Updated:   time.Now(),
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
-			srv.createProjectMembersGroupAndPolicy(ctx, project)
+			srv.createProjectMembersGroup(ctx, project)
 			msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 			// Create agent with the specified phase and project message mode
@@ -244,7 +244,7 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	// Create a running agent with project message mode.
@@ -433,7 +433,7 @@ func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *test
 				Updated:   time.Now(),
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
-			srv.createProjectMembersGroupAndPolicy(ctx, project)
+			srv.createProjectMembersGroup(ctx, project)
 			msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 			agent := &store.Agent{
@@ -510,7 +510,7 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	// Create a running agent with project message mode.

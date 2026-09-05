@@ -1478,9 +1478,9 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// createProjectMembersGroupAndPolicy should not return an error even though
+	// createProjectMembersGroup should not return an error even though
 	// the owner user does not exist. It should retry without OwnerID.
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// The members group must still have been created.
 	membersSlug := "project:" + project.Slug + ":members"
@@ -1545,12 +1545,17 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	assert.NoError(t, err, ".scion directory should exist for shared-workspace project")
 }
 
-func TestCreateProject_PerAgentGit_NoWorkspaceLabel(t *testing.T) {
+// TestCreateProject_GitNoExplicitMode_NoWorkspaceLabel verifies that a git
+// project created WITHOUT an explicit WorkspaceMode field does not receive a
+// workspace-mode label. The downstream ResolveWorkspaceSharingMode defaults
+// empty labels to shared-plain, which is the backward-compatible behavior for
+// projects that predate workspace-mode support.
+func TestCreateProject_GitNoExplicitMode_NoWorkspaceLabel(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
-		Name:      "Per-Agent Git Project",
-		GitRemote: "github.com/test/per-agent",
+		Name:      "No Mode Git Project",
+		GitRemote: "github.com/test/no-mode",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
@@ -1560,8 +1565,33 @@ func TestCreateProject_PerAgentGit_NoWorkspaceLabel(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
-		"per-agent git project should not have workspace mode label")
+		"git project without explicit workspace mode should not have label")
 	assert.False(t, project.IsSharedWorkspace())
+}
+
+// TestCreateProject_ExplicitPerAgent_StampsLabel verifies that creating a git
+// project with WorkspaceMode: "per-agent" correctly persists the
+// scion.dev/workspace-mode label so downstream dispatch resolves
+// clone-per-agent instead of defaulting to shared-plain.
+func TestCreateProject_ExplicitPerAgent_StampsLabel(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := CreateProjectRequest{
+		Name:          "Per-Agent Git Project",
+		GitRemote:     "github.com/test/per-agent",
+		WorkspaceMode: "per-agent",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+
+	assert.Equal(t, store.WorkspaceModePerAgent, project.Labels[store.LabelWorkspaceMode],
+		"per-agent label should be stamped when workspace mode is explicitly set")
+	assert.False(t, project.IsSharedWorkspace(), "per-agent project should not report as shared workspace")
+	assert.False(t, project.IsWorktreePerAgent(), "per-agent project should not report as worktree-per-agent")
 }
 
 func TestCreateProject_WorktreePerAgent_StampsLabel(t *testing.T) {

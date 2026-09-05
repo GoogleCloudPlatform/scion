@@ -5,6 +5,7 @@ package ent
 import (
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -70,6 +71,44 @@ import (
 // (default values, validators, hooks and policies) and stitches it
 // to their package variables.
 func init() {
+	accessconstraintFields := schema.AccessConstraint{}.Fields()
+	_ = accessconstraintFields
+	// accessconstraintDescName is the schema descriptor for name field.
+	accessconstraintDescName := accessconstraintFields[1].Descriptor()
+	// accessconstraint.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	accessconstraint.NameValidator = accessconstraintDescName.Validators[0].(func(string) error)
+	// accessconstraintDescScopeID is the schema descriptor for scope_id field.
+	accessconstraintDescScopeID := accessconstraintFields[7].Descriptor()
+	// accessconstraint.DefaultScopeID holds the default value on creation for the scope_id field.
+	accessconstraint.DefaultScopeID = accessconstraintDescScopeID.Default.(string)
+	// accessconstraintDescDisabled is the schema descriptor for disabled field.
+	accessconstraintDescDisabled := accessconstraintFields[11].Descriptor()
+	// accessconstraint.DefaultDisabled holds the default value on creation for the disabled field.
+	accessconstraint.DefaultDisabled = accessconstraintDescDisabled.Default.(bool)
+	// accessconstraintDescRevision is the schema descriptor for revision field.
+	accessconstraintDescRevision := accessconstraintFields[12].Descriptor()
+	// accessconstraint.DefaultRevision holds the default value on creation for the revision field.
+	accessconstraint.DefaultRevision = accessconstraintDescRevision.Default.(int64)
+	// accessconstraintDescPurpose is the schema descriptor for purpose field.
+	accessconstraintDescPurpose := accessconstraintFields[13].Descriptor()
+	// accessconstraint.DefaultPurpose holds the default value on creation for the purpose field.
+	accessconstraint.DefaultPurpose = accessconstraintDescPurpose.Default.(string)
+	// accessconstraint.PurposeValidator is a validator for the "purpose" field. It is called by the builders before save.
+	accessconstraint.PurposeValidator = accessconstraintDescPurpose.Validators[0].(func(string) error)
+	// accessconstraintDescCreated is the schema descriptor for created field.
+	accessconstraintDescCreated := accessconstraintFields[16].Descriptor()
+	// accessconstraint.DefaultCreated holds the default value on creation for the created field.
+	accessconstraint.DefaultCreated = accessconstraintDescCreated.Default.(func() time.Time)
+	// accessconstraintDescUpdated is the schema descriptor for updated field.
+	accessconstraintDescUpdated := accessconstraintFields[17].Descriptor()
+	// accessconstraint.DefaultUpdated holds the default value on creation for the updated field.
+	accessconstraint.DefaultUpdated = accessconstraintDescUpdated.Default.(func() time.Time)
+	// accessconstraint.UpdateDefaultUpdated holds the default value on update for the updated field.
+	accessconstraint.UpdateDefaultUpdated = accessconstraintDescUpdated.UpdateDefault.(func() time.Time)
+	// accessconstraintDescID is the schema descriptor for id field.
+	accessconstraintDescID := accessconstraintFields[0].Descriptor()
+	// accessconstraint.DefaultID holds the default value on creation for the id field.
+	accessconstraint.DefaultID = accessconstraintDescID.Default.(func() uuid.UUID)
 	accesspolicyFields := schema.AccessPolicy{}.Fields()
 	_ = accesspolicyFields
 	// accesspolicyDescName is the schema descriptor for name field.
@@ -1243,7 +1282,7 @@ func init() {
 	// rolebinding.DefaultScopeID holds the default value on creation for the scope_id field.
 	rolebinding.DefaultScopeID = rolebindingDescScopeID.Default.(string)
 	// rolebindingDescCreated is the schema descriptor for created field.
-	rolebindingDescCreated := rolebindingFields[7].Descriptor()
+	rolebindingDescCreated := rolebindingFields[9].Descriptor()
 	// rolebinding.DefaultCreated holds the default value on creation for the created field.
 	rolebinding.DefaultCreated = rolebindingDescCreated.Default.(func() time.Time)
 	// rolebindingDescID is the schema descriptor for id field.

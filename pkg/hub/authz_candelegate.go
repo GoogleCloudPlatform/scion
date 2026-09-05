@@ -31,9 +31,7 @@ import (
 //   - Group membership: wired in handlers_groups.go:addGroupMember.
 //   - Agent delegation: wired in handlers_agents_core.go:createAgentInProject.
 //   - Scheduled dispatch: wired in server.go:authorizeScheduledAgentCreate.
-//   - Policy create/update/bind: gated by requireAdmin (super-admin only).
-//     CanDelegate enforcement is implicit. If policy routes are ever opened
-//     to scoped admins, explicit CanDelegate checks must be added.
+//   - Policy routes: removed in CO1 cutover.
 //   - Custom role definition create/update: no HTTP handlers exist yet.
 //     Future handlers MUST call CanDelegate to verify the actor holds all
 //     permissions defined in the custom role.
@@ -46,7 +44,6 @@ const (
 	GrantTypeGroupMembership   GrantType = "group_membership"
 	GrantTypeAgentDelegation   GrantType = "agent_delegation"
 	GrantTypeCustomRole        GrantType = "custom_role"
-	GrantTypePolicy            GrantType = "policy"
 	GrantTypeProjectMembership GrantType = "project_membership"
 )
 
@@ -59,9 +56,8 @@ type GrantDescriptor struct {
 	RoleDefinitionID string
 	RolePermissions  []string // resolved permissions if available
 
-	// For group membership: the group and role being granted.
-	GroupID   string
-	GroupRole string // "owner", "admin", "member"
+	// For group membership: the target group.
+	GroupID string
 
 	// For agent delegation: the role/scopes being delegated.
 	AgentRole   string
@@ -70,11 +66,6 @@ type GrantDescriptor struct {
 
 	// For custom roles: the permissions being defined.
 	CustomRolePermissions []string
-
-	// For policy: the policy being created/bound.
-	PolicyEffect   string // "allow", "deny"
-	PolicyActions  []string
-	PolicyResource string
 
 	// Scope of the grant.
 	ScopeType string // "system", "project"
@@ -118,8 +109,6 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 		return a.canDelegateAgent(ctx, actor, grant)
 	case GrantTypeCustomRole:
 		return a.canDelegateCustomRole(ctx, actor, grant)
-	case GrantTypePolicy:
-		return a.canDelegatePolicy(ctx, actor, grant)
 	case GrantTypeProjectMembership:
 		return a.canDelegateProjectMembership(ctx, actor, grant)
 	default:
@@ -170,27 +159,138 @@ func (a *AuthzService) canDelegateRoleBinding(ctx context.Context, actor Identit
 }
 
 // canDelegateGroupMembership checks whether the actor can add a member to
-// a group at the given role. For project member groups, adding a member with
-// an elevated role grants project-level authority — the actor must hold at
-// least that authority.
+// a group. Because membership in a role-bearing group confers all of that
+// group's role-binding authority, the actor must hold every permission that
+// becomes newly reachable through the addition.
+//
+// The check covers:
+//   - Direct role bindings on the target group.
+//   - For nested group additions: the full parent closure — if group A has
+//     role R at scope S, adding group B to A means B's members inherit R at S.
+//   - Agent callers: pass the same test as user callers.
+//   - GroupMembership.Role (governance) does NOT substitute for resource
+//     authority and is not consulted here.
 func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
-	// If the group is a project-scoped members group, check that the actor
-	// holds the equivalent project permissions.
-	if grant.ProjectID != "" && grant.GroupRole != "" {
-		projectRoleName := groupRoleToProjectRole(grant.GroupRole)
-		if projectRoleName != "" {
-			rd, err := a.store.GetRoleDefinitionByName(ctx, projectRoleName, store.RoleScopeProject)
-			if err != nil {
-				return Decision{Allowed: false, Reason: "cannot resolve project role definition for group role"}
+	groupID := grant.GroupID
+	if groupID == "" {
+		return Decision{Allowed: true, Reason: "no group specified"}
+	}
+
+	// Build the principal closure of the target group: the group itself plus
+	// all ancestor groups that transitively contain it. Adding a member to
+	// groupID means the new member inherits bindings on groupID AND on every
+	// ancestor group.
+	groupPrincipals := []store.PrincipalRef{
+		{Type: store.RoleBindingPrincipalGroup, ID: groupID},
+	}
+
+	// Collect ancestor groups via the group's effective-group parent closure.
+	// GetEffectiveGroups returns groups a user/agent belongs to by walking UP
+	// the group hierarchy. For a group, we need to find which groups contain
+	// THIS group — i.e., its parent groups. We use the store method directly.
+	parentGroups, err := a.store.GetParentGroups(ctx, groupID)
+	if err != nil {
+		a.logger.Warn("failed to resolve parent groups for delegation check",
+			"group_id", groupID, "error", err)
+		// Fail closed: if we cannot resolve the parent closure, deny.
+		return Decision{Allowed: false, Reason: "cannot resolve parent group closure"}
+	}
+	for _, pgID := range parentGroups {
+		groupPrincipals = append(groupPrincipals, store.PrincipalRef{
+			Type: store.RoleBindingPrincipalGroup,
+			ID:   pgID,
+		})
+	}
+
+	// Fetch ALL role bindings for the group closure in one batched query.
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, groupPrincipals, nil, nil)
+	if err != nil {
+		a.logger.Warn("failed to list role bindings for group closure",
+			"group_id", groupID, "error", err)
+		return Decision{Allowed: false, Reason: "cannot resolve group role bindings"}
+	}
+
+	// If the group (and its ancestors) have no role bindings, no authority
+	// is being delegated through this membership addition.
+	if len(bindings) == 0 {
+		return Decision{Allowed: true, Reason: "group has no role bindings; no authority delegation required"}
+	}
+
+	// R4 gap (a): UAT scope bypass on group membership. If any binding on
+	// the group closure is system-scoped, a project-scoped UAT must not be
+	// allowed to delegate that authority — the GrantDescriptor for group
+	// membership has no ScopeType, so enforceUATDelegation cannot catch it.
+	if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeSystem {
+				return Decision{
+					Allowed: false,
+					Reason:  "scoped credential cannot delegate system-scoped group authority",
+				}
 			}
-			return a.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, grant.ProjectID)
 		}
 	}
 
-	// For non-project groups, check that the actor is at least a group admin
-	// or owner. This is already enforced by the handler's role-hierarchy check,
-	// so CanDelegate adds the permission-level validation layer.
-	return Decision{Allowed: true, Reason: "group membership delegation permitted"}
+	// Collect all permissions grouped by (scopeType, scopeID) so we can
+	// verify the actor holds each permission at the appropriate scope.
+	type scopeKey struct {
+		scopeType string
+		scopeID   string
+	}
+	permsByScope := make(map[scopeKey]map[string]struct{})
+	rdCache := make(map[string]*store.RoleDefinition) // dedup GetRoleDefinition calls
+
+	for _, b := range bindings {
+		rd, ok := rdCache[b.RoleDefinitionID]
+		if !ok {
+			var rdErr error
+			rd, rdErr = a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			if rdErr != nil {
+				a.logger.Warn("failed to resolve role definition for group binding",
+					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
+				// Fail closed: an unresolvable role definition must deny, not skip.
+				return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
+			}
+			rdCache[b.RoleDefinitionID] = rd
+		}
+		sk := scopeKey{scopeType: b.ScopeType, scopeID: b.ScopeID}
+		if permsByScope[sk] == nil {
+			permsByScope[sk] = make(map[string]struct{})
+		}
+		for _, perm := range rd.Permissions {
+			permsByScope[sk][perm] = struct{}{}
+		}
+	}
+
+	// Verify the actor holds every inherited permission at each scope.
+	for sk, perms := range permsByScope {
+		// R-3 fix: for scoped UAT actors, reject any project-scoped binding
+		// whose project doesn't match the credential's scoped project. A
+		// project-scoped UAT must not delegate group authority in a different
+		// project.
+		if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
+			if sk.scopeType == store.RoleScopeProject && sk.scopeID != scoped.ScopedProjectID() {
+				return Decision{
+					Allowed: false,
+					Reason:  "scoped credential cannot delegate group authority in a different project",
+				}
+			}
+		}
+
+		permList := make([]string, 0, len(perms))
+		for p := range perms {
+			permList = append(permList, p)
+		}
+		decision := a.actorHoldsAllPermissions(ctx, actor, permList, sk.scopeType, sk.scopeID)
+		if !decision.Allowed {
+			return Decision{
+				Allowed: false,
+				Reason:  "actor cannot delegate inherited group authority: " + decision.Reason,
+			}
+		}
+	}
+
+	return Decision{Allowed: true, Reason: "actor holds all permissions inherited through group membership"}
 }
 
 // canDelegateAgent checks whether the actor holds all scopes/permissions
@@ -270,17 +370,6 @@ func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity
 	return a.actorHoldsAllPermissions(ctx, actor, grant.CustomRolePermissions, grant.ScopeType, grant.ScopeID)
 }
 
-// canDelegatePolicy checks whether the actor can create/modify policies.
-// Raw policy authoring is super-admin-only for now.
-func (a *AuthzService) canDelegatePolicy(_ context.Context, _ Identity, _ GrantDescriptor) Decision {
-	// Per brief constraint #3: raw policy authoring is super-admin-only.
-	// Super-admin is already handled above, so reaching here means non-admin.
-	return Decision{
-		Allowed: false,
-		Reason:  "policy authoring requires super-admin",
-	}
-}
-
 // canDelegateProjectMembership checks whether the actor can add members to
 // a project. The actor must be a project owner or admin.
 func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
@@ -296,8 +385,9 @@ func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor I
 
 // actorHoldsAllPermissions resolves the actor's effective permissions in the
 // given scope and checks that every permission in targetPerms is held.
-// Permissions come from both role bindings AND policy grants, because a user's
-// effective authority is the union of both sources.
+// Permissions come from role bindings. Credential caveats (UAT project scope,
+// agent JWT scopes) are intersected with the resolved permissions so that
+// delegation checks enforce the same restrictions as normal CheckAccess.
 func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Identity, targetPerms []string, scopeType, scopeID string) Decision {
 	actorPerms, err := a.getEffectivePermissions(ctx, actor.Type(), actor.ID(), scopeType, scopeID)
 	if err != nil {
@@ -314,10 +404,10 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 		}
 	}
 
-	// Also check policy-granted permissions: policies bound to the user
-	// or their groups also grant authority the user can delegate.
-	policyPerms := a.getPolicyGrantedPermissions(ctx, actor, scopeType, scopeID)
-	actorPerms = append(actorPerms, policyPerms...)
+	// R4 gap (b): Intersect resolved permissions with credential caveats.
+	// This mirrors the restrictions built in CheckAccess (steps 7a/7b) so
+	// that delegation checks honour the same credential scope boundaries.
+	actorPerms = a.intersectCredentialCaveats(actor, actorPerms)
 
 	actorPermSet := make(map[string]bool, len(actorPerms))
 	for _, p := range actorPerms {
@@ -336,75 +426,37 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 	return Decision{Allowed: true, Reason: "actor holds all required permissions"}
 }
 
-// getPolicyGrantedPermissions resolves permissions granted to the actor via
-// policies (as opposed to role bindings). This ensures that policy-granted
-// authority (e.g., project member policies bound to groups) is considered
-// when checking delegation authority.
-func (a *AuthzService) getPolicyGrantedPermissions(ctx context.Context, actor Identity, scopeType, scopeID string) []string {
-	principals, err := a.authorizationPrincipals(ctx, actor)
-	if err != nil {
-		return nil
-	}
+// intersectCredentialCaveats filters a permission set through the credential
+// restrictions carried by the actor's identity. If the actor has no credential
+// caveats (full session), the permissions are returned unchanged.
+func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string) []string {
+	var restriction *Restriction
 
-	policies, err := a.store.GetPoliciesForPrincipals(ctx, principals)
-	if err != nil {
-		return nil
-	}
-
-	seen := make(map[string]bool)
-	var result []string
-	for _, policy := range policies {
-		if policy.Effect != "allow" {
-			continue
-		}
-		// Filter by scope
-		if scopeType == store.RoleScopeProject && policy.ScopeType == "project" {
-			if policy.ScopeID != scopeID {
-				continue
+	switch v := actor.(type) {
+	case *ScopedUserIdentity:
+		if v != nil {
+			scopes := v.ScopedScopes()
+			if len(scopes) > 0 {
+				r := uatScopeRestriction(scopes)
+				restriction = &r
 			}
 		}
-		// Map policy actions + resource type to permission IDs
-		for _, action := range policy.Actions {
-			if action == "*" {
-				// Wildcard action — grant all permissions for the resource type
-				for _, p := range permissions.Registry {
-					if policy.ResourceType == "*" || p.Resource == policy.ResourceType {
-						if !seen[p.ID] {
-							seen[p.ID] = true
-							result = append(result, p.ID)
-						}
-					}
-				}
-			} else {
-				// Specific action — find matching permission
-				for _, p := range permissions.Registry {
-					if (policy.ResourceType == "*" || p.Resource == policy.ResourceType) && p.Action == action {
-						if !seen[p.ID] {
-							seen[p.ID] = true
-							result = append(result, p.ID)
-						}
-					}
-				}
-			}
+	case AgentIdentity:
+		r := agentScopeRestriction(v)
+		restriction = &r
+	}
+
+	if restriction == nil || restriction.Check == nil {
+		return perms
+	}
+
+	filtered := make([]string, 0, len(perms))
+	for _, p := range perms {
+		if restriction.Check(p) {
+			filtered = append(filtered, p)
 		}
 	}
-	return result
-}
-
-// groupRoleToProjectRole maps a group membership role to the corresponding
-// project role definition name. Returns "" for plain members, since member
-// access doesn't need additional delegation checks beyond ActionAddMember.
-func groupRoleToProjectRole(groupRole string) string {
-	switch groupRole {
-	case store.GroupMemberRoleOwner:
-		return store.ProjectRoleOwner
-	case store.GroupMemberRoleAdmin:
-		return store.ProjectRoleAdmin
-	case store.GroupMemberRoleMember:
-		return store.ProjectRoleMember
-	default:
-		return ""
-	}
+	return filtered
 }
 
 // scopesToPermissionIDs maps agent token scopes to permission IDs using

@@ -1,0 +1,40 @@
+{
+  "$fixture": {
+    "endpoint": "DELETE /api/v1/admin/groups/grp-contractors  (an ADJACENT mutation, not a boundary mutation)",
+    "status": 409,
+    "designRef": "constraint-ui-ux-design.md §9.6, §8; plan §WP B7, F7",
+    "notes": "Not one of the 12 B7 boundary codes — this is the adjacent-domain code from design §9.6. Mutations elsewhere in the product (group membership, role bindings, project deletion) that would change a boundary's effect must refuse and hand back an impactPreviewUrl rather than silently altering the boundary's blast radius. The nearest existing behavior is isConstraintBearingGroup (pkg/hub/handlers_groups.go:912-938), which already blocks constraint-bearing group changes but returns a plain 409 conflict with no preview link. Included because F7 consumes it."
+  },
+  "error": {
+    "code": "SECURITY_REVIEW_REQUIRED",
+    "message": "This change alters an access boundary's effect and needs security review.",
+    "retryable": false,
+    "correlationId": "req-fa20e5b1",
+    "requestId": "req-fa20e5b1",
+    "details": {
+      "attemptedOperation": "group.delete",
+      "target": { "type": "group", "id": "grp-contractors", "displayName": "Contractors" },
+      "affectedBoundaries": [
+        {
+          "id": "ac-42",
+          "name": "Contractor deploy ceiling",
+          "scope": { "type": "project", "projectId": "proj-atlas" },
+          "effect": "Deleting this group removes the boundary's subject, restoring authority to 126 principals.",
+          "classification": "relax",
+          "_capabilities": { "actions": ["read"] }
+        },
+        {
+          "id": "ac-19",
+          "name": "Atlas read-only auditors",
+          "scope": { "type": "project", "projectId": "proj-atlas" },
+          "effect": "6 principals would leave this boundary's subject set.",
+          "classification": "relax",
+          "_capabilities": { "actions": ["read"] }
+        }
+      ],
+      "affectedBoundaryCount": 2,
+      "impactPreviewUrl": "/api/v1/admin/access-constraint-previews?adjacentOperation=group.delete&targetId=grp-contractors",
+      "remedy": "Review the impact preview. If the relaxation is intended, remove or narrow the affected boundaries first, then retry the deletion."
+    }
+  }
+}

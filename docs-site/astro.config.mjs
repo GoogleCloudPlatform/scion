@@ -97,6 +97,7 @@ export default defineConfig({
 							label: 'Release Notes',
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'Aug 24 -- 30', slug: 'release-notes/2026-08-24' },
 								{ label: 'Aug 17 -- 23', slug: 'release-notes/2026-08-17' },
 								{ label: 'Aug 10 -- 16', slug: 'release-notes/2026-08-10' },
 								{ label: 'Aug 3 -- 9', slug: 'release-notes/2026-08-03' },

@@ -25,7 +25,15 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type { AdminUser, UserRole } from '../../shared/types.js';
+import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
+import {
+  parseSecurityReviewResponse,
+  parseLockoutResponse,
+} from '../shared/security-review-dialog.js';
 import '../shared/status-badge.js';
+import '../shared/effective-role-provenance.js';
+import '../shared/effective-access-boundary-notice.js';
+import '../shared/security-review-dialog.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
@@ -171,6 +179,17 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private inviteCopied = false;
+
+  /** User for which we are showing the effective roles dialog. */
+  @state()
+  private viewRolesUser: AdminUser | null = null;
+
+  // Security review dialog state
+  @state()
+  private securityReviewDetail: SecurityReviewDetail | null = null;
+
+  @state()
+  private showSecurityReview = false;
 
   static override styles = css`
     :host {
@@ -791,8 +810,9 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async updateUser(
     userId: string,
-    updates: { role?: string; status?: string }
-  ): Promise<void> {
+    updates: { role?: string; status?: string },
+    userLabel?: string
+  ): Promise<{ securityReview: boolean }> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'PATCH',
       credentials: 'include',
@@ -800,18 +820,77 @@ export class ScionPageAdminUsers extends LitElement {
       body: JSON.stringify(updates),
     });
     if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (errorBody) {
+        const label = userLabel ?? userId;
+
+        const lockout = parseLockoutResponse(errorBody);
+        if (lockout) {
+          this.securityReviewDetail = {
+            entityLabel: label,
+            contextLabel: 'system',
+            boundaries: [],
+            canCommit: false,
+            lockout,
+          };
+          this.showSecurityReview = true;
+          return { securityReview: true };
+        }
+
+        const reviewDetail = parseSecurityReviewResponse(errorBody, label, 'system');
+        if (reviewDetail) {
+          this.securityReviewDetail = reviewDetail;
+          this.showSecurityReview = true;
+          return { securityReview: true };
+        }
+
+        const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+        throw new Error(msg ?? `HTTP ${response.status}`);
+      }
+      throw new Error(`HTTP ${response.status}`);
     }
+    return { securityReview: false };
   }
 
-  private async deleteUser(userId: string): Promise<void> {
+  private async deleteUser(
+    userId: string,
+    userLabel?: string
+  ): Promise<{ securityReview: boolean }> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'DELETE',
       credentials: 'include',
     });
     if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (errorBody) {
+        const label = userLabel ?? userId;
+
+        const lockout = parseLockoutResponse(errorBody);
+        if (lockout) {
+          this.securityReviewDetail = {
+            entityLabel: label,
+            contextLabel: 'system',
+            boundaries: [],
+            canCommit: false,
+            lockout,
+          };
+          this.showSecurityReview = true;
+          return { securityReview: true };
+        }
+
+        const reviewDetail = parseSecurityReviewResponse(errorBody, label, 'system');
+        if (reviewDetail) {
+          this.securityReviewDetail = reviewDetail;
+          this.showSecurityReview = true;
+          return { securityReview: true };
+        }
+
+        const msg = (errorBody.error as Record<string, unknown>)?.message as string | undefined;
+        throw new Error(msg ?? `HTTP ${response.status}`);
+      }
+      throw new Error(`HTTP ${response.status}`);
     }
+    return { securityReview: false };
   }
 
   private promptChangeRole(user: AdminUser, newRole: UserRole): void {
@@ -824,7 +903,8 @@ export class ScionPageAdminUsers extends LitElement {
       confirmLabel: action,
       user,
       action: async () => {
-        await this.updateUser(user.id, { role: newRole });
+        const result = await this.updateUser(user.id, { role: newRole });
+        if (result.securityReview) return;
         this.showFeedback('success', `${user.displayName || user.email} is now ${roleLabel}.`);
         void this.loadUsers(
           this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
@@ -845,7 +925,12 @@ export class ScionPageAdminUsers extends LitElement {
       user,
       action: async () => {
         const newStatus = suspending ? 'suspended' : 'active';
-        await this.updateUser(user.id, { status: newStatus });
+        const result = await this.updateUser(
+          user.id,
+          { status: newStatus },
+          user.displayName || user.email
+        );
+        if (result.securityReview) return;
         this.showFeedback(
           'success',
           `${user.displayName || user.email} has been ${suspending ? 'suspended' : 'reactivated'}.`
@@ -870,7 +955,8 @@ export class ScionPageAdminUsers extends LitElement {
       confirmLabel: user.status === 'invited' ? 'Remove' : 'Delete',
       user,
       action: async () => {
-        await this.deleteUser(user.id);
+        const result = await this.deleteUser(user.id, user.displayName || user.email);
+        if (result.securityReview) return;
         this.showFeedback(
           'success',
           `${user.displayName || user.email} has been ${user.status === 'invited' ? 'removed' : 'deleted'}.`
@@ -1230,6 +1316,15 @@ export class ScionPageAdminUsers extends LitElement {
         : this.renderInvitesTab()}
       ${this.renderConfirmDialog()} ${this.renderInviteUserDialog()} ${this.renderImportDialog()}
       ${this.renderCreateInviteDialog()} ${this.renderInviteRevealDialog()}
+      ${this.renderViewRolesDialog()}
+      <scion-security-review-dialog
+        ?open=${this.showSecurityReview}
+        .detail=${this.securityReviewDetail}
+        @security-review-cancel=${() => {
+          this.showSecurityReview = false;
+          this.securityReviewDetail = null;
+        }}
+      ></scion-security-review-dialog>
     `;
   }
 
@@ -1497,13 +1592,22 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
-    // Active users: Change role, Suspend, Delete
+    // Active users: View Roles, Change role, Suspend, Delete
     return html`
       <sl-dropdown placement="bottom-end" hoist>
         <sl-button slot="trigger" size="small" variant="text" caret>
           <sl-icon name="three-dots-vertical"></sl-icon>
         </sl-button>
         <sl-menu>
+          <sl-menu-item
+            @click=${() => {
+              this.viewRolesUser = user;
+            }}
+          >
+            <sl-icon slot="prefix" name="shield"></sl-icon>
+            View Roles
+          </sl-menu-item>
+          <sl-divider></sl-divider>
           ${user.role !== 'admin'
             ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
                 <sl-icon slot="prefix" name="shield-check"></sl-icon>
@@ -1882,6 +1986,39 @@ export class ScionPageAdminUsers extends LitElement {
           <sl-icon slot="prefix" name=${this.inviteCopied ? 'check' : 'clipboard'}></sl-icon>
           ${this.inviteCopied ? 'Copied!' : 'Copy Link'}
         </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderViewRolesDialog() {
+    if (!this.viewRolesUser) return nothing;
+    const user = this.viewRolesUser;
+    return html`
+      <sl-dialog
+        label="Effective Roles — ${user.displayName || user.email}"
+        open
+        style="--width: 36rem;"
+        @sl-request-close=${() => {
+          this.viewRolesUser = null;
+        }}
+      >
+        <scion-effective-role-provenance
+          principalType="user"
+          principalId=${user.id}
+          sectionTitle="Effective Roles"
+        ></scion-effective-role-provenance>
+        <scion-effective-access-boundary-notice
+          contextType="user"
+          contextId=${user.id}
+        ></scion-effective-access-boundary-notice>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.viewRolesUser = null;
+          }}
+          >Close</sl-button
+        >
       </sl-dialog>
     `;
   }

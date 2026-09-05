@@ -136,7 +136,9 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockInlineSecretsMigration", LockInlineSecretsMigration},
 		{"LockNonceCacheEviction", LockNonceCacheEviction},
 		{"LockChatLinkCodeEviction", LockChatLinkCodeEviction},
+		{"LockWebchatMigration", LockWebchatMigration},
 		{"LockDataMigrations", LockDataMigrations},
+		{"LockRecoveryAuthz", LockRecoveryAuthz},
 		// Per-object class IDs (different range, but must not collide
 		// with singletons or each other).
 		{"LockWorkspaceProvision", LockWorkspaceProvision},

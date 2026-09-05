@@ -177,10 +177,10 @@ func (s *ExternalStore) GetGCPServiceAccount(ctx context.Context, id string) (*s
 // control, and you have just reached it.
 //
 // WHY THOSE THREE ARE AUTHORIZATION INPUTS, in this repo, today:
-//   - CreatedBy feeds Resource.OwnerID for a service account. The owner bypass
-//     in checkAccessForUser returns Allowed on an OwnerID match before any
-//     membership or policy is consulted. Writable CreatedBy is therefore a
-//     writable authorization bypass.
+//   - CreatedBy feeds Resource.OwnerID for a service account. The owner
+//     relationship grant in the AK1 kernel returns Allowed on an OwnerID
+//     match before any membership is consulted. Writable CreatedBy is
+//     therefore a writable authorization bypass.
 //   - Scope selects which arm of gcpServiceAccountVerdict runs, and the user
 //     arm is a bare CreatedBy equality with no admin bypass.
 //   - ScopeID is the project an account is confined to, and is what

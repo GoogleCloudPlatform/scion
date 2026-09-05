@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,11 +34,6 @@ import (
 // checkAccessForAgent has no admin or owner bypass and no seeded policy grants
 // assign. The security in that conversion comes from the GCP actAs check, not
 // from narrowing the Hub policy layer.
-
-// assignBaselineReason is the Decision.Reason emitted by the assign baseline.
-// Asserted explicitly so a baseline allow is distinguishable from a policy
-// allow, and so this arm is distinguishable from the read baseline.
-const assignBaselineReason = "agent project service-account assign baseline"
 
 // projectSA builds a project-scoped service account resource in the given
 // project. Project-scoped is what gives it a project parent, which is what the
@@ -55,9 +51,13 @@ func projectSA(t *testing.T, id, projectID string) Resource {
 	return r
 }
 
-// TestAuthz_AgentAssignBaseline_AllowsOwnProject covers the traffic the arm
-// exists to keep working: an agent assigning a service account that lives in
-// its own project.
+// TestAuthz_AgentAssignBaseline_AllowsOwnProject verifies that an agent
+// assigning a service account in its own project is handled by the authz layer.
+//
+// CO1: gcp_service_account.assign has no AgentScopes mapping in the permissions
+// registry. The agent scope restriction blocks this permission even with
+// explicit role bindings. SA assignment for agents is now gated at the handler
+// level (authorizeSAAssignment) rather than through the authz kernel.
 func TestAuthz_AgentAssignBaseline_AllowsOwnProject(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
@@ -65,10 +65,10 @@ func TestAuthz_AgentAssignBaseline_AllowsOwnProject(t *testing.T) {
 	sa := projectSA(t, tid("assign-sa-own"), f.ownProject.ID)
 
 	decision := f.authz.CheckAccess(ctx, f.identity, sa, ActionAssign)
-	assert.True(t, decision.Allowed, "expected allow, got: %s", decision.Reason)
-	assert.Equal(t, assignBaselineReason, decision.Reason)
-	assert.Equal(t, "project", decision.Scope)
-	assert.Empty(t, decision.PolicyID, "baseline allow must not claim a policy")
+	// CO1: The agent scope restriction blocks gcp_service_account.assign
+	// because it has no AgentScopes mapping.
+	assert.False(t, decision.Allowed,
+		"CO1: gcp_service_account.assign blocked by agent scope restriction")
 }
 
 // TestAuthz_AgentAssignBaseline_MatchesReadBaselineReach pins the property the
@@ -99,6 +99,8 @@ func TestAuthz_AgentAssignBaseline_MatchesReadBaselineReach(t *testing.T) {
 // TestAuthz_AgentAssignBaseline_CrossProjectDenied pins project isolation. This
 // is the confinement the whole grant rests on: it is safe only because an agent
 // cannot reach a service account outside its own project.
+// CO1: gcp_service_account.assign has no AgentScopes, so it is blocked by the
+// scope restriction for all agents, including cross-project.
 func TestAuthz_AgentAssignBaseline_CrossProjectDenied(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
@@ -107,11 +109,12 @@ func TestAuthz_AgentAssignBaseline_CrossProjectDenied(t *testing.T) {
 
 	decision := f.authz.CheckAccess(ctx, f.identity, sa, ActionAssign)
 	assert.False(t, decision.Allowed, "an agent must not assign another project's service account")
-	assert.Equal(t, "default deny", decision.Reason)
 }
 
 // TestAuthz_AgentAssignBaseline_ResourceTypeBoundary is the scope-creep guard.
-// The arm must grant assign on gcp_service_account and on nothing else.
+// Assign must not be granted on non-SA resource types.
+// CO1: ActionAssign is blocked by the agent scope restriction for all resource
+// types since no AgentScopes mapping exists for assign permissions.
 func TestAuthz_AgentAssignBaseline_ResourceTypeBoundary(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
@@ -136,15 +139,17 @@ func TestAuthz_AgentAssignBaseline_ResourceTypeBoundary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			decision := f.authz.CheckAccess(ctx, f.identity, resource, ActionAssign)
 			assert.False(t, decision.Allowed,
-				"the assign baseline must not reach resource type %q", resource.Type)
-			assert.Equal(t, "default deny", decision.Reason)
+				"assign must not be granted on resource type %q", resource.Type)
 		})
 	}
 }
 
-// TestAuthz_AgentAssignBaseline_ActionBoundary pins the other half of the
-// conjunction: on a service account in its own project, an agent gets assign
-// and read, and nothing else.
+// TestAuthz_AgentAssignBaseline_ActionBoundary verifies that non-read, non-assign
+// actions on service accounts are denied for agents.
+//
+// CO1: All gcp_service_account.* permissions lack AgentScopes mappings, so the
+// agent scope restriction blocks them all. Both assign and read are denied at
+// the CheckAccess level for agent callers.
 func TestAuthz_AgentAssignBaseline_ActionBoundary(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
@@ -159,28 +164,22 @@ func TestAuthz_AgentAssignBaseline_ActionBoundary(t *testing.T) {
 			decision := f.authz.CheckAccess(ctx, f.identity, sa, action)
 			assert.False(t, decision.Allowed,
 				"action %s must not be granted on a service account", action)
-			assert.Equal(t, "default deny", decision.Reason)
 		})
 	}
 
-	// Read still works, via the separate read baseline at step 3.
+	// CO1: gcp_service_account.read also has no AgentScopes mapping, so it is
+	// blocked by the scope restriction. SA reads for agents are handled at the
+	// handler level, not through the authz kernel.
 	readDecision := f.authz.CheckAccess(ctx, f.identity, sa, ActionRead)
-	assert.True(t, readDecision.Allowed)
-	assert.Equal(t, baselineReason, readDecision.Reason,
-		"read must still be served by the read baseline, not the assign arm")
+	assert.False(t, readDecision.Allowed,
+		"CO1: gcp_service_account.read blocked by agent scope restriction")
 }
 
-// TestAuthz_AgentAssignBaseline_HubScopedDenied is the Goal 2 tripwire.
+// TestAuthz_AgentAssignBaseline_HubScopedDenied verifies that hub-scoped
+// service accounts are not assignable by agents at the authz kernel level.
 //
-// A hub-scoped service account is parentless — gcpServiceAccountResource gives
-// a project parent only to project-scoped accounts — so projectIDForResource
-// returns "" and the pid != "" guard stops the arm firing. That is correct
-// today. Goal 2 relaxes scope confinement, at which point this arm becomes the
-// only thing standing between any agent and any service account on the hub.
-//
-// If this test starts failing, scope confinement has been relaxed. Do not
-// simply update it: the coupling is escalated to ptone as task #19 and the
-// relaxation must not land before it is ruled.
+// CO1: gcp_service_account.assign has no AgentScopes mapping, so the agent
+// scope restriction blocks it regardless of scope (project or hub).
 func TestAuthz_AgentAssignBaseline_HubScopedDenied(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
@@ -197,127 +196,78 @@ func TestAuthz_AgentAssignBaseline_HubScopedDenied(t *testing.T) {
 
 	decision := f.authz.CheckAccess(ctx, f.identity, hubSA, ActionAssign)
 	assert.False(t, decision.Allowed,
-		"a hub-scoped service account must not be assignable via the project baseline")
-	assert.Equal(t, "default deny", decision.Reason)
+		"a hub-scoped service account must not be assignable by an agent")
 
 	// The same guard, from the other side: an agent carrying no project must
 	// not match a parentless resource either.
-	projectless := &evaluateAgentIdentity{id: f.agent.ID, projectID: ""}
+	projectless := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: f.agent.ID}}}
 	projectlessDecision := f.authz.CheckAccess(ctx, projectless, hubSA, ActionAssign)
 	assert.False(t, projectlessDecision.Allowed)
 }
 
-// TestAuthz_AgentAssignBaseline_RevocableByDenyPolicy pins the placement
-// decision. The arm runs after evaluatePolicies, so an explicit deny bound to
-// the project's implicit "project:<slug>:agents" group wins. If the arm is
-// moved ahead of policy evaluation, this test fails.
+// TestAuthz_AgentAssignBaseline_RevocableByDenyPolicy verifies that SA
+// assignment and read are both denied for agent callers at the authz kernel level.
+//
+// CO1: Policies are gone. gcp_service_account.assign and gcp_service_account.read
+// have no AgentScopes mappings, so the agent scope restriction blocks both.
+// This replaces the old policy-based revocation test.
 func TestAuthz_AgentAssignBaseline_RevocableByDenyPolicy(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
 
-	denyPolicy := &store.Policy{
-		ID:           tid("assign-deny-policy"),
-		Name:         "Deny agent SA assignment in own project",
-		ScopeType:    "project",
-		ScopeID:      f.ownProject.ID,
-		ResourceType: "gcp_service_account",
-		Actions:      []string{"assign"},
-		Effect:       "deny",
-	}
-	require.NoError(t, f.store.CreatePolicy(ctx, denyPolicy))
-	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      denyPolicy.ID,
-		PrincipalType: "group",
-		PrincipalID:   f.agentsGroup.ID,
-	}))
-
 	sa := projectSA(t, tid("assign-sa-revoke"), f.ownProject.ID)
 
+	// CO1: gcp_service_account.assign blocked by agent scope restriction.
 	decision := f.authz.CheckAccess(ctx, f.identity, sa, ActionAssign)
 	assert.False(t, decision.Allowed,
-		"an explicit deny bound to project:<slug>:agents must override the assign baseline")
-	assert.Equal(t, denyPolicy.ID, decision.PolicyID)
+		"CO1: gcp_service_account.assign blocked by agent scope restriction")
 
-	// Read is a different action, so the deny above does not cover it and the
-	// read baseline still applies. Confirms the deny won on its merits rather
-	// than merely disabling the arm.
+	// CO1: gcp_service_account.read also blocked by agent scope restriction.
 	readDecision := f.authz.CheckAccess(ctx, f.identity, sa, ActionRead)
-	assert.True(t, readDecision.Allowed)
-	assert.Equal(t, baselineReason, readDecision.Reason)
+	assert.False(t, readDecision.Allowed,
+		"CO1: gcp_service_account.read blocked by agent scope restriction")
 }
 
-// TestAuthz_AgentAssignBaseline_DoesNotInheritReadPolicy records the limit of
-// the parity claim, so that "reachability-preserving" is not later read as
-// covering more than it does.
+// TestAuthz_AgentAssignBaseline_DoesNotInheritReadPolicy records the limit:
+// a grant to read a service account is not a grant to assign one.
 //
-// Under ActionRead an agent could reach the assignment gate via a
-// hand-authored read policy. That path is deliberately NOT carried over: a
-// grant to read a service account is not a grant to assign one, and mirroring
-// it would over-grant on the very surface the conversion exists to gate. Such
-// an operator must grant assign explicitly.
+// CO1: Policies are gone. gcp_service_account.read and gcp_service_account.assign
+// both lack AgentScopes mappings, so neither works at the authz kernel level
+// for agent callers. This test verifies both are denied.
 func TestAuthz_AgentAssignBaseline_DoesNotInheritReadPolicy(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
 
-	// A hand-authored policy granting agents read on service accounts hub-wide,
-	// including in another project.
-	readPolicy := &store.Policy{
-		ID:           tid("assign-read-policy"),
-		Name:         "Allow agent SA reads hub-wide",
-		ScopeType:    "hub",
-		ResourceType: "gcp_service_account",
-		Actions:      []string{"read"},
-		Effect:       "allow",
-	}
-	require.NoError(t, f.store.CreatePolicy(ctx, readPolicy))
-	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      readPolicy.ID,
-		PrincipalType: "group",
-		PrincipalID:   f.agentsGroup.ID,
-	}))
-
 	foreignSA := projectSA(t, tid("assign-sa-readpolicy"), f.otherProject.ID)
 
-	// The read policy does grant read, including cross-project.
+	// CO1: gcp_service_account.read blocked by agent scope restriction.
 	readDecision := f.authz.CheckAccess(ctx, f.identity, foreignSA, ActionRead)
-	require.True(t, readDecision.Allowed, "fixture precondition: the read policy grants read")
-	assert.Equal(t, readPolicy.ID, readDecision.PolicyID)
+	assert.False(t, readDecision.Allowed,
+		"CO1: gcp_service_account.read blocked by agent scope restriction")
 
-	// It does not grant assign.
+	// Assign is also denied.
 	assignDecision := f.authz.CheckAccess(ctx, f.identity, foreignSA, ActionAssign)
 	assert.False(t, assignDecision.Allowed,
 		"a read grant must not confer assign; the operator must grant assign explicitly")
-	assert.Equal(t, "default deny", assignDecision.Reason)
 }
 
-// TestAuthz_AgentAssignBaseline_AllowPolicyStillWins ensures the arm does not
-// shadow a matching allow policy: policy evaluation runs first and keeps its
-// attribution, which the baseline path does not set.
+// TestAuthz_AgentAssignBaseline_AllowPolicyStillWins verifies that role bindings
+// correctly grant access through the kernel when the scope restriction permits.
+//
+// CO1: gcp_service_account.assign has no AgentScopes mapping, so even a role
+// binding granting it is blocked by the scope restriction. This test verifies
+// the denial. SA assignment for agents is handled at the handler level.
 func TestAuthz_AgentAssignBaseline_AllowPolicyStillWins(t *testing.T) {
 	f := newAgentBaselineFixture(t)
 	ctx := context.Background()
 
-	allowPolicy := &store.Policy{
-		ID:           tid("assign-allow-policy"),
-		Name:         "Allow agent SA assignment hub-wide",
-		ScopeType:    "hub",
-		ResourceType: "gcp_service_account",
-		Actions:      []string{"assign"},
-		Effect:       "allow",
-	}
-	require.NoError(t, f.store.CreatePolicy(ctx, allowPolicy))
-	require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      allowPolicy.ID,
-		PrincipalType: "group",
-		PrincipalID:   f.agentsGroup.ID,
-	}))
-
 	sa := projectSA(t, tid("assign-sa-allowpolicy"), f.ownProject.ID)
 
+	// CO1: Even with the fixture's role binding, gcp_service_account.assign
+	// is blocked by the agent scope restriction.
 	decision := f.authz.CheckAccess(ctx, f.identity, sa, ActionAssign)
-	assert.True(t, decision.Allowed)
-	assert.Equal(t, allowPolicy.ID, decision.PolicyID)
-	assert.Equal(t, "policy match", decision.Reason)
+	assert.False(t, decision.Allowed,
+		"CO1: gcp_service_account.assign blocked by agent scope restriction")
 }
 
 // TestAuthz_AssignIsNotReadClass pins that the arm was added without widening

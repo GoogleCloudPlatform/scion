@@ -58,6 +58,22 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 		}
 	}
 
+	// Give super-admin user the super-admin role binding.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get super-admin role definition: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("create super-admin role binding: %v", err)
+	}
+
 	// Give hub-admin user the hub-admin role binding
 	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	if err != nil {

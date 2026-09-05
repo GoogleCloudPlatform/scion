@@ -26,6 +26,10 @@ const (
 	FieldScopeType = "scope_type"
 	// FieldScopeID holds the string denoting the scope_id field in the database.
 	FieldScopeID = "scope_id"
+	// FieldNotBefore holds the string denoting the not_before field in the database.
+	FieldNotBefore = "not_before"
+	// FieldExpiresAt holds the string denoting the expires_at field in the database.
+	FieldExpiresAt = "expires_at"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -51,6 +55,8 @@ var Columns = []string{
 	FieldPrincipalID,
 	FieldScopeType,
 	FieldScopeID,
+	FieldNotBefore,
+	FieldExpiresAt,
 	FieldCreatedBy,
 	FieldCreated,
 }
@@ -83,6 +89,7 @@ type PrincipalType string
 const (
 	PrincipalTypeUser  PrincipalType = "user"
 	PrincipalTypeAgent PrincipalType = "agent"
+	PrincipalTypeGroup PrincipalType = "group"
 )
 
 func (pt PrincipalType) String() string {
@@ -92,7 +99,7 @@ func (pt PrincipalType) String() string {
 // PrincipalTypeValidator is a validator for the "principal_type" field enum values. It is called by the builders before save.
 func PrincipalTypeValidator(pt PrincipalType) error {
 	switch pt {
-	case PrincipalTypeUser, PrincipalTypeAgent:
+	case PrincipalTypeUser, PrincipalTypeAgent, PrincipalTypeGroup:
 		return nil
 	default:
 		return fmt.Errorf("rolebinding: invalid enum value for principal_type field: %q", pt)
@@ -153,6 +160,16 @@ func ByScopeType(opts ...sql.OrderTermOption) OrderOption {
 // ByScopeID orders the results by the scope_id field.
 func ByScopeID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldScopeID, opts...).ToFunc()
+}
+
+// ByNotBefore orders the results by the not_before field.
+func ByNotBefore(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotBefore, opts...).ToFunc()
+}
+
+// ByExpiresAt orders the results by the expires_at field.
+func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.

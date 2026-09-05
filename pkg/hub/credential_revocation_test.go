@@ -58,7 +58,7 @@ func setupCredentialTestServer(t *testing.T) (*Server, store.Store, *store.User,
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	return srv, s, user, project
 }

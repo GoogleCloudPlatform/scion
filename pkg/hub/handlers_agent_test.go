@@ -699,6 +699,20 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentOtherProject))
 
+	// Grant the calling agent a project-member role binding so it has agent.read
+	// permission within its project (CO1 cutover: role bindings required).
+	pmRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: pmRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalAgent,
+		PrincipalID:      agent1.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project1.ID,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
@@ -707,6 +721,11 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 	token, err := tokenSvc.GenerateAgentToken(agent1.ID, project1.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	require.NoError(t, err)
 
+	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
+	// so the agent scope restriction blocks agent-to-agent reads at the kernel
+	// level. The handler's checkAgentReadScope passes (ScopeProjectRead is
+	// present), but s.authorize denies because agent.read is not in the
+	// allowed set for the agent's credential scopes.
 	t.Run("Agent can GET details of agents in same project", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent2SameProject.ID, nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -714,7 +733,8 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping, blocked by credential scope restriction")
 	})
 
 	t.Run("Agent cannot GET details of agents in different project", func(t *testing.T) {
@@ -2342,6 +2362,7 @@ func TestGetAgent_ProfileInResponse(t *testing.T) {
 // backfills the profile in AppliedConfig when the agent record is missing it.
 func TestHeartbeat_BackfillsProfile(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -3033,6 +3054,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 
 func TestBrokerHeartbeat_PublishesActivitySSE(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	// Wire up a real event publisher so we can subscribe to SSE events
@@ -3133,6 +3155,7 @@ func TestBrokerHeartbeat_ContainerExitedDerivesCrash(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
+			grantDevUserRuntimeBrokerAccess(t, s)
 			ctx := context.Background()
 
 			project := &store.Project{ID: tid("project-hb-crash"), Name: "P", Slug: "hb-crash-project"}
@@ -3177,6 +3200,7 @@ func TestBrokerHeartbeat_ContainerExitedDerivesCrash(t *testing.T) {
 
 func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	// Create project, broker, and agent
@@ -3273,6 +3297,7 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 
 func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	// Create project, broker, and agent
@@ -3331,6 +3356,7 @@ func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) 
 
 func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	// Create project, broker, and agent
@@ -3389,6 +3415,7 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 
 func TestBrokerHeartbeat_StalledWorkingAgentNotOverwrittenBySameActivity(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("project-stall-working"), Name: "Stall Working Project", Slug: "stall-working-project"}
@@ -3445,6 +3472,7 @@ func TestBrokerHeartbeat_StalledWorkingAgentNotOverwrittenBySameActivity(t *test
 
 func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("project-stop-revert"), Name: "Stop Revert Project", Slug: "stop-revert-project"}
@@ -3503,6 +3531,7 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 
 func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("project-stop-legacy"), Name: "Stop Legacy Project", Slug: "stop-legacy-project"}
@@ -3551,6 +3580,7 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 
 func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("proj-crash-hb"), Name: "Crash HB Project", Slug: "crash-hb-proj"}
@@ -3600,6 +3630,7 @@ func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) 
 
 func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("proj-term-guard"), Name: "Term Guard Project", Slug: "term-guard-proj"}
@@ -4334,7 +4365,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Create a broker owned by the same user, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
@@ -4412,7 +4443,7 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Create a broker owned by a DIFFERENT user
 	broker := &store.RuntimeBroker{
@@ -4474,6 +4505,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, adminUser))
 	ensureHubMembership(ctx, s, adminUser.ID)
+	grantSuperAdminRole(t, s, adminUser.ID)
 
 	project := &store.Project{
 		ID:        tid("project-pt-admin"),
@@ -4485,7 +4517,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Broker owned by someone else, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
@@ -4919,6 +4951,7 @@ func TestAgentStatusUpdate_ActivityAutoCorrectsPhase(t *testing.T) {
 
 func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("proj-hb-regress"), Name: "HB Regression Project", Slug: "hb-regress-project"}
@@ -5013,6 +5046,7 @@ func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
 // heartbeat reporting stopped/crashed for a suspended agent leaves it suspended.
 func TestBrokerHeartbeat_DoesNotRevertSuspendedAgent(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("proj-susp-hb"), Name: "Suspend HB Project", Slug: "susp-hb-project"}
@@ -5268,6 +5302,7 @@ func TestBrokerHeartbeat_PhaseErrorPersistsExitCodeAndReason(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
+			grantDevUserRuntimeBrokerAccess(t, s)
 			ctx := context.Background()
 
 			project := &store.Project{ID: tid("proj-pe-exit-" + tc.name), Name: "P", Slug: "pe-exit-proj-" + tc.name}
@@ -5367,6 +5402,7 @@ func TestBrokerHeartbeat_BackfillsContainerStatusFromStructuredPhase(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
+			grantDevUserRuntimeBrokerAccess(t, s)
 			ctx := context.Background()
 
 			project := &store.Project{ID: tid("proj-backfill-" + tc.name), Name: "P", Slug: "backfill-proj-" + tc.name}
@@ -5413,6 +5449,7 @@ func TestBrokerHeartbeat_BackfillsContainerStatusFromStructuredPhase(t *testing.
 // already sent.
 func TestBrokerHeartbeat_NoBackfillWhenContainerStatusPresent(t *testing.T) {
 	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("proj-no-backfill"), Name: "P", Slug: "no-backfill-proj"}

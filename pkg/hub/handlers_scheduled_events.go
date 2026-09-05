@@ -98,9 +98,8 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 			writeForbidden(w, "")
 			return false
 		}
-		// Pass the canonical permission ID so the role-binding check (step 3
-		// in checkAccessForUser) fires for hub-admin users who hold
-		// scheduled_event permissions through their system-scoped role.
+		// Pass the canonical permission ID so the kernel evaluates
+		// scheduled_event permissions through system-scoped role bindings.
 		permissionID := "scheduled_event." + string(action)
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(userIdent),

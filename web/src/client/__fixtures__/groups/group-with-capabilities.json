@@ -1,0 +1,16 @@
+{
+  "id": "g-00000000-0000-0000-0000-000000000001",
+  "name": "Platform Engineers",
+  "slug": "platform-engineers",
+  "description": "Core platform engineering team",
+  "groupType": "explicit",
+  "ownerId": "u-00000000-0000-0000-0000-000000000001",
+  "createdBy": "u-00000000-0000-0000-0000-000000000001",
+  "labels": { "team": "platform", "tier": "core" },
+  "annotations": { "oncall": "platform-eng" },
+  "created": "2026-01-15T10:00:00Z",
+  "updated": "2026-06-20T14:30:00Z",
+  "_capabilities": {
+    "actions": ["read", "update", "delete", "addMember", "removeMember"]
+  }
+}

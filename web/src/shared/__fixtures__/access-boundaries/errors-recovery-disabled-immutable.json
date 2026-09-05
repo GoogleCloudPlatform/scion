@@ -1,0 +1,32 @@
+{
+  "$fixture": {
+    "endpoint": "PUT /api/v1/admin/access-constraints/ac-07",
+    "status": 409,
+    "designRef": "constraint-ui-ux-design.md §9.7, §7.10; plan §WP B6",
+    "notes": "A boundary disabled by offline recovery is immutable in-product and cannot be re-enabled through the API. This matches the backend today, where updateAccessConstraint never writes `disabled` and only the offline CLI can clear it (base inventory §2.2, §3.6) — but today the API silently round-trips the flag instead of refusing. The matching record fixture is recovery-disabled-detail.json, whose _capabilities omits commit and previewTighten."
+  },
+  "error": {
+    "code": "RECOVERY_DISABLED_IMMUTABLE",
+    "message": "This boundary was disabled by emergency recovery and cannot be changed here.",
+    "retryable": false,
+    "correlationId": "req-1177bcd3",
+    "requestId": "req-1177bcd3",
+    "details": {
+      "constraintId": "ac-07",
+      "status": "recovery_disabled",
+      "disabledAt": "2026-08-17T03:41:55Z",
+      "disabledBy": {
+        "type": "user",
+        "id": "usr-root",
+        "displayName": "offline recovery operator",
+        "credentialType": "offline_recovery_cli"
+      },
+      "disabledReason": "Emergency lockout recovery: every principal holding access_constraint.admin was excluded by this boundary.",
+      "auditEventId": "aev-4d10",
+      "attemptedOperation": "update",
+      "allowedOperations": ["read", "readAudit", "delete"],
+      "reenableSupported": false,
+      "remedy": "Create a new boundary with the corrected permission set, or restore this one with the offline recovery tool on the hub host."
+    }
+  }
+}

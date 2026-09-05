@@ -609,9 +609,8 @@ func (a *AuthzService) checkUserHoldsPermission(
 		return false, fmt.Sprintf("user %s is %s", userID, user.Status), nil
 	}
 
-	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "delegation_ceiling")
-	policyPerms := a.getPolicyGrantedPermissions(ctx, identity, scopeType, scopeID)
-	perms = append(perms, policyPerms...)
+	// CO1: Policy-granted permissions removed. All authority now flows
+	// through RoleBindings resolved above.
 
 	for _, p := range perms {
 		if p == permissionID {

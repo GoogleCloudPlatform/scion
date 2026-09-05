@@ -70,6 +70,8 @@ import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
+import '../shared/effective-role-provenance.js';
+import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 
@@ -1695,11 +1697,21 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent)} ${this.renderMessagingCard()}
-      ${this.renderLabelsCard(agent)} ${this.renderHarnessModelCard(agent, cfg, inline)}
-      ${this.renderRuntimeCard(agent, inline)} ${this.renderGCPIdentityCard(cfg?.gcpIdentity)}
-      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
-      ${this.renderInitialTaskCard(cfg)}
+      ${this.renderIdentityCard(agent)}
+      <scion-effective-role-provenance
+        principalType="agent"
+        principalId=${this.agentId}
+        compact
+        sectionTitle="Effective Roles"
+      ></scion-effective-role-provenance>
+      <scion-effective-access-boundary-notice
+        contextType="agent"
+        contextId=${this.agentId}
+      ></scion-effective-access-boundary-notice>
+      ${this.renderMessagingCard()} ${this.renderLabelsCard(agent)}
+      ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
+      ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
+      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
     `;
   }
 
@@ -1708,8 +1720,7 @@ export class ScionPageAgentDetail extends LitElement {
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
     const messageability = agent._messageability as AgentMessageabilityDetail | undefined;
     const canSetMode = can(agent._capabilities, 'set_message_mode');
-    const hasChildren =
-      ((agent.childrenIds?.length) ?? 0) > 0;
+    const hasChildren = (agent.childrenIds?.length ?? 0) > 0;
 
     return html`
       <div class="card">
@@ -1732,7 +1743,10 @@ export class ScionPageAgentDetail extends LitElement {
                       ${(Object.keys(MESSAGE_MODE_DISPLAY) as MessageMode[]).map(
                         (mode) => html`
                           <sl-option value=${mode}>
-                            <sl-icon slot="prefix" name=${MESSAGE_MODE_DISPLAY[mode].icon}></sl-icon>
+                            <sl-icon
+                              slot="prefix"
+                              name=${MESSAGE_MODE_DISPLAY[mode].icon}
+                            ></sl-icon>
                             ${MESSAGE_MODE_DISPLAY[mode].label} —
                             ${MESSAGE_MODE_DISPLAY[mode].description}
                           </sl-option>
@@ -1765,7 +1779,9 @@ export class ScionPageAgentDetail extends LitElement {
         </div>
         ${canSetMode && hasChildren
           ? html`
-              <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);">
+              <div
+                style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);"
+              >
                 <sl-button
                   size="small"
                   variant="default"
@@ -1856,16 +1872,14 @@ export class ScionPageAgentDetail extends LitElement {
 
     // Apply the mode change via API
     try {
-      const response = await apiFetch(`/api/v1/agents/${agent.id}/actions`, {
+      const response = await apiFetch(`/api/v1/agents/${agent.id}/set_message_mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set_message_mode', mode: newMode }),
+        body: JSON.stringify({ mode: newMode }),
       });
 
       if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, 'Failed to change message mode.')
-        );
+        throw new Error(await extractApiError(response, 'Failed to change message mode.'));
       }
 
       // Optimistic update
@@ -1877,10 +1891,7 @@ export class ScionPageAgentDetail extends LitElement {
       this.backgroundRefresh();
     } catch (err) {
       revertSelect();
-      showToast(
-        err instanceof Error ? err.message : 'Failed to change message mode.',
-        'danger'
-      );
+      showToast(err instanceof Error ? err.message : 'Failed to change message mode.', 'danger');
     }
   }
 

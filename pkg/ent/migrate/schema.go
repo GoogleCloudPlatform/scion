@@ -9,6 +9,55 @@ import (
 )
 
 var (
+	// AccessConstraintsColumns holds the columns for the "access_constraints" table.
+	AccessConstraintsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "subject_kind", Type: field.TypeEnum, Enums: []string{"principal", "group_closure", "all_principals"}},
+		{Name: "subject_principal_type", Type: field.TypeString, Nullable: true},
+		{Name: "subject_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "subject_group_id", Type: field.TypeString, Nullable: true},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "maximum_permissions", Type: field.TypeJSON},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "disabled", Type: field.TypeBool, Default: false},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "purpose", Type: field.TypeString, Default: "system constraint"},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// AccessConstraintsTable holds the schema information for the "access_constraints" table.
+	AccessConstraintsTable = &schema.Table{
+		Name:       "access_constraints",
+		Columns:    AccessConstraintsColumns,
+		PrimaryKey: []*schema.Column{AccessConstraintsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "accessconstraint_name_scope_type_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{AccessConstraintsColumns[1], AccessConstraintsColumns[6], AccessConstraintsColumns[7]},
+			},
+			{
+				Name:    "accessconstraint_subject_kind_scope_type_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintsColumns[2], AccessConstraintsColumns[6], AccessConstraintsColumns[7]},
+			},
+			{
+				Name:    "accessconstraint_subject_principal_type_subject_principal_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintsColumns[3], AccessConstraintsColumns[4]},
+			},
+			{
+				Name:    "accessconstraint_subject_group_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintsColumns[5]},
+			},
+		},
+	}
 	// AccessPoliciesColumns holds the columns for the "access_policies" table.
 	AccessPoliciesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1408,10 +1457,12 @@ var (
 	// RoleBindingsColumns holds the columns for the "role_bindings" table.
 	RoleBindingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
-		{Name: "principal_type", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
+		{Name: "principal_type", Type: field.TypeEnum, Enums: []string{"user", "agent", "group"}},
 		{Name: "principal_id", Type: field.TypeString},
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "role_definition_id", Type: field.TypeUUID, Nullable: true},
@@ -1424,7 +1475,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "role_bindings_role_definitions_role_bindings",
-				Columns:    []*schema.Column{RoleBindingsColumns[7]},
+				Columns:    []*schema.Column{RoleBindingsColumns[9]},
 				RefColumns: []*schema.Column{RoleDefinitionsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -1438,7 +1489,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[7]},
+				Columns: []*schema.Column{RoleBindingsColumns[9]},
 			},
 			{
 				Name:    "rolebinding_scope_type_scope_id",
@@ -1448,7 +1499,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id_principal_type_principal_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{RoleBindingsColumns[7], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
+				Columns: []*schema.Column{RoleBindingsColumns[9], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 		},
 	}
@@ -1983,6 +2034,7 @@ var (
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
+		AccessConstraintsTable,
 		AccessPoliciesTable,
 		AgentsTable,
 		AgentCredentialsTable,

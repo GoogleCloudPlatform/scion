@@ -71,6 +71,10 @@ fixturegen
 # Screenshot artifacts
 web/.screenshots/
 
+# Playwright E2E artifacts
+web/test-results/
+web/playwright-report/
+
 # Downloaded files
 downloads/
 

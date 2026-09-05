@@ -49,16 +49,11 @@ func TestGCPSA_ProjectDelete_DoesNotCascadeHubScoped(t *testing.T) {
 	srv, s, _, _, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
-	admin := &store.User{
-		ID:          tid("user-cascade-admin"),
-		Email:       "cascade-admin@test.com",
-		DisplayName: "Cascade Admin",
-		Role:        store.UserRoleAdmin,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, admin))
-	ensureHubMembership(ctx, s, admin.ID)
+	// CO1: admin needs a super-admin role binding, not just the Role field.
+	adminID := tid("user-cascade-admin")
+	createTestUserWithRole(t, s, adminID, "cascade-admin@test.com", "admin", store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
 
 	hubSA := newHubScopedSA("sa-hub-survives", "hub-survives@hub.iam.gserviceaccount.com")
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, hubSA))

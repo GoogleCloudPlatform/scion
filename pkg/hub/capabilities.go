@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -138,21 +137,6 @@ func userResource(u *store.User) Resource {
 	}
 }
 
-// policyResource constructs a Resource from a store.Policy for capability computation.
-func policyResource(p *store.Policy) Resource {
-	r := Resource{
-		Type:   "policy",
-		ID:     p.ID,
-		Labels: p.Labels,
-	}
-	// Project-scoped policies are children of the project for authz purposes.
-	if p.ScopeType == "project" && p.ScopeID != "" {
-		r.ParentType = "project"
-		r.ParentID = p.ScopeID
-	}
-	return r
-}
-
 // brokerResource constructs a Resource from a store.RuntimeBroker for capability computation.
 func brokerResource(b *store.RuntimeBroker) Resource {
 	return Resource{
@@ -198,8 +182,8 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	}
 
 	// Project owner/admin short-circuit: full access on project and project-scoped
-	// resources. Mirrors the bypass in checkAccessForUser so capability lists
-	// match what the user can actually do.
+	// resources. Mirrors the kernel evaluation so capability lists match what
+	// the user can actually do.
 	if user, ok := identity.(UserIdentity); ok {
 		if projectID := projectIDForResource(resource); projectID != "" {
 			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
@@ -302,10 +286,6 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return v
 	}
 
-	// Precompute group memberships and policies once for the entire batch,
-	// rather than re-deriving them on every CheckAccess call.
-	principals, policies := a.precomputeForIdentity(ctx, identity)
-
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
 		// Project owner/admin short-circuit
@@ -316,7 +296,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 
 		var allowed []string
 		for _, action := range actions {
-			decision := a.checkAccessPrecomputed(identity, principals, policies, resource, action)
+			decision := a.checkAccessPrecomputed(ctx, identity, resource, action)
 			if decision.Allowed {
 				allowed = append(allowed, string(action))
 			}
@@ -345,60 +325,11 @@ func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, ident
 	return &Capabilities{Actions: allowed}
 }
 
-// precomputeForIdentity fetches group memberships and policies once for an identity.
-func (a *AuthzService) precomputeForIdentity(ctx context.Context, identity Identity) ([]store.PrincipalRef, []store.Policy) {
-	var principals []store.PrincipalRef
-
-	switch identity.Type() {
-	case "user", "dev":
-		principals = append(principals, store.PrincipalRef{Type: "user", ID: identity.ID()})
-		groupIDs, err := a.store.GetEffectiveGroups(ctx, identity.ID())
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("failed to get effective groups for user", "userID", identity.ID(), "error", err.Error())
-		}
-		for _, gid := range groupIDs {
-			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-		}
-	case "agent":
-		principals = append(principals, store.PrincipalRef{Type: "agent", ID: identity.ID()})
-		groupIDs, err := a.store.GetEffectiveGroupsForAgent(ctx, identity.ID())
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("failed to get effective groups for agent", "agent_id", identity.ID(), "error", err.Error())
-		}
-		for _, gid := range groupIDs {
-			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-		}
-	}
-
-	policies, err := a.store.GetPoliciesForPrincipals(ctx, principals)
-	if err != nil {
-		a.logger.Warn("failed to get policies for principals", "error", err)
-	}
-
-	return principals, policies
-}
-
-// checkAccessPrecomputed evaluates access using pre-fetched principals and policies.
-func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.PrincipalRef, policies []store.Policy, resource Resource, action Action) Decision {
-	// Admin bypass: mirrors checkAccessForUser step 1 so batch callers
-	// that skip CheckAccess still grant admins full access.
-	if user, ok := identity.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
-		return Decision{Allowed: true, Reason: "admin bypass"}
-	}
-
-	// Owner bypass (already handled in batch caller, but kept for single-resource calls)
-	if user, ok := identity.(UserIdentity); ok {
-		if resource.OwnerID != "" && resource.OwnerID == user.ID() {
-			return Decision{Allowed: true, Reason: "resource owner"}
-		}
-	}
-
-	// Ancestry bypass (already handled in batch caller, but kept for single-resource calls)
-	if canAccessAsAncestor(identity.ID(), resource) {
-		return Decision{Allowed: true, Reason: "ancestor access"}
-	}
-
-	return a.evaluatePolicies(policies, resource, action)
+// checkAccessPrecomputed evaluates access using CheckAccess through the
+// standard kernel pipeline. The pre-computed parameters are no longer used
+// — all decisions route through the AK1 kernel.
+func (a *AuthzService) checkAccessPrecomputed(ctx context.Context, identity Identity, resource Resource, action Action) Decision {
+	return a.CheckAccess(ctx, identity, resource, action)
 }
 
 // allActions returns a Capabilities with all provided actions.

@@ -1,0 +1,165 @@
+{
+  "$fixture": {
+    "endpoint": "GET /api/v1/admin/access-constraints/ac-42/affected-principals?pageSize=100&pageToken=",
+    "status": 200,
+    "designRef": "constraint-ui-ux-design.md §9.3, §6.4, §6.5",
+    "notes": "Server-paged impact rows. Design §9.1: 'Impact lists are server-paged and server-counted; the UI never estimates from a truncated page.' Current code caps at maxPreviewMembers=50 in memory (handlers_access_constraints.go:692) with a boolean Truncated and no pagination."
+  },
+  "constraintId": "ac-42",
+  "constraintRevision": "7",
+  "snapshotAt": "2026-08-31T14:20:03Z",
+  "items": [
+    {
+      "principal": {
+        "type": "user",
+        "id": "usr-danvers",
+        "displayName": "Ada Danvers"
+      },
+      "status": "active",
+      "changeKind": "loses",
+      "membershipPaths": [
+        {
+          "hops": [
+            { "type": "user", "id": "usr-danvers", "displayName": "Ada Danvers" },
+            { "type": "group", "id": "grp-vendor-frontend", "displayName": "Vendor Frontend" },
+            { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
+          ],
+          "direct": false,
+          "truncated": false
+        }
+      ],
+      "currentPermissionCount": 24,
+      "proposedPermissionCount": 11,
+      "removedPermissions": [
+        "agent.create",
+        "agent.delete",
+        "agent.update",
+        "agent.message.send",
+        "project.update",
+        "skill.register",
+        "role_binding.create",
+        "scheduled_event.create"
+      ],
+      "regainedPermissions": [],
+      "removedPermissionsTruncated": true,
+      "removedPermissionCount": 13,
+      "grantSources": [
+        {
+          "kind": "role_binding",
+          "id": "rb-88a1",
+          "roleName": "project-member",
+          "scope": { "type": "project", "projectId": "proj-atlas" }
+        }
+      ],
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "principal": {
+        "type": "agent",
+        "id": "agt-atlas-builder-3",
+        "displayName": "atlas-builder-3"
+      },
+      "status": "active",
+      "changeKind": "loses",
+      "membershipPaths": [
+        {
+          "hops": [
+            { "type": "agent", "id": "agt-atlas-builder-3", "displayName": "atlas-builder-3" },
+            { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
+          ],
+          "direct": true,
+          "truncated": false
+        }
+      ],
+      "currentPermissionCount": 9,
+      "proposedPermissionCount": 5,
+      "removedPermissions": ["agent.message.send", "agent.update", "skill.register", "project.update"],
+      "regainedPermissions": [],
+      "removedPermissionsTruncated": false,
+      "removedPermissionCount": 4,
+      "grantSources": [
+        {
+          "kind": "role_binding",
+          "id": "rb-2f30",
+          "roleName": "agent-role-baseline",
+          "scope": { "type": "system" }
+        }
+      ],
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "principal": {
+        "type": "user",
+        "id": "usr-okafor",
+        "displayName": "Ndidi Okafor"
+      },
+      "status": "suspended",
+      "changeKind": "no_effect",
+      "membershipPaths": [
+        {
+          "hops": [
+            { "type": "user", "id": "usr-okafor", "displayName": "Ndidi Okafor" },
+            { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
+          ],
+          "direct": true,
+          "truncated": false
+        }
+      ],
+      "currentPermissionCount": 0,
+      "proposedPermissionCount": 0,
+      "removedPermissions": [],
+      "regainedPermissions": [],
+      "removedPermissionsTruncated": false,
+      "removedPermissionCount": 0,
+      "grantSources": [],
+      "noEffectReason": "principal_suspended",
+      "_capabilities": { "actions": ["read"] }
+    },
+    {
+      "principal": {
+        "type": "user",
+        "id": "usr-berg",
+        "displayName": "Tomas Berg"
+      },
+      "status": "active",
+      "changeKind": "regains",
+      "membershipPaths": [
+        {
+          "hops": [
+            { "type": "user", "id": "usr-berg", "displayName": "Tomas Berg" },
+            { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
+          ],
+          "direct": true,
+          "truncated": false
+        }
+      ],
+      "currentPermissionCount": 6,
+      "proposedPermissionCount": 11,
+      "removedPermissions": [],
+      "regainedPermissions": ["skill.list", "role.read", "role_binding.read", "group.read", "quota.read"],
+      "removedPermissionsTruncated": false,
+      "removedPermissionCount": 0,
+      "grantSources": [
+        {
+          "kind": "role_binding",
+          "id": "rb-51cc",
+          "roleName": "project-member",
+          "scope": { "type": "project", "projectId": "proj-atlas" }
+        }
+      ],
+      "_capabilities": { "actions": ["read"] }
+    }
+  ],
+  "nextPageToken": "eyJvIjoxMDAsImMiOiJhYy00MiJ9",
+  "totalCount": 126,
+  "totalCountExact": true,
+  "completeness": {
+    "complete": true,
+    "truncated": false,
+    "degraded": false,
+    "reasons": []
+  },
+  "_capabilities": {
+    "actions": ["read"]
+  }
+}

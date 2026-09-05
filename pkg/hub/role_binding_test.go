@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -25,6 +26,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ensureTestUser creates a user record in the store so that role binding
+// creation passes principal existence validation (R5). Idempotent.
+func ensureTestUser(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	_ = s.CreateUser(context.Background(), &store.User{
+		ID: userID, Email: fmt.Sprintf("%s@test.com", userID[:8]),
+		DisplayName: "Test User", Role: store.UserRoleMember, Status: "active",
+	})
+}
 
 // =============================================================================
 // Test: Role definitions exist after seeding
@@ -109,6 +120,8 @@ func TestRoleBinding_CreateAndGet(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
+	ensureTestUser(t, s, tid("rb-test-user"))
+
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
 	require.NoError(t, err)
 
@@ -135,6 +148,8 @@ func TestRoleBinding_DuplicatePrevented(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
+	ensureTestUser(t, s, tid("dup-test-user"))
+
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
 	require.NoError(t, err)
 
@@ -156,6 +171,8 @@ func TestRoleBinding_DuplicatePrevented(t *testing.T) {
 func TestRoleBinding_Delete(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
+
+	ensureTestUser(t, s, tid("del-test-user"))
 
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
 	require.NoError(t, err)
@@ -181,6 +198,7 @@ func TestRoleBinding_ListForPrincipal(t *testing.T) {
 	ctx := context.Background()
 
 	userID := tid("list-principal-user")
+	ensureTestUser(t, s, userID)
 
 	// Create bindings to two different roles
 	hubMember, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
@@ -213,14 +231,26 @@ func TestRoleBinding_ListForScope(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
+	userID := tid("scope-test-user")
 	projectID := tid("scope-test-project")
+
+	// Create the user and project so principal/scope existence checks pass.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "scope-test@test.com", DisplayName: "Scope Test",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "scope-test-project", Slug: "scope-test-project",
+		OwnerID: userID, CreatedBy: userID, Created: time.Now(), Updated: time.Now(),
+	}))
+
 	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	require.NoError(t, err)
 
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      tid("scope-test-user"),
+		PrincipalID:      userID,
 		ScopeType:        store.RoleScopeProject,
 		ScopeID:          projectID,
 	})
@@ -262,9 +292,9 @@ func TestProjectMembership_KeyedByProjectID(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
-	// Create owner role binding (Phase 1F: createProjectMembersGroupAndPolicy
+	// Create owner role binding (Phase 1F: createProjectMembersGroup
 	// now also creates this, so it may already exist — use idempotent helper).
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
 
@@ -286,6 +316,15 @@ func TestProjectMembership_IsProjectMember(t *testing.T) {
 
 	projectID := tid("ipm-project")
 	userID := tid("ipm-user")
+
+	// Create user and project so store validation passes (R5).
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "ipm-user@test.com", DisplayName: "IPM User",
+		Role: store.UserRoleMember, Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "IPM Project", Slug: "ipm-project",
+	}))
 
 	// Before adding binding, should not be a member
 	isMember, err := s.IsProjectMember(ctx, projectID, userID)
@@ -315,6 +354,19 @@ func TestProjectMembership_ListProjectMembers(t *testing.T) {
 	ctx := context.Background()
 
 	projectID := tid("lpm-project")
+
+	// Create users and project so store validation passes (R5).
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("lpm-owner"), Email: "lpm-owner@test.com", DisplayName: "LPM Owner",
+		Role: store.UserRoleMember, Status: "active",
+	}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("lpm-member"), Email: "lpm-member@test.com", DisplayName: "LPM Member",
+		Role: store.UserRoleMember, Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "LPM Project", Slug: "lpm-project",
+	}))
 
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	require.NoError(t, err)
@@ -388,7 +440,7 @@ func TestAuthz_GroupMembershipWithoutRoleBinding_NoBypass(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Add user to the project members group as owner (legacy path)
 	addProjectMemberWithRole(t, s, project, user.ID, store.GroupMemberRoleOwner)
@@ -580,16 +632,14 @@ func TestRegression_AdminBypassStillWorks(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create an admin user
+	// Create an admin user with super-admin role binding (CO1: role bindings required)
+	createTestUserWithRole(t, s, tid("admin-bypass-regression"), "admin-bypass@test.com", "admin", store.SystemRoleSuperAdmin)
 	admin := &store.User{
 		ID:          tid("admin-bypass-regression"),
 		Email:       "admin-bypass@test.com",
-		DisplayName: "Admin Bypass",
+		DisplayName: "admin-bypass@test.com",
 		Role:        store.UserRoleAdmin,
-		Status:      "active",
-		Created:     time.Now(),
 	}
-	require.NoError(t, s.CreateUser(ctx, admin))
 
 	// Create a project
 	project := &store.Project{
@@ -619,6 +669,12 @@ func TestGetEffectivePermissions_SystemScope(t *testing.T) {
 
 	userID := tid("eff-perms-user")
 
+	// Create the user so principal existence check passes.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "eff-perms@test.com", DisplayName: "Eff Perms User",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}))
+
 	// Create hub-member binding
 	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
 	require.NoError(t, err)
@@ -643,6 +699,16 @@ func TestGetEffectivePermissions_ProjectScope(t *testing.T) {
 
 	userID := tid("eff-perms-proj-user")
 	projectID := tid("eff-perms-project")
+
+	// Create the user and project so existence checks pass.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "eff-perms-proj@test.com", DisplayName: "Eff Perms Proj User",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "eff-perms-project", Slug: "eff-perms-project",
+		OwnerID: userID, CreatedBy: userID, Created: time.Now(), Updated: time.Now(),
+	}))
 
 	// Create project-owner binding
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
@@ -746,7 +812,7 @@ func TestBackfill_ProjectMembersGetRoleBindings(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroup(ctx, project)
 
 	// Add a member to the project group
 	member := &store.User{

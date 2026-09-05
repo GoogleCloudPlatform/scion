@@ -263,8 +263,9 @@ func TestProjectDefaultGate_AgentCreatesAgent_UsesCreatingSA(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateGCPServiceAccount(context.Background(), callerSA))
 
-	// Update the caller agent's AppliedConfig to have the SA assigned
+	// Update the caller agent's AppliedConfig to have the SA assigned and full agent role
 	f.caller.AppliedConfig = &store.AgentAppliedConfig{
+		AgentRole: string(AgentRoleFull),
 		GCPIdentity: &store.GCPIdentityConfig{
 			MetadataMode:        store.GCPMetadataModeAssign,
 			ServiceAccountID:    callerSA.ID,
@@ -289,25 +290,19 @@ func TestProjectDefaultGate_AgentCreatesAgent_UsesCreatingSA(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(targetSA.Email)
 	enforceSAAssign(f.srv, checker)
 
-	// Agent creates an agent — the actAs check should use the CALLER agent's
-	// SA (callerSAEmail), not the human creator's identity.
+	// CO1: gcp_service_account.assign has no AgentScopes mapping in the
+	// permissions registry, so the agent scope restriction blocks SA assignment
+	// at the authz kernel level. Even with a role binding granting the
+	// permission, agent credentials cannot carry gcp_service_account.assign.
+	// Agent-creates-agent with project-default SA is now denied.
+	fullScopes := ScopesForRole(AgentRoleFull)
 	rec := f.asAgent(t, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents",
 		CreateAgentRequest{Name: "p10-child-agent"},
-		ScopeAgentCreate)
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"P10: agent-creates-agent with project default should succeed when caller SA has actAs; got: %s",
+		fullScopes...)
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"CO1: agent cannot assign SA (gcp_service_account.assign has no AgentScopes mapping); got: %s",
 		rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-	got, err := f.store.GetAgent(ctx, resp.Agent.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, targetSA.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID,
-		"project default SA should be applied")
 }
 
 // Agent-creates-agent denied when the creating agent has no SA (block mode).

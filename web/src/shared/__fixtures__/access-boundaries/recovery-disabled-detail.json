@@ -1,0 +1,95 @@
+{
+  "$fixture": {
+    "endpoint": "GET /api/v1/admin/access-constraints/ac-07",
+    "status": 200,
+    "designRef": "constraint-ui-ux-design.md §7.10, §6.4, §6.1 (status vocabulary)",
+    "notes": "A boundary deactivated by the offline recovery CLI (cmd/server_recover_authz.go). Design §7.10: recovery-disabled state is explicit, explains itself, and offers NO in-product re-enable — matching the backend, where updateAccessConstraint never touches `disabled` and no API can clear it (base inventory §2.2). _capabilities.actions therefore omits commit and previewTighten; RECOVERY_DISABLED_IMMUTABLE is returned if a client attempts one anyway."
+  },
+  "id": "ac-07",
+  "name": "Break-glass admin ceiling",
+  "purpose": "Restrict the on-call admin group to non-destructive operations outside incidents.",
+  "revision": "12",
+  "subject": {
+    "kind": "group_closure",
+    "groupId": "grp-oncall-admins"
+  },
+  "subjectDisplay": {
+    "kind": "group_closure",
+    "label": "Everyone in On-call Admins",
+    "groupName": "On-call Admins",
+    "resolved": true,
+    "memberCount": 6,
+    "directMemberCount": 6,
+    "nestedGroupCount": 0
+  },
+  "scope": { "type": "system" },
+  "scopeDisplay": {
+    "type": "system",
+    "label": "Entire hub",
+    "projectName": null,
+    "resolved": true
+  },
+  "status": "recovery_disabled",
+  "risk": ["lockout_sensitive"],
+  "health": {
+    "state": "healthy",
+    "unresolvedReferences": []
+  },
+  "maximumPermissions": [
+    "agent.read",
+    "agent.list",
+    "project.read",
+    "project.list",
+    "hub.health.read",
+    "role.read",
+    "role_binding.read"
+  ],
+  "permissionRegistry": {
+    "revision": "reg-2026-08-19-a",
+    "totalPermissionCount": 119,
+    "excludedPermissionCount": 112,
+    "newSincePermissionIds": ["agent.snapshot.read", "hub.federation.read", "quota.delete"],
+    "newSinceRevision": "reg-2026-05-11-b"
+  },
+  "appliesWhen": {
+    "notBefore": null,
+    "expiresAt": null
+  },
+  "effect": {
+    "affectedPrincipalCount": 0,
+    "affectedPrincipalCountExact": true,
+    "principalsLosingAuthorityCount": 0,
+    "intersectingBoundaryCount": 0,
+    "computedAt": "2026-08-31T14:20:03Z",
+    "completeness": { "complete": true, "truncated": false, "degraded": false, "reasons": [] },
+    "note": "This boundary is not being evaluated. It currently reduces no one's authority."
+  },
+  "intersectingBoundaries": [],
+  "recovery": {
+    "disabled": true,
+    "disabledAt": "2026-08-17T03:41:55Z",
+    "disabledBy": {
+      "type": "user",
+      "id": "usr-root",
+      "displayName": "offline recovery operator",
+      "credentialType": "offline_recovery_cli"
+    },
+    "disabledReason": "Emergency lockout recovery: every principal holding access_constraint.admin was excluded by this boundary.",
+    "auditEventId": "aev-4d10",
+    "reenableSupported": false,
+    "reenableGuidance": "This boundary cannot be re-enabled from the web UI. Recreate it as a new boundary with the corrected permission set, or restore it with the offline recovery tool on the hub host."
+  },
+  "links": {
+    "affectedPrincipals": "/api/v1/admin/access-constraints/ac-07/affected-principals",
+    "audit": "/api/v1/admin/access-constraints/ac-07/audit",
+    "preview": "/api/v1/admin/access-constraint-previews"
+  },
+  "createdBy": { "type": "user", "id": "usr-lin", "displayName": "Lin Alvarez" },
+  "createdAt": "2026-02-11T14:00:00Z",
+  "updatedBy": { "type": "user", "id": "usr-root", "displayName": "offline recovery operator" },
+  "updatedAt": "2026-08-17T03:41:55Z",
+  "lastAuditEventId": "aev-4d10",
+  "_capabilities": {
+    "actions": ["read", "readAudit", "previewCreate", "previewRelax", "delete"]
+  }
+}

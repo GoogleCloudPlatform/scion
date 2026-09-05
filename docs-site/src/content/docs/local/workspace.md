@@ -134,13 +134,15 @@ Project IDs are always randomly generated UUIDs (v4). A git remote is associated
 
 Each agent gets its own branch named `scion/<agent-name>`. This prevents conflicts when multiple agents work on the same repository concurrently.
 
-#### Shallow Clones
+#### Shallow Clones & Full Clones
 
-By default, git projects use a shallow clone with `depth=1` for fast startup. If an agent needs full history (e.g., for `git log` or `git blame`), it can fetch the rest:
+By default, git projects use a shallow clone with `depth=1` for fast startup. 
 
-```bash
-git fetch --unshallow
-```
+- **Full Clones on Startup:** If an agent needs full git history for operations like `git log` or `git blame` from the very start, you can configure `depth: 0` (or set `SCION_GIT_DEPTH=0`). The `GitCloneConfig` API treats a depth of `0` as an explicit instruction to perform a complete, non-shallow clone.
+- **Unshallowing Later:** Alternatively, an agent with a shallow clone (`depth=1`) can unshallow itself later inside its session by running:
+  ```bash
+  git fetch --unshallow
+  ```
 
 #### Environment Variables
 
@@ -148,7 +150,7 @@ git fetch --unshallow
 |----------|-------------|---------|
 | `SCION_GIT_CLONE_URL` | HTTPS URL of the repository to clone | *(required)* |
 | `SCION_GIT_BRANCH` | Branch to clone | `main` |
-| `SCION_GIT_DEPTH` | Clone depth | `1` |
+| `SCION_GIT_DEPTH` | Clone depth (set to `0` for full clone, omission defaults to shallow depth `1`) | `1` |
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 

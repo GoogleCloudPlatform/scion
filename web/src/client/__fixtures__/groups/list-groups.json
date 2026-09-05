@@ -1,0 +1,51 @@
+{
+  "groups": [
+    {
+      "id": "g-00000000-0000-0000-0000-000000000001",
+      "name": "Platform Engineers",
+      "slug": "platform-engineers",
+      "description": "Core platform engineering team",
+      "groupType": "explicit",
+      "ownerId": "u-00000000-0000-0000-0000-000000000001",
+      "createdBy": "u-00000000-0000-0000-0000-000000000001",
+      "created": "2026-01-15T10:00:00Z",
+      "updated": "2026-06-20T14:30:00Z",
+      "_capabilities": {
+        "actions": ["read", "update", "delete", "addMember", "removeMember"]
+      }
+    },
+    {
+      "id": "g-00000000-0000-0000-0000-000000000002",
+      "name": "Frontend Team",
+      "slug": "frontend-team",
+      "description": "Frontend developers",
+      "groupType": "explicit",
+      "parentId": "g-00000000-0000-0000-0000-000000000001",
+      "ownerId": "u-00000000-0000-0000-0000-000000000002",
+      "createdBy": "u-00000000-0000-0000-0000-000000000002",
+      "created": "2026-02-10T08:00:00Z",
+      "updated": "2026-07-01T12:00:00Z",
+      "_capabilities": {
+        "actions": ["read"]
+      }
+    },
+    {
+      "id": "g-00000000-0000-0000-0000-000000000003",
+      "name": "Project Alpha Agents",
+      "slug": "project:alpha-agents",
+      "groupType": "project_agents",
+      "projectId": "p-00000000-0000-0000-0000-000000000001",
+      "ownerId": "u-00000000-0000-0000-0000-000000000001",
+      "created": "2026-03-01T09:00:00Z",
+      "updated": "2026-03-01T09:00:00Z",
+      "_capabilities": {
+        "actions": ["read"]
+      }
+    }
+  ],
+  "nextCursor": "eyJpZCI6Imc...cursor-token",
+  "totalCount": 42,
+  "_capabilities": {
+    "actions": ["create", "list"]
+  }
+}

@@ -2076,7 +2076,8 @@ func TestSSEHandler_Headers(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	ws.SetAuthzService(NewAuthzService(&mockAuthzStore{}, nil))
+	// CO1: dev-auth user needs super-admin role binding for project subjects.
+	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
 	// Use a test server so we get a real connection that supports streaming
@@ -2098,7 +2099,8 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	ws.SetAuthzService(NewAuthzService(&mockAuthzStore{}, nil))
+	// CO1: dev-auth user needs super-admin role binding for project subjects.
+	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
 	ts := httptest.NewServer(ws.Handler())
@@ -2219,7 +2221,8 @@ func TestSSEHandler_ReconnectOnMaxAge(t *testing.T) {
 	})
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	ws.SetAuthzService(NewAuthzService(&mockAuthzStore{}, nil))
+	// CO1: dev-auth user needs super-admin role binding for project subjects.
+	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
 	ts := httptest.NewServer(ws.Handler())

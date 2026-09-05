@@ -117,14 +117,10 @@ func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
 		ProjectID: project.ID, OwnerID: tid("different-owner"), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	policy := &store.Policy{
-		ID: tid("federated-port-access"), Name: "Federated port access", ScopeType: "project", ScopeID: project.ID,
-		ResourceType: "agent", Actions: []string{string(ActionPortAccess)}, Effect: "allow",
-	}
-	require.NoError(t, s.CreatePolicy(ctx, policy))
-	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: policy.ID, PrincipalType: "user", PrincipalID: caller.ID(),
-	}))
+	// CO1: Replace old policy with a project-scoped role binding so the caller
+	// passes authorizePortAccess but still lacks the hub-level permission
+	// checked by authorizePortRegistration.
+	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
 	r = r.WithContext(contextWithIdentity(r.Context(), caller))
@@ -147,6 +143,8 @@ func TestAuthorizePortRegistrationAllowsUnscopedLocalAdmin(t *testing.T) {
 		ProjectID: project.ID, OwnerID: tid("different-owner"), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
+	// CO1: Admin users need a super-admin role binding to pass authz checks.
+	createTestUserWithRole(t, s, tid("local-port-admin"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
 	localAdmin := NewAuthenticatedUser(tid("local-port-admin"), "admin@example.com", "Local Port Admin", store.UserRoleAdmin, "api")
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
 	r = r.WithContext(contextWithIdentity(r.Context(), localAdmin))

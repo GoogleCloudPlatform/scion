@@ -211,6 +211,21 @@ func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBr
 	return nil
 }
 
+// integAdminServer creates a testServer with a super-admin user for
+// integration tests that exercise authorization paths. Returns the server,
+// the admin identity, and a context with the admin identity set.
+// CO1: Replaces the old pattern of &Server{authzService: NewAuthzService(nil, ...)}.
+func integAdminServer(t *testing.T, suffix string) (*Server, *AuthenticatedUser, context.Context) {
+	t.Helper()
+	srv, s := testServer(t)
+	userID := tid("integ-" + suffix)
+	email := "integ-" + suffix + "@example.com"
+	createTestUserWithRole(t, s, userID, email, "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(userID, email, "Admin", "admin", "cli")
+	ctx := contextWithIdentity(context.Background(), admin)
+	return srv, admin, ctx
+}
+
 // --- Auth tests ---
 
 // Auth tests for integrations endpoints.
@@ -447,10 +462,8 @@ func TestGetIntegration_MethodNotAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	seedRoleDefinitions(ctx, s)
-	adminU := &store.User{ID: tid("integ-admin-ma"), Email: "admin-ma@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
-	if err := s.CreateUser(ctx, adminU); err != nil {
-		t.Fatalf("create admin: %v", err)
-	}
+	// CO1: Admin access requires role binding.
+	createTestUserWithRole(t, s, tid("integ-admin-ma"), "admin-ma@example.com", "admin", store.SystemRoleSuperAdmin)
 
 	admin := NewAuthenticatedUser(tid("integ-admin-ma"), "admin-ma@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/integrations/telegram", nil)
@@ -472,12 +485,15 @@ func TestIntegrationHealth_OK(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	createTestUserWithRole(t, s, tid("integ-health-admin"), "integ-health@example.com", "admin", store.SystemRoleSuperAdmin)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-health-admin"), "integ-health@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/health", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -502,12 +518,15 @@ func TestIntegrationHealth_OK(t *testing.T) {
 
 func TestIntegrationHealth_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	createTestUserWithRole(t, s, tid("integ-health-nf"), "integ-health-nf@example.com", "admin", store.SystemRoleSuperAdmin)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-health-nf"), "integ-health-nf@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/nonexistent/health", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -522,12 +541,15 @@ func TestRestartIntegration_OK(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	createTestUserWithRole(t, s, tid("integ-restart-admin"), "integ-restart@example.com", "admin", store.SystemRoleSuperAdmin)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-restart-admin"), "integ-restart@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/restart", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -554,13 +576,16 @@ func TestRestartIntegration_WithSpokeWired(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	createTestUserWithRole(t, s, tid("integ-spoke-admin"), "integ-spoke@example.com", "admin", store.SystemRoleSuperAdmin)
 	srv.pluginManager = mgr
 	srv.SetMessageBrokerProxy(proxy)
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-spoke-admin"), "integ-spoke@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -593,11 +618,14 @@ func TestRestartIntegration_WithoutSpokeWired(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz; overlay custom integration components.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 	srv.SetMessageBrokerProxy(proxy)
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	// Create admin user with super-admin role binding for hub.integrations.update.
+	createTestUserWithRole(t, st, tid("u1"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1"), "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
@@ -707,12 +735,16 @@ func TestEnsureBrokerSpoke_NoProxyIsNoop(t *testing.T) {
 
 func TestRestartIntegration_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	createTestUserWithRole(t, s, tid("integ-notfound-admin"), "integ-notfound@example.com", "admin", store.SystemRoleSuperAdmin)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-notfound-admin"), "integ-notfound@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/nonexistent/restart", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -724,12 +756,16 @@ func TestRestartIntegration_NotFound(t *testing.T) {
 func TestRestartIntegration_MethodNotAllowed(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	createTestUserWithRole(t, s, tid("integ-methna-admin"), "integ-methna@example.com", "admin", store.SystemRoleSuperAdmin)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	admin := NewAuthenticatedUser(tid("integ-methna-admin"), "integ-methna@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/restart", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -865,10 +901,12 @@ func TestUpdateConfig_NoConfigFile(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1"), "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -890,10 +928,12 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 		"webhook_listen": ":9094",
 	}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-wcf"), "admin-wcf@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-wcf"), "admin-wcf@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095","db_path":"/tmp/tg.db"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -926,10 +966,12 @@ func TestUpdateConfig_InstalledButNotLoaded(t *testing.T) {
 
 	mgr := newMockIntegrationManager() // telegram NOT loaded in the manager
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-inbl"), "admin-inbl@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-inbl"), "admin-inbl@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -966,10 +1008,12 @@ func TestUpdateConfig_InstalledButNotLoaded_ActivationFailureIsNonFatal(t *testi
 	mgr := newMockIntegrationManager()
 	mgr.loadOneErr = fmt.Errorf("bot_token is required")
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-actfail"), "admin-actfail@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-actfail"), "admin-actfail@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -986,10 +1030,12 @@ func TestUpdateConfig_InvalidBody(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-invbody"), "admin-invbody@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-invbody"), "admin-invbody@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader("not json"))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
@@ -1004,10 +1050,12 @@ func TestUpdateConfig_UnknownSecretKey(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-unksec"), "admin-unksec@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-unksec"), "admin-unksec@example.com", "Admin", "admin", "cli")
 	body := `{"secrets":{"unknown_key":"value"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -1025,10 +1073,12 @@ func TestUpdateConfig_NotFound(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	mgr := newMockIntegrationManager()
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-confnf"), "admin-confnf@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-confnf"), "admin-confnf@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/nonexistent/config", strings.NewReader(body))
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -1183,11 +1233,13 @@ func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	mgr.deploymentModes["telegram"] = plugin.DeploymentModeHA
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use testServer for real store + authz.
+	srv, st := testServer(t)
 	srv.pluginManager = mgr
 	// dbDriver is empty → requirePostgres returns 409
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	createTestUserWithRole(t, st, tid("u1-smsql"), "admin-smsql@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-smsql"), "admin-smsql@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
@@ -1200,12 +1252,11 @@ func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 
 func TestUpdateIntegration_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "upd-nf")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/nonexistent/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1218,12 +1269,11 @@ func TestUpdateIntegration_NoRepoPath(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "upd-nrp")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1237,13 +1287,12 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	mgr.updateErr = fmt.Errorf("go build failed: exit status 1")
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "upd-bld")
 	srv.config.MaintenanceConfig.RepoPath = "/some/repo"
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1259,11 +1308,11 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 // --- Install endpoint ---
 
 func TestInstallIntegration_NilPluginManager(t *testing.T) {
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "inst-nil")
+	// pluginManager intentionally left nil
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1276,12 +1325,11 @@ func TestInstallIntegration_AlreadyInstalled(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "inst-dup")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1293,12 +1341,11 @@ func TestInstallIntegration_AlreadyInstalled(t *testing.T) {
 func TestInstallIntegration_UnknownPlugin(t *testing.T) {
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "inst-unk")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/evil-plugin/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1328,13 +1375,12 @@ func TestInstallIntegration_PreservesExistingConfigFile(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "inst-prs")
 	srv.pluginManager = mgr
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1354,11 +1400,10 @@ func TestInstallIntegration_PreservesExistingConfigFile(t *testing.T) {
 // --- Available integrations endpoint ---
 
 func TestListAvailableIntegrations_NoRepoPath(t *testing.T) {
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "avail-nrp")
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1386,13 +1431,12 @@ func TestListAvailableIntegrations_WithSource(t *testing.T) {
 	// telegram is NOT installed, discord is NOT installed either
 	// but only telegram has a source dir
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "avail-wsrc")
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1793,13 +1837,13 @@ func TestUpdateConfig_NonHA_NeedsConfigFile(t *testing.T) {
 	mgr.plugins["telegram"] = map[string]string{}
 	// selfManaged is false → non-HA path
 
-	srv := &Server{dbDriver: "postgres", authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "conf-nonha")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2216,12 +2260,11 @@ func TestUpdateIntegration_SelfManagedRejected(t *testing.T) {
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "upd-smrej")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2242,13 +2285,12 @@ func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "inst-smcfg")
 	srv.pluginManager = mgr
 	srv.config.HubEndpoint = "http://hub.example.com:8080"
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2376,13 +2418,12 @@ func TestCreateBridgeConfigTemplate_PreservesExisting(t *testing.T) {
 	// stat-before-create guard in handleInstallSelfManaged (the function itself
 	// always writes). Here we verify the guard at the handler level.
 	mgr := newMockIntegrationManager()
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "brcfg-prsv")
 	srv.pluginManager = mgr
 	srv.config.HubEndpoint = "http://other-hub:8080"
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2421,12 +2462,11 @@ func TestInstallIntegration_SelfManaged_RegisteredButNotLoaded(t *testing.T) {
 
 	mgr := newMockIntegrationManager() // a2a-bridge NOT in mgr.plugins
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv, admin, ctx := integAdminServer(t, "inst-rbnl")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2448,12 +2488,12 @@ func TestInstallIntegration_SelfManaged_AlreadyInstalled(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use integAdminServer for real store + authz.
+	srv, admin, ctx := integAdminServer(t, "inst-smai")
 	srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2549,13 +2589,13 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_NoSource(t *testing.T) {
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use integAdminServer for real store + authz.
+	srv, admin, ctx := integAdminServer(t, "upd-smns")
 	srv.pluginManager = mgr
 	srv.config.MaintenanceConfig.RepoPath = t.TempDir() // RepoPath set but no source dir
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2569,13 +2609,13 @@ func TestUpdateIntegration_SelfManaged_NoRepoPath(t *testing.T) {
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use integAdminServer for real store + authz.
+	srv, admin, ctx := integAdminServer(t, "upd-smnrp")
 	srv.pluginManager = mgr
 	// No RepoPath set → should reject with guidance
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2599,13 +2639,13 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T)
 	mgr.plugins["a2a-bridge"] = map[string]string{}
 	mgr.selfManaged["a2a-bridge"] = true
 
-	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	// CO1: Use integAdminServer for real store + authz.
+	srv, admin, ctx := integAdminServer(t, "upd-smse")
 	srv.pluginManager = mgr
 	srv.config.MaintenanceConfig.RepoPath = repoPath
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 

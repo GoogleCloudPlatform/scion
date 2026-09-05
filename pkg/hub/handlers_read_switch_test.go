@@ -98,6 +98,7 @@ func rsAgent(t *testing.T, s store.Store, agentName, projectID string) string {
 		Slug:      agentName,
 		Name:      agentName,
 		ProjectID: projectID,
+		OwnerID:   DevUserID, // CO1: owner bypass grants manage access to the dev user
 	}
 	if err := s.CreateAgent(context.Background(), agent); err != nil {
 		t.Fatalf("rsAgent(%s): %v", agentName, err)

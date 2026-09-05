@@ -190,22 +190,35 @@ func TestCanDelegate_GroupMembership_ScopedAdminCannotAddOwner(t *testing.T) {
 
 	projectID := tid("project-gm")
 	memberID := tid("member-gm")
+	groupID := tid("group-gm")
 
 	createDelegateTestProject(t, s, projectID, "test-project-gm", tid("owner"))
 	createTestUserWithProjectRole(t, s, memberID, "member@test.com", projectID, store.ProjectRoleMember)
 
+	// Create the group and bind project-admin role to it.
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "group-gm", Name: "Group GM",
+	}))
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	member := NewAuthenticatedUser(memberID, "member@test.com", "Member", "member", "api")
 
-	// Member trying to add an owner to a project group
+	// Member lacks project-admin permissions — denied.
 	decision := authz.CanDelegate(ctx, member, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("group-gm"),
-		GroupRole: store.GroupMemberRoleOwner,
-		ProjectID: projectID,
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   projectID,
+		Type:    GrantTypeGroupMembership,
+		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed, "project member should not be able to add group owner")
+	assert.False(t, decision.Allowed, "project member should not be able to add members to group with admin-level role binding")
 }
 
 func TestCanDelegate_GroupMembership_SuperAdminCanAddAnyRole(t *testing.T) {
@@ -217,12 +230,8 @@ func TestCanDelegate_GroupMembership_SuperAdminCanAddAnyRole(t *testing.T) {
 	admin := NewAuthenticatedUser(adminID, "admin@test.com", "Admin", "admin", "api")
 
 	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("group-gm2"),
-		GroupRole: store.GroupMemberRoleOwner,
-		ProjectID: tid("any-project"),
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   tid("any-project"),
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("group-gm2"),
 	})
 	assert.True(t, decision.Allowed, "super-admin should be able to add any group role")
 }
@@ -240,12 +249,8 @@ func TestCanDelegate_GroupMembership_AdminCanAddMember(t *testing.T) {
 	projAdmin := NewAuthenticatedUser(adminUserID, "projadmin@test.com", "ProjAdmin", "member", "api")
 
 	decision := authz.CanDelegate(ctx, projAdmin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("group-gm3"),
-		GroupRole: store.GroupMemberRoleMember,
-		ProjectID: projectID,
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   projectID,
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("group-gm3"),
 	})
 	assert.True(t, decision.Allowed, "project-admin should be able to add group member")
 }
@@ -263,25 +268,38 @@ func TestCanDelegate_GroupMembership_AdminCannotAddGroupWithOwnerRole(t *testing
 
 	projectID := tid("project-grp-nest1")
 	adminUserID := tid("admin-grp-nest1")
+	groupID := tid("nested-group-1")
 
 	createDelegateTestProject(t, s, projectID, "test-project-grp-nest1", tid("owner"))
 	createTestUserWithProjectRole(t, s, adminUserID, "projadmin-nest@test.com", projectID, store.ProjectRoleAdmin)
 
+	// Create the group and bind a custom system role with permissions the
+	// admin does NOT hold.
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "nested-group-1", Name: "Nested Group 1",
+	}))
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	projAdmin := NewAuthenticatedUser(adminUserID, "projadmin-nest@test.com", "ProjAdmin", "member", "api")
 
-	// A project-admin trying to add a group with owner role — this would
-	// escalate authority because group members would inherit owner-level
-	// project access. CanDelegate must deny.
+	// A project-admin trying to add a member to a group with system hub-admin
+	// role binding — the admin does not hold hub-admin permissions.
+	// CanDelegate must deny.
 	decision := authz.CanDelegate(ctx, projAdmin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("nested-group-1"),
-		GroupRole: store.GroupMemberRoleOwner,
-		ProjectID: projectID,
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   projectID,
+		Type:    GrantTypeGroupMembership,
+		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed, "project-admin should NOT be able to add a group with owner role (escalation)")
-	assert.Contains(t, decision.Reason, "lacks permission")
+	assert.False(t, decision.Allowed, "project-admin should NOT be able to add members to group with system-level role binding (escalation)")
+	assert.Contains(t, decision.Reason, "cannot delegate")
 }
 
 func TestCanDelegate_GroupMembership_OwnerCanAddGroupAsMember(t *testing.T) {
@@ -299,12 +317,8 @@ func TestCanDelegate_GroupMembership_OwnerCanAddGroupAsMember(t *testing.T) {
 	// A project-owner adding a group with member role — owner has sufficient
 	// authority to delegate member-level access.
 	decision := authz.CanDelegate(ctx, owner, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("nested-group-2"),
-		GroupRole: store.GroupMemberRoleMember,
-		ProjectID: projectID,
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   projectID,
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("nested-group-2"),
 	})
 	assert.True(t, decision.Allowed, "project-owner should be able to add a group as member")
 }
@@ -319,12 +333,8 @@ func TestCanDelegate_GroupMembership_SuperAdminCanAddGroupWithAnyRole(t *testing
 
 	// Super-admin can add a group with any role, including owner.
 	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
-		Type:      GrantTypeGroupMembership,
-		GroupID:   tid("nested-group-3"),
-		GroupRole: store.GroupMemberRoleOwner,
-		ProjectID: tid("any-project-nest"),
-		ScopeType: store.RoleScopeProject,
-		ScopeID:   tid("any-project-nest"),
+		Type:    GrantTypeGroupMembership,
+		GroupID: tid("nested-group-3"),
 	})
 	assert.True(t, decision.Allowed, "super-admin should be able to add a group with any role")
 }
@@ -576,41 +586,11 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 // --- Part D.6: Policy authoring tests ---
 
 func TestCanDelegate_Policy_NonSuperAdminDenied(t *testing.T) {
-	authz, s := setupCanDelegateTest(t)
-	ctx := context.Background()
-
-	memberID := tid("member-policy")
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: memberID, Email: "member@test.com", DisplayName: "Member", Role: "member", Status: "active",
-	}))
-
-	member := NewAuthenticatedUser(memberID, "member@test.com", "Member", "member", "api")
-
-	decision := authz.CanDelegate(ctx, member, GrantDescriptor{
-		Type:           GrantTypePolicy,
-		PolicyEffect:   "allow",
-		PolicyActions:  []string{"read"},
-		PolicyResource: "agent",
-	})
-	assert.False(t, decision.Allowed, "non-super-admin should not create policies")
-	assert.Contains(t, decision.Reason, "super-admin")
+	// CO1: Policy grant type removed. Test retained as shell.
 }
 
 func TestCanDelegate_Policy_SuperAdminAllowed(t *testing.T) {
-	authz, s := setupCanDelegateTest(t)
-	ctx := context.Background()
-
-	adminID := tid("admin-policy")
-	createTestUserWithRole(t, s, adminID, "admin@test.com", "admin", store.SystemRoleSuperAdmin)
-	admin := NewAuthenticatedUser(adminID, "admin@test.com", "Admin", "admin", "api")
-
-	decision := authz.CanDelegate(ctx, admin, GrantDescriptor{
-		Type:           GrantTypePolicy,
-		PolicyEffect:   "allow",
-		PolicyActions:  []string{"*"},
-		PolicyResource: "*",
-	})
-	assert.True(t, decision.Allowed, "super-admin should be able to create policies")
+	// CO1: Policy grant type removed. Test retained as shell.
 }
 
 // --- Part D.7: Phase 1E deferred item tests ---
