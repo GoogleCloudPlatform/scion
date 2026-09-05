@@ -898,17 +898,20 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 	return nil
 }
 
-// backfillUserRoleBindings creates system-scoped role bindings from User.Role.
+// backfillUserRoleBindings creates system-scoped role bindings from User.Role
+// for admin and viewer users. Members receive hub-member permissions via the
+// canonical Hub Members group (ensureHubMembership), not via direct role bindings.
 // It paginates through all users to avoid silent truncation by store defaults.
 func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
+	// Only admin and viewer get direct bindings; members use group membership.
 	userRoleMap := map[string]string{
 		"admin":  store.SystemRoleSuperAdmin,
-		"member": store.SystemRoleHubMember,
 		"viewer": store.SystemRoleHubViewer,
 	}
 
 	var cursor string
-	var created int
+	var createdBindings int
+	var createdMemberships int
 	for {
 		users, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{
 			Limit:  200,
@@ -920,6 +923,14 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 
 		for i := range users.Items {
 			u := &users.Items[i]
+
+			// Members get hub-member permissions via the canonical group.
+			if u.Role == "member" {
+				ensureHubMembership(ctx, s, u.ID)
+				createdMemberships++
+				continue
+			}
+
 			roleName, ok := userRoleMap[u.Role]
 			if !ok {
 				continue
@@ -937,7 +948,7 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 				PrincipalID:      u.ID,
 				ScopeType:        store.RoleScopeSystem,
 				ScopeID:          "",
-				CreatedBy:        "system-backfill",
+				CreatedBy:        store.SystemBackfillCreatedBy,
 			})
 			if err != nil {
 				if errors.Is(err, store.ErrAlreadyExists) {
@@ -947,7 +958,7 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 					"user_id", u.ID, "role", roleName, "error", err)
 				continue
 			}
-			created++
+			createdBindings++
 		}
 
 		if users.NextCursor == "" {
@@ -956,8 +967,11 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 		cursor = users.NextCursor
 	}
 
-	if created > 0 {
-		slog.Info("backfilled user role bindings", "created", created)
+	if createdBindings > 0 {
+		slog.Info("backfilled user role bindings", "created", createdBindings)
+	}
+	if createdMemberships > 0 {
+		slog.Info("backfilled hub-member group memberships", "ensured", createdMemberships)
 	}
 	return nil
 }
@@ -1261,6 +1275,75 @@ func seedLimitDefinition(ctx context.Context, s store.Store, name, resourceType,
 		return
 	}
 	slog.Info("seeded limit definition", "name", name, "resource_type", resourceType)
+}
+
+// CleanupRedundantHubMemberBindings removes system-created direct user→hub-member
+// role bindings that are redundant with the canonical Hub Members group membership.
+// Only bindings with CreatedBy sentinels "system-backfill" or "system-reconcile"
+// are deleted. Administrator-created, project-scoped, or non-hub-member bindings
+// are never touched. This function is idempotent and safe to run on every startup.
+func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error {
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	if err != nil {
+		// Group doesn't exist yet — nothing to clean up.
+		slog.Debug("hub-members group not found, skipping redundant binding cleanup", "error", err)
+		return nil
+	}
+
+	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	if err != nil {
+		slog.Debug("hub-member role definition not found, skipping cleanup", "error", err)
+		return nil
+	}
+
+	members, err := s.GetGroupMembers(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("list hub-members group members: %w", err)
+	}
+
+	var cleaned int
+	for _, m := range members {
+		if m.MemberType != store.GroupMemberTypeUser {
+			continue
+		}
+
+		// List all role bindings for this user.
+		bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, m.MemberID)
+		if err != nil {
+			slog.Warn("failed to list bindings for user during cleanup",
+				"user_id", m.MemberID, "error", err)
+			continue
+		}
+
+		for _, rb := range bindings {
+			// Only delete direct user→hub-member, system-scope bindings
+			// that were created by the system (backfill or reconcile sentinels).
+			if rb.RoleDefinitionID != hubMemberRD.ID {
+				continue
+			}
+			if rb.ScopeType != store.RoleScopeSystem {
+				continue
+			}
+			if rb.PrincipalType != store.RoleBindingPrincipalUser {
+				continue
+			}
+			if !store.IsSystemCreatedBinding(rb.CreatedBy) {
+				continue // preserve admin-created direct bindings
+			}
+
+			if err := s.DeleteRoleBinding(ctx, rb.ID); err != nil {
+				slog.Warn("failed to delete redundant hub-member binding",
+					"binding_id", rb.ID, "user_id", m.MemberID, "error", err)
+				continue
+			}
+			cleaned++
+		}
+	}
+
+	if cleaned > 0 {
+		slog.Info("cleaned up redundant direct hub-member bindings", "deleted", cleaned)
+	}
+	return nil
 }
 
 // ensureHubMembership adds the given user to the hub-members group.

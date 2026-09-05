@@ -63,6 +63,14 @@ func IsSuperAdminBindingAllowed(createdBy string) bool {
 	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
 }
 
+// IsSystemCreatedBinding reports whether the given CreatedBy value identifies
+// a binding created automatically by the system (backfill or reconcile).
+// Used by cleanup routines to distinguish automatic bindings from
+// administrator-created ones.
+func IsSystemCreatedBinding(createdBy string) bool {
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+}
+
 // Store defines the interface for Hub data persistence.
 // Implementations may use SQLite, PostgreSQL, Firestore, or other backends.
 type Store interface {

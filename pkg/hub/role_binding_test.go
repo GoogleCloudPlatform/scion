@@ -498,7 +498,7 @@ func TestBackfill_AdminUserGetsRoleBinding(t *testing.T) {
 	assert.True(t, hasSuperAdmin, "admin user should have super-admin role binding after backfill")
 }
 
-func TestBackfill_MemberUserGetsRoleBinding(t *testing.T) {
+func TestBackfill_MemberUserGetsGroupMembership(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
@@ -517,22 +517,23 @@ func TestBackfill_MemberUserGetsRoleBinding(t *testing.T) {
 	err := BackfillRoleBindings(ctx, s)
 	require.NoError(t, err)
 
-	// Verify hub-member binding exists
+	// Verify canonical Hub Members group membership exists (not a direct binding)
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	_, err = s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, member.ID)
+	assert.NoError(t, err, "member user should have hub-members group membership after backfill")
+
+	// Verify no direct hub-member role binding was created
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, member.ID)
 	require.NoError(t, err)
-
-	var hasHubMember bool
 	for _, b := range bindings {
 		rd, err := s.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue
 		}
-		if rd.Name == store.SystemRoleHubMember {
-			hasHubMember = true
-			break
-		}
+		assert.NotEqual(t, store.SystemRoleHubMember, rd.Name,
+			"member user should NOT have a direct hub-member role binding after backfill")
 	}
-	assert.True(t, hasHubMember, "member user should have hub-member role binding after backfill")
 }
 
 func TestBackfill_ViewerUserGetsRoleBinding(t *testing.T) {
@@ -576,7 +577,7 @@ func TestBackfill_Idempotent(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a user
+	// Create a member user
 	user := &store.User{
 		ID:          tid("backfill-idempotent"),
 		Email:       "backfill-idempotent@test.com",
@@ -591,11 +592,16 @@ func TestBackfill_Idempotent(t *testing.T) {
 	require.NoError(t, BackfillRoleBindings(ctx, s))
 	require.NoError(t, BackfillRoleBindings(ctx, s))
 
-	// Verify no duplicate bindings
+	// Verify no direct hub-member bindings (member uses group membership)
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
 	require.NoError(t, err)
-	// Should have exactly 1 binding (hub-member)
-	assert.Len(t, bindings, 1, "backfill should not create duplicate bindings")
+	assert.Len(t, bindings, 0, "member user should have no direct role bindings after backfill")
+
+	// Verify group membership exists and is not duplicated
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	_, err = s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, user.ID)
+	assert.NoError(t, err, "member user should have hub-members group membership")
 }
 
 // =============================================================================
@@ -990,4 +996,229 @@ func TestSeedRoleDefinitions_Idempotent(t *testing.T) {
 	rds, err := s.ListRoleDefinitions(ctx)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(rds), 10)
+}
+
+// =============================================================================
+// Tests: Hub-member canonicalization
+// =============================================================================
+
+// TestCleanup_RedundantSystemHubMemberBindingsRemoved verifies that
+// system-created direct user→hub-member bindings are deleted when the
+// user already has hub-member permissions via the canonical Hub Members group.
+func TestCleanup_RedundantSystemHubMemberBindingsRemoved(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("cleanup-redundant"),
+		Email:       "cleanup-redundant@test.com",
+		DisplayName: "Cleanup Redundant",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Add user to canonical hub-members group
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Create a redundant direct hub-member binding with system-backfill sentinel
+	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubMemberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Run cleanup
+	require.NoError(t, CleanupRedundantHubMemberBindings(ctx, s))
+
+	// Verify the redundant direct binding was removed
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.RoleDefinitionID == hubMemberRD.ID && b.ScopeType == store.RoleScopeSystem {
+			t.Fatal("redundant system-created direct hub-member binding should have been removed")
+		}
+	}
+}
+
+// TestCleanup_SystemReconcileBindingsAlsoRemoved verifies that bindings
+// created with the system-reconcile sentinel are also cleaned up.
+func TestCleanup_SystemReconcileBindingsAlsoRemoved(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("cleanup-reconcl"),
+		Email:       "cleanup-reconcile@test.com",
+		DisplayName: "Cleanup Reconcile",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	ensureHubMembership(ctx, s, user.ID)
+
+	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubMemberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, CleanupRedundantHubMemberBindings(ctx, s))
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.RoleDefinitionID == hubMemberRD.ID && b.ScopeType == store.RoleScopeSystem {
+			t.Fatal("system-reconcile hub-member binding should have been removed")
+		}
+	}
+}
+
+// TestCleanup_AdminCreatedDirectBindingPreserved verifies that a direct
+// hub-member binding with a non-system CreatedBy is NOT deleted.
+func TestCleanup_AdminCreatedDirectBindingPreserved(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("cleanup-admin-c"),
+		Email:       "cleanup-admin-created@test.com",
+		DisplayName: "Cleanup Admin Created",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	ensureHubMembership(ctx, s, user.ID)
+
+	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+	adminBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubMemberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "admin-user-123", // NOT a system sentinel
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, CleanupRedundantHubMemberBindings(ctx, s))
+
+	// Verify the admin-created binding still exists
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	var found bool
+	for _, b := range bindings {
+		if b.ID == adminBinding.ID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "admin-created direct hub-member binding must be preserved")
+}
+
+// TestCleanup_Idempotent verifies that running cleanup multiple times is safe.
+func TestCleanup_Idempotent(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("cleanup-idmptn"),
+		Email:       "cleanup-idempotent@test.com",
+		DisplayName: "Cleanup Idempotent",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	ensureHubMembership(ctx, s, user.ID)
+
+	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubMemberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Run cleanup twice - both should succeed
+	require.NoError(t, CleanupRedundantHubMemberBindings(ctx, s))
+	require.NoError(t, CleanupRedundantHubMemberBindings(ctx, s))
+
+	// Verify no system-created direct bindings remain
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.RoleDefinitionID == hubMemberRD.ID && b.ScopeType == store.RoleScopeSystem &&
+			store.IsSystemCreatedBinding(b.CreatedBy) {
+			t.Fatal("redundant binding should not exist after second cleanup run")
+		}
+	}
+}
+
+// TestCleanup_NoGroupMembershipNoDelete verifies that direct bindings
+// are NOT deleted when the user is NOT a member of the Hub Members group.
+func TestCleanup_NoGroupMembershipNoDelete(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("cleanup-no-grp"),
+		Email:       "cleanup-no-group@test.com",
+		DisplayName: "Cleanup No Group",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Do NOT add user to hub-members group — create a direct binding only
+	hubMemberRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+	directBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubMemberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, CleanupRedundantHubMemberBindings(ctx, s))
+
+	// Verify the binding still exists (user is not in the group, so cleanup
+	// does not iterate over them)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	var found bool
+	for _, b := range bindings {
+		if b.ID == directBinding.ID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "direct binding should be preserved when user is not in hub-members group")
 }

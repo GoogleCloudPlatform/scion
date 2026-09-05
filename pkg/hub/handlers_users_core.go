@@ -745,10 +745,10 @@ func (s *Server) executeRoleTransition(
 		// !wantsBinding && !txState.HasAny: nothing to do.
 	}
 
-	// Ensure hub-member binding for members.
+	// Ensure canonical hub-member group membership for members (demotion path).
 	if !wantsBinding {
-		if err := s.ensureHubMemberBindingTx(ctx, tx, user.ID); err != nil {
-			return bindingMutationNone, fmt.Errorf("ensure hub-member binding: %w", err)
+		if err := s.ensureHubMembershipTx(ctx, tx, user.ID); err != nil {
+			return bindingMutationNone, fmt.Errorf("ensure hub-member group membership: %w", err)
 		}
 	}
 
@@ -878,25 +878,26 @@ func (s *Server) checkLastSuperAdminTx(
 	return nil
 }
 
-// ensureHubMemberBindingTx idempotently creates a system-scoped hub-member
-// role binding for the given user.
-func (s *Server) ensureHubMemberBindingTx(ctx context.Context, tx store.Store, userID string) error {
-	hubMemberRD, err := tx.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+// ensureHubMembershipTx idempotently adds the given user to the canonical
+// Hub Members group within the provided transaction. This is the canonical
+// path for granting hub-member permissions on demotion from admin to member.
+// Returns an error if the group cannot be found (fail-closed).
+func (s *Server) ensureHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
+	group, err := tx.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {
-		return fmt.Errorf("hub-member role definition lookup: %w", err)
+		return fmt.Errorf("hub-members group lookup: %w", err)
 	}
-	_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubMemberRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        store.SystemReconcileCreatedBy,
+
+	err = tx.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    group.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   userID,
+		Role:       store.GroupMemberRoleMember,
 	})
-	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
-		return nil
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return fmt.Errorf("add user to hub-members group: %w", err)
 	}
-	return err
+	return nil
 }
 
 // ---------------------------------------------------------------------------

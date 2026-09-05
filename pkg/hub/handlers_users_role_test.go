@@ -157,7 +157,7 @@ func TestPromoteUser_Idempotent(t *testing.T) {
 // Demotion tests
 // ---------------------------------------------------------------------------
 
-func TestDemoteUser_RemovesBindingAndCreatesHubMember(t *testing.T) {
+func TestDemoteUser_RemovesBindingAndCreatesGroupMembership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -200,9 +200,15 @@ func TestDemoteUser_RemovesBindingAndCreatesHubMember(t *testing.T) {
 	assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID),
 		"super-admin binding should be deleted after demotion")
 
-	// Verify hub-member binding was created.
-	assert.Equal(t, 1, hubMemberBindingCount(t, s, user.ID),
-		"hub-member binding should exist after demotion")
+	// Verify canonical hub-members group membership was created (not a direct binding).
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	_, err = s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, user.ID)
+	assert.NoError(t, err, "hub-members group membership should exist after demotion")
+
+	// Verify no direct hub-member binding was created by the demotion.
+	assert.Equal(t, 0, hubMemberBindingCount(t, s, user.ID),
+		"demotion should NOT create a direct hub-member binding")
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,9 +1483,15 @@ func TestStaleRoleMember_AnotherActiveAdmin_CleanupSucceeds(t *testing.T) {
 	assert.Equal(t, 0, superAdminBindingCount(t, s, target.ID),
 		"super-admin binding should be removed on cleanup")
 
-	// Verify hub-member binding was created.
-	assert.Equal(t, 1, hubMemberBindingCount(t, s, target.ID),
-		"hub-member binding should exist after cleanup")
+	// Verify canonical hub-members group membership was created (not a direct binding).
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	_, err = s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, target.ID)
+	assert.NoError(t, err, "hub-members group membership should exist after cleanup")
+
+	// Verify no direct hub-member binding was created.
+	assert.Equal(t, 0, hubMemberBindingCount(t, s, target.ID),
+		"demotion should NOT create a direct hub-member binding")
 }
 
 // TestStaleRoleMember_CanDelegateDenied_NoBindingDeletion verifies that

@@ -1415,8 +1415,18 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Backfill role bindings from existing User.Role and project group memberships.
 	// Must run after reconcileBuiltInRoles so the role definitions exist.
+	// Members receive hub-member permissions via the canonical Hub Members group,
+	// not via direct role bindings.
 	if err := BackfillRoleBindings(ctx, s); err != nil {
 		slog.Warn("failed to backfill role bindings", "error", err)
+	}
+
+	// Clean up redundant direct user→hub-member system-scope bindings for users
+	// who already have hub-member permissions via the canonical Hub Members group.
+	// Only system-created bindings (system-backfill / system-reconcile sentinels)
+	// are deleted; administrator-created direct bindings are preserved.
+	if err := CleanupRedundantHubMemberBindings(ctx, s); err != nil {
+		slog.Warn("failed to clean up redundant hub-member bindings", "error", err)
 	}
 
 	// Reconcile super-admin bindings: ensure User.Role == "admin" and
