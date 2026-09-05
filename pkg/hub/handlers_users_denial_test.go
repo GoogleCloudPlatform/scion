@@ -351,6 +351,152 @@ func TestDenialShape_RoleBinding_CanDelegateDenied_ViaPromote(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// CanDelegate denial via user.promote — truthful action tests (R2)
+//
+// These tests verify that when an actor has user.promote permission but lacks
+// CanDelegate authority for super-admin bindings, the 403 response reports
+// the truthful binding action: "create" for promotion and "delete" for
+// demotion. The actor is a member with a custom role granting user.promote
+// (not a super-admin), so CanDelegate falls through to the permission-ceiling
+// check and fails.
+// ---------------------------------------------------------------------------
+
+// setupPromoteOnlyActor creates a member user whose custom role grants
+// user.promote but who is NOT a super-admin, so CanDelegate will deny.
+func setupPromoteOnlyActor(t *testing.T, ctx context.Context, s store.Store, name string) *store.User {
+	t.Helper()
+
+	// Custom role with exactly user.promote.
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "promote-only-" + name,
+		Description: "grants user.promote for CanDelegate denial test",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"user.promote"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	actor := &store.User{
+		ID:          tid("r2-cd-" + name + "-actor"),
+		Email:       name + "actor@example.com",
+		DisplayName: "R2 " + name + " Actor",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+	ensureHubMembership(ctx, s, actor.ID)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      actor.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "system",
+	})
+	require.NoError(t, err)
+
+	return actor
+}
+
+// TestDenialShape_CanDelegate_PromoteCreate verifies that promoting a member
+// to admin (creating a super-admin binding) reports denied_action: "create"
+// when the actor has user.promote but lacks delegation authority.
+func TestDenialShape_CanDelegate_PromoteCreate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	actor := setupPromoteOnlyActor(t, ctx, s, "promo")
+
+	target := &store.User{
+		ID:          tid("r2-cd-promo-target"),
+		Email:       "r2promotarget@example.com",
+		DisplayName: "R2 Promote Target",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	// Snapshot pre-request state.
+	preUser, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	preBindings := superAdminBindingCount(t, s, target.ID)
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch,
+		"/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	resp := parseErrorResponse(t, rec.Body.Bytes())
+	assertStructuredDenial(t, resp, "role_binding", "create")
+
+	// Verify no mutation occurred.
+	postUser, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, preUser.Role, postUser.Role, "user role must not change after CanDelegate denial")
+	assert.Equal(t, preBindings, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding count must not change after CanDelegate denial")
+
+	// Must not leak internal IDs.
+	assertNoIDLeakage(t, rec.Body.String(), target.ID, actor.ID)
+}
+
+// TestDenialShape_CanDelegate_DemoteDelete verifies that demoting an admin
+// to member (deleting the super-admin binding) reports denied_action: "delete"
+// when the actor has user.promote but lacks delegation authority.
+func TestDenialShape_CanDelegate_DemoteDelete(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	actor := setupPromoteOnlyActor(t, ctx, s, "demo")
+
+	// Create a target that is already an admin with a super-admin binding.
+	target := &store.User{
+		ID:          tid("r2-cd-demo-target"),
+		Email:       "r2demotarget@example.com",
+		DisplayName: "R2 Demote Target",
+		Role:        "admin",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	// Give the target a system-scoped super-admin binding.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      target.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Snapshot pre-request state.
+	preUser, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	preBindings := superAdminBindingCount(t, s, target.ID)
+	require.Equal(t, 1, preBindings, "target must have exactly one super-admin binding before test")
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch,
+		"/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	resp := parseErrorResponse(t, rec.Body.Bytes())
+	assertStructuredDenial(t, resp, "role_binding", "delete")
+
+	// Verify no mutation occurred.
+	postUser, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, preUser.Role, postUser.Role, "user role must not change after CanDelegate denial")
+	assert.Equal(t, preBindings, superAdminBindingCount(t, s, target.ID),
+		"super-admin binding count must not change after CanDelegate denial")
+
+	// Must not leak internal IDs.
+	assertNoIDLeakage(t, rec.Body.String(), target.ID, actor.ID)
+}
+
+// ---------------------------------------------------------------------------
 // Redaction: verify IDs and internals are not exposed
 // ---------------------------------------------------------------------------
 

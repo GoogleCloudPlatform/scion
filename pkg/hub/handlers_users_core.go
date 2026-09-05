@@ -615,7 +615,13 @@ func (s *Server) checkUserPromotePermission(
 			ScopeType:        store.RoleScopeSystem,
 		})
 		if !canDel.Allowed {
-			writeForbiddenStructured(w, "insufficient authority to modify super-admin role binding: "+canDel.Reason, "role_binding", Action("create"))
+			// Report the truthful binding action: "create" when promoting
+			// (wantsBinding), "delete" when demoting an existing binding.
+			bindingAction := Action("delete")
+			if wantsBinding {
+				bindingAction = Action("create")
+			}
+			writeForbiddenStructured(w, "insufficient authority to modify super-admin role binding: "+canDel.Reason, "role_binding", bindingAction)
 			return fmt.Errorf("CanDelegate denied: %s", canDel.Reason)
 		}
 	}
