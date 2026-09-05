@@ -142,12 +142,32 @@ type roleImportResponse struct {
 }
 
 // safeFilename replaces any characters unsafe for Content-Disposition filenames.
+// After sanitization the result is truncated so that the full filename
+// (prefix "scion-role-" + sanitized name + ".json") stays within 200
+// bytes — well under the 255-byte filesystem limit and safe for all
+// major browsers and operating systems.
 var unsafeFilenameChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+
+// maxSanitizedNameLen caps the sanitized role-name segment so the full
+// attachment filename ("scion-role-" + name + ".json") fits comfortably
+// within 255 bytes.  200 − len("scion-role-") − len(".json") = 184.
+const maxSanitizedNameLen = 184
 
 func sanitizeFilename(name string) string {
 	safe := unsafeFilenameChars.ReplaceAllString(name, "_")
+	// Trim leading/trailing underscores and dots left over from
+	// replacement so the result is clean.
+	safe = strings.Trim(safe, "_.")
 	if safe == "" {
 		safe = "role"
+	}
+	if len(safe) > maxSanitizedNameLen {
+		safe = safe[:maxSanitizedNameLen]
+		// Avoid a trailing dot or underscore after truncation.
+		safe = strings.TrimRight(safe, "_.")
+		if safe == "" {
+			safe = "role"
+		}
 	}
 	return safe
 }

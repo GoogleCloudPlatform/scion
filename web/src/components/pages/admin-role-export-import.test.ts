@@ -297,23 +297,15 @@ function createJsonFile(content: string, name = 'roles.json'): File {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Export (roles list page) — server-driven download
+// Tests: Export (roles list page) — native anchor download
 // ---------------------------------------------------------------------------
 
 describe('admin-roles: export', () => {
   let el: HTMLElement | null = null;
-  let originalLocation: PropertyDescriptor | undefined;
-
-  beforeEach(() => {
-    originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
-  });
 
   afterEach(() => {
     if (el?.parentNode) el.parentNode.removeChild(el);
     el = null;
-    if (originalLocation) {
-      Object.defineProperty(window, 'location', originalLocation);
-    }
     vi.restoreAllMocks();
   });
 
@@ -346,61 +338,58 @@ describe('admin-roles: export', () => {
     expect(exportBtn?.hasAttribute('disabled')).toBe(true);
   });
 
-  it('list export uses direct navigation to /api/v1/admin/roles/export', async () => {
+  it('list export button has native href to /api/v1/admin/roles/export', async () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
-    const hrefSetter = vi.fn();
-    Object.defineProperty(window, 'location', {
-      value: { href: '' },
-      writable: true,
-      configurable: true,
-    });
-    Object.defineProperty(window.location, 'href', {
-      set: hrefSetter,
-      get: () => '',
-      configurable: true,
-    });
-
-    (el as any).exportRoles();
-
-    expect(hrefSetter).toHaveBeenCalledWith('/api/v1/admin/roles/export');
+    const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
+    const exportBtn = [...(buttons ?? [])].find((b) =>
+      b.textContent?.trim() === 'Export Custom Roles'
+    );
+    expect(exportBtn?.getAttribute('href')).toBe('/api/v1/admin/roles/export');
+    expect(exportBtn?.getAttribute('target')).toBe('_blank');
+    expect(exportBtn?.hasAttribute('download')).toBe(true);
   });
 
-  it('single-role export uses direct navigation to /api/v1/admin/roles/{id}/export', async () => {
+  it('list export button has no preventDefault click handler', async () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
-    const hrefSetter = vi.fn();
-    Object.defineProperty(window, 'location', {
-      value: { href: '' },
-      writable: true,
-      configurable: true,
-    });
-    Object.defineProperty(window.location, 'href', {
-      set: hrefSetter,
-      get: () => '',
-      configurable: true,
-    });
+    // The component should NOT have exportRoles method since it uses native links
+    expect((el as any).exportRoles).toBeUndefined();
+  });
 
-    (el as any).exportSingleRole('test-role-uuid');
+  it('per-row export button has native href to /api/v1/admin/roles/{id}/export', async () => {
+    const handler = createRolesListFetchHandler();
+    el = await createRolesPage(handler);
 
-    expect(hrefSetter).toHaveBeenCalledWith('/api/v1/admin/roles/test-role-uuid/export');
+    const exportButtons = el.shadowRoot?.querySelectorAll(
+      'sl-icon-button[label="Export role"]'
+    );
+    expect(exportButtons?.length).toBeGreaterThanOrEqual(2);
+
+    // First custom role's export button should point to its export endpoint
+    const btn = exportButtons?.[0];
+    expect(btn?.getAttribute('href')).toContain('/api/v1/admin/roles/');
+    expect(btn?.getAttribute('href')).toContain('/export');
+    expect(btn?.getAttribute('target')).toBe('_blank');
+    expect(btn?.hasAttribute('download')).toBe(true);
   });
 
   it('export does NOT use Blob or createObjectURL', async () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
+    // Verify no Blob/createObjectURL references in the component's export path
     const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
 
-    Object.defineProperty(window, 'location', {
-      value: { href: '' },
-      writable: true,
-      configurable: true,
-    });
-
-    (el as any).exportRoles();
+    // Click the export button — since it's a native link, no JS export method fires
+    const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
+    const exportBtn = [...(buttons ?? [])].find((b) =>
+      b.textContent?.trim() === 'Export Custom Roles'
+    );
+    exportBtn?.click();
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(createObjectURLSpy).not.toHaveBeenCalled();
     createObjectURLSpy.mockRestore();
@@ -724,23 +713,15 @@ describe('admin-roles: import', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: Export from role detail page — server-driven download
+// Tests: Export from role detail page — native anchor download
 // ---------------------------------------------------------------------------
 
 describe('admin-role-detail: single role export', () => {
   let el: HTMLElement | null = null;
-  let originalLocation: PropertyDescriptor | undefined;
-
-  beforeEach(() => {
-    originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
-  });
 
   afterEach(() => {
     if (el?.parentNode) el.parentNode.removeChild(el);
     el = null;
-    if (originalLocation) {
-      Object.defineProperty(window, 'location', originalLocation);
-    }
     vi.restoreAllMocks();
   });
 
@@ -752,26 +733,25 @@ describe('admin-role-detail: single role export', () => {
     expect(labels).toContain('Export');
   });
 
-  it('detail export navigates to /api/v1/admin/roles/{id}/export', async () => {
+  it('detail export button has native href to /api/v1/admin/roles/{id}/export', async () => {
     el = await createRoleDetailPage();
 
-    const hrefSetter = vi.fn();
-    Object.defineProperty(window, 'location', {
-      value: { href: '' },
-      writable: true,
-      configurable: true,
-    });
-    Object.defineProperty(window.location, 'href', {
-      set: hrefSetter,
-      get: () => '',
-      configurable: true,
-    });
-
-    (el as any).exportSingleRole();
-
-    expect(hrefSetter).toHaveBeenCalledWith(
+    const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
+    const exportBtn = [...(buttons ?? [])].find((b) =>
+      b.textContent?.trim() === 'Export'
+    );
+    expect(exportBtn?.getAttribute('href')).toBe(
       '/api/v1/admin/roles/role-custom-1/export'
     );
+    expect(exportBtn?.getAttribute('target')).toBe('_blank');
+    expect(exportBtn?.hasAttribute('download')).toBe(true);
+  });
+
+  it('detail export has no exportSingleRole method (uses native link)', async () => {
+    el = await createRoleDetailPage();
+
+    // The component should NOT have exportSingleRole method since it uses native links
+    expect((el as any).exportSingleRole).toBeUndefined();
   });
 
   it('detail export does NOT use Blob or createObjectURL', async () => {
@@ -779,13 +759,13 @@ describe('admin-role-detail: single role export', () => {
 
     const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
 
-    Object.defineProperty(window, 'location', {
-      value: { href: '' },
-      writable: true,
-      configurable: true,
-    });
-
-    (el as any).exportSingleRole();
+    // Click the export button — native link, no JS handler
+    const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
+    const exportBtn = [...(buttons ?? [])].find((b) =>
+      b.textContent?.trim() === 'Export'
+    );
+    exportBtn?.click();
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(createObjectURLSpy).not.toHaveBeenCalled();
     createObjectURLSpy.mockRestore();

@@ -836,22 +836,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Export
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Export this single custom role via server-driven download.
-   * Uses direct navigation to the attachment endpoint so the browser's
-   * native download handling (Content-Disposition: attachment) works
-   * reliably across all browsers.
-   */
-  private exportSingleRole(): void {
-    const role = this.roleData;
-    if (!role || role.system) return;
-    window.location.href = `/api/v1/admin/roles/${role.id}/export`;
-  }
-
-  // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
 
@@ -979,7 +963,13 @@ export class ScionPageAdminRoleDetail extends LitElement {
           ${role.system
             ? nothing
             : html`
-                <sl-button variant="default" size="small" @click=${() => this.exportSingleRole()}>
+                <sl-button
+                  variant="default"
+                  size="small"
+                  href="/api/v1/admin/roles/${role.id}/export"
+                  target="_blank"
+                  download
+                >
                   <sl-icon slot="prefix" name="download"></sl-icon>
                   Export
                 </sl-button>

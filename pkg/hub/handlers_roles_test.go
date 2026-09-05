@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -3139,8 +3140,8 @@ func TestRolesAPI_ExportSingleRole_SafeFilename(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	cd := rec.Header().Get("Content-Disposition")
-	// Unsafe chars should be replaced with underscores.
-	assert.Contains(t, cd, "scion-role-my_role_with__special__chars_")
+	// Unsafe chars should be replaced with underscores; leading/trailing trimmed.
+	assert.Contains(t, cd, "scion-role-my_role_with__special__chars")
 	assert.NotContains(t, cd, "/")
 	assert.NotContains(t, cd, "<")
 	assert.NotContains(t, cd, ">")
@@ -3291,4 +3292,115 @@ func TestRolesAPI_ExportSingleRole_RoundTrip(t *testing.T) {
 	assert.Equal(t, 0, imported.Created)
 	assert.Equal(t, 1, imported.Skipped)
 	assert.Equal(t, 0, imported.Errors)
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: sanitizeFilename adversarial cases
+// ---------------------------------------------------------------------------
+
+func TestSanitizeFilename(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "simple ASCII name",
+			input:    "my-role",
+			expected: "my-role",
+		},
+		{
+			name:     "special characters replaced",
+			input:    "role/with<special>chars!",
+			expected: "role_with_special_chars",
+		},
+		{
+			name:     "empty string falls back",
+			input:    "",
+			expected: "role",
+		},
+		{
+			name:     "only whitespace/special chars falls back",
+			input:    "   \t\n",
+			expected: "role",
+		},
+		{
+			name:     "only dots falls back",
+			input:    "...",
+			expected: "role",
+		},
+		{
+			name:     "only underscores falls back",
+			input:    "___",
+			expected: "role",
+		},
+		{
+			name:     "Unicode-only name falls back",
+			input:    "角色定义",
+			expected: "role",
+		},
+		{
+			name:     "mixed Unicode and ASCII preserves ASCII",
+			input:    "角色-test-定义",
+			expected: "-test-",
+		},
+		{
+			name:     "punctuation-only falls back",
+			input:    "!!!@#$%^&*()",
+			expected: "role",
+		},
+		{
+			name:     "CRLF injection prevented",
+			input:    "role\r\nContent-Disposition: malicious",
+			expected: "role__Content-Disposition__malicious",
+		},
+		{
+			name:     "quotes replaced",
+			input:    `role "with" 'quotes'`,
+			expected: "role__with___quotes",
+		},
+		{
+			name:     "slash and backslash replaced",
+			input:    "path/to\\role",
+			expected: "path_to_role",
+		},
+		{
+			name:     "dot at start trimmed",
+			input:    ".hidden-role",
+			expected: "hidden-role",
+		},
+		{
+			name:     "very long name is truncated",
+			input:    strings.Repeat("a", 300),
+			expected: strings.Repeat("a", maxSanitizedNameLen),
+		},
+		{
+			name:     "truncation does not leave trailing dot",
+			input:    strings.Repeat("a", maxSanitizedNameLen) + ".",
+			expected: strings.Repeat("a", maxSanitizedNameLen),
+		},
+		{
+			name:     "long Unicode-only name falls back after truncation",
+			input:    strings.Repeat("中", 300),
+			expected: "role",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeFilename(tt.input)
+			assert.Equal(t, tt.expected, got)
+			// Invariant: result is always non-empty.
+			assert.NotEmpty(t, got, "sanitizeFilename must never return empty string")
+			// Invariant: result length fits comfortably in a filename.
+			assert.LessOrEqual(t, len(got), maxSanitizedNameLen,
+				"sanitized name must be at most %d bytes", maxSanitizedNameLen)
+			// Invariant: no header-unsafe characters.
+			assert.NotContains(t, got, "\r")
+			assert.NotContains(t, got, "\n")
+			assert.NotContains(t, got, `"`)
+			assert.NotContains(t, got, "/")
+			assert.NotContains(t, got, "\\")
+		})
+	}
 }

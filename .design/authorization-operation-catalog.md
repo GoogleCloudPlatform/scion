@@ -3067,6 +3067,7 @@
 | http_route | GET | `/api/v1/admin/roles` |
 | http_route | GET | `/api/v1/admin/roles/{id}` |
 | http_route | GET | `/api/v1/admin/roles/export` |
+| http_route | GET | `/api/v1/admin/roles/{id}/export` |
 | http_route | GET | `/api/v1/admin/permissions` |
 
 **Principals:** `user`

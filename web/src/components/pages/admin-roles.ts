@@ -678,27 +678,6 @@ export class ScionPageAdminRoles extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Export
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Export all custom roles via server-driven download.
-   * Uses direct navigation to the attachment endpoint so the browser's
-   * native download handling (Content-Disposition: attachment) works
-   * reliably across all browsers.
-   */
-  private exportRoles(): void {
-    window.location.href = '/api/v1/admin/roles/export';
-  }
-
-  /**
-   * Export a single custom role via server-driven download.
-   */
-  private exportSingleRole(roleId: string): void {
-    window.location.href = `/api/v1/admin/roles/${roleId}/export`;
-  }
-
-  // ---------------------------------------------------------------------------
   // Import
   // ---------------------------------------------------------------------------
 
@@ -914,15 +893,8 @@ export class ScionPageAdminRoles extends LitElement {
             variant="default"
             size="small"
             href="/api/v1/admin/roles/export"
-            target="_self"
+            target="_blank"
             download="scion-custom-roles.json"
-            @click=${(e: Event) => {
-              // Use direct navigation so the browser's native download
-              // handling (Content-Disposition: attachment) works reliably
-              // across all browsers including Safari.
-              e.preventDefault();
-              this.exportRoles();
-            }}
             ?disabled=${this.loading || !!this.error || this.roles.filter((r) => !r.system).length === 0}
           >
             <sl-icon slot="prefix" name="download"></sl-icon>
@@ -1038,9 +1010,9 @@ export class ScionPageAdminRoles extends LitElement {
                 <sl-icon-button
                   name="download"
                   label="Export role"
-                  @click=${() => {
-                    this.exportSingleRole(role.id);
-                  }}
+                  href="/api/v1/admin/roles/${role.id}/export"
+                  target="_blank"
+                  download
                 ></sl-icon-button>
               `}
         </td>

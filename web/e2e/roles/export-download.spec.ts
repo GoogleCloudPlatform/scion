@@ -121,8 +121,8 @@ test.describe('Role export -- browser download', () => {
     });
 
     // Click the "Export Custom Roles" button and capture the download event.
-    // The button uses window.location.href navigation, which triggers a
-    // Content-Disposition: attachment response from the server.
+    // The button is a native anchor link (href + download attribute) pointing
+    // at the attachment endpoint — the browser handles the download natively.
     const downloadPromise = page.waitForEvent('download', { timeout: 15_000 });
     await page.getByRole('button', { name: /Export Custom Roles/i }).click();
     const download = await downloadPromise;
